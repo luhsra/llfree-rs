@@ -60,24 +60,37 @@ impl PageTable {
         }
     }
 
-    pub fn cas(&self, i: usize, expected: Entry, new: Entry) -> bool {
+    pub fn cas(&self, i: usize, expected: Entry, new: Entry) -> Result<Entry, Entry> {
         match self.entries[i].compare_exchange(
             expected.0,
             new.0,
             Ordering::AcqRel,
             Ordering::Relaxed,
         ) {
-            Ok(_) => true,
-            Err(_) => false,
+            Ok(v) => Ok(Entry(v)),
+            Err(v) => Err(Entry(v)),
         }
     }
 
-    pub fn inc(
-        &self,
-        i: usize,
-        pages: usize,
-        nonempty: usize,
-    ) -> Result<Entry, Entry> {
+    pub fn insert_page(&self, i: usize) -> Result<Entry, Entry> {
+        match self.entries[i].fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| {
+            let pte = Entry(v);
+            if pte.is_empty()
+                || (pte.is_table() && pte.pages() == 0)
+                // pt1 page (overwrite when it is the last page in the chunk)
+                || (pte.is_page() && pte.is_reserved())
+            {
+                Some(Entry::page().0)
+            } else {
+                None
+            }
+        }) {
+            Ok(v) => Ok(Entry(v)),
+            Err(v) => Err(Entry(v)),
+        }
+    }
+
+    pub fn inc(&self, i: usize, pages: usize, nonempty: usize) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| {
             let pte = Entry(v);
             if !pte.is_empty() && !pte.is_table() {
@@ -86,7 +99,7 @@ impl PageTable {
 
             let pages = pte.pages() + pages;
             let nonempty = pte.nonempty() + nonempty;
-            if pages <= PageTable::p_span(LAYERS) && nonempty <= PT_LEN {
+            if pages <= PageTable::p_span(LAYERS) && nonempty <= 2 * PT_LEN {
                 Some(Entry::table(pages, nonempty, pte.i1(), pte.is_reserved()).0)
             } else {
                 None
@@ -96,12 +109,7 @@ impl PageTable {
             Err(v) => Err(Entry(v)),
         }
     }
-    pub fn dec(
-        &self,
-        i: usize,
-        pages: usize,
-        nonempty: usize,
-    ) -> Result<Entry, Entry> {
+    pub fn dec(&self, i: usize, pages: usize, nonempty: usize) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| {
             let pte = Entry(v);
             if !pte.is_table() {
@@ -111,9 +119,7 @@ impl PageTable {
             let pages = pte.pages() as isize - pages as isize;
             let nonempty = pte.nonempty() as isize - nonempty as isize;
             if pages >= 0 && nonempty >= 0 {
-                Some(
-                    Entry::table(pages as _, nonempty as _, pte.i1(), pte.is_reserved()).0,
-                )
+                Some(Entry::table(pages as _, nonempty as _, pte.i1(), pte.is_reserved()).0)
             } else {
                 None
             }
@@ -166,6 +172,10 @@ impl Entry {
     #[inline(always)]
     pub fn page() -> Entry {
         Entry(PTE_PAGES_MASK | PTE_NONEMPTY_MASK)
+    }
+    #[inline(always)]
+    pub fn page_reserved() -> Entry {
+        Entry(PTE_PAGES_MASK | PTE_NONEMPTY_MASK | PTE_RESERVED)
     }
     #[inline(always)]
     pub fn table(pages: usize, nonempty: usize, i1: usize, reserved: bool) -> Entry {
