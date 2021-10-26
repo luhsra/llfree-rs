@@ -57,12 +57,19 @@ pub fn put(addr: u64, size: ChunkSize) -> alloc::Result<()> {
 
 #[cfg(test)]
 mod test {
-    use std::{slice, sync::atomic::AtomicU64, thread};
+    use std::{
+        slice,
+        sync::atomic::{AtomicU64, Ordering},
+        thread,
+        time::Duration,
+    };
 
     use crate::{
         alloc::{ChunkSize, MAX_SIZE},
         get, init,
         mmap::c_mmap_fixed,
+        paging::PT_LEN,
+        put,
     };
 
     #[test]
@@ -92,22 +99,37 @@ mod test {
         init(addr, size).unwrap();
 
         println!("init finished");
+        const DEFAULT: AtomicU64 = AtomicU64::new(0);
 
         let addr = addr as usize;
-        let handle = thread::spawn(move || {
-            init(addr as _, size).unwrap();
+        let threads = (0..10)
+            .into_iter()
+            .map(|_| {
+                thread::spawn(move || {
+                    init(addr as _, size).unwrap();
 
-            for _ in 0..10 {
-                let dst = AtomicU64::new(0);
-                get(ChunkSize::Page, &dst, |v| v, 0).unwrap();
-            }
-        });
-        for _ in 0..10 {
+                    let pages = [DEFAULT; PT_LEN];
+                    for page in &pages {
+                        get(ChunkSize::Page, page, |v| v, 0).unwrap();
+                    }
+
+                    thread::sleep(Duration::from_millis(1));
+
+                    for page in &pages {
+                        put(page.load(Ordering::Acquire), ChunkSize::Page).unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for _ in 0..100 {
             let dst = AtomicU64::new(0);
             get(ChunkSize::Page, &dst, |v| v, 0).unwrap();
         }
 
-        handle.join().unwrap();
+        for t in threads {
+            t.join().unwrap();
+        }
 
         println!("Finish");
         super::ALLOC.with(|a| {

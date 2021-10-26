@@ -385,6 +385,11 @@ impl Allocator {
         } else {
             println!("alloc l{} i={}", layer, i);
             // Replace empty / table with zero pages / last pt1
+
+            // TODO: Infinit loop:
+            // child pt full -> alloc pt1 as page -> pt1 is not `page_reserved`
+            // => race condition with free!
+
             match pt.insert_page(i) {
                 Ok(_) => Ok(true),
                 Err(e) => {
@@ -428,13 +433,7 @@ impl Allocator {
         match dst.compare_exchange(expected, new, Ordering::AcqRel, Ordering::Relaxed) {
             Ok(_) => Ok(()),
             Err(_) => {
-                loop {
-                    match self.free(size, self.root(), LAYERS, page) {
-                        Ok(_) => break,
-                        Err(Error::CAS) => {}
-                        Err(e) => return Err(e),
-                    }
-                }
+                self.free(size, self.root(), LAYERS, page).unwrap();
                 Err(Error::CAS)
             }
         }
