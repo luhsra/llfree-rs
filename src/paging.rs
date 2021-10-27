@@ -2,6 +2,7 @@ use std::fmt;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use log::error;
 use static_assertions::{const_assert, const_assert_eq};
 
 pub const PAGE_SIZE_BITS: usize = 8; // 2^12 => 4KiB
@@ -74,12 +75,7 @@ impl PageTable {
 
     pub fn insert_page(&self, i: usize) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| {
-            let pte = Entry(v);
-            if pte.is_empty()
-                || (pte.is_table() && pte.pages() == 0)
-                // pt1 page (overwrite when it is the last page in the chunk)
-                || (pte.is_page() && pte.is_reserved())
-            {
+            if Entry(v).is_empty() {
                 Some(Entry::page().0)
             } else {
                 None
@@ -93,13 +89,15 @@ impl PageTable {
     pub fn inc(&self, i: usize, pages: usize, nonempty: usize) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| {
             let pte = Entry(v);
-            if !pte.is_empty() && !pte.is_table() {
+            if !pte.is_table() && !pte.is_empty() {
                 return None;
             }
-
             let pages = pte.pages() + pages;
             let nonempty = pte.nonempty() + nonempty;
-            if pages <= PageTable::p_span(LAYERS) && nonempty <= 2 * PT_LEN {
+            if pages < nonempty {
+                return None;
+            }
+            if pages < PTE_PAGES_MASK as _ && nonempty < PTE_NONEMPTY_MASK as _ {
                 Some(Entry::table(pages, nonempty, pte.i1(), pte.is_reserved()).0)
             } else {
                 None
@@ -116,10 +114,13 @@ impl PageTable {
                 return None;
             }
 
-            let pages = pte.pages() as isize - pages as isize;
-            let nonempty = pte.nonempty() as isize - nonempty as isize;
-            if pages >= 0 && nonempty >= 0 {
-                Some(Entry::table(pages as _, nonempty as _, pte.i1(), pte.is_reserved()).0)
+            if pte.pages() >= pages && pte.nonempty() >= nonempty {
+                let pages = pte.pages() - pages;
+                let nonempty = pte.nonempty() - nonempty;
+                if pages < nonempty {
+                    return None;
+                }
+                Some(Entry::table(pages, nonempty, pte.i1(), pte.is_reserved()).0)
             } else {
                 None
             }
@@ -228,9 +229,8 @@ impl fmt::Debug for Entry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "[ .. | {} | {} | {} | {} | {} ]",
+            "[ .. | {} | {} | {} | {} ]",
             self.is_reserved(),
-            self.is_table(),
             self.i1(),
             self.nonempty(),
             self.pages()

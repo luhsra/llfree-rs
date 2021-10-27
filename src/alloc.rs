@@ -4,6 +4,7 @@ use std::alloc::{alloc_zeroed, Layout};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
+use log::{error, info, warn};
 use static_assertions::const_assert;
 
 use crate::paging::*;
@@ -42,12 +43,28 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(usize)]
+#[repr(u8)]
 pub enum ChunkSize {
     Page = 0, // 4KiB
     L1 = 1,   // 2MiB
     L2 = 2,   // 1GiB
-    L3 = 3,   // 512GiB
+}
+
+#[derive(Debug, Clone)]
+struct SearchResult {
+    size: ChunkSize,
+    last_page: bool,
+    page: usize,
+}
+
+impl SearchResult {
+    fn new(size: ChunkSize, page: usize, last_page: bool) -> Self {
+        Self {
+            size,
+            page,
+            last_page,
+        }
+    }
 }
 
 impl Allocator {
@@ -59,6 +76,15 @@ impl Allocator {
     /// Returns the root page table. Shorthand for `self.pt(LAYERS, 0)`.
     fn root(&self) -> &PageTable {
         unsafe { &mut *self.volatile }
+    }
+
+    /// Returns the number of allocated pages.
+    pub fn allocated_pages(&self) -> usize {
+        let mut pages = 0;
+        for i in 0..PT_LEN {
+            pages += self.root().get(i).pages();
+        }
+        pages
     }
 
     /// Returns the page table of the given `layer` that contains the `page`.
@@ -86,9 +112,13 @@ impl Allocator {
     }
 
     /// Returns the according l1 page table
-    fn pt1(&self, pte2: Entry, page: usize) -> &PageTable {
-        let start = page & !(PageTable::p_span(1) - 1);
-        unsafe { &*((self.begin + (start + pte2.i1()) * PAGE_SIZE) as *const PageTable) }
+    fn pt1(&self, pte2: Entry, page: usize) -> Option<&PageTable> {
+        if pte2.is_table() {
+            let start = page & !(PageTable::p_span(1) - 1);
+            Some(unsafe { &*((self.begin + (start + pte2.i1()) * PAGE_SIZE) as *const PageTable) })
+        } else {
+            None
+        }
     }
 
     /// Allows init from multiple threads.
@@ -101,7 +131,7 @@ impl Allocator {
 
         // Last frame is reserved for metadata
         let length = (end - begin - PAGE_SIZE).min(MAX_SIZE);
-        println!(
+        info!(
             "Alloc: {:?}-{:?} - {} pages",
             begin as *const (),
             (begin + length) as *const (),
@@ -112,7 +142,7 @@ impl Allocator {
 
         let volatile = VOLATILE.load(Ordering::Acquire);
         if !volatile.is_null() {
-            println!("Alloc already initialized");
+            info!("Alloc already initialized");
             let pages = length / PAGE_SIZE;
             let num_pt2 = (pages + (PT_LEN * PT_LEN) - 1) / (PT_LEN * PT_LEN);
             let pt2 = (begin + length - (num_pt2 * PAGE_SIZE)) as *mut PageTable;
@@ -131,10 +161,10 @@ impl Allocator {
             && false
         {
             // TODO: check if power was lost and recovery is necessary
-            println!("Found allocator state. Recovery...");
+            info!("Found allocator state. Recovery...");
             Self::recover(begin, length)
         } else {
-            println!("Create new allocator state.");
+            info!("Create new allocator state.");
             let alloc = Self::setup(begin, length)?;
             meta.length.store(length, Ordering::Release);
             meta.magic.store(MAGIC, Ordering::Release);
@@ -151,7 +181,7 @@ impl Allocator {
         // Remaining number pages
         let pages = pages - num_pt2;
 
-        println!(
+        info!(
             "pages={}, #pt2={}, #pt1={}, area=[0x{:x}|{:?}-0x{:x}]",
             pages,
             num_pt2,
@@ -162,7 +192,7 @@ impl Allocator {
         );
 
         // Init pt1
-        println!("Init pt1");
+        info!("Init pt1");
         for i in 0..num_pt1 {
             let addr = begin + i * PAGE_SIZE * PT_LEN;
             let pt1 = unsafe { &mut *(addr as *mut PageTable) };
@@ -170,7 +200,7 @@ impl Allocator {
             pt1.set(0, Entry::page_reserved());
         }
 
-        println!("Init pt2");
+        info!("Init pt2");
         // Init pt2
         for i in 0..num_pt2 {
             let pt2 = unsafe { &*pt2.add(i) };
@@ -182,7 +212,7 @@ impl Allocator {
             let span = PageTable::p_span(i);
             higher_level_pts += (pages + span - 1) / span;
         }
-        println!("#higher level pts = {}", higher_level_pts);
+        info!("#higher level pts = {}", higher_level_pts);
 
         // Init ptn - pt3
         let volatile = unsafe {
@@ -217,7 +247,7 @@ impl Allocator {
             let span = PageTable::p_span(i);
             higher_level_pts += (pages + span - 1) / span;
         }
-        println!("#higher level pts = {}", higher_level_pts);
+        info!("#higher level pts = {}", higher_level_pts);
 
         // Init ptn - pt3
         let volatile = unsafe {
@@ -240,7 +270,7 @@ impl Allocator {
         // TODO recreate ptn-pt3 mapping
         let (pages, nonempty) = alloc.recover_rec(alloc.root(), LAYERS, 0);
 
-        println!("Recovered pages={}, nonempty={}", pages, nonempty);
+        info!("Recovered pages={}, nonempty={}", pages, nonempty);
 
         Ok(alloc)
     }
@@ -275,7 +305,7 @@ impl Allocator {
             }
         }
 
-        println!(
+        info!(
             "recovered pt{}={:?} p={} n={}",
             layer, pt as *const _, pages, nonemtpy
         );
@@ -283,66 +313,94 @@ impl Allocator {
         (pages, nonemtpy)
     }
 
-    fn search(&self, size: ChunkSize, pt: &PageTable, layer: usize, start: usize) -> Result<usize> {
-        if size as usize >= layer {
-            return Err(Error::Memory);
+    /// Search free page table entry.
+    fn search_pt_page(&self, layer: usize, start: usize, pt: &PageTable) -> Result<usize> {
+        for i in 0..PT_LEN {
+            let start = start + i * PageTable::p_span(layer - 1);
+            if start >= self.pages {
+                break;
+            }
+            let pte = pt.get(i);
+            if pte.is_empty() {
+                info!("search found i={}: {} - {:?}", i, start, pte);
+                return Ok(start);
+            }
+        }
+        Err(Error::Memory)
+    }
+
+    fn search_leaf_page(&self, start: usize) -> Result<SearchResult> {
+        let pt2 = self.pt(2, start);
+
+        for i2 in 0..PT_LEN {
+            let start = start + i2 * PageTable::p_span(1);
+            let pte2 = pt2.get(i2);
+
+            if pte2.pages() >= PT_LEN {
+                continue;
+            }
+
+            if pte2.pages() == PT_LEN - 1 {
+                info!("search >> child pt full: {}, {:?}", start + pte2.i1(), pte2);
+                return Ok(SearchResult::new(ChunkSize::Page, start + pte2.i1(), true));
+            }
+
+            if let Some(pt1) = self.pt1(pte2, start) {
+                if let Ok(page) = self.search_pt_page(1, start, pt1) {
+                    return Ok(SearchResult::new(ChunkSize::Page, page, false));
+                }
+            } else {
+                assert!(pte2.is_empty());
+                return Ok(SearchResult::new(ChunkSize::Page, start, false));
+            }
+        }
+        Err(Error::Memory)
+    }
+
+    fn search(&self, layer: usize, size: ChunkSize, start: usize) -> Result<SearchResult> {
+        assert!(layer > 1);
+        assert!((size as usize) < layer);
+        assert!(start < self.pages);
+
+        info!("search {:?}, l{}, s={}", size, layer, start);
+
+        if layer == 2 && size == ChunkSize::Page {
+            return self.search_leaf_page(start);
         }
 
-        println!(
-            "search {:?}, pt{}={:?}, s={}",
-            size, layer, pt as *const _, start
-        );
+        let pt = self.pt(layer, start);
+        if layer - 1 == size as usize {
+            let pt = self.pt(layer, start);
+            let page = self.search_pt_page(layer, start, pt)?;
+            return Ok(SearchResult::new(size, page, false));
+        }
 
-        if size as usize == layer - 1 {
-            // Search in leaf page table
-            for i in 0..PT_LEN {
-                let start = start + i * PageTable::p_span(layer - 1);
-                if start >= self.pages {
-                    return Err(Error::Memory);
-                }
-                let pte = pt.get(i);
-                if pte.is_empty() {
-                    println!("search found i={}: {} - {:?}", i, start, pte);
-                    return Ok(start);
-                }
+        assert!(layer > 2);
+
+        for i in 0..PT_LEN {
+            let start = start + i * PageTable::p_span(layer - 1);
+            if start >= self.pages {
+                return Err(Error::Memory);
             }
-        } else {
-            for i in 0..PT_LEN {
-                let start = start + i * PageTable::p_span(layer - 1);
-                if start >= self.pages {
-                    return Err(Error::Memory);
-                }
-                let pte = pt.get(i);
-                let child_pt = if layer == 2 {
-                    self.pt1(pte, start)
-                } else {
-                    self.pt(layer - 1, start)
-                };
 
-                if !pte.is_empty() && !pte.is_table() {
-                    continue;
-                }
+            let pte = pt.get(i);
 
-                if layer > 2 && size as usize == layer - 2 {
-                    // Large / Huge Pages
-                    if pte.nonempty() < PT_LEN {
-                        if let Ok(result) = self.search(size, child_pt, layer - 1, start) {
-                            return Ok(result);
-                        }
-                    }
-                } else if PageTable::p_span(size as usize)
-                    <= PageTable::p_span(layer - 1) - pte.pages()
-                {
-                    // Allocate the l1 page as last page
-                    if layer == 2 && pte.pages() == PT_LEN - 1 {
-                        println!("search >> child pt full: {}", start + pte.i1());
-                        return Ok(start + pte.i1());
-                    }
+            if pte.is_page() {
+                continue;
+            }
 
-                    // Enough pages in child pt
-                    if let Ok(result) = self.search(size, child_pt, layer - 1, start) {
+            if size as usize == layer - 2 {
+                // Large / Huge Pages
+                if pte.nonempty() < PT_LEN {
+                    if let Ok(result) = self.search(layer - 1, size, start) {
                         return Ok(result);
                     }
+                }
+            } else if PageTable::p_span(size as usize) <= PageTable::p_span(layer - 1) - pte.pages()
+            {
+                // Enough pages in child pt
+                if let Ok(result) = self.search(layer - 1, size, start) {
+                    return Ok(result);
                 }
             }
         }
@@ -350,50 +408,137 @@ impl Allocator {
         Err(Error::Memory)
     }
 
-    fn alloc(&self, size: ChunkSize, pt: &PageTable, layer: usize, page: usize) -> Result<bool> {
-        if size as usize >= layer {
+    fn alloc_last_pt1(&self, page: usize) -> Result<bool> {
+        let pt2 = self.pt(2, page);
+        let i2 = PageTable::p_idx(2, page);
+        let i1 = PageTable::p_idx(1, page);
+
+        // Only modify pt2 as pt1 is returned as page.
+
+        match pt2.cas(
+            i2,
+            Entry::table(PT_LEN - 1, PT_LEN - 1, i1, false),
+            Entry::table(PT_LEN, PT_LEN, 0, false),
+        ) {
+            Ok(_) => Ok(true),
+            Err(pte) => {
+                warn!("CAS: alloc last pt2 {:?}", pte);
+                Err(Error::CAS)
+            }
+        }
+    }
+
+    fn alloc_init_pt1(&self, start: usize) -> Result<bool> {
+        info!("alloc init pt1");
+        let start = start & !(PageTable::p_span(1) - 1);
+
+        let pt1 = unsafe { &*((self.begin + start * PAGE_SIZE) as *const PageTable) };
+        pt1.set(0, Entry::page_reserved());
+        pt1.set(0, Entry::page());
+        for i1 in 2..PT_LEN {
+            pt1.set(i1, Entry::empty());
+        }
+
+        let pt2 = self.pt(2, start);
+        let i2 = PageTable::p_idx(2, start);
+        match pt2.cas(i2, Entry::empty(), Entry::table(1, 1, 0, false)) {
+            Ok(_) => Ok(true),
+            Err(pte) => {
+                warn!("CAS: init pt1 {:?}", pte);
+                Err(Error::CAS)
+            },
+        }
+    }
+
+    fn alloc_leaf_page(&self, target: SearchResult) -> Result<bool> {
+        if target.last_page {
+            return self.alloc_last_pt1(target.page);
+        }
+
+        let pt2 = self.pt(2, target.page);
+        let i2 = PageTable::p_idx(2, target.page);
+        let pte2 = pt2.get(i2);
+
+        // Check before modifying pt1 as it's page allocated by the user.
+        if pte2.pages() >= PT_LEN {
+            warn!("CAS: page full");
+            return Err(Error::CAS);
+        }
+
+        // Is there already a page table
+        if let Some(pt1) = self.pt1(pte2, target.page) {
+            let i1 = PageTable::p_idx(1, target.page);
+            match pt1.cas(i1, Entry::empty(), Entry::page()) {
+                Err(pte) => {
+                    warn!("CAS: alloc leaf pt1 {:?}", pte);
+                    return Err(Error::CAS);
+                }
+                _ => {}
+            }
+        } else if pte2.is_empty() {
+            // Split and alloc new page table.
+            return self.alloc_init_pt1(target.page);
+        } else {
+            error!("alloc unexpected pte2 {:?}", pte2);
+            panic!();
+        }
+
+        let new = Entry::table(
+            pte2.pages() + 1,
+            pte2.nonempty() + 1,
+            pte2.i1(),
+            pte2.is_reserved(),
+        );
+        match pt2.cas(i2, pte2, new) {
+            Ok(pte) => Ok(pte.is_empty()),
+            Err(pte) => {
+                warn!("CAS: alloc leaf pt2 {:?}", pte);
+                Err(Error::CAS)
+            }
+        }
+    }
+
+    fn alloc(&self, layer: usize, target: SearchResult) -> Result<bool> {
+        if target.size as usize >= layer {
             return Err(Error::Memory);
         }
-        let i = PageTable::p_idx(layer, page);
+        let pt = self.pt(layer, target.page);
+        let i = PageTable::p_idx(layer, target.page);
 
-        println!(
+        info!(
             "alloc {:?} pt{}={:?} i={} p={}",
-            size, layer, pt as *const _, i, page
+            target.size, layer, pt as *const _, i, target.page
         );
 
-        if (size as usize) < layer - 1 {
-            let child_pt = if layer == 2 {
-                self.pt1(pt.get(i), page)
-            } else {
-                self.pt(layer - 1, page)
-            };
+        if (target.size as usize) < layer - 1 {
+            if layer == 2 {
+                return self.alloc_leaf_page(target);
+            }
 
-            let newentry = self.alloc(size, child_pt, layer - 1, page)?;
+            let newentry = self.alloc(layer - 1, target.clone())?;
 
-            println!(
+            info!(
                 "alloc l{} i={} -> +{}, +{}",
                 layer,
                 i,
-                PageTable::p_span(size as usize),
+                PageTable::p_span(target.size as usize),
                 newentry as usize
             );
 
-            match pt.inc(i, PageTable::p_span(size as usize), newentry as _) {
+            match pt.inc(i, PageTable::p_span(target.size as usize), newentry as _) {
                 Ok(pte) => Ok(pte.is_empty()),
-                Err(_) => Err(Error::CAS),
+                Err(pte) => {
+                    error!("CAS: inc failed {:?}", pte);
+                    Err(Error::CAS)
+                }
             }
         } else {
-            println!("alloc l{} i={}", layer, i);
-            // Replace empty / table with zero pages / last pt1
-
-            // TODO: Infinit loop:
-            // child pt full -> alloc pt1 as page -> pt1 is not `page_reserved`
-            // => race condition with free!
+            info!("alloc l{} i={}", layer, i);
 
             match pt.insert_page(i) {
                 Ok(_) => Ok(true),
-                Err(e) => {
-                    println!("ERROR CAS: alloc unexpected {:?}", e);
+                Err(pte) => {
+                    warn!("CAS: alloc unexpected {:?}", pte);
                     Err(Error::CAS)
                 }
             }
@@ -411,41 +556,37 @@ impl Allocator {
             panic!("Huge pages are currently not supported!");
         }
 
-        let mut page;
+        let mut target;
         loop {
-            page = self.search(size, self.root(), LAYERS, 0)?;
-            println!("page found {}", page);
+            target = self.search(LAYERS, size, 0)?;
+            info!("page found {}, last={:?}", target.page, target.last_page);
 
-            match self.alloc(size, self.root(), LAYERS, page) {
-                Ok(_) => {
-                    println!("allocated {:?}", self.root().get(0));
-                    break;
-                }
-                Err(Error::CAS) => {
-                    println!(">> CAS ERROR: retry alloc")
-                }
+            match self.alloc(LAYERS, target.clone()) {
+                Ok(_) => break,
+                Err(Error::CAS) => warn!("CAS: retry alloc"),
                 Err(e) => return Err(e),
             }
         }
 
-        let addr = (page * PAGE_SIZE) as u64 + self.begin as u64;
+        let addr = (target.page * PAGE_SIZE) as u64 + self.begin as u64;
         let new = translate(addr);
         match dst.compare_exchange(expected, new, Ordering::AcqRel, Ordering::Relaxed) {
             Ok(_) => Ok(()),
             Err(_) => {
-                self.free(size, self.root(), LAYERS, page).unwrap();
+                error!("CAS: get failed -> free");
+                self.free(LAYERS, size, target.page).unwrap();
                 Err(Error::CAS)
             }
         }
     }
 
-    fn free_and_create_pt1(&self, pte2: Entry, page: usize) -> Result<bool> {
+    fn free_and_create_pt1(&self, page: usize) -> Result<bool> {
         // The new pt
         let pt2 = self.pt(2, page);
         let i = PageTable::p_idx(2, page);
 
         let child_pt = unsafe { &*((self.begin + page * PAGE_SIZE) as *const PageTable) };
-        println!("free: init last pt1 {}", page);
+        info!("free: init last pt1 {}", page);
 
         for j in 0..PT_LEN {
             if j == page % PT_LEN {
@@ -460,16 +601,19 @@ impl Allocator {
 
         match pt2.cas(
             i,
-            Entry::table(PT_LEN, PT_LEN, pte2.i1(), false),
+            Entry::table(PT_LEN, PT_LEN, 0, false),
             Entry::table(PT_LEN - 1, PT_LEN - 1, page % PT_LEN, false),
         ) {
             Ok(_) => Ok(false),
-            Err(_) => Err(Error::CAS),
+            Err(pte) => {
+                warn!("CAS: create pt1 {:?}", pte);
+                Err(Error::CAS)
+            }
         }
     }
 
     fn free_leaf_page(&self, page: usize) -> Result<bool> {
-        println!("free leaf page {}", page);
+        info!("free leaf page {}", page);
 
         let pt2 = self.pt(2, page);
         let i2 = PageTable::p_idx(2, page);
@@ -478,67 +622,78 @@ impl Allocator {
         if pte2.is_page() {
             return Err(Error::Address);
         } else if pte2.pages() < PT_LEN {
-            let pt1 = self.pt1(pte2, page);
-            let i1 = PageTable::p_idx(1, page);
+            if let Some(pt1) = self.pt1(pte2, page) {
+                let i1 = PageTable::p_idx(1, page);
+                info!("free l1 i={}", i1);
 
-            println!("free l1 i={}", i1);
-            match pt1.cas(i1, Entry::page(), Entry::empty()) {
-                Ok(_) => {}
-                Err(e) => {
-                    println!("ERROR CAS: free unexpected {:?}", e);
-                    return Err(Error::CAS);
+                match pt1.cas(i1, Entry::page(), Entry::empty()) {
+                    Ok(_) => {}
+                    Err(pte) => {
+                        error!("CAS: free unexpected {:?}", pte);
+                        return Err(Error::Address);
+                    }
                 }
+            } else {
+                error!("free no pt1");
+                return Err(Error::Address);
             }
 
-            println!("free l2 i={} -> -1, -1", i2);
             match pt2.dec(i2, 1, 1) {
                 Ok(pte) => Ok(pte.pages() == 1),
-                Err(_) => Err(Error::CAS),
+                Err(pte) => {
+                    error!("CAS: free dec l2 {:?}", pte);
+                    Err(Error::Address)
+                }
             }
         } else {
             // free last page of pt1 & rebuild pt1
-            self.free_and_create_pt1(pte2, page)
+            self.free_and_create_pt1(page)
         }
     }
 
-    fn free(&self, size: ChunkSize, pt: &PageTable, layer: usize, page: usize) -> Result<bool> {
+    fn free(&self, layer: usize, size: ChunkSize, page: usize) -> Result<bool> {
         if size as usize >= layer {
             return Err(Error::Memory);
         }
+        let pt = self.pt(layer, page);
         let i = PageTable::p_idx(layer, page);
-        println!(
+
+        info!(
             "free {:?} pt{}={:?} i={} p={}",
             size, layer, pt as *const _, i, page
         );
 
+        // TODO: create pt1 after freeing large/huge pages!
+        // Or create pt1 on demand in alloc
+
         if (size as usize) < layer - 1 {
-            if layer == 2 && size == ChunkSize::Page {
+            if layer == 2 {
                 return self.free_leaf_page(page);
             }
 
-            let child_pt = self.pt(layer - 1, page);
+            let pte = pt.get(i);
 
-            let cleared = self.free(size, child_pt, layer - 1, page)?;
+            if pte.is_page() {
+                error!("No table found l{} {:?}", layer, pte);
+                return Err(Error::Address);
+            }
 
-            println!(
-                "free l{} i={} -> -{}, -{}",
-                layer,
-                i,
-                PageTable::p_span(size as usize),
-                cleared as usize
-            );
+            let cleared = self.free(layer - 1, size, page)?;
 
             match pt.dec(i, PageTable::p_span(size as usize), cleared as _) {
                 Ok(pte) => Ok(pte.pages() == PageTable::p_span(size as usize)),
-                Err(_) => Err(Error::CAS),
+                Err(pte) => {
+                    error!("CAS: free dec l{} {:?}", layer, pte);
+                    Err(Error::Address)
+                }
             }
         } else {
-            println!("free l{} i={}", layer, i);
+            info!("free l{} i={}", layer, i);
             match pt.cas(i, Entry::page(), Entry::empty()) {
                 Ok(_) => Ok(true),
-                Err(e) => {
-                    println!("ERROR CAS: free unexpected {:?}", e);
-                    Err(Error::CAS)
+                Err(pte) => {
+                    error!("CAS: free unexpected {:?}", pte);
+                    Err(Error::Address)
                 }
             }
         }
@@ -560,14 +715,12 @@ impl Allocator {
         let page = (addr - self.begin) / PAGE_SIZE;
 
         loop {
-            match self.free(size, self.root(), LAYERS, page) {
-                Ok(_) => break,
-                Err(Error::CAS) => {}
+            match self.free(LAYERS, size, page) {
+                Err(Error::CAS) => warn!("CAS: retry free"),
                 Err(e) => return Err(e),
+                Ok(_) => break,
             }
         }
-
-        println!("allocated {:?}", self.root().get(0));
 
         Ok(())
     }
@@ -585,12 +738,18 @@ impl Allocator {
                 return;
             }
 
-            print!("{:1$}", "", (LAYERS - layer) * 4);
-            println!("i={} {}: {:?}", i, start, pte);
+            info!(
+                "{:1$} i={2} {3}: {4:?}",
+                "",
+                (LAYERS - layer) * 4,
+                i,
+                start,
+                pte
+            );
 
-            if layer > 1 && pte.is_table() {
+            if layer > 1 && !pte.is_page() && !pte.is_empty() {
                 let child_pt = if layer == 2 {
-                    self.pt1(pt.get(i), start)
+                    self.pt1(pt.get(i), start).unwrap()
                 } else {
                     self.pt(layer - 1, start)
                 };
@@ -605,37 +764,32 @@ mod test {
 
     use core::slice;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    use log::info;
 
     use crate::alloc::{ChunkSize, Error};
-    use crate::mmap::c_mmap_fixed;
+    use crate::logging;
+    use crate::mmap::c_mmap_anon;
     use crate::paging::PT_LEN;
 
     use super::{Allocator, MAX_SIZE};
 
     #[test]
-    fn initialization() {
+    fn init() {
+        logging();
+
         let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
 
-        println!("prepare file");
+        info!("mmap {} bytes", data.len());
+        c_mmap_anon(data).unwrap();
 
-        let f = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open("memfile")
-            .unwrap();
-        f.set_len(data.len() as _).unwrap();
-        f.sync_all().unwrap();
-
-        println!("alloc {} bytes", data.len());
-
-        c_mmap_fixed(data, f).unwrap();
-
-        println!("init alloc");
+        info!("init alloc");
 
         let mut alloc = Allocator::init(data.as_ptr() as _, data.len()).unwrap();
 
-        println!("get");
+        info!("get");
 
         let small = AtomicU64::new(0);
         alloc.get(ChunkSize::Page, &small, |v| v, 0).unwrap();
@@ -657,22 +811,32 @@ mod test {
             alloc.get(ChunkSize::Page, page, |v| v, 0).unwrap();
         }
 
+        assert_eq!(alloc.allocated_pages(), 1 + PT_LEN + PT_LEN);
+
         // Check that the same page was not allocated twice
         for i in 0..pages.len() {
-            for j in 0..pages.len() {
-                if i != j {
-                    assert_ne!(
-                        pages[i].load(Ordering::Acquire),
-                        pages[j].load(Ordering::Acquire)
-                    );
-                }
+            for j in i + 1..pages.len() {
+                assert_ne!(
+                    pages[i].load(Ordering::Acquire),
+                    pages[j].load(Ordering::Acquire)
+                );
             }
         }
+        // Free some
+        for page in &pages[5..10] {
+            let addr = page.swap(0, Ordering::AcqRel);
+            alloc.put(addr, ChunkSize::Page).unwrap();
+        }
 
+        // Realloc
+        for page in &pages[5..10] {
+            alloc.get(ChunkSize::Page, page, |v| v, 0).unwrap();
+        }
+
+        // Free all
         for page in &pages {
-            alloc
-                .put(page.load(Ordering::Acquire), ChunkSize::Page)
-                .unwrap();
+            let addr = page.swap(0, Ordering::AcqRel);
+            alloc.put(addr, ChunkSize::Page).unwrap();
         }
 
         alloc.dump();
@@ -680,5 +844,54 @@ mod test {
         alloc
             .put(large.load(Ordering::Acquire), ChunkSize::L1)
             .unwrap();
+    }
+
+    #[test]
+    fn last_page() {
+        logging();
+
+        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
+
+        info!("mmap {} bytes", data.len());
+        c_mmap_anon(data).unwrap();
+
+        let mut alloc = Allocator::init(data.as_ptr() as _, data.len()).unwrap();
+
+        const DEFAULT: AtomicU64 = AtomicU64::new(0);
+        let pages = Arc::new([DEFAULT; PT_LEN]);
+        let barrier = Arc::new(Barrier::new(2));
+
+        for page in pages.iter() {
+            alloc.get(ChunkSize::Page, page, |v| v, 0).unwrap();
+        }
+
+        let handle = {
+            let pages = pages.clone();
+            let barrier = barrier.clone();
+            let begin = data.as_ptr() as usize;
+            let size = data.len();
+
+            thread::spawn(move || {
+                let mut alloc = Allocator::init(begin, size).unwrap();
+
+                barrier.wait();
+                for _ in 0..10 {
+                    let addr = pages[14].load(Ordering::Acquire);
+                    alloc.put(addr, ChunkSize::Page).unwrap();
+                    alloc.get(ChunkSize::Page, &pages[14], |v| v, addr).unwrap();
+                }
+            })
+        };
+
+        barrier.wait();
+        for _ in 0..10 {
+            let addr = pages[13].load(Ordering::Acquire);
+            alloc.put(addr, ChunkSize::Page).unwrap();
+            alloc.get(ChunkSize::Page, &pages[13], |v| v, addr).unwrap();
+        }
+
+        handle.join().unwrap();
+
+        alloc.dump();
     }
 }

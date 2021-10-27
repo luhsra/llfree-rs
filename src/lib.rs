@@ -56,49 +56,44 @@ pub fn put(addr: u64, size: ChunkSize) -> alloc::Result<()> {
 }
 
 #[cfg(test)]
-mod test {
-    use std::{
-        slice,
-        sync::atomic::{AtomicU64, Ordering},
-        thread,
-        time::Duration,
-    };
+pub(crate) fn logging() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .init();
+}
 
-    use crate::{
-        alloc::{ChunkSize, MAX_SIZE},
-        get, init,
-        mmap::c_mmap_fixed,
-        paging::PT_LEN,
-        put,
-    };
+#[cfg(test)]
+mod test {
+    use std::slice;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    use log::info;
+
+    use crate::alloc::{ChunkSize, MAX_SIZE};
+    use crate::mmap::c_mmap_anon;
+    use crate::paging::PT_LEN;
+    use crate::{get, init, logging, put};
 
     #[test]
     fn threading() {
+        logging();
+
         let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
 
-        println!("prepare file");
+        info!("mmap {} bytes", data.len());
 
-        let f = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open("memfile")
-            .unwrap();
-        f.set_len(data.len() as _).unwrap();
-        f.sync_all().unwrap();
+        c_mmap_anon(data).unwrap();
 
-        println!("alloc {} bytes", data.len());
-
-        c_mmap_fixed(data, f).unwrap();
-
-        println!("init alloc");
+        info!("init alloc");
 
         let addr = data.as_ptr() as _;
         let size = data.len();
 
         init(addr, size).unwrap();
 
-        println!("init finished");
+        info!("init finished");
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
 
         let addr = addr as usize;
@@ -113,7 +108,17 @@ mod test {
                         get(ChunkSize::Page, page, |v| v, 0).unwrap();
                     }
 
-                    thread::sleep(Duration::from_millis(1));
+                    for i in 0..pages.len() {
+                        for j in i + 1..pages.len() {
+                            assert_ne!(
+                                pages[i].load(Ordering::Acquire),
+                                pages[j].load(Ordering::Acquire),
+                                "{}=={}",
+                                i,
+                                j
+                            );
+                        }
+                    }
 
                     for page in &pages {
                         put(page.load(Ordering::Acquire), ChunkSize::Page).unwrap();
@@ -122,16 +127,13 @@ mod test {
             })
             .collect::<Vec<_>>();
 
-        for _ in 0..100 {
-            let dst = AtomicU64::new(0);
-            get(ChunkSize::Page, &dst, |v| v, 0).unwrap();
-        }
+        thread::sleep(Duration::from_secs(1));
 
         for t in threads {
             t.join().unwrap();
         }
 
-        println!("Finish");
+        info!("Finish");
         super::ALLOC.with(|a| {
             let mut a = a.borrow_mut();
             if let Some(a) = a.as_mut() {

@@ -35,7 +35,6 @@ pub const MAP_TYPE: c_int = 0x0f;
 
 /// Don't use a file.
 pub const MAP_ANONYMOUS: c_int = 0x20;
-pub const MAP_ANON: c_int = MAP_ANONYMOUS;
 /// When MAP_HUGETLB is set bits [26:31] encode the log2 of the huge page size.
 pub const MAP_HUGE_SHIFT: c_int = 26;
 pub const MAP_HUGE_MASK: c_int = 0x3f;
@@ -108,6 +107,25 @@ pub fn c_mmap_fixed(slice: &[u8], file: File) -> Result<(), ()> {
     }
 }
 
+pub fn c_mmap_anon(slice: &[u8]) -> Result<(), ()> {
+    let addr = unsafe {
+        mmap(
+            slice.as_ptr() as _,
+            slice.len() as _,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+            -1,
+            0,
+        )
+    };
+    if addr == MAP_FAILED {
+        unsafe { perror(b"mmap failed\0" as *const _ as _) };
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn c_munmap(slice: &[u8]) -> Result<(), ()> {
     let ret = unsafe { munmap(slice.as_ptr() as _, slice.len() as _) };
     if ret != 0 {
@@ -120,10 +138,10 @@ pub fn c_munmap(slice: &[u8]) -> Result<(), ()> {
 
 #[cfg(test)]
 mod test {
-    use std::os::unix::prelude::AsRawFd;
+    use core::slice;
 
-    use super::{mmap, perror, MAP_FAILED, MAP_FIXED_NOREPLACE, MAP_SHARED, PROT_READ, PROT_WRITE};
-    use crate::{mmap::munmap, paging::PAGE_SIZE};
+    use crate::mmap::{c_mmap_anon, c_mmap_fixed, c_munmap};
+    use crate::paging::PAGE_SIZE;
 
     #[test]
     fn mapping() {
@@ -136,36 +154,26 @@ mod test {
         f.set_len(PAGE_SIZE as _).unwrap();
         f.sync_all().unwrap();
 
-        let fd = f.as_raw_fd();
-        println!("fd = {}", fd);
+        let slice =
+            unsafe { slice::from_raw_parts_mut(0x0000_1000_0000_0000_u64 as *mut u8, PAGE_SIZE) };
 
-        let addr = unsafe {
-            mmap(
-                0x0000_1000_0000_0000_u64 as _,
-                PAGE_SIZE as _,
-                PROT_READ | PROT_WRITE,
-                MAP_SHARED | MAP_FIXED_NOREPLACE,
-                fd,
-                0,
-            )
-        };
-        drop(f);
+        c_mmap_fixed(slice, f).unwrap();
 
-        println!("result = {:?}", addr);
-        if addr == MAP_FAILED {
-            unsafe { perror(b"mmap failed\0" as *const _ as _) }
-            panic!();
-        }
+        slice[0] = 42;
+        assert_eq!(slice[0], 42);
 
-        unsafe {
-            *(addr as *mut usize) = 42;
-            println!("write {:?}={}", addr, *(addr as *mut usize));
-        }
+        c_munmap(slice).unwrap();
+    }
 
-        let ret = unsafe { munmap(addr, PAGE_SIZE as _) };
-        if ret != 0 {
-            unsafe { perror(b"munmap failed" as *const _ as _) }
-            panic!();
-        }
+    #[test]
+    fn anonymous() {
+        let slice =
+            unsafe { slice::from_raw_parts_mut(0x0000_1000_0000_0000_u64 as *mut u8, PAGE_SIZE) };
+        c_mmap_anon(slice).unwrap();
+
+        slice[0] = 42;
+        assert_eq!(slice[0], 42);
+
+        c_munmap(slice).unwrap();
     }
 }
