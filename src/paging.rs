@@ -2,7 +2,6 @@ use std::fmt;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use log::error;
 use static_assertions::{const_assert, const_assert_eq};
 
 pub const PAGE_SIZE_BITS: usize = 8; // 2^12 => 4KiB
@@ -48,16 +47,16 @@ impl PageTable {
     }
 
     pub fn get(&self, i: usize) -> Entry {
-        Entry(self.entries[i].load(Ordering::Acquire))
+        Entry(self.entries[i].load(Ordering::SeqCst))
     }
 
     pub fn set(&self, i: usize, e: Entry) {
-        self.entries[i].store(e.0, Ordering::Release);
+        self.entries[i].store(e.0, Ordering::SeqCst);
     }
 
     pub fn clear(&self) {
         for i in 0..PT_LEN {
-            self.entries[i].store(0, Ordering::Release);
+            self.entries[i].store(0, Ordering::SeqCst);
         }
     }
 
@@ -65,8 +64,8 @@ impl PageTable {
         match self.entries[i].compare_exchange(
             expected.0,
             new.0,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
         ) {
             Ok(v) => Ok(Entry(v)),
             Err(v) => Err(Entry(v)),
@@ -74,7 +73,7 @@ impl PageTable {
     }
 
     pub fn insert_page(&self, i: usize) -> Result<Entry, Entry> {
-        match self.entries[i].fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| {
+        match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             if Entry(v).is_empty() {
                 Some(Entry::page().0)
             } else {
@@ -87,7 +86,7 @@ impl PageTable {
     }
 
     pub fn inc(&self, i: usize, pages: usize, nonempty: usize) -> Result<Entry, Entry> {
-        match self.entries[i].fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| {
+        match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let pte = Entry(v);
             if !pte.is_table() && !pte.is_empty() {
                 return None;
@@ -108,7 +107,7 @@ impl PageTable {
         }
     }
     pub fn dec(&self, i: usize, pages: usize, nonempty: usize) -> Result<Entry, Entry> {
-        match self.entries[i].fetch_update(Ordering::AcqRel, Ordering::Relaxed, |v| {
+        match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let pte = Entry(v);
             if !pte.is_table() {
                 return None;

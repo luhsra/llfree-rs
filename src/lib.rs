@@ -137,6 +137,7 @@ mod test {
         super::ALLOC.with(|a| {
             let mut a = a.borrow_mut();
             if let Some(a) = a.as_mut() {
+                info!("allocated pages {}", a.allocated_pages());
                 a.dump();
             }
         });

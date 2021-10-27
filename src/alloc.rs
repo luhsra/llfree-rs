@@ -420,7 +420,7 @@ impl Allocator {
             Entry::table(PT_LEN - 1, PT_LEN - 1, i1, false),
             Entry::table(PT_LEN, PT_LEN, 0, false),
         ) {
-            Ok(_) => Ok(true),
+            Ok(_) => Ok(false),
             Err(pte) => {
                 warn!("CAS: alloc last pt2 {:?}", pte);
                 Err(Error::CAS)
@@ -439,6 +439,9 @@ impl Allocator {
             pt1.set(i1, Entry::empty());
         }
 
+        // memory barrier
+        unsafe { core::arch::x86_64::_mm_sfence() };
+
         let pt2 = self.pt(2, start);
         let i2 = PageTable::p_idx(2, start);
         match pt2.cas(i2, Entry::empty(), Entry::table(1, 1, 0, false)) {
@@ -446,7 +449,7 @@ impl Allocator {
             Err(pte) => {
                 warn!("CAS: init pt1 {:?}", pte);
                 Err(Error::CAS)
-            },
+            }
         }
     }
 
@@ -483,17 +486,11 @@ impl Allocator {
             panic!();
         }
 
-        let new = Entry::table(
-            pte2.pages() + 1,
-            pte2.nonempty() + 1,
-            pte2.i1(),
-            pte2.is_reserved(),
-        );
-        match pt2.cas(i2, pte2, new) {
+        match pt2.inc(i2, 1, 1) {
             Ok(pte) => Ok(pte.is_empty()),
             Err(pte) => {
-                warn!("CAS: alloc leaf pt2 {:?}", pte);
-                Err(Error::CAS)
+                error!("CAS: alloc leaf pt2 {:?}", pte);
+                Err(Error::Memory)
             }
         }
     }
@@ -529,7 +526,7 @@ impl Allocator {
                 Ok(pte) => Ok(pte.is_empty()),
                 Err(pte) => {
                     error!("CAS: inc failed {:?}", pte);
-                    Err(Error::CAS)
+                    Err(Error::Memory)
                 }
             }
         } else {
@@ -629,7 +626,7 @@ impl Allocator {
                 match pt1.cas(i1, Entry::page(), Entry::empty()) {
                     Ok(_) => {}
                     Err(pte) => {
-                        error!("CAS: free unexpected {:?}", pte);
+                        error!("CAS: free unexpected l1 {:?}", pte);
                         return Err(Error::Address);
                     }
                 }
@@ -681,7 +678,17 @@ impl Allocator {
             let cleared = self.free(layer - 1, size, page)?;
 
             match pt.dec(i, PageTable::p_span(size as usize), cleared as _) {
-                Ok(pte) => Ok(pte.pages() == PageTable::p_span(size as usize)),
+                Ok(pte) => {
+                    info!(
+                        "free dec l{} i={} pages={} cleared={} from={:?}",
+                        layer,
+                        i,
+                        PageTable::p_span(size as usize),
+                        cleared as usize,
+                        pte
+                    );
+                    Ok(pte.pages() == PageTable::p_span(size as usize))
+                }
                 Err(pte) => {
                     error!("CAS: free dec l{} {:?}", layer, pte);
                     Err(Error::Address)
