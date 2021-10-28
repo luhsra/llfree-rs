@@ -112,8 +112,8 @@ impl Allocator {
         }
     }
 
-    fn l2(&self) -> L2Alloc {
-        L2Alloc::at(self.begin, self.pages)
+    fn page_alloc(&self) -> PageAllocator {
+        PageAllocator::at(self.begin, self.pages)
     }
 
     /// Allows init from multiple threads.
@@ -297,37 +297,36 @@ impl Allocator {
     }
 
     /// Search free page table entry.
-    fn search_pt_page(&self, layer: usize, start: usize) -> Result<usize> {
+    fn alloc_child_page(&self, layer: usize, start: usize) -> Result<(usize, bool)> {
         let pt = self.pt(layer, start);
+
         for i in 0..PT_LEN {
             let start = start + i * Table::p_span(layer - 1);
             if start >= self.pages {
                 break;
             }
-            let pte = pt.get(i);
-            if pte.is_empty() {
-                info!("search found i={}: {} - {:?}", i, start, pte);
-                return Ok(start);
+
+            if let Ok(_) = pt.insert_page(i) {
+                return Ok((start, true));
             }
         }
         Err(Error::Memory)
     }
 
-    fn search(&self, layer: usize, size: ChunkSize, start: usize) -> Result<SearchResult> {
+    fn alloc(&self, layer: usize, size: ChunkSize, start: usize) -> Result<(usize, bool)> {
         assert!(layer > 1);
         assert!((size as usize) < layer);
         assert!(start < self.pages);
 
-        info!("search {:?}, l{}, s={}", size, layer, start);
+        info!("alloc l{}, s={}", layer, start);
 
         if layer == 2 && size == ChunkSize::Page {
-            return self.l2().search(start);
+            return self.page_alloc().alloc(start);
         }
 
         let pt = self.pt(layer, start);
         if layer - 1 == size as usize {
-            let page = self.search_pt_page(layer, start)?;
-            return Ok(SearchResult::new(size, page, false));
+            return self.alloc_child_page(layer, start);
         }
 
         assert!(layer > 2);
@@ -344,61 +343,32 @@ impl Allocator {
                 continue;
             }
 
-            if size as usize == layer - 2 {
-                // Large / Huge Pages
-                if pte.nonempty() < PT_LEN {
-                    if let Ok(result) = self.search(layer - 1, size, start) {
-                        return Ok(result);
+            // Large / Huge Pages or enough pages in child pt
+            if (size as usize == layer - 2 && pte.nonempty() < PT_LEN)
+                || ((size as usize) < layer - 2
+                    && Table::p_span(size as usize) <= Table::p_span(layer - 1) - pte.pages())
+            {
+                if let Ok((page, newentry)) = self.alloc(layer - 1, size, start) {
+                    info!(
+                        "alloc inc l{} i{} {:?} +{} +{}",
+                        layer,
+                        i,
+                        pte,
+                        Table::p_span(size as _),
+                        newentry as usize
+                    );
+                    match pt.inc(i, Table::p_span(size as _), newentry as _) {
+                        Ok(pte) => return Ok((page, pte.pages() == 0)),
+                        Err(pte) => {
+                            error!("CAS: inc failed {:?}", pte);
+                            return Err(Error::Memory);
+                        }
                     }
-                }
-            } else if Table::p_span(size as usize) <= Table::p_span(layer - 1) - pte.pages() {
-                // Enough pages in child pt
-                if let Ok(result) = self.search(layer - 1, size, start) {
-                    return Ok(result);
                 }
             }
         }
 
         Err(Error::Memory)
-    }
-
-    fn alloc(&self, layer: usize, target: SearchResult) -> Result<bool> {
-        if target.size as usize >= layer {
-            return Err(Error::Memory);
-        }
-        let pt = self.pt(layer, target.page);
-        let i = Table::p_idx(layer, target.page);
-
-        info!(
-            "alloc {:?} pt{}={:?} i={} p={}",
-            target.size, layer, pt as *const _, i, target.page
-        );
-
-        if (target.size as usize) < layer - 1 {
-            if layer == 2 {
-                return self.l2().alloc(target);
-            }
-
-            let newentry = self.alloc(layer - 1, target.clone())?;
-
-            match pt.inc(i, Table::p_span(target.size as usize), newentry as _) {
-                Ok(pte) => Ok(pte.is_empty()),
-                Err(pte) => {
-                    error!("CAS: inc failed {:?}", pte);
-                    Err(Error::Memory)
-                }
-            }
-        } else {
-            info!("alloc l{} i={}", layer, i);
-
-            match pt.insert_page(i) {
-                Ok(_) => Ok(true),
-                Err(pte) => {
-                    warn!("CAS: alloc unexpected {:?}", pte);
-                    Err(Error::CAS)
-                }
-            }
-        }
     }
 
     pub fn get<F: FnOnce(u64) -> u64>(
@@ -412,25 +382,21 @@ impl Allocator {
             panic!("Huge pages are currently not supported!");
         }
 
-        let mut target;
-        loop {
-            target = self.search(LAYERS, size, 0)?;
-            info!("page found {}, last={:?}", target.page, target.last_page);
-
-            match self.alloc(LAYERS, target.clone()) {
-                Ok(_) => break,
+        let page = loop {
+            match self.alloc(LAYERS, size, 0) {
+                Ok((page, _)) => break page,
                 Err(Error::CAS) => warn!("CAS: retry alloc"),
                 Err(e) => return Err(e),
             }
-        }
+        };
 
-        let addr = (target.page * PAGE_SIZE) as u64 + self.begin as u64;
+        let addr = (page * PAGE_SIZE) as u64 + self.begin as u64;
         let new = translate(addr);
         match dst.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => Ok(()),
             Err(_) => {
                 error!("CAS: get failed -> free");
-                self.free(LAYERS, size, target.page).unwrap();
+                self.free(LAYERS, size, page).unwrap();
                 Err(Error::CAS)
             }
         }
@@ -443,17 +409,14 @@ impl Allocator {
         let pt = self.pt(layer, page);
         let i = Table::p_idx(layer, page);
 
-        info!(
-            "free {:?} pt{}={:?} i={} p={}",
-            size, layer, pt as *const _, i, page
-        );
+        info!("free l{} i{} p={}", layer, i, page);
 
         // TODO: create pt1 after freeing large/huge pages!
         // Or create pt1 on demand in alloc
 
         if (size as usize) < layer - 1 {
             if layer == 2 {
-                return self.l2().free(page);
+                return self.page_alloc().free(page);
             }
 
             let pte = pt.get(i);
@@ -468,12 +431,12 @@ impl Allocator {
             match pt.dec(i, Table::p_span(size as usize), cleared as _) {
                 Ok(pte) => {
                     info!(
-                        "free dec l{} i={} pages={} cleared={} from={:?}",
+                        "free dec l{} i{} {:?} -{} -{}",
                         layer,
                         i,
+                        pte,
                         Table::p_span(size as usize),
-                        cleared as usize,
-                        pte
+                        cleared as usize
                     );
                     Ok(pte.pages() == Table::p_span(size as usize))
                 }
@@ -522,44 +485,45 @@ impl Allocator {
 
     #[allow(dead_code)]
     pub fn dump(&self) {
-        self.dump_rec(self.root(), LAYERS, 0);
+        self.dump_rec(LAYERS, 0);
     }
 
-    fn dump_rec(&self, pt: &Table, layer: usize, start: usize) {
+    fn dump_rec(&self, layer: usize, start: usize) {
+        let pt = self.pt(layer, start);
         for i in 0..PT_LEN {
-            let pte = pt.get(i);
             let start = start + i * Table::p_span(layer - 1);
             if start >= self.pages {
                 return;
             }
 
+            let pte = pt.get(i);
             info!(
-                "{:1$} i={2} 0x{3:x}: {4:?}",
+                "{:1$}l{5} i={2} 0x{3:x}: {4:?}",
                 "",
                 (LAYERS - layer) * 4,
                 i,
                 start * PAGE_SIZE,
-                pte
+                pte,
+                layer
             );
 
-            if !pte.is_page() && !pte.is_empty() {
+            if !pte.is_page() && pte.pages() > 0 {
                 if layer > 2 {
-                    let child_pt = self.pt(layer - 1, start);
-                    self.dump_rec(child_pt, layer - 1, start);
+                    self.dump_rec(layer - 1, start);
                 } else {
-                    self.l2().dump(start);
+                    self.page_alloc().dump(start);
                 }
             }
         }
     }
 }
 
-struct L2Alloc {
+struct PageAllocator {
     begin: usize,
     pages: usize,
 }
 
-impl L2Alloc {
+impl PageAllocator {
     fn at(begin: usize, pages: usize) -> Self {
         Self { begin, pages }
     }
@@ -585,114 +549,85 @@ impl L2Alloc {
         unsafe { &mut *pt2.add(i) }
     }
 
-    /// Search free page table entry.
-    fn search_pt_page(&self, start: usize, pt: &Table) -> Result<usize> {
-        for i in 0..PT_LEN {
-            let start = start + i;
-            if start >= self.pages {
-                break;
-            }
-            let pte = pt.get(i);
-            if pte.is_empty() {
-                info!("search found i={}: {} - {:?}", i, start, pte);
-                return Ok(start);
-            }
-        }
-        Err(Error::Memory)
-    }
-
-    fn search(&self, start: usize) -> Result<SearchResult> {
+    /// Allocate a single page
+    fn alloc(&self, start: usize) -> Result<(usize, bool)> {
         let pt2 = self.pt2(start);
 
         for i2 in 0..PT_LEN {
-            let start = start + i2 * Table::p_span(1);
+            let start = start + i2 * PT_LEN;
             let pte2 = pt2.get(i2);
 
-            if pte2.pages() >= PT_LEN {
+            if pte2.pages() >= PT_LEN || pte2.is_reserved() {
                 continue;
             }
 
             if pte2.pages() == PT_LEN - 1 {
-                info!("search pt2 full: {}, {:?}", pte2.i1(), pte2);
-                return Ok(SearchResult::new(ChunkSize::Page, start + pte2.i1(), true));
+                return self.alloc_last(pte2, start);
             }
 
             if let Some(pt1) = self.pt1(pte2, start) {
-                if let Ok(page) = self.search_pt_page(start, pt1) {
-                    return Ok(SearchResult::new(ChunkSize::Page, page, false));
-                }
-            } else {
-                assert!(pte2.is_empty());
-                info!("search pt2 empty {:?}", pte2);
-                return Ok(SearchResult::new(ChunkSize::Page, start, false));
+                return self.alloc_pt(pt1, start);
+            }
+
+            assert!(pte2.is_empty());
+            return self.alloc_first(start);
+        }
+        Err(Error::Memory)
+    }
+
+    /// Search free page table entry.
+    fn alloc_pt(&self, pt1: &Table, start: usize) -> Result<(usize, bool)> {
+        let pt2 = self.pt2(start);
+
+        for i in 0..PT_LEN {
+            let page = start + i;
+            if page >= self.pages {
+                break;
+            }
+            if let Ok(_) = pt1.cas(i, Entry::empty(), Entry::page()) {
+                info!("alloc l1 i={}: {}", i, page);
+
+                let i2 = Table::p_idx(2, page);
+                info!("alloc inc l2 i{} {:?} +1 +1", i2, pt2.get(i2));
+                return match pt2.inc(i2, 1, 1) {
+                    Ok(pte) => Ok((page, pte.pages() == 0)),
+                    Err(pte) => {
+                        error!("CAS: inc alloc pt {:?}", pte);
+                        Err(Error::Memory)
+                    }
+                };
             }
         }
         Err(Error::Memory)
     }
 
-    /// Allocate single page
-    fn alloc(&self, target: SearchResult) -> Result<bool> {
-        if target.last_page {
-            return self.alloc_last(target.page);
-        }
-
-        let pt2 = self.pt2(target.page);
-        let i2 = Table::p_idx(2, target.page);
-        let pte2 = pt2.get(i2);
-
-        // Check before modifying pt1 as it's page allocated by the user.
-        if pte2.pages() >= PT_LEN {
-            warn!("CAS: page full");
-            return Err(Error::CAS);
-        }
-
-        // Is there already a page table
-        if let Some(pt1) = self.pt1(pte2, target.page) {
-            let i1 = Table::p_idx(1, target.page);
-            match pt1.cas(i1, Entry::empty(), Entry::page()) {
-                Err(pte) => {
-                    warn!("CAS: alloc leaf pt1 {:?} (pt2={:?})", pte, pte2);
-                    return Err(Error::CAS);
-                }
-                _ => {}
-            }
-        } else if pte2.is_empty() {
-            return self.alloc_first(target.page);
-        } else {
-            error!("alloc unexpected pte2 {:?}", pte2);
-            panic!();
-        }
-
-        match pt2.inc(i2, 1, 1) {
-            Ok(pte) => Ok(pte.is_empty()),
-            Err(pte) => {
-                error!("CAS: alloc leaf pt2 {:?}", pte);
-                Err(Error::Memory)
-            }
-        }
-    }
-
     /// Split and alloc new page table.
-    fn alloc_first(&self, start: usize) -> Result<bool> {
-        info!("alloc init pt1");
+    fn alloc_first(&self, start: usize) -> Result<(usize, bool)> {
+        info!("alloc init pt1 s={}", start);
+        assert!(start % PT_LEN == 0);
 
-        let start = (start & !(PT_LEN - 1)) + 1;
+        let pt2 = self.pt2(start);
+        let i2 = Table::p_idx(2, start);
+
+        // reserve -> stall parallel allocs to this area
+        match pt2.cas(i2, Entry::empty(), Entry::table(1, 1, 1, true)) {
+            Ok(_) => {},
+            Err(pte) => {
+                warn!("CAS: init pt1 {:?}", pte);
+                return Err(Error::CAS);
+            }
+        }
+
         // store pt1 at i=1, so that the allocated page is at i=0
-        let pt1 = unsafe { &*((self.begin + start * PAGE_SIZE) as *const Table) };
+        let pt1 = unsafe { &*((self.begin + (start + 1) * PAGE_SIZE) as *const Table) };
         pt1.set(0, Entry::page());
         pt1.set(1, Entry::page_reserved());
         for i1 in 2..PT_LEN {
             pt1.set(i1, Entry::empty());
         }
 
-        let pt2 = self.pt2(start);
-        let i2 = Table::p_idx(2, start);
-        info!(
-            "alloc init pt1 inc pt2={:?} i2={} s={}",
-            pt2 as *const _, i2, start
-        );
-        match pt2.cas(i2, Entry::empty(), Entry::table(1, 1, 1, false)) {
-            Ok(_) => Ok(true),
+        match pt2.cas(i2, Entry::table(1, 1, 1, true), Entry::table(1, 1, 1, false)) {
+            Ok(_) => Ok((start, true)),
             Err(pte) => {
                 warn!("CAS: init pt1 {:?}", pte);
                 Err(Error::CAS)
@@ -701,18 +636,17 @@ impl L2Alloc {
     }
 
     /// Allocate the last page (the pt1 is reused as last page).
-    fn alloc_last(&self, page: usize) -> Result<bool> {
-        let pt2 = self.pt2(page);
-        let i2 = Table::p_idx(2, page);
-        let i1 = Table::p_idx(1, page);
+    fn alloc_last(&self, pte2: Entry, start: usize) -> Result<(usize, bool)> {
+        let pt2 = self.pt2(start);
+        let i2 = Table::p_idx(2, start);
+
+        assert!(pte2.is_table() && pte2.pages() == PT_LEN - 1);
+
+        info!("alloc last {} s={}", pte2.i1(), start);
 
         // Only modify pt2 as pt1 is returned as page.
-        match pt2.cas(
-            i2,
-            Entry::table(PT_LEN - 1, PT_LEN - 1, i1, false),
-            Entry::table(PT_LEN, PT_LEN, 0, false),
-        ) {
-            Ok(_) => Ok(false),
+        match pt2.cas(i2, pte2, Entry::table(PT_LEN, PT_LEN, 0, false)) {
+            Ok(_) => Ok((start + pte2.i1(), false)),
             Err(pte) => {
                 warn!("CAS: alloc last pt2 {:?}", pte);
                 Err(Error::CAS)
@@ -731,6 +665,11 @@ impl L2Alloc {
         if pte2.is_page() {
             return Err(Error::Address);
         } else if pte2.pages() < PT_LEN {
+            if pte2.is_reserved() {
+                // initialization in progress
+                return Err(Error::CAS);
+            }
+
             if let Some(pt1) = self.pt1(pte2, page) {
                 let i1 = Table::p_idx(1, page);
                 info!("free l1 i={}", i1);
@@ -756,7 +695,7 @@ impl L2Alloc {
             ) {
                 Ok(pte) => Ok(pte.pages() == 1),
                 Err(pte) => {
-                    error!("CAS: free dec l2 {:?}", pte);
+                    warn!("CAS: free dec l2 {:?}", pte);
                     Err(Error::CAS)
                 }
             }
@@ -800,9 +739,13 @@ impl L2Alloc {
         let pt2 = self.pt2(start);
         for i2 in 0..PT_LEN {
             let start = start + i2 * PT_LEN;
+            if start >= self.pages {
+                return;
+            }
+
             let pte2 = pt2.get(i2);
             info!(
-                "{:1$}i={2} 0x{3:x}: {4:?}",
+                "{:1$}l2 i={2} 0x{3:x}: {4:?}",
                 "",
                 (LAYERS - 2) * 4,
                 i2,
@@ -813,7 +756,7 @@ impl L2Alloc {
                 for i1 in 0..PT_LEN {
                     let pte1 = pt1.get(i1);
                     info!(
-                        "{:1$}i={2} 0x{3:x}: {4:?}",
+                        "{:1$}l1 i={2} 0x{3:x}: {4:?}",
                         "",
                         (LAYERS - 1) * 4,
                         i1,
@@ -833,8 +776,9 @@ mod test {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
+    use std::time::Duration;
 
-    use log::info;
+    use log::{info, warn};
 
     use crate::alloc::{ChunkSize, Error};
     use crate::logging;
@@ -848,8 +792,6 @@ mod test {
         logging();
 
         let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
-
-        info!("mmap {} bytes", data.len());
         c_mmap_anon(data).unwrap();
 
         info!("init alloc");
@@ -873,12 +815,13 @@ mod test {
 
         // Stress test
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
-        let pages = [DEFAULT; PT_LEN * 5];
+        let pages = [DEFAULT; PT_LEN * 2];
         for page in &pages {
             alloc.get(ChunkSize::Page, page, |v| v, 0).unwrap();
         }
 
-        alloc.dump();
+        // alloc.dump();
+        alloc.page_alloc().dump(0);
 
         assert_eq!(alloc.allocated_pages(), 1 + PT_LEN + pages.len());
         // Check that the same page was not allocated twice
@@ -888,18 +831,25 @@ mod test {
             assert!(p1 as usize % PAGE_SIZE == 0 && data.contains(unsafe { &mut *p1 }));
             for j in (i + 1)..pages.len() {
                 let p2 = pages[j].load(Ordering::SeqCst) as *mut u8;
-                assert_ne!(p1, p2, "{}=={}", i, j);
+                assert_ne!(
+                    p1,
+                    p2,
+                    "{}=={} ({})",
+                    i,
+                    j,
+                    ((p1 as usize) - alloc.begin) / PAGE_SIZE
+                );
             }
         }
 
         // Free some
-        for page in &pages[5..10] {
+        for page in &pages[10..PT_LEN + 10] {
             let addr = page.swap(0, Ordering::SeqCst);
             alloc.put(addr, ChunkSize::Page).unwrap();
         }
 
         // Realloc
-        for page in &pages[5..10] {
+        for page in &pages[10..PT_LEN + 10] {
             alloc.get(ChunkSize::Page, page, |v| v, 0).unwrap();
         }
 
@@ -908,6 +858,128 @@ mod test {
             let addr = page.swap(0, Ordering::SeqCst);
             alloc.put(addr, ChunkSize::Page).unwrap();
         }
+    }
+
+    #[test]
+    fn parallel_alloc() {
+        logging();
+
+        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
+        c_mmap_anon(data).unwrap();
+
+        info!("init alloc");
+
+        let alloc = Allocator::init(data.as_ptr() as _, data.len()).unwrap();
+
+        // Stress test
+        const ALLOC_PER_THREAD: usize = PT_LEN * 2;
+        const THREADS: usize = 10;
+        const DEFAULT: AtomicU64 = AtomicU64::new(0);
+        let pages = [DEFAULT; ALLOC_PER_THREAD * THREADS];
+        let barrier = Arc::new(Barrier::new(THREADS));
+
+        let handles = (0..THREADS)
+            .into_iter()
+            .map(|t| {
+                let pages_begin = pages.as_ptr() as usize;
+                let begin = data.as_ptr() as usize;
+                let size = data.len();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    let mut alloc = Allocator::init(begin, size).unwrap();
+                    barrier.wait();
+
+                    for i in 0..ALLOC_PER_THREAD {
+                        let dst = unsafe {
+                            &*(pages_begin as *const AtomicU64).add(t * ALLOC_PER_THREAD + i)
+                        };
+                        alloc.get(ChunkSize::Page, dst, |v| v, 0).unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        thread::sleep(Duration::from_millis(1000));
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(alloc.allocated_pages(), pages.len());
+        warn!("allocates pages: {}", pages.len());
+
+        // Check that the same page was not allocated twice
+        for i in 0..pages.len() {
+            let p1 = pages[i].load(Ordering::SeqCst) as *mut u8;
+            info!("addr {}={:?}", i, p1);
+            assert!(p1 as usize % PAGE_SIZE == 0 && data.contains(unsafe { &mut *p1 }));
+            for j in (i + 1)..pages.len() {
+                let p2 = pages[j].load(Ordering::SeqCst) as *mut u8;
+                assert_ne!(
+                    p1,
+                    p2,
+                    "{}=={} ({})",
+                    i,
+                    j,
+                    ((p1 as usize) - alloc.begin) / PAGE_SIZE
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_free() {
+        logging();
+
+        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
+        c_mmap_anon(data).unwrap();
+
+        info!("init alloc");
+
+        let alloc = Allocator::init(data.as_ptr() as _, data.len()).unwrap();
+
+        // Stress test
+        const ALLOC_PER_THREAD: usize = PT_LEN * 2;
+        const THREADS: usize = 10;
+        const DEFAULT: AtomicU64 = AtomicU64::new(0);
+        let pages = [DEFAULT; ALLOC_PER_THREAD * THREADS];
+        let barrier = Arc::new(Barrier::new(THREADS));
+
+        let handles = (0..THREADS)
+            .into_iter()
+            .map(|t| {
+                let pages_begin = pages.as_ptr() as usize;
+                let begin = data.as_ptr() as usize;
+                let size = data.len();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    let mut alloc = Allocator::init(begin, size).unwrap();
+                    barrier.wait();
+
+                    for i in 0..ALLOC_PER_THREAD {
+                        let dst = unsafe {
+                            &*(pages_begin as *const AtomicU64).add(t * ALLOC_PER_THREAD + i)
+                        };
+                        alloc.get(ChunkSize::Page, dst, |v| v, 0).unwrap();
+                    }
+
+                    for i in 0..ALLOC_PER_THREAD {
+                        let dst = unsafe {
+                            &*(pages_begin as *const AtomicU64).add(t * ALLOC_PER_THREAD + i)
+                        };
+                        alloc
+                            .put(dst.load(Ordering::SeqCst), ChunkSize::Page)
+                            .unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(alloc.allocated_pages(), 0);
     }
 
     #[test]

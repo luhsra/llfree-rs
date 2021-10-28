@@ -57,8 +57,26 @@ pub fn put(addr: u64, size: ChunkSize) -> alloc::Result<()> {
 
 #[cfg(test)]
 pub(crate) fn logging() {
+    use std::{io::Write, thread::ThreadId};
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp(None)
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "{}[{:5} {:2?} {}:{}] {}\x1b[0m",
+                match record.level() {
+                    log::Level::Error => "\x1b[91m",
+                    log::Level::Warn => "\x1b[93m",
+                    log::Level::Info => "\x1b[90m",
+                    log::Level::Debug => "\x1b[90m",
+                    log::Level::Trace => "\x1b[90m",
+                },
+                record.level(),
+                unsafe { std::mem::transmute::<ThreadId, u64>(std::thread::current().id()) },
+                record.file().unwrap_or_default(),
+                record.line().unwrap_or_default(),
+                record.args()
+            )
+        })
         .init();
 }
 
@@ -99,7 +117,7 @@ mod test {
         let addr = addr as usize;
         let threads = (0..10)
             .into_iter()
-            .map(|_| {
+            .map(|t| {
                 thread::spawn(move || {
                     init(addr as _, size).unwrap();
 
@@ -109,19 +127,16 @@ mod test {
                     }
 
                     for i in 0..pages.len() {
-                        let p1 = pages[i].load(Ordering::Acquire) as *mut u8;
-                        assert!(
-                            p1 as usize % PAGE_SIZE == 0
-                                && data.contains(unsafe { &mut *p1 })
-                        );
+                        let p1 = pages[i].load(Ordering::SeqCst) as *mut u8;
+                        assert!(p1 as usize % PAGE_SIZE == 0 && data.contains(unsafe { &mut *p1 }));
                         for j in i + 1..pages.len() {
-                            let p2 = pages[j].load(Ordering::Acquire) as *mut u8;
-                            assert_ne!(p1, p2, "{}=={}", i, j);
+                            let p2 = pages[j].load(Ordering::SeqCst) as *mut u8;
+                            assert_ne!(p1, p2, "t{}: {}=={}", t, i, j);
                         }
                     }
 
                     for page in &pages {
-                        put(page.load(Ordering::Acquire), ChunkSize::Page).unwrap();
+                        put(page.load(Ordering::SeqCst), ChunkSize::Page).unwrap();
                     }
                 })
             })
