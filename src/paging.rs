@@ -15,26 +15,29 @@ pub const LAYERS: usize = 4;
 
 /// Page table with atomic entries
 #[repr(align(32))]
-pub struct PageTable {
+pub struct Table {
     entries: [AtomicU64; PT_LEN],
 }
 
 const_assert_eq!(size_of::<AtomicU64>(), PTE_SIZE);
-const_assert_eq!(size_of::<PageTable>(), PAGE_SIZE);
+const_assert_eq!(size_of::<Table>(), PAGE_SIZE);
 const_assert_eq!(size_of::<usize>(), size_of::<u64>());
 
-impl PageTable {
+impl Table {
     /// Area in bytes that a page table covers
+    #[inline(always)]
     pub const fn span(layer: usize) -> usize {
         Self::p_span(layer) << PAGE_SIZE_BITS
     }
 
     /// Area in pages that a page table covers
+    #[inline(always)]
     pub const fn p_span(layer: usize) -> usize {
         1 << (PT_LEN_BITS * layer)
     }
 
     /// Returns pt index that contains the `page`
+    #[inline(always)]
     pub fn p_idx(layer: usize, page: usize) -> usize {
         (page >> (PT_LEN_BITS * (layer - 1))) & (PT_LEN - 1)
     }
@@ -239,16 +242,16 @@ impl fmt::Debug for Entry {
 
 #[cfg(test)]
 mod test {
-    use crate::paging::{PageTable, PAGE_SIZE, PT_LEN};
+    use crate::paging::{Table, PAGE_SIZE, PT_LEN};
 
     #[test]
     fn pt_size() {
-        assert_eq!(PageTable::span(0), PAGE_SIZE);
-        assert_eq!(PageTable::span(1), PAGE_SIZE * PT_LEN);
-        assert_eq!(PageTable::span(2), PAGE_SIZE * PT_LEN * PT_LEN);
+        assert_eq!(Table::span(0), PAGE_SIZE);
+        assert_eq!(Table::span(1), PAGE_SIZE * PT_LEN);
+        assert_eq!(Table::span(2), PAGE_SIZE * PT_LEN * PT_LEN);
 
-        assert_eq!(PageTable::p_span(0), 1);
-        assert_eq!(PageTable::p_span(1), PT_LEN);
-        assert_eq!(PageTable::p_span(2), PT_LEN * PT_LEN);
+        assert_eq!(Table::p_span(0), 1);
+        assert_eq!(Table::p_span(1), PT_LEN);
+        assert_eq!(Table::p_span(2), PT_LEN * PT_LEN);
     }
 }

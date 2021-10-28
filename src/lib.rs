@@ -73,7 +73,7 @@ mod test {
 
     use crate::alloc::{ChunkSize, MAX_SIZE};
     use crate::mmap::c_mmap_anon;
-    use crate::paging::PT_LEN;
+    use crate::paging::{PAGE_SIZE, PT_LEN};
     use crate::{get, init, logging, put};
 
     #[test]
@@ -109,14 +109,14 @@ mod test {
                     }
 
                     for i in 0..pages.len() {
+                        let p1 = pages[i].load(Ordering::Acquire) as *mut u8;
+                        assert!(
+                            p1 as usize % PAGE_SIZE == 0
+                                && data.contains(unsafe { &mut *p1 })
+                        );
                         for j in i + 1..pages.len() {
-                            assert_ne!(
-                                pages[i].load(Ordering::Acquire),
-                                pages[j].load(Ordering::Acquire),
-                                "{}=={}",
-                                i,
-                                j
-                            );
+                            let p2 = pages[j].load(Ordering::Acquire) as *mut u8;
+                            assert_ne!(p1, p2, "{}=={}", i, j);
                         }
                     }
 

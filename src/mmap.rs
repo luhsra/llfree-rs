@@ -83,8 +83,8 @@ extern "C" {
 }
 
 pub fn c_perror(s: &str) {
-    let ref this = CString::new(s).unwrap();
-    unsafe { perror(this.as_ptr()) }
+    let ref s = CString::new(s).unwrap();
+    unsafe { perror(s.as_ptr()) }
 }
 
 pub fn c_mmap_fixed(slice: &[u8], file: File) -> Result<(), ()> {
