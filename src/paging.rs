@@ -88,6 +88,24 @@ impl Table {
         }
     }
 
+    pub fn reserve(&self, i: usize, reserved: bool) -> Result<Entry, Entry> {
+        match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            let pte = Entry(v);
+            if pte.is_reserved() == reserved {
+                return None;
+            } else {
+                if pte.is_page() {
+                    return Some(Entry::page_reserved().0);
+                } else {
+                    return Some(Entry::table(pte.pages(), pte.nonempty(), pte.i1(), reserved).0);
+                }
+            }
+        }) {
+            Ok(v) => Ok(Entry(v)),
+            Err(v) => Err(Entry(v)),
+        }
+    }
+
     pub fn inc(&self, i: usize, pages: usize, nonempty: usize) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let pte = Entry(v);

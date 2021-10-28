@@ -7,7 +7,7 @@ mod mmap;
 mod paging;
 mod util;
 
-use alloc::{Allocator, ChunkSize, Error};
+use alloc::{Allocator, Error, Size};
 
 thread_local! {
     static ALLOC: RefCell<Option<Allocator>> = RefCell::new(None);
@@ -23,7 +23,7 @@ pub fn init(addr: *mut (), size: usize) -> alloc::Result<()> {
 }
 
 pub fn get<F: FnOnce(u64) -> u64>(
-    size: ChunkSize,
+    size: Size,
     dst: &AtomicU64,
     translate: F,
     expected: u64,
@@ -41,7 +41,7 @@ pub fn get<F: FnOnce(u64) -> u64>(
     Ok(())
 }
 
-pub fn put(addr: u64, size: ChunkSize) -> alloc::Result<()> {
+pub fn put(addr: u64, size: Size) -> alloc::Result<()> {
     ALLOC.with(|a| {
         let mut a = a.borrow_mut();
 
@@ -89,9 +89,9 @@ mod test {
 
     use log::info;
 
-    use crate::alloc::{ChunkSize, MAX_SIZE};
+    use crate::alloc::{Size, MAX_SIZE};
     use crate::mmap::c_mmap_anon;
-    use crate::paging::{PAGE_SIZE, PT_LEN};
+    use crate::paging::PT_LEN;
     use crate::{get, init, logging, put};
 
     #[test]
@@ -117,26 +117,17 @@ mod test {
         let addr = addr as usize;
         let threads = (0..10)
             .into_iter()
-            .map(|t| {
+            .map(|_| {
                 thread::spawn(move || {
                     init(addr as _, size).unwrap();
 
                     let pages = [DEFAULT; PT_LEN];
                     for page in &pages {
-                        get(ChunkSize::Page, page, |v| v, 0).unwrap();
-                    }
-
-                    for i in 0..pages.len() {
-                        let p1 = pages[i].load(Ordering::SeqCst) as *mut u8;
-                        assert!(p1 as usize % PAGE_SIZE == 0 && data.contains(unsafe { &mut *p1 }));
-                        for j in i + 1..pages.len() {
-                            let p2 = pages[j].load(Ordering::SeqCst) as *mut u8;
-                            assert_ne!(p1, p2, "t{}: {}=={}", t, i, j);
-                        }
+                        get(Size::Page, page, |v| v, 0).unwrap();
                     }
 
                     for page in &pages {
-                        put(page.load(Ordering::SeqCst), ChunkSize::Page).unwrap();
+                        put(page.load(Ordering::SeqCst), Size::Page).unwrap();
                     }
                 })
             })
@@ -149,12 +140,5 @@ mod test {
         }
 
         info!("Finish");
-        super::ALLOC.with(|a| {
-            let mut a = a.borrow_mut();
-            if let Some(a) = a.as_mut() {
-                info!("allocated pages {}", a.allocated_pages());
-                a.dump();
-            }
-        });
     }
 }
