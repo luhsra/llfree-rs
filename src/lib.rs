@@ -3,9 +3,9 @@
 use std::{cell::RefCell, sync::atomic::AtomicU64};
 
 mod alloc;
-mod mmap;
 mod paging;
 mod util;
+pub mod mmap;
 
 use alloc::{Allocator, Error, Size};
 
@@ -56,31 +56,6 @@ pub fn put(addr: u64, size: Size) -> alloc::Result<()> {
 }
 
 #[cfg(test)]
-pub(crate) fn logging() {
-    use std::{io::Write, thread::ThreadId};
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format(|buf, record| {
-            writeln!(
-                buf,
-                "{}[{:5} {:2?} {}:{}] {}\x1b[0m",
-                match record.level() {
-                    log::Level::Error => "\x1b[91m",
-                    log::Level::Warn => "\x1b[93m",
-                    log::Level::Info => "\x1b[90m",
-                    log::Level::Debug => "\x1b[90m",
-                    log::Level::Trace => "\x1b[90m",
-                },
-                record.level(),
-                unsafe { std::mem::transmute::<ThreadId, u64>(std::thread::current().id()) },
-                record.file().unwrap_or_default(),
-                record.line().unwrap_or_default(),
-                record.args()
-            )
-        })
-        .init();
-}
-
-#[cfg(test)]
 mod test {
     use std::slice;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -92,7 +67,8 @@ mod test {
     use crate::alloc::{Size, MAX_SIZE};
     use crate::mmap::c_mmap_anon;
     use crate::paging::PT_LEN;
-    use crate::{get, init, logging, put};
+    use crate::util::logging;
+    use crate::{get, init, put};
 
     #[test]
     fn threading() {

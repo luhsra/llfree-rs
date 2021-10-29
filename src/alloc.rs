@@ -104,7 +104,7 @@ impl Allocator {
     }
 
     fn page_alloc(&self) -> PageAllocator {
-        PageAllocator::at(self.begin, self.pages)
+        PageAllocator::new(self.begin, self.pages)
     }
 
     /// Allows init from multiple threads.
@@ -128,7 +128,6 @@ impl Allocator {
 
         let volatile = VOLATILE.load(Ordering::SeqCst);
         if !volatile.is_null() {
-            info!("Alloc already initialized");
             let pages = length / PAGE_SIZE;
             let num_pt2 = (pages + (PT_LEN * PT_LEN) - 1) / (PT_LEN * PT_LEN);
             // Remaining number of pages
@@ -142,6 +141,7 @@ impl Allocator {
             };
             alloc.small_start = alloc.reserve_pt2(LAYERS, 0).unwrap();
             alloc.large_start = alloc.reserve_pt2(LAYERS, alloc.small_start).unwrap();
+            info!("Alloc already initialized small={} large={}", alloc.small_start, alloc.large_start);
             return Ok(alloc);
         }
 
@@ -217,12 +217,14 @@ impl Allocator {
             small_start: 0,
             large_start: Table::p_span(2),
         };
-        alloc
-            .pt(3, alloc.small_start)
-            .set(Table::p_idx(3, alloc.small_start), Entry::table(0, 0, 0, true));
-        alloc
-            .pt(3, alloc.large_start)
-            .set(Table::p_idx(3, alloc.large_start), Entry::table(0, 0, 0, true));
+        alloc.pt(3, alloc.small_start).set(
+            Table::p_idx(3, alloc.small_start),
+            Entry::table(0, 0, 0, true),
+        );
+        alloc.pt(3, alloc.large_start).set(
+            Table::p_idx(3, alloc.large_start),
+            Entry::table(0, 0, 0, true),
+        );
 
         info!(
             "reserved small={} ({:?}), large={} ({:?})",
@@ -453,7 +455,6 @@ impl Allocator {
         };
 
         let (page, mut newentry) = loop {
-
             // TODO: check pte3 pages / entries & reserve next before alloc
 
             match self.alloc(2, size, start) {
@@ -608,13 +609,14 @@ impl Allocator {
     }
 }
 
+/// Layer 2 page allocator.
 struct PageAllocator {
     begin: usize,
     pages: usize,
 }
 
 impl PageAllocator {
-    fn at(begin: usize, pages: usize) -> Self {
+    fn new(begin: usize, pages: usize) -> Self {
         Self { begin, pages }
     }
 
@@ -857,7 +859,7 @@ mod test {
     use log::{info, warn};
 
     use crate::alloc::{Error, Size};
-    use crate::logging;
+    use crate::util::logging;
     use crate::mmap::c_mmap_anon;
     use crate::paging::{PAGE_SIZE, PT_LEN};
 
@@ -866,15 +868,15 @@ mod test {
     #[test]
     fn init() {
         logging();
-
-        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
+        // 8GiB
+        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, 8 << 30) };
         c_mmap_anon(data).unwrap();
 
         info!("init alloc");
 
         let mut alloc = Allocator::init(data.as_ptr() as _, data.len()).unwrap();
 
-        info!("get");
+        warn!("start alloc...");
 
         let small = AtomicU64::new(0);
         alloc.get(Size::Page, &small, |v| v, 0).unwrap();
@@ -887,8 +889,8 @@ mod test {
         assert_eq!(alloc.get(Size::Page, &small, |v| v, 0), Err(Error::CAS));
 
         // Stress test
-        const DEFAULT: AtomicU64 = AtomicU64::new(0);
-        let pages = [DEFAULT; PT_LEN * PT_LEN];
+        let mut pages = Vec::with_capacity(PT_LEN * PT_LEN);
+        pages.resize_with(PT_LEN * PT_LEN, AtomicU64::default);
         for page in &pages {
             alloc.get(Size::Page, page, |v| v, 0).unwrap();
         }
@@ -896,24 +898,22 @@ mod test {
         // alloc.dump();
         alloc.page_alloc().dump(0);
 
+        warn!("check...");
+
         assert_eq!(alloc.allocated_pages(), 1 + PT_LEN + pages.len());
+
+        pages.sort_unstable_by(|a, b| a.load(Ordering::Relaxed).cmp(&b.load(Ordering::Relaxed)));
+
         // Check that the same page was not allocated twice
-        for i in 0..pages.len() {
-            let p1 = pages[i].load(Ordering::SeqCst) as *mut u8;
+        for i in 0..pages.len() - 1 {
+            let p1 = pages[i].load(Ordering::Relaxed) as *mut u8;
+            let p2 = pages[i + 1].load(Ordering::Relaxed) as *mut u8;
             info!("addr {}={:?}", i, p1);
             assert!(p1 as usize % PAGE_SIZE == 0 && data.contains(unsafe { &mut *p1 }));
-            for j in (i + 1)..pages.len() {
-                let p2 = pages[j].load(Ordering::SeqCst) as *mut u8;
-                assert_ne!(
-                    p1,
-                    p2,
-                    "{}=={} ({})",
-                    i,
-                    j,
-                    ((p1 as usize) - alloc.begin) / PAGE_SIZE
-                );
-            }
+            assert!(p1 != p2);
         }
+
+        warn!("realloc...");
 
         // Free some
         for page in &pages[10..PT_LEN + 10] {
@@ -928,6 +928,8 @@ mod test {
             alloc.get(Size::Page, page, |v| v, 0).unwrap();
         }
 
+        warn!("free...");
+
         // Free all
         for page in &pages {
             let addr = page.swap(0, Ordering::SeqCst);
@@ -939,7 +941,7 @@ mod test {
     fn parallel_alloc() {
         logging();
 
-        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
+        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, 20 << 30) };
         c_mmap_anon(data).unwrap();
 
         info!("init alloc");
@@ -948,7 +950,7 @@ mod test {
 
         // Stress test
         const ALLOC_PER_THREAD: usize = PT_LEN * 2;
-        const THREADS: usize = 10;
+        const THREADS: usize = 4;
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
         let pages = [DEFAULT; ALLOC_PER_THREAD * THREADS];
         let barrier = Arc::new(Barrier::new(THREADS));
@@ -981,7 +983,7 @@ mod test {
         }
 
         assert_eq!(alloc.allocated_pages(), pages.len());
-        warn!("allocates pages: {}", pages.len());
+        warn!("allocated pages: {}", pages.len());
 
         // Check that the same page was not allocated twice
         for i in 0..pages.len() {
@@ -1006,7 +1008,7 @@ mod test {
     fn parallel_free() {
         logging();
 
-        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
+        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, 20 << 30) };
         c_mmap_anon(data).unwrap();
 
         info!("init alloc");
@@ -1015,7 +1017,7 @@ mod test {
 
         // Stress test
         const ALLOC_PER_THREAD: usize = PT_LEN * 2;
-        const THREADS: usize = 10;
+        const THREADS: usize = 4;
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
         let pages = [DEFAULT; ALLOC_PER_THREAD * THREADS];
         let barrier = Arc::new(Barrier::new(THREADS));
@@ -1060,7 +1062,7 @@ mod test {
     fn last_page() {
         logging();
 
-        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
+        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, 8 << 30) };
 
         info!("mmap {} bytes", data.len());
         c_mmap_anon(data).unwrap();

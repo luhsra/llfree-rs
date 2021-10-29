@@ -1,5 +1,5 @@
 [package]
-name = "lockgfree-alloc-rs"
+name = "nvalloc-rs"
 version = "0.1.0"
 edition = "2018"
 

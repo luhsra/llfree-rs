@@ -1,4 +1,8 @@
+# rust
 /target
+Cargo.lock
+
+# misc
 memfile
 .vscode
 /test

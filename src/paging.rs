@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use static_assertions::{const_assert, const_assert_eq};
 
-pub const PAGE_SIZE_BITS: usize = 8; // 2^12 => 4KiB
+pub const PAGE_SIZE_BITS: usize = 12; // 2^12 => 4KiB
 pub const PAGE_SIZE: usize = 1 << PAGE_SIZE_BITS;
 pub const PTE_SIZE_BITS: usize = 3; // 2^3 => 8B => 64b
 pub const PTE_SIZE: usize = 1 << PTE_SIZE_BITS;
