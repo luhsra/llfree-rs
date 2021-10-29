@@ -124,42 +124,55 @@ impl Allocator {
 
         let meta = unsafe { &mut *((begin + length) as *mut Meta) };
 
-        let volatile = VOLATILE.load(Ordering::SeqCst);
-        if !volatile.is_null() {
-            let pages = length / PAGE_SIZE;
-            let num_pt2 = (pages + (PT_LEN * PT_LEN) - 1) / (PT_LEN * PT_LEN);
-            // Remaining number of pages
-            let pages = pages - num_pt2;
-            let mut alloc = Allocator {
-                begin,
-                pages,
-                volatile,
-                small_start: 0,
-                large_start: 0,
-            };
-            alloc.small_start = alloc.reserve_pt2(LAYERS, 0).unwrap();
-            alloc.large_start = alloc.reserve_pt2(LAYERS, 0).unwrap();
-            warn!(
-                "Alloc already initialized small={} large={}",
-                alloc.small_start / Table::p_span(2),
-                alloc.large_start / Table::p_span(2)
-            );
-            return Ok(alloc);
-        }
-
-        if meta.length.load(Ordering::SeqCst) == length
-            && meta.magic.load(Ordering::SeqCst) == MAGIC
-        {
-            // TODO: check if power was lost and recovery is necessary
-            info!("Found allocator state. Recovery...");
-            Self::recover(begin, length)
-        } else {
-            info!("Create new allocator state.");
-            let alloc = Self::setup(begin, length)?;
-            meta.length.store(length, Ordering::SeqCst);
-            meta.magic.store(MAGIC, Ordering::SeqCst);
-            VOLATILE.store(alloc.volatile, Ordering::SeqCst);
-            Ok(alloc)
+        const INITIALIZING: *mut Table = usize::MAX as *mut _;
+        loop {
+            match VOLATILE.compare_exchange(
+                std::ptr::null_mut(),
+                usize::MAX as *mut _,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    if meta.length.load(Ordering::SeqCst) == length
+                        && meta.magic.load(Ordering::SeqCst) == MAGIC
+                    {
+                        // TODO: check if power was lost and recovery is necessary
+                        info!("Found allocator state. Recovery...");
+                        return Self::recover(begin, length);
+                    } else {
+                        info!("Create new allocator state.");
+                        let alloc = Self::setup(begin, length)?;
+                        meta.length.store(length, Ordering::SeqCst);
+                        meta.magic.store(MAGIC, Ordering::SeqCst);
+                        VOLATILE.store(alloc.volatile, Ordering::SeqCst);
+                        return Ok(alloc);
+                    }
+                }
+                Err(INITIALIZING) => {
+                    // TODO: replace with loop
+                }
+                Err(volatile) => {
+                    let pages = length / PAGE_SIZE;
+                    let num_pt2 = (pages + (PT_LEN * PT_LEN) - 1) / (PT_LEN * PT_LEN);
+                    // Remaining number of pages
+                    let pages = pages - num_pt2;
+                    let mut alloc = Allocator {
+                        begin,
+                        pages,
+                        volatile,
+                        small_start: 0,
+                        large_start: 0,
+                    };
+                    alloc.small_start = alloc.reserve_pt2(LAYERS, 0).unwrap();
+                    alloc.large_start = alloc.reserve_pt2(LAYERS, 0).unwrap();
+                    warn!(
+                        "Alloc already initialized small={} large={}",
+                        alloc.small_start / Table::p_span(2),
+                        alloc.large_start / Table::p_span(2)
+                    );
+                    return Ok(alloc);
+                }
+            }
         }
     }
 
@@ -322,7 +335,7 @@ impl Allocator {
 
     fn reserve_new(&mut self, size: Size) -> Result<usize> {
         let result = self.reserve_pt2(LAYERS, 0)?;
-        warn!("reserved new {} ({:?})", result, size);
+        warn!("reserved new {} ({:?})", result / Table::p_span(2), size);
         match size {
             Size::Page => {
                 self.unreserve_pt2(self.small_start);
@@ -608,6 +621,13 @@ impl Allocator {
     }
 }
 
+impl Drop for Allocator {
+    fn drop(&mut self) {
+        self.unreserve_pt2(self.small_start);
+        self.unreserve_pt2(self.large_start);
+    }
+}
+
 /// Layer 2 page allocator.
 struct PageAllocator {
     begin: usize,
@@ -852,7 +872,6 @@ mod test {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
-    use std::time::Duration;
 
     use log::{info, warn};
 
@@ -940,15 +959,13 @@ mod test {
 
         const ALLOC_PER_THREAD: usize = PT_LEN * 2;
         const THREADS: usize = 10;
-        const MEM_SIZE: usize = 2 * (THREADS + 1) * Table::span(2);
+        const MEM_SIZE: usize = 2 * THREADS * Table::span(2);
 
         warn!("mapping {}", MEM_SIZE);
 
         let mapping = MMap::anon(0x1000_0000_0000, MEM_SIZE).unwrap();
 
         info!("init alloc");
-
-        let alloc = Allocator::init(mapping.slice.as_ptr() as _, mapping.slice.len()).unwrap();
 
         // Stress test
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
@@ -980,6 +997,7 @@ mod test {
             handle.join().unwrap();
         }
 
+        let alloc = Allocator::init(mapping.slice.as_ptr() as _, mapping.slice.len()).unwrap();
         assert_eq!(alloc.allocated_pages(), pages.len());
         warn!("allocated pages: {}", pages.len());
 
@@ -1008,13 +1026,11 @@ mod test {
 
         const ALLOC_PER_THREAD: usize = PT_LEN * 2;
         const THREADS: usize = 10;
-        const MEM_SIZE: usize = 2 * (THREADS + 1) * Table::span(2);
+        const MEM_SIZE: usize = 2 * THREADS * Table::span(2);
 
         let mapping = MMap::anon(0x1000_0000_0000, MEM_SIZE).unwrap();
 
         info!("init alloc");
-
-        let alloc = Allocator::init(mapping.slice.as_ptr() as _, mapping.slice.len()).unwrap();
 
         // Stress test
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
@@ -1054,6 +1070,7 @@ mod test {
             handle.join().unwrap();
         }
 
+        let alloc = Allocator::init(mapping.slice.as_ptr() as _, mapping.slice.len()).unwrap();
         assert_eq!(alloc.allocated_pages(), 0);
     }
 
@@ -1109,7 +1126,7 @@ mod test {
     fn recover() {
         logging();
 
-        let mapping = MMap::anon(0x1000_0000_0000, 200 << 30).unwrap();
+        let mapping = MMap::anon(0x1000_0000_0000, 8 << 30).unwrap();
 
         info!("mmap {} bytes", mapping.slice.len());
 
