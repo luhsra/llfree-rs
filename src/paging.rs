@@ -42,13 +42,6 @@ impl Table {
         (page >> (PT_LEN_BITS * (layer - 1))) & (PT_LEN - 1)
     }
 
-    pub fn addr(layer: usize, prefix: u64, i: usize) -> u64 {
-        let mask = Self::span(layer) - 1;
-        let pref = prefix as usize & !mask;
-        let suffix = (i << (PAGE_SIZE_BITS + PT_LEN_BITS * (layer - 1))) & mask;
-        (pref | suffix) as u64
-    }
-
     pub fn get(&self, i: usize) -> Entry {
         Entry(self.entries[i].load(Ordering::SeqCst))
     }
@@ -182,7 +175,7 @@ const_assert!(PTE_RESERVED_OFF < 64);
 /// [ .. | reserved | table | i1 | nonempty | pages ]
 ///    3       1        1      9      10       40
 /// ```
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Entry(pub u64);
 
 impl Entry {
@@ -260,7 +253,9 @@ impl fmt::Debug for Entry {
 
 #[cfg(test)]
 mod test {
-    use crate::paging::{Table, PAGE_SIZE, PT_LEN};
+    use std::sync::atomic::AtomicU64;
+
+    use crate::paging::{Entry, Table, PAGE_SIZE, PT_LEN};
 
     #[test]
     fn pt_size() {
@@ -271,5 +266,17 @@ mod test {
         assert_eq!(Table::p_span(0), 1);
         assert_eq!(Table::p_span(1), PT_LEN);
         assert_eq!(Table::p_span(2), PT_LEN * PT_LEN);
+    }
+
+    #[test]
+    fn pt() {
+        const DEFAULT: AtomicU64 = AtomicU64::new(0);
+        let pt = Table {
+            entries: [DEFAULT; PT_LEN],
+        };
+        pt.cas(0, Entry::empty(), Entry::table(0, 0, 0, true))
+            .unwrap();
+        pt.inc(0, 42, 1).unwrap();
+        assert_eq!(pt.get(0), Entry::table(42, 1, 0, true));
     }
 }

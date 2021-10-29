@@ -1,40 +1,24 @@
-use std::env::{args, Args};
+use std::env::args;
 use std::fs::metadata;
-use std::io::{Seek, SeekFrom};
-use std::slice;
 
-use log::{error, info};
-use nvalloc_rs::mmap;
+use log::{error, info, warn};
+use nvalloc_rs::mmap::MMap;
 
 fn main() {
     logging();
 
     let mut args = args();
-
     args.next().unwrap();
     let filename = args.next().expect("usage: mmap <filename> [size]");
 
     let size = if let Some(size) = args.next() {
-        let mut multiplier = 1;
-        let size = match size.chars().last() {
-            Some('K') => {
-                multiplier = 1 << 10;
-                &size[..size.len() - 1]
-            }
-            Some('M') => {
-                multiplier = 1 << 20;
-                &size[..size.len() - 1]
-            }
-            Some('G') => {
-                multiplier = 1 << 30;
-                &size[..size.len() - 1]
-            }
-            Some('T') => {
-                multiplier = 1 << 40;
-                &size[..size.len() - 1]
-            }
-            Some(_) => panic!("Invalid size"),
-            None => &size[..],
+        let (multiplier, size) = match size.chars().last() {
+            Some('K') => (1 << 10, &size[..size.len() - 1]),
+            Some('M') => (1 << 20, &size[..size.len() - 1]),
+            Some('G') => (1 << 30, &size[..size.len() - 1]),
+            Some('T') => (1 << 40, &size[..size.len() - 1]),
+            Some(_) => (1, &size[..]),
+            _ => panic!("Invalid size"),
         };
         size.trim().parse::<usize>().expect("Invalid size") * multiplier
     } else {
@@ -53,20 +37,22 @@ fn main() {
 
     info!("map file s={}", size);
 
-    let data = unsafe { slice::from_raw_parts_mut(0x1000_0000_0000_u64 as _, size) };
-    mmap::c_mmap_fixed(data, file).unwrap();
+    let mut mapping = MMap::file(0x1000_0000_0000_u64 as _, size, file).unwrap();
+    let data = &mut mapping.slice;
 
     info!("check read/write");
 
-    data[0] = 42;
+    warn!("previously written {}", data[0]);
+    warn!("previously written {}", data[data.len() - 1]);
 
-    if data[0] != 42 {
+    data[0] = 42;
+    data[data.len() - 1] = 33;
+
+    if data[0] != 42 || data[data.len() - 1] != 33 {
         error!("Unexpected value!");
     }
 
     info!("unmap file");
-
-    mmap::c_munmap(data).unwrap();
 }
 
 pub fn logging() {

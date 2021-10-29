@@ -3,9 +3,9 @@
 use std::{cell::RefCell, sync::atomic::AtomicU64};
 
 mod alloc;
+pub mod mmap;
 mod paging;
 mod util;
-pub mod mmap;
 
 use alloc::{Allocator, Error, Size};
 
@@ -57,15 +57,14 @@ pub fn put(addr: u64, size: Size) -> alloc::Result<()> {
 
 #[cfg(test)]
 mod test {
-    use std::slice;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::Duration;
 
     use log::info;
 
-    use crate::alloc::{Size, MAX_SIZE};
-    use crate::mmap::c_mmap_anon;
+    use crate::alloc::Size;
+    use crate::mmap::MMap;
     use crate::paging::PT_LEN;
     use crate::util::logging;
     use crate::{get, init, put};
@@ -74,16 +73,14 @@ mod test {
     fn threading() {
         logging();
 
-        let data = unsafe { slice::from_raw_parts(0x1000_0000_0000_u64 as _, MAX_SIZE) };
+        let mapping = MMap::anon(0x1000_0000_0000_u64 as _, 20 << 30).unwrap();
 
-        info!("mmap {} bytes", data.len());
-
-        c_mmap_anon(data).unwrap();
+        info!("mmap {} bytes", mapping.slice.len());
 
         info!("init alloc");
 
-        let addr = data.as_ptr() as _;
-        let size = data.len();
+        let addr = mapping.slice.as_ptr() as _;
+        let size = mapping.slice.len();
 
         init(addr, size).unwrap();
 
