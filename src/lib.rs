@@ -6,6 +6,7 @@ mod alloc;
 pub mod mmap;
 mod paging;
 mod util;
+mod cpu;
 
 use alloc::{Allocator, Error, Size};
 

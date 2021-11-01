@@ -2,7 +2,7 @@
 
 use std::ffi::{c_void, CString};
 use std::fs::File;
-use std::os::raw::{c_char, c_int, c_long, c_ulong};
+use std::os::raw::c_int;
 use std::os::unix::prelude::AsRawFd;
 
 /// Page can be read.
@@ -65,24 +65,28 @@ pub const MAP_SYNC: c_int = 0x80000;
 /// MAP_FIXED but do not unmap underlying mapping.
 pub const MAP_FIXED_NOREPLACE: c_int = 0x100000;
 
-extern "C" {
-    fn mmap(
-        addr: *mut c_void,
-        len: c_ulong,
-        prot: c_int,
-        flags: c_int,
-        fd: c_int,
-        offset: c_long,
-    ) -> *mut c_void;
+mod raw {
+    use std::ffi::c_void;
+    use std::os::raw::{c_char, c_int, c_long, c_ulong};
+    extern "C" {
+        pub(crate) fn mmap(
+            addr: *mut c_void,
+            len: c_ulong,
+            prot: c_int,
+            flags: c_int,
+            fd: c_int,
+            offset: c_long,
+        ) -> *mut c_void;
 
-    fn munmap(addr: *mut c_void, len: c_ulong) -> c_int;
+        pub(crate) fn munmap(addr: *mut c_void, len: c_ulong) -> c_int;
 
-    fn perror(s: *const c_char);
+        pub(crate) fn perror(s: *const c_char);
+    }
 }
 
-pub fn c_perror(s: &str) {
+pub fn perror(s: &str) {
     let ref s = CString::new(s).unwrap();
-    unsafe { perror(s.as_ptr()) }
+    unsafe { raw::perror(s.as_ptr()) }
 }
 
 pub struct MMap<'a> {
@@ -93,7 +97,7 @@ impl<'a> MMap<'a> {
     pub fn file(begin: usize, length: usize, file: File) -> Result<MMap<'a>, ()> {
         let fd = file.as_raw_fd();
         let addr = unsafe {
-            mmap(
+            raw::mmap(
                 begin as _,
                 length as _,
                 PROT_READ | PROT_WRITE,
@@ -107,14 +111,14 @@ impl<'a> MMap<'a> {
                 slice: unsafe { std::slice::from_raw_parts_mut(addr as _, length) },
             })
         } else {
-            unsafe { perror(b"mmap failed\0" as *const _ as _) };
+            unsafe { raw::perror(b"mmap failed\0" as *const _ as _) };
             Err(())
         }
     }
 
     pub fn anon(begin: usize, length: usize) -> Result<MMap<'a>, ()> {
         let addr = unsafe {
-            mmap(
+            raw::mmap(
                 begin as _,
                 length as _,
                 PROT_READ | PROT_WRITE,
@@ -128,7 +132,7 @@ impl<'a> MMap<'a> {
                 slice: unsafe { std::slice::from_raw_parts_mut(addr as _, length) },
             })
         } else {
-            unsafe { perror(b"mmap failed\0" as *const _ as _) };
+            unsafe { raw::perror(b"mmap failed\0" as *const _ as _) };
             Err(())
         }
     }
@@ -136,9 +140,9 @@ impl<'a> MMap<'a> {
 
 impl<'a> Drop for MMap<'a> {
     fn drop(&mut self) {
-        let ret = unsafe { munmap(self.slice.as_ptr() as _, self.slice.len() as _) };
+        let ret = unsafe { raw::munmap(self.slice.as_ptr() as _, self.slice.len() as _) };
         if ret != 0 {
-            unsafe { perror(b"munmap failed\0" as *const _ as _) };
+            unsafe { raw::perror(b"munmap failed\0" as *const _ as _) };
             panic!();
         }
     }
