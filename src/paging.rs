@@ -162,7 +162,7 @@ const PTE_TABLE: u64 = 1 << PTE_TABLE_OFF;
 const PTE_RESERVED_OFF: usize = PTE_TABLE_OFF + 1;
 const PTE_RESERVED: u64 = 1 << PTE_RESERVED_OFF;
 
-const_assert!(PTE_RESERVED_OFF < 64);
+const_assert!(PTE_RESERVED_OFF < PTE_SIZE * 8);
 
 /// PTE states:
 /// - `pages`: num of allocated 4KiB pages
