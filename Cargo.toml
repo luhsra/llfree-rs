@@ -6,6 +6,7 @@ edition = "2018"
 [dependencies]
 static_assertions = "1.1"
 log = "0.4"
+libc = "0.2.106"
 
 [dev-dependencies]
 env_logger = "0.9"

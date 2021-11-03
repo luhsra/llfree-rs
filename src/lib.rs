@@ -80,15 +80,12 @@ mod test {
 
         info!("init alloc");
 
-        let addr = mapping.slice.as_ptr() as _;
+        let addr = mapping.slice.as_ptr() as usize;
         let size = mapping.slice.len();
-
-        init(addr, size).unwrap();
 
         info!("init finished");
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
 
-        let addr = addr as usize;
         let threads = (0..10)
             .into_iter()
             .map(|_| {

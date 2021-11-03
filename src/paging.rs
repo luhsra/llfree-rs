@@ -1,5 +1,6 @@
 use std::fmt;
 use std::mem::size_of;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use static_assertions::{const_assert, const_assert_eq};
@@ -26,20 +27,33 @@ const_assert_eq!(size_of::<usize>(), size_of::<u64>());
 impl Table {
     /// Area in bytes that a page table covers
     #[inline(always)]
-    pub const fn span(layer: usize) -> usize {
-        Self::p_span(layer) << PAGE_SIZE_BITS
+    pub const fn m_span(layer: usize) -> usize {
+        Self::span(layer) << PAGE_SIZE_BITS
     }
 
     /// Area in pages that a page table covers
     #[inline(always)]
-    pub const fn p_span(layer: usize) -> usize {
+    pub const fn span(layer: usize) -> usize {
         1 << (PT_LEN_BITS * layer)
     }
 
     /// Returns pt index that contains the `page`
     #[inline(always)]
-    pub fn p_idx(layer: usize, page: usize) -> usize {
+    pub const fn idx(layer: usize, page: usize) -> usize {
         (page >> (PT_LEN_BITS * (layer - 1))) & (PT_LEN - 1)
+    }
+
+    /// Computes the index range for the given page range
+    #[inline(always)]
+    pub fn range(layer: usize, pages: Range<usize>) -> Range<usize> {
+        let bits = PT_LEN_BITS * (layer - 1);
+        let start = pages.start >> bits;
+        let end = (pages.end >> bits) + (pages.end.trailing_zeros() < bits as _) as usize;
+
+        let end = (end.saturating_sub(start & !(PT_LEN - 1))).min(PT_LEN);
+        let start = start & (PT_LEN - 1);
+
+        start..end
     }
 
     pub fn get(&self, i: usize) -> Entry {
@@ -259,13 +273,13 @@ mod test {
 
     #[test]
     fn pt_size() {
-        assert_eq!(Table::span(0), PAGE_SIZE);
-        assert_eq!(Table::span(1), PAGE_SIZE * PT_LEN);
-        assert_eq!(Table::span(2), PAGE_SIZE * PT_LEN * PT_LEN);
+        assert_eq!(Table::m_span(0), PAGE_SIZE);
+        assert_eq!(Table::m_span(1), PAGE_SIZE * PT_LEN);
+        assert_eq!(Table::m_span(2), PAGE_SIZE * PT_LEN * PT_LEN);
 
-        assert_eq!(Table::p_span(0), 1);
-        assert_eq!(Table::p_span(1), PT_LEN);
-        assert_eq!(Table::p_span(2), PT_LEN * PT_LEN);
+        assert_eq!(Table::span(0), 1);
+        assert_eq!(Table::span(1), PT_LEN);
+        assert_eq!(Table::span(2), PT_LEN * PT_LEN);
     }
 
     #[test]
@@ -278,5 +292,25 @@ mod test {
             .unwrap();
         pt.inc(0, 42, 1).unwrap();
         assert_eq!(pt.get(0), Entry::table(42, 1, 0, true));
+    }
+
+    #[test]
+    fn indexing() {
+        assert_eq!(Table::range(1, 0..PT_LEN), 0..PT_LEN);
+        assert_eq!(Table::range(1, 0..0), 0..0);
+        assert_eq!(Table::range(1, 0..PT_LEN + 1), 0..PT_LEN);
+        assert_eq!(Table::range(1, PT_LEN..PT_LEN - 1), 0..0);
+
+        // L2
+        assert_eq!(Table::range(2, 0..Table::span(1)), 0..1);
+        assert_eq!(Table::range(2, Table::span(1)..3 * Table::span(1)), 1..3);
+        assert_eq!(Table::range(2, 0..Table::span(2)), 0..PT_LEN);
+
+        // L3
+        assert_eq!(Table::range(3, 0..Table::span(2)), 0..1);
+        assert_eq!(Table::range(3, Table::span(2)..3 * Table::span(2)), 1..3);
+        assert_eq!(Table::range(3, 0..Table::span(3)), 0..PT_LEN);
+
+        assert_eq!(Table::range(3, 0..1), 0..1);
     }
 }

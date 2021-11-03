@@ -3,7 +3,7 @@ pub const fn align_up(v: usize, align: usize) -> usize {
 }
 
 pub const fn align_down(v: usize, align: usize) -> usize {
-    (v + align - 1) & !(align - 1)
+    v & !(align - 1)
 }
 
 #[cfg(test)]

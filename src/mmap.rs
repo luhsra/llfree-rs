@@ -65,28 +65,9 @@ pub const MAP_SYNC: c_int = 0x80000;
 /// MAP_FIXED but do not unmap underlying mapping.
 pub const MAP_FIXED_NOREPLACE: c_int = 0x100000;
 
-mod raw {
-    use std::ffi::c_void;
-    use std::os::raw::{c_char, c_int, c_long, c_ulong};
-    extern "C" {
-        pub(crate) fn mmap(
-            addr: *mut c_void,
-            len: c_ulong,
-            prot: c_int,
-            flags: c_int,
-            fd: c_int,
-            offset: c_long,
-        ) -> *mut c_void;
-
-        pub(crate) fn munmap(addr: *mut c_void, len: c_ulong) -> c_int;
-
-        pub(crate) fn perror(s: *const c_char);
-    }
-}
-
 pub fn perror(s: &str) {
     let ref s = CString::new(s).unwrap();
-    unsafe { raw::perror(s.as_ptr()) }
+    unsafe { libc::perror(s.as_ptr()) }
 }
 
 pub struct MMap<'a> {
@@ -97,7 +78,7 @@ impl<'a> MMap<'a> {
     pub fn file(begin: usize, length: usize, file: File) -> Result<MMap<'a>, ()> {
         let fd = file.as_raw_fd();
         let addr = unsafe {
-            raw::mmap(
+            libc::mmap(
                 begin as _,
                 length as _,
                 PROT_READ | PROT_WRITE,
@@ -111,14 +92,14 @@ impl<'a> MMap<'a> {
                 slice: unsafe { std::slice::from_raw_parts_mut(addr as _, length) },
             })
         } else {
-            unsafe { raw::perror(b"mmap failed\0" as *const _ as _) };
+            unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
             Err(())
         }
     }
 
     pub fn anon(begin: usize, length: usize) -> Result<MMap<'a>, ()> {
         let addr = unsafe {
-            raw::mmap(
+            libc::mmap(
                 begin as _,
                 length as _,
                 PROT_READ | PROT_WRITE,
@@ -132,7 +113,7 @@ impl<'a> MMap<'a> {
                 slice: unsafe { std::slice::from_raw_parts_mut(addr as _, length) },
             })
         } else {
-            unsafe { raw::perror(b"mmap failed\0" as *const _ as _) };
+            unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
             Err(())
         }
     }
@@ -140,9 +121,9 @@ impl<'a> MMap<'a> {
 
 impl<'a> Drop for MMap<'a> {
     fn drop(&mut self) {
-        let ret = unsafe { raw::munmap(self.slice.as_ptr() as _, self.slice.len() as _) };
+        let ret = unsafe { libc::munmap(self.slice.as_ptr() as _, self.slice.len() as _) };
         if ret != 0 {
-            unsafe { raw::perror(b"munmap failed\0" as *const _ as _) };
+            unsafe { libc::perror(b"munmap failed\0" as *const _ as _) };
             panic!();
         }
     }
