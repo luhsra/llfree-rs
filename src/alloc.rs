@@ -61,29 +61,6 @@ pub enum Size {
 }
 
 impl Allocator {
-    fn new(begin: usize, length: usize, volatile: *mut Table) -> Result<Allocator> {
-        let pages = length / PAGE_SIZE;
-        let num_pt2 = (pages + (PT_LEN * PT_LEN) - 1) / (PT_LEN * PT_LEN);
-        // Remaining number of pages
-        let pages = pages - num_pt2;
-        let mut alloc = Allocator {
-            begin,
-            pages,
-            volatile,
-            small_start: 0,
-            large_start: 0,
-        };
-        alloc.small_start = alloc.reserve_pt2(LAYERS, 0)?;
-        alloc.large_start = alloc.reserve_pt2(LAYERS, 0)?;
-        warn!(
-            "Alloc initialized small={} large={}",
-            alloc.small_start / Table::span(2),
-            alloc.large_start / Table::span(2)
-        );
-        alloc.meta().active.fetch_add(1, Ordering::SeqCst);
-        return Ok(alloc);
-    }
-
     /// Allows init from multiple threads.
     pub fn init(begin: usize, length: usize) -> Result<Allocator> {
         let end = align_down(begin + length, PAGE_SIZE);
@@ -134,6 +111,29 @@ impl Allocator {
                 }
             }
         }
+    }
+
+    fn new(begin: usize, length: usize, volatile: *mut Table) -> Result<Allocator> {
+        let pages = length / PAGE_SIZE;
+        let num_pt2 = (pages + (PT_LEN * PT_LEN) - 1) / (PT_LEN * PT_LEN);
+        // Remaining number of pages
+        let pages = pages - num_pt2;
+        let mut alloc = Allocator {
+            begin,
+            pages,
+            volatile,
+            small_start: 0,
+            large_start: 0,
+        };
+        alloc.small_start = alloc.reserve_pt2(LAYERS, 0)?;
+        alloc.large_start = alloc.reserve_pt2(LAYERS, 0)?;
+        warn!(
+            "Alloc initialized small={} large={}",
+            alloc.small_start / Table::span(2),
+            alloc.large_start / Table::span(2)
+        );
+        alloc.meta().active.fetch_add(1, Ordering::SeqCst);
+        return Ok(alloc);
     }
 
     fn setup(begin: usize, length: usize) -> Result<Allocator> {

@@ -8,6 +8,9 @@ mod paging;
 mod util;
 mod cpu;
 
+#[cfg(test)]
+mod sync;
+
 use alloc::{Allocator, Error, Size};
 
 thread_local! {
