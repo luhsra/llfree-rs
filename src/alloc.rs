@@ -542,12 +542,26 @@ mod test {
 
     use super::Allocator;
 
+    fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a>, ()> {
+        if let Ok(file) = std::env::var("NVM_FILE") {
+            warn!("MMap file {} l={}G", file, length >> 30);
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(file)
+                .unwrap();
+            MMap::file(begin, length, f)
+        } else {
+            MMap::anon(begin, length)
+        }
+    }
+
     #[test]
     fn init() {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
-        let mapping = MMap::anon(0x1000_0000_0000, MEM_SIZE).unwrap();
+        let mapping = mapping(0x1000_0000_0000, MEM_SIZE).unwrap();
         let begin = mapping.slice.as_ptr() as usize;
 
         info!("mmap {} bytes at {:?}", MEM_SIZE, begin as *const u8);
@@ -629,9 +643,7 @@ mod test {
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
         const MEM_SIZE: usize = 2 * THREADS * Table::m_span(2);
 
-        warn!("mapping {}", MEM_SIZE);
-
-        let mapping = MMap::anon(0x1000_0000_0000, MEM_SIZE).unwrap();
+        let mapping = mapping(0x1000_0000_0000, MEM_SIZE).unwrap();
         let begin = mapping.slice.as_ptr() as usize;
         let size = mapping.slice.len();
 
@@ -749,7 +761,7 @@ mod test {
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
         const MEM_SIZE: usize = 2 * THREADS * Table::m_span(2);
 
-        let mapping = MMap::anon(0x1000_0000_0000, MEM_SIZE).unwrap();
+        let mapping = mapping(0x1000_0000_0000, MEM_SIZE).unwrap();
         let begin = mapping.slice.as_ptr() as usize;
         let size = mapping.slice.len();
 
@@ -799,11 +811,9 @@ mod test {
 
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 10);
 
-        let mapping = MMap::anon(0x1000_0000_0000, 8 << 30).unwrap();
+        let mapping = mapping(0x1000_0000_0000, 8 << 30).unwrap();
         let begin = mapping.slice.as_ptr() as usize;
         let size = mapping.slice.len();
-
-        info!("mmap {} bytes", mapping.slice.len());
 
         let mut alloc = Allocator::init(begin, size).unwrap();
 
@@ -852,9 +862,7 @@ mod test {
     fn recover() {
         logging();
 
-        let mapping = MMap::anon(0x1000_0000_0000, 8 << 30).unwrap();
-
-        info!("mmap {} bytes", mapping.slice.len());
+        let mapping = mapping(0x1000_0000_0000, 8 << 30).unwrap();
 
         let mut alloc = Allocator::init(mapping.slice.as_ptr() as _, mapping.slice.len()).unwrap();
 
