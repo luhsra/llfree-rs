@@ -54,12 +54,14 @@ pub fn init(id: u8) -> Result<()> {
 }
 
 pub fn wait() -> Result<()> {
+    // Check if activated
     if BARRIER.load(Ordering::SeqCst).is_null() {
         return Ok(());
     }
     DATA.with(|data| {
         let mut data = data.borrow_mut();
         let data = data.as_mut().ok_or(Error::Uninitialized)?;
+
         for i in data.index..unsafe { ORDER.len() } {
             info!("t{} wait for {}", data.id, i);
             unsafe { &*data.barrier }.wait();
@@ -70,18 +72,21 @@ pub fn wait() -> Result<()> {
                 return Ok(());
             }
         }
+
         error!("Order to short {}", unsafe { ORDER.len() });
         Err(Error::OverflowOrdering)
     })
 }
 
 pub fn end() -> Result<()> {
+    // Check if activated
     if BARRIER.load(Ordering::SeqCst).is_null() {
         return Ok(());
     }
     DATA.with(|data| {
         let mut data = data.borrow_mut();
         let data = data.as_mut().ok_or(Error::Uninitialized)?;
+
         for i in data.index..unsafe { ORDER.len() } {
             info!("t{} wait for {}", data.id, i);
             unsafe { &*data.barrier }.wait();

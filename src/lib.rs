@@ -3,21 +3,48 @@
 use std::{cell::RefCell, sync::atomic::AtomicU64};
 
 mod alloc;
+mod cpu;
 pub mod mmap;
+mod page_alloc;
 mod paging;
 mod util;
-mod cpu;
 
 #[cfg(test)]
 mod sync;
 
-use alloc::{Allocator, Error, Size};
+use alloc::Allocator;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    /// Not enough memory
+    Memory,
+    /// Failed comapare and swap operation
+    CAS,
+    /// Invalid address
+    Address,
+    /// Corrupted allocator state
+    Corruption,
+    /// Allocator not initialized
+    Uninitialized,
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Size {
+    /// 4KiB
+    Page = 0,
+    /// 2MiB
+    L1 = 1,
+    /// 1GiB
+    L2 = 2,
+}
 
 thread_local! {
     static ALLOC: RefCell<Option<Allocator>> = RefCell::new(None);
 }
 
-pub fn init(addr: *mut (), size: usize) -> alloc::Result<()> {
+pub fn init(addr: *mut (), size: usize) -> Result<()> {
     ALLOC.with(|a| {
         *a.borrow_mut() = Some(Allocator::init(addr as usize, size)?);
         Ok(())
@@ -31,7 +58,7 @@ pub fn get<F: FnOnce(u64) -> u64>(
     dst: &AtomicU64,
     translate: F,
     expected: u64,
-) -> alloc::Result<()> {
+) -> Result<()> {
     ALLOC.with(|a| {
         let mut a = a.borrow_mut();
 
@@ -45,7 +72,7 @@ pub fn get<F: FnOnce(u64) -> u64>(
     Ok(())
 }
 
-pub fn put(addr: u64, size: Size) -> alloc::Result<()> {
+pub fn put(addr: u64, size: Size) -> Result<()> {
     ALLOC.with(|a| {
         let mut a = a.borrow_mut();
 
@@ -67,11 +94,10 @@ mod test {
 
     use log::info;
 
-    use crate::alloc::Size;
     use crate::mmap::MMap;
     use crate::paging::PT_LEN;
     use crate::util::logging;
-    use crate::{get, init, put};
+    use crate::{Size, get, init, put};
 
     #[test]
     fn threading() {

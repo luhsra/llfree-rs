@@ -113,10 +113,16 @@ impl Table {
         }
     }
 
-    pub fn inc(&self, i: usize, pages: usize, nonempty: usize) -> Result<Entry, Entry> {
+    pub fn inc(
+        &self,
+        i: usize,
+        pages: usize,
+        nonempty: usize,
+        i1: usize,
+    ) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let pte = Entry(v);
-            if !pte.is_table() && !pte.is_empty() {
+            if !pte.is_table() && !pte.is_empty() && i1 != pte.i1() {
                 return None;
             }
             let pages = pte.pages() + pages;
@@ -134,10 +140,16 @@ impl Table {
             Err(v) => Err(Entry(v)),
         }
     }
-    pub fn dec(&self, i: usize, pages: usize, nonempty: usize) -> Result<Entry, Entry> {
+    pub fn dec(
+        &self,
+        i: usize,
+        pages: usize,
+        nonempty: usize,
+        i1: usize,
+    ) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let pte = Entry(v);
-            if !pte.is_table() {
+            if !pte.is_table() && i1 != pte.i1() {
                 return None;
             }
 
@@ -290,7 +302,7 @@ mod test {
         };
         pt.cas(0, Entry::empty(), Entry::table(0, 0, 0, true))
             .unwrap();
-        pt.inc(0, 42, 1).unwrap();
+        pt.inc(0, 42, 1, 0).unwrap();
         assert_eq!(pt.get(0), Entry::table(42, 1, 0, true));
     }
 
