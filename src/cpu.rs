@@ -62,7 +62,7 @@ pub fn affinity() -> CoreIDs {
     CoreIDs { set, i: 0 }
 }
 
-pub fn set_affinity(core: usize) {
+pub fn pin(core: usize) {
     let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
     unsafe { libc::CPU_SET(core, &mut set) };
     let ret =
@@ -95,7 +95,7 @@ mod test {
         println!("Affinity: {:?}", super::affinity().collect::<Vec<_>>());
 
         info!("Switching core");
-        super::set_affinity(3);
+        super::pin(3);
 
         println!("Affinity: {:?}", super::affinity().collect::<Vec<_>>());
         let cpu = super::getcpu();

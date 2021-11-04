@@ -268,7 +268,7 @@ impl fmt::Debug for Entry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "[ .. | {} | {} | {} | {} ]",
+            "{{ r={} | i1={} | nonempty={} | pages={} }}",
             self.is_reserved(),
             self.i1(),
             self.nonempty(),

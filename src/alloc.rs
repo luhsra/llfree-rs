@@ -91,7 +91,7 @@ impl Allocator {
 
     fn new(begin: usize, length: usize, volatile: Option<&mut Table>) -> Result<Allocator> {
         let pages = length / PAGE_SIZE;
-        let num_pt2 = (pages + (PT_LEN * PT_LEN) - 1) / (PT_LEN * PT_LEN);
+        let num_pt2 = (pages + Table::span(2) - 1) / Table::span(2);
         // Remaining number of pages
         let pages = pages - num_pt2;
 
@@ -99,16 +99,15 @@ impl Allocator {
             volatile
         } else {
             // Allocate new page tables
-            let mut higher_level_pts = 0;
-            for i in 3..=LAYERS {
-                let span = Table::span(i);
-                higher_level_pts += (pages + span - 1) / span;
-            }
+            let pts: usize = (3..=LAYERS)
+                .map(|i| (pages + Table::span(i) - 1) / Table::span(i))
+                .sum();
+
             // the high level page table are initialized with zero
             // -> all counters and flags are zero
             unsafe {
                 alloc_zeroed(Layout::from_size_align_unchecked(
-                    higher_level_pts * PAGE_SIZE,
+                    pts * PAGE_SIZE,
                     PAGE_SIZE,
                 )) as *mut Table
             }
@@ -129,7 +128,7 @@ impl Allocator {
         alloc.large_start = alloc.reserve_pt2(LAYERS, 0, Size::L1)?;
 
         warn!(
-            "pages={}, #pt2={}, area=[0x{:x}|{:x}-0x{:x}] small={} large={}",
+            "p={} #pt2={} [0x{:x}|{:x}-0x{:x}] small={} large={}",
             pages,
             num_pt2,
             begin,
@@ -203,10 +202,7 @@ impl Allocator {
             unsafe { &mut *pt2.add(i) }
         } else {
             // Located in DRAM
-            let mut offset = 0;
-            for i in layer..LAYERS {
-                offset += self.num_pt(i);
-            }
+            let offset: usize = (layer..LAYERS).map(|i| self.num_pt(i)).sum();
             unsafe { &mut *self.volatile.add(offset + i) }
         }
     }
@@ -218,6 +214,7 @@ impl Allocator {
         (self.pages + span - 1) / span
     }
 
+    #[inline(always)]
     fn page_alloc(&self) -> PageAllocator {
         PageAllocator::new(self.begin, self.pages)
     }
@@ -305,8 +302,7 @@ impl Allocator {
         let pt = self.pt(3, start);
         let i = Table::idx(3, start);
         if let Err(_) = pt.reserve(i, false) {
-            error!("Unreserve failed! {}", start);
-            panic!()
+            panic!("Unreserve failed")
         }
     }
 
@@ -687,7 +683,6 @@ mod test {
         for i in 0..pages.len() - 1 {
             let p1 = pages[i].load(Ordering::Relaxed) as *mut u8;
             let p2 = pages[i + 1].load(Ordering::Relaxed) as *mut u8;
-            info!("addr {}={:?}", i, p1);
             assert!(p1 as usize % PAGE_SIZE == 0 && mapping.slice.contains(unsafe { &mut *p1 }));
             assert!(p1 != p2);
         }
@@ -703,13 +698,13 @@ mod test {
         // Stress test
         let mut pages = Vec::with_capacity(ALLOC_PER_THREAD * THREADS);
         pages.resize_with(ALLOC_PER_THREAD * THREADS, AtomicU64::default);
+        let pages_begin = pages.as_ptr() as usize;
 
         let barrier = Arc::new(Barrier::new(THREADS + 1));
 
         let handles = (0..THREADS)
             .into_iter()
             .map(|t| {
-                let pages_begin = pages.as_ptr() as usize;
                 let barrier = barrier.clone();
                 thread::spawn(move || {
                     barrier.wait();
@@ -718,11 +713,7 @@ mod test {
                         let dst = unsafe {
                             &*(pages_begin as *const AtomicU64).add(t * ALLOC_PER_THREAD + i)
                         };
-                        let val = unsafe {
-                            std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(
-                                PAGE_SIZE, PAGE_SIZE,
-                            ))
-                        } as u64;
+                        let val = unsafe { libc::malloc(PAGE_SIZE) } as u64;
                         dst.store(val, Ordering::SeqCst)
                     }
                 })
@@ -746,8 +737,6 @@ mod test {
         for i in 0..pages.len() - 1 {
             let p1 = pages[i].load(Ordering::Relaxed) as *mut u8;
             let p2 = pages[i + 1].load(Ordering::Relaxed) as *mut u8;
-            info!("addr {}={:?}", i, p1);
-            assert!(p1 as usize % PAGE_SIZE == 0);
             assert!(p1 != p2);
         }
     }
@@ -776,7 +765,6 @@ mod test {
                 let barrier = barrier.clone();
                 thread::spawn(move || {
                     let mut alloc = Allocator::init(begin, size).unwrap();
-                    warn!("t{} wait", t);
                     barrier.wait();
 
                     let pages = unsafe {
