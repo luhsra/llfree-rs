@@ -67,6 +67,7 @@ impl Allocator {
                 Ok(_) => {
                     if meta.length.load(Ordering::SeqCst) == length
                         && meta.magic.load(Ordering::SeqCst) == MAGIC
+                        && false
                     {
                         info!("Found allocator state. Recovery...");
                         return Self::recover(begin, length);
@@ -543,8 +544,8 @@ mod test {
     use super::Allocator;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a>, ()> {
-        if let Ok(file) = std::env::var("NVM_FILE") {
-            warn!("MMap file {} l={}G", file, length >> 30);
+        if let Ok(file) = std::env::var("NVM_DAX") {
+            warn!("MMap dax {} l={}G", file, length >> 30);
             let f = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -639,7 +640,7 @@ mod test {
     fn parallel_alloc() {
         logging();
 
-        const THREADS: usize = 10;
+        const THREADS: usize = 40;
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
         const MEM_SIZE: usize = 2 * THREADS * Table::m_span(2);
 
@@ -693,9 +694,9 @@ mod test {
 
         // Check that the same page was not allocated twice
         for i in 0..pages.len() - 1 {
-            let p1 = pages[i].load(Ordering::Relaxed) as *mut u8;
-            let p2 = pages[i + 1].load(Ordering::Relaxed) as *mut u8;
-            assert!(p1 as usize % PAGE_SIZE == 0 && mapping.slice.contains(unsafe { &mut *p1 }));
+            let p1 = pages[i].load(Ordering::Relaxed) as usize;
+            let p2 = pages[i + 1].load(Ordering::Relaxed) as usize;
+            assert!(p1 % PAGE_SIZE == 0 && p1 >= begin && p1 - begin < MEM_SIZE);
             assert!(p1 != p2);
         }
     }
@@ -747,8 +748,8 @@ mod test {
 
         // Check that the same page was not allocated twice
         for i in 0..pages.len() - 1 {
-            let p1 = pages[i].load(Ordering::Relaxed) as *mut u8;
-            let p2 = pages[i + 1].load(Ordering::Relaxed) as *mut u8;
+            let p1 = pages[i].load(Ordering::Relaxed);
+            let p2 = pages[i + 1].load(Ordering::Relaxed);
             assert!(p1 != p2);
         }
     }
@@ -757,7 +758,7 @@ mod test {
     fn parallel_free() {
         logging();
 
-        const THREADS: usize = 10;
+        const THREADS: usize = 40;
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
         const MEM_SIZE: usize = 2 * THREADS * Table::m_span(2);
 

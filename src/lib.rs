@@ -1,3 +1,4 @@
+#![feature(asm)]
 //! Simple reduced alloc example.
 
 use std::{cell::RefCell, sync::atomic::AtomicU64};

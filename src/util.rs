@@ -31,3 +31,18 @@ pub fn logging() {
         })
         .init();
 }
+
+#[inline(always)]
+pub unsafe fn _mm_clwb(addr: *const ()) {
+    asm!("clwb [rax]", in("rax") addr);
+}
+
+#[cfg(test)]
+mod test {
+    #[test]
+    fn clwb() {
+        let mut data = Box::new(43_u64);
+        *data = 44;
+        unsafe { super::_mm_clwb(data.as_ref() as *const _ as _) };
+    }
+}

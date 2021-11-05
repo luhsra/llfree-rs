@@ -156,7 +156,7 @@ impl<'a> MMap<'a> {
                 begin as _,
                 length as _,
                 PROT_READ | PROT_WRITE,
-                MAP_SHARED_VALIDATE | MAP_SYNC | MAP_FIXED_NOREPLACE,
+                MAP_SHARED_VALIDATE | MAP_SYNC,
                 fd,
                 0,
             )
@@ -205,13 +205,14 @@ impl<'a> Drop for MMap<'a> {
 
 #[cfg(test)]
 mod test {
+    use core::arch::x86_64::_mm_sfence;
     use std::thread;
 
-    use log::warn;
+    use log::info;
 
     use crate::mmap::MMap;
     use crate::paging::PAGE_SIZE;
-    use crate::util::logging;
+    use crate::util::{_mm_clwb, logging};
 
     #[test]
     fn mapping() {
@@ -233,9 +234,9 @@ mod test {
     fn dax() {
         logging();
 
-        let file = std::env::var("NVM_FILE").unwrap_or("/dev/pmem0".into());
+        let file = std::env::var("NVM_DAX").unwrap_or("/dev/dax0.1".into());
 
-        warn!("MMap file {} l={}G", file, 1 << 30);
+        info!("MMap file {} l={}G", file, 1);
 
         let f = std::fs::OpenOptions::new()
             .read(true)
@@ -245,9 +246,12 @@ mod test {
 
         let mapping = MMap::dax(0x0000_1000_0000_0000, 1 << 30, f).unwrap();
 
-        warn!("previously {}", mapping.slice[0]);
+        info!("previously {}", mapping.slice[0]);
 
         mapping.slice[0] = 42;
+        unsafe { _mm_clwb(mapping.slice.as_ptr() as _) };
+        unsafe { _mm_sfence() };
+
         assert_eq!(mapping.slice[0], 42);
     }
 
@@ -261,14 +265,14 @@ mod test {
         assert_eq!(mapping.slice[0], 42);
 
         let addr = mapping.slice.as_ptr() as usize;
-        warn!("check own thread");
+        info!("check own thread");
         assert_eq!(unsafe { *(addr as *const u8) }, 42);
         thread::spawn(move || {
             let data = unsafe { &mut *(addr as *mut u8) };
-            warn!("check multithreading");
+            info!("check multithreading");
             assert_eq!(*data, 42);
             *data = 43;
-            warn!("success");
+            info!("success");
         })
         .join()
         .unwrap();
