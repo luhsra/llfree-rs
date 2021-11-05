@@ -550,7 +550,7 @@ mod test {
                 .write(true)
                 .open(file)
                 .unwrap();
-            MMap::file(begin, length, f)
+            MMap::dax(begin, length, f)
         } else {
             MMap::anon(begin, length)
         }

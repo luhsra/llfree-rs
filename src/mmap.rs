@@ -97,6 +97,28 @@ impl<'a> MMap<'a> {
         }
     }
 
+    pub fn dax(begin: usize, length: usize, file: File) -> Result<MMap<'a>, ()> {
+        let fd = file.as_raw_fd();
+        let addr = unsafe {
+            libc::mmap(
+                begin as _,
+                length as _,
+                PROT_READ | PROT_WRITE,
+                MAP_SHARED | MAP_SYNC | MAP_FIXED_NOREPLACE,
+                fd,
+                0,
+            )
+        };
+        if addr != MAP_FAILED {
+            Ok(MMap {
+                slice: unsafe { std::slice::from_raw_parts_mut(addr as _, length) },
+            })
+        } else {
+            unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
+            Err(())
+        }
+    }
+
     pub fn anon(begin: usize, length: usize) -> Result<MMap<'a>, ()> {
         let addr = unsafe {
             libc::mmap(
@@ -131,8 +153,11 @@ impl<'a> Drop for MMap<'a> {
 
 #[cfg(test)]
 mod test {
+    use log::warn;
+
     use crate::mmap::MMap;
     use crate::paging::PAGE_SIZE;
+    use crate::util::logging;
 
     #[test]
     fn mapping() {
@@ -145,6 +170,28 @@ mod test {
         f.set_len(PAGE_SIZE as _).unwrap();
 
         let mapping = MMap::file(0x0000_1000_0000_0000, PAGE_SIZE, f).unwrap();
+
+        mapping.slice[0] = 42;
+        assert_eq!(mapping.slice[0], 42);
+    }
+
+    #[test]
+    fn dax() {
+        logging();
+
+        let file = std::env::var("NVM_FILE").unwrap_or("/dev/pmem0".into());
+
+        warn!("MMap file {} l={}G", file, 1 << 30);
+
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(file)
+            .unwrap();
+
+        let mapping = MMap::dax(0x0000_1000_0000_0000, 1 << 30, f).unwrap();
+
+        warn!("previously {}", mapping.slice[0]);
 
         mapping.slice[0] = 42;
         assert_eq!(mapping.slice[0], 42);
