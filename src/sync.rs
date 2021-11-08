@@ -26,6 +26,7 @@ thread_local! {
     static DATA: RefCell<Option<SyncData>> = RefCell::new(None);
 }
 
+/// Initializes the order and number of threads. Has to be called before the init calls.
 pub fn setup(threads: u8, order: Vec<u8>) {
     unsafe {
         ORDER = order;
@@ -36,6 +37,7 @@ pub fn setup(threads: u8, order: Vec<u8>) {
     }
 }
 
+/// Per thread initialization. Has to be called on every thread that calls wait.
 pub fn init(id: u8) -> Result<()> {
     DATA.with(|data| {
         let mut data = data.borrow_mut();
@@ -53,6 +55,7 @@ pub fn init(id: u8) -> Result<()> {
     })
 }
 
+/// Synchronization point with the other threads.
 pub fn wait() -> Result<()> {
     // Check if activated
     if BARRIER.load(Ordering::SeqCst).is_null() {
@@ -73,11 +76,12 @@ pub fn wait() -> Result<()> {
             }
         }
 
-        error!("Order to short {}", unsafe { ORDER.len() });
+        error!("Sync overflow ordering {}", unsafe { ORDER.len() });
         Err(Error::OverflowOrdering)
     })
 }
 
+/// Has to be called at the end of a thread.
 pub fn end() -> Result<()> {
     // Check if activated
     if BARRIER.load(Ordering::SeqCst).is_null() {
@@ -92,7 +96,7 @@ pub fn end() -> Result<()> {
             unsafe { &*data.barrier }.wait();
 
             if unsafe { ORDER[i] == data.id } {
-                error!("Running ended t{} for {}", data.id, i);
+                error!("Wake suspended t{} for {}", data.id, i);
                 return Err(Error::WakeSuspended);
             }
         }
