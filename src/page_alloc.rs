@@ -73,7 +73,7 @@ impl PageAllocator {
                 return self.alloc_first(start);
             }
             match self.alloc_pt(pte2, start) {
-                Err(Error::Memory) => {}, // table full before inc
+                Err(Error::Memory) => {} // table full before inc
                 r => return r,
             }
         }
@@ -90,7 +90,7 @@ impl PageAllocator {
 
             wait!();
 
-            if let Ok(_) = pt1.cas(i, Entry::empty(), Entry::page()) {
+            if pt1.cas(i, Entry::empty(), Entry::page()).is_ok() {
                 info!("alloc l1 i={}: {}", i, page);
 
                 let i2 = Table::idx(2, page);
@@ -99,10 +99,7 @@ impl PageAllocator {
 
                 return match pt2.inc(i2, 1, 1, pte2.i1()) {
                     Ok(pte) => Ok((page, pte.pages() == 0)),
-                    Err(pte) => {
-                        error!("CAS: inc alloc pt {:?}", pte);
-                        Err(Error::Corruption)
-                    }
+                    Err(pte) => Err(Error::Corruption(2, i2, pte)),
                 };
             }
         }
@@ -167,21 +164,15 @@ impl PageAllocator {
 
         let pte2 = pt2.get(i2);
         if pte2.is_page() {
-            return Err(Error::Address);
+            Err(Error::Address)
         } else if pte2.pages() < PT_LEN {
-            if let Some(pt1) = self.pt1(pte2, page) {
-                let i1 = Table::idx(1, page);
+            let pt1 = self.pt1(pte2, page).ok_or(Error::Address)?;
+            let i1 = Table::idx(1, page);
 
-                wait!();
+            wait!();
 
-                if let Err(pte) = pt1.cas(i1, Entry::page(), Entry::empty()) {
-                    error!("CAS: free unexpected l1 {:?}", pte);
-                    return Err(Error::Address);
-                }
-            } else {
-                error!("free no pt1");
-                return Err(Error::Address);
-            }
+            pt1.cas(i1, Entry::page(), Entry::empty())
+                .map_err(|_| Error::Address)?;
 
             wait!();
 
@@ -189,11 +180,7 @@ impl PageAllocator {
             // If not the page table has been moved in between, which should not be possible!
             match pt2.dec(i2, 1, 1, pte2.i1()) {
                 Ok(pte) => Ok(pte.pages() == 1),
-                Err(pte) => {
-                    // TODO: revert free
-                    error!("CAS: free dec l2 {:?} (i1={})", pte, pte2.i1());
-                    Err(Error::Corruption)
-                }
+                Err(pte) => Err(Error::Corruption(2, i2, pte)),
             }
         } else {
             // free last page of pt1 & rebuild pt1
@@ -270,28 +257,32 @@ impl PageAllocator {
 #[cfg(test)]
 mod test {
     use std::alloc::{alloc_zeroed, Layout};
-    use std::thread;
 
     use log::warn;
 
     use crate::paging::{PAGE_SIZE, PT_LEN};
     use crate::sync;
-    use crate::util::logging;
+    use crate::util::{logging, parallel};
 
     use super::PageAllocator;
 
-    #[test]
-    fn alloc_normal_two() {
-        logging();
-        const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
+    fn aligned_buffer(size: usize) -> Vec<u8> {
         let buffer = unsafe {
             Vec::from_raw_parts(
-                alloc_zeroed(Layout::from_size_align_unchecked(MEM_SIZE, PAGE_SIZE)),
-                MEM_SIZE,
-                MEM_SIZE,
+                alloc_zeroed(Layout::from_size_align_unchecked(size, PAGE_SIZE)),
+                size,
+                size,
             )
         };
         assert!(buffer.as_ptr() as usize % PAGE_SIZE == 0);
+        buffer
+    }
+
+    #[test]
+    fn alloc_normal() {
+        logging();
+        const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
+        let buffer = aligned_buffer(MEM_SIZE);
 
         // init
         {
@@ -302,9 +293,7 @@ mod test {
 
         let orders = [
             vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1], // first 0 complete, 1 fails cas
-            vec![1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0], // first 1 complete, 0 fails cas
             vec![0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0], // 0 first cas, but inc out of order
-            vec![1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1], // 1 first cas, but inc out of order
             vec![1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0], // 1 first cas, but inc out of order
             vec![1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0], // 1 first cas, but inc out of order
         ];
@@ -315,8 +304,8 @@ mod test {
             let begin = copy.as_ptr() as usize;
             sync::setup(2, order);
 
-            let handle = thread::spawn(move || {
-                sync::init(1).unwrap();
+            parallel(2, move |t| {
+                sync::init(t).unwrap();
                 let page_alloc = PageAllocator::new(begin, PT_LEN);
 
                 let (page, newentry) = page_alloc.alloc(0).unwrap();
@@ -324,31 +313,19 @@ mod test {
                 assert!(page != 0 && !newentry);
             });
 
-            sync::init(0).unwrap();
             let page_alloc = PageAllocator::new(begin, PT_LEN);
-            let (page, newentry) = page_alloc.alloc(0).unwrap();
-            sync::end().unwrap();
-            assert!(page != 0 && !newentry);
-
-            handle.join().unwrap();
+            assert_eq!(page_alloc.pt2(0).get(0).pages(), 3);
         }
     }
 
     #[test]
-    fn alloc_first_two() {
+    fn alloc_first() {
         logging();
         const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
-        let buffer = unsafe {
-            Vec::from_raw_parts(
-                alloc_zeroed(Layout::from_size_align_unchecked(MEM_SIZE, PAGE_SIZE)),
-                MEM_SIZE,
-                MEM_SIZE,
-            )
-        };
-        assert!(buffer.as_ptr() as usize % PAGE_SIZE == 0);
+        let buffer = aligned_buffer(MEM_SIZE);
 
         let orders = vec![
-            vec![0, 0, 1, 1, 1, 1, 1], // first 0 complete, 1 normal
+            vec![0, 0, 1, 1, 1, 1, 1],       // first 0 complete, 1 normal
             vec![0, 1, 0, 1, 1, 1, 1, 1, 1], // first 0, 1 fails cas
             vec![1, 0, 1, 0, 0, 0, 0, 0, 0], // first 1, 0 fails cas
         ];
@@ -359,8 +336,8 @@ mod test {
             let begin = copy.as_ptr() as usize;
             sync::setup(2, order);
 
-            let handle = thread::spawn(move || {
-                sync::init(1).unwrap();
+            parallel(2, move |t| {
+                sync::init(t).unwrap();
                 let page_alloc = PageAllocator::new(begin, PT_LEN);
 
                 match page_alloc.alloc(0) {
@@ -373,18 +350,157 @@ mod test {
                 sync::end().unwrap();
             });
 
-            sync::init(0).unwrap();
             let page_alloc = PageAllocator::new(begin, PT_LEN);
-            match page_alloc.alloc(0) {
-                Err(crate::Error::CAS) => {
-                    page_alloc.alloc(0).unwrap();
-                }
-                Err(e) => panic!("{:?}", e),
-                Ok(_) => {}
-            }
-            sync::end().unwrap();
+            assert_eq!(page_alloc.pt2(0).get(0).pages(), 2);
+        }
+    }
 
-            handle.join().unwrap();
+    #[test]
+    fn alloc_last() {
+        logging();
+        const MEM_SIZE: usize = 2 * (PT_LEN + 1) * PAGE_SIZE;
+        let buffer = aligned_buffer(MEM_SIZE);
+
+        let orders = vec![
+            vec![0, 0, 1, 1, 1],       // first 0 complete, 1 normal
+            vec![0, 1, 0, 1, 1, 1, 1], // 1 fails cas
+            vec![1, 0, 0, 1, 1, 1, 1], // 1 fails cas
+            vec![1, 0, 1, 0, 0, 0, 0], // 0 fails cas
+        ];
+
+        // init
+        {
+            let page_alloc = PageAllocator::new(buffer.as_ptr() as _, 2 * PT_LEN);
+            for _ in 0..PT_LEN - 1 {
+                page_alloc.alloc(0).unwrap();
+            }
+            warn!("setup single alloc");
+        }
+
+        for order in orders {
+            warn!("order: {:?}", order);
+            let copy = buffer.clone();
+            let begin = copy.as_ptr() as usize;
+            sync::setup(2, order);
+
+            parallel(2, move |t| {
+                sync::init(t).unwrap();
+                let page_alloc = PageAllocator::new(begin, 2 * PT_LEN);
+
+                match page_alloc.alloc(0) {
+                    Err(crate::Error::CAS) => {
+                        page_alloc.alloc(0).unwrap();
+                    }
+                    Err(e) => panic!("{:?}", e),
+                    Ok(_) => {}
+                }
+                sync::end().unwrap();
+            });
+
+            let page_alloc = PageAllocator::new(begin, 2 * PT_LEN);
+            assert_eq!(page_alloc.pt2(0).get(0).pages(), PT_LEN);
+            assert_eq!(page_alloc.pt2(1).get(0).pages(), 1);
+        }
+    }
+
+    #[test]
+    fn free_normal() {
+        logging();
+        const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
+        let buffer = aligned_buffer(MEM_SIZE);
+
+        let orders = vec![
+            vec![0, 0, 0, 1, 1, 1], // first 0, then 1
+            vec![0, 1, 0, 1, 0, 1],
+            vec![0, 0, 1, 1, 1, 0],
+        ];
+
+        let mut pages = [0; 2];
+
+        // init
+        {
+            let page_alloc = PageAllocator::new(buffer.as_ptr() as _, PT_LEN);
+            pages[0] = page_alloc.alloc(0).unwrap().0;
+            pages[1] = page_alloc.alloc(0).unwrap().0;
+            warn!("setup single alloc");
+        }
+
+        for order in orders {
+            warn!("order: {:?}", order);
+            let copy = buffer.clone();
+            let begin = copy.as_ptr() as usize;
+            sync::setup(2, order);
+
+            parallel(2, {
+                let pages = pages.clone();
+                move |t| {
+                    sync::init(t).unwrap();
+                    let page_alloc = PageAllocator::new(begin, PT_LEN);
+
+                    match page_alloc.free(pages[t as usize]) {
+                        Err(crate::Error::CAS) => {
+                            page_alloc.free(pages[t as usize]).unwrap();
+                        }
+                        Err(e) => panic!("{:?}", e),
+                        Ok(_) => {}
+                    }
+                    sync::end().unwrap();
+                }
+            });
+
+            let page_alloc = PageAllocator::new(begin, PT_LEN);
+            assert_eq!(page_alloc.pt2(0).get(0).pages(), 0);
+        }
+    }
+
+    #[test]
+    fn free_last() {
+        logging();
+        const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
+        let buffer = aligned_buffer(MEM_SIZE);
+
+        let orders = vec![
+            vec![0, 0, 1, 1, 1],       // first 0, then 1
+            vec![0, 1, 0, 1, 1, 1, 1], // 1 fails cas
+            vec![0, 1, 1, 0, 0, 0, 0], // 0 fails cas
+        ];
+
+        let mut pages = [0; PT_LEN];
+
+        // init
+        {
+            let page_alloc = PageAllocator::new(buffer.as_ptr() as _, PT_LEN);
+            for page in &mut pages {
+                *page = page_alloc.alloc(0).unwrap().0;
+            }
+            warn!("setup single alloc");
+        }
+
+        for order in orders {
+            warn!("order: {:?}", order);
+            let buffer = buffer.clone();
+            let begin = buffer.as_ptr() as usize;
+            sync::setup(2, order);
+
+            parallel(2, {
+                let pages = pages.clone();
+                move |t| {
+                    sync::init(t).unwrap();
+                    let page_alloc = PageAllocator::new(begin, PT_LEN);
+
+                    match page_alloc.free(pages[t as usize]) {
+                        Err(crate::Error::CAS) => {
+                            page_alloc.free(pages[t as usize]).unwrap();
+                        }
+                        Err(e) => panic!("{:?}", e),
+                        Ok(_) => {}
+                    }
+                    sync::end().unwrap();
+                }
+            });
+
+            let page_alloc = PageAllocator::new(begin, PT_LEN);
+            assert_eq!(page_alloc.pt2(0).get(0).pages(), PT_LEN - 2);
         }
     }
 }

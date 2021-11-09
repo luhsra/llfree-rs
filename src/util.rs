@@ -31,3 +31,17 @@ pub fn logging() {
         })
         .init();
 }
+
+#[cfg(test)]
+pub fn parallel<F: FnOnce(u8) + Clone + Send + 'static>(n: u8, f: F) {
+    let handles = (0..n)
+        .into_iter()
+        .map(|t| {
+            let f = f.clone();
+            std::thread::spawn(move || f(t))
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}

@@ -13,6 +13,7 @@ mod util;
 mod sync;
 
 use alloc::Allocator;
+use paging::Entry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -23,7 +24,7 @@ pub enum Error {
     /// Invalid address
     Address,
     /// Corrupted allocator state
-    Corruption,
+    Corruption(usize, usize, Entry),
     /// Allocator not initialized
     Uninitialized,
 }

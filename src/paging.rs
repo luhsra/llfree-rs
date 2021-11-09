@@ -15,7 +15,7 @@ pub const PT_LEN: usize = 1 << PT_LEN_BITS;
 pub const LAYERS: usize = 4;
 
 /// Page table with atomic entries
-#[repr(align(32))]
+#[repr(align(128))]
 pub struct Table {
     entries: [AtomicU64; PT_LEN],
 }
@@ -99,13 +99,11 @@ impl Table {
         match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let pte = Entry(v);
             if pte.is_reserved() == reserved {
-                return None;
+                None
+            } else if pte.is_page() {
+                Some(Entry::page_reserved().0)
             } else {
-                if pte.is_page() {
-                    return Some(Entry::page_reserved().0);
-                } else {
-                    return Some(Entry::table(pte.pages(), pte.nonempty(), pte.i1(), reserved).0);
-                }
+                Some(Entry::table(pte.pages(), pte.nonempty(), pte.i1(), reserved).0)
             }
         }) {
             Ok(v) => Ok(Entry(v)),
@@ -113,13 +111,7 @@ impl Table {
         }
     }
 
-    pub fn inc(
-        &self,
-        i: usize,
-        pages: usize,
-        nonempty: usize,
-        i1: usize,
-    ) -> Result<Entry, Entry> {
+    pub fn inc(&self, i: usize, pages: usize, nonempty: usize, i1: usize) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let pte = Entry(v);
             if !pte.is_table() && !pte.is_empty() && i1 != pte.i1() {
@@ -140,13 +132,8 @@ impl Table {
             Err(v) => Err(Entry(v)),
         }
     }
-    pub fn dec(
-        &self,
-        i: usize,
-        pages: usize,
-        nonempty: usize,
-        i1: usize,
-    ) -> Result<Entry, Entry> {
+
+    pub fn dec(&self, i: usize, pages: usize, nonempty: usize, i1: usize) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let pte = Entry(v);
             if !pte.is_table() && i1 != pte.i1() {
