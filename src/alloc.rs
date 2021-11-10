@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use log::{error, info, warn};
 use static_assertions::const_assert;
 
-use crate::page_alloc::PageAllocator;
+use crate::leaf_alloc::LeafAllocator;
 use crate::paging::{Entry, Table, LAYERS, PAGE_SIZE, PT_LEN, PT_LEN_BITS};
 use crate::util::{align_down, align_up};
 use crate::{Error, Result, Size};
@@ -21,9 +21,9 @@ pub struct Allocator {
     begin: usize,
     pages: usize,
     volatile: *mut Table,
+    meta: *mut Meta,
     small_start: usize,
     large_start: usize,
-    meta: *mut Meta,
 }
 
 static VOLATILE: AtomicPtr<Table> = AtomicPtr::new(std::ptr::null_mut());
@@ -217,8 +217,8 @@ impl Allocator {
     }
 
     #[inline(always)]
-    fn page_alloc(&self) -> PageAllocator {
-        PageAllocator::new(self.begin, self.pages)
+    fn page_alloc(&self) -> LeafAllocator {
+        LeafAllocator::new(self.begin, self.pages)
     }
 
     fn recover_rec(&self, layer: usize, start: usize) -> (usize, usize) {

@@ -114,7 +114,7 @@ impl Table {
     pub fn inc(&self, i: usize, pages: usize, nonempty: usize, i1: usize) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let pte = Entry(v);
-            if !pte.is_table() && !pte.is_empty() && i1 != pte.i1() {
+            if !pte.is_table() || i1 != pte.i1() {
                 return None;
             }
             let pages = pte.pages() + pages;
@@ -136,7 +136,30 @@ impl Table {
     pub fn dec(&self, i: usize, pages: usize, nonempty: usize, i1: usize) -> Result<Entry, Entry> {
         match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
             let pte = Entry(v);
-            if !pte.is_table() && i1 != pte.i1() {
+            if !pte.is_table() || i1 != pte.i1() {
+                return None;
+            }
+
+            if pte.pages() >= pages && pte.nonempty() >= nonempty {
+                let pages = pte.pages() - pages;
+                let nonempty = pte.nonempty() - nonempty;
+                if pages < nonempty {
+                    return None;
+                }
+                Some(Entry::table(pages, nonempty, pte.i1(), pte.is_reserved()).0)
+            } else {
+                None
+            }
+        }) {
+            Ok(v) => Ok(Entry(v)),
+            Err(v) => Err(Entry(v)),
+        }
+    }
+
+    pub fn dec_nofull(&self, i: usize, pages: usize, nonempty: usize) -> Result<Entry, Entry> {
+        match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            let pte = Entry(v);
+            if !pte.is_table() || pte.nonempty() >= PT_LEN {
                 return None;
             }
 

@@ -6,7 +6,7 @@ use std::{cell::RefCell, sync::atomic::AtomicU64};
 mod alloc;
 mod cpu;
 pub mod mmap;
-mod page_alloc;
+mod leaf_alloc;
 mod paging;
 mod util;
 

@@ -19,12 +19,12 @@ macro_rules! wait {
 }
 
 /// Layer 2 page allocator.
-pub struct PageAllocator {
+pub struct LeafAllocator {
     begin: usize,
     pages: usize,
 }
 
-impl PageAllocator {
+impl LeafAllocator {
     pub fn new(begin: usize, pages: usize) -> Self {
         Self { begin, pages }
     }
@@ -60,9 +60,9 @@ impl PageAllocator {
             wait!();
 
             let pte2 = pt2.get(i2);
-            info!("pte2={:?}", pte2);
+            info!("i={} pte2={:?}", i2, pte2);
 
-            if pte2.pages() >= PT_LEN {
+            if pte2.pages() >= PT_LEN || pte2.is_reserved() {
                 continue;
             }
 
@@ -116,6 +116,14 @@ impl PageAllocator {
 
         wait!();
 
+        match pt2.cas(i2, Entry::empty(), Entry::page_reserved()) {
+            Ok(_) => {}
+            Err(pte) => {
+                warn!("CAS: init pt1 {:?}", pte);
+                return Err(Error::CAS);
+            }
+        }
+
         // store pt1 at i=1, so that the allocated page is at i=0
         let pt1 = unsafe { &*((self.begin + (start + 1) * PAGE_SIZE) as *const Table) };
         pt1.set(0, Entry::page());
@@ -124,12 +132,11 @@ impl PageAllocator {
             pt1.set(i1, Entry::empty());
         }
 
-        match pt2.cas(i2, Entry::empty(), Entry::table(1, 1, 1, false)) {
+        wait!();
+
+        match pt2.cas(i2, Entry::page_reserved(), Entry::table(1, 1, 1, false)) {
             Ok(_) => Ok((start, true)),
-            Err(pte) => {
-                warn!("CAS: init pt1 {:?}", pte);
-                Err(Error::CAS)
-            }
+            Err(pte) => Err(Error::Corruption(2, i2, pte)),
         }
     }
 
@@ -162,6 +169,33 @@ impl PageAllocator {
 
         wait!();
 
+        // Try decrementing first
+        // match pt2.dec_nofull(i2, 1, 1) {
+        //     Ok(pte2) => {
+        //         let pt1 = self.pt1(pte2, page).unwrap();
+        //         let i1 = Table::idx(1, page);
+        //         match pt1.cas(i1, Entry::page(), Entry::empty()) {
+        //             Ok(_) => Ok(pte2.pages() == 1),
+        //             Err(_) => match pt2.inc(i2, 1, 1, pte2.i1()) {
+        //                 Ok(_) => Err(Error::Address),
+        //                 Err(pte) => Err(Error::Corruption(2, i2, pte)),
+        //             },
+        //         }
+        //     }
+        //     Err(pte) if pte.nonempty() >= PT_LEN => self.free_last(page),
+        //     Err(pte) if pte.nonempty() == 0 => {
+        //         let pt1 = self.pt1(pte2, page).unwrap();
+        //         let i1 = Table::idx(1, page);
+        //         let pte1 = pt1.get(i1);
+        //         if pte1.is_page() {
+        //             Err(Error::CAS)
+        //         } else {
+        //             Err(Error::Address)
+        //         }
+        //     }
+        //     Err(pte) => Err(Error::Corruption(2, i2, pte)),
+        // }
+
         let pte2 = pt2.get(i2);
         if pte2.is_page() {
             Err(Error::Address)
@@ -175,9 +209,16 @@ impl PageAllocator {
                 .map_err(|_| Error::Address)?;
 
             wait!();
+            info!("free dec i={} {:?}", i2, pte2);
 
-            // i2 is expected to be unchanged.
+            // i1 is expected to be unchanged.
             // If not the page table has been moved in between, which should not be possible!
+
+            // TODO: A parallel alloc of the last page destroys pt2 -> detect & retry!
+            // In this case the write to pte1 remains!
+
+            // TODO: Parallel: free & alloc last & free full => may result in lost pte1
+
             match pt2.dec(i2, 1, 1, pte2.i1()) {
                 Ok(pte) => Ok(pte.pages() == 1),
                 Err(pte) => Err(Error::Corruption(2, i2, pte)),
@@ -257,6 +298,7 @@ impl PageAllocator {
 #[cfg(test)]
 mod test {
     use std::alloc::{alloc_zeroed, Layout};
+    use std::thread;
 
     use log::warn;
 
@@ -264,7 +306,7 @@ mod test {
     use crate::sync;
     use crate::util::{logging, parallel};
 
-    use super::PageAllocator;
+    use super::LeafAllocator;
 
     fn aligned_buffer(size: usize) -> Vec<u8> {
         let buffer = unsafe {
@@ -286,7 +328,7 @@ mod test {
 
         // init
         {
-            let page_alloc = PageAllocator::new(buffer.as_ptr() as _, PT_LEN);
+            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, PT_LEN);
             let (page, newentry) = page_alloc.alloc(0).unwrap();
             warn!("setup single alloc {} {}", page, newentry);
         }
@@ -306,14 +348,14 @@ mod test {
 
             parallel(2, move |t| {
                 sync::init(t).unwrap();
-                let page_alloc = PageAllocator::new(begin, PT_LEN);
+                let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
                 let (page, newentry) = page_alloc.alloc(0).unwrap();
                 sync::end().unwrap();
                 assert!(page != 0 && !newentry);
             });
 
-            let page_alloc = PageAllocator::new(begin, PT_LEN);
+            let page_alloc = LeafAllocator::new(begin, PT_LEN);
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 3);
         }
     }
@@ -324,7 +366,7 @@ mod test {
         const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
         let buffer = aligned_buffer(MEM_SIZE);
 
-        let orders = vec![
+        let orders = [
             vec![0, 0, 1, 1, 1, 1, 1],       // first 0 complete, 1 normal
             vec![0, 1, 0, 1, 1, 1, 1, 1, 1], // first 0, 1 fails cas
             vec![1, 0, 1, 0, 0, 0, 0, 0, 0], // first 1, 0 fails cas
@@ -338,7 +380,7 @@ mod test {
 
             parallel(2, move |t| {
                 sync::init(t).unwrap();
-                let page_alloc = PageAllocator::new(begin, PT_LEN);
+                let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
                 match page_alloc.alloc(0) {
                     Err(crate::Error::CAS) => {
@@ -350,7 +392,7 @@ mod test {
                 sync::end().unwrap();
             });
 
-            let page_alloc = PageAllocator::new(begin, PT_LEN);
+            let page_alloc = LeafAllocator::new(begin, PT_LEN);
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 2);
         }
     }
@@ -361,7 +403,7 @@ mod test {
         const MEM_SIZE: usize = 2 * (PT_LEN + 1) * PAGE_SIZE;
         let buffer = aligned_buffer(MEM_SIZE);
 
-        let orders = vec![
+        let orders = [
             vec![0, 0, 1, 1, 1],       // first 0 complete, 1 normal
             vec![0, 1, 0, 1, 1, 1, 1], // 1 fails cas
             vec![1, 0, 0, 1, 1, 1, 1], // 1 fails cas
@@ -370,7 +412,7 @@ mod test {
 
         // init
         {
-            let page_alloc = PageAllocator::new(buffer.as_ptr() as _, 2 * PT_LEN);
+            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, 2 * PT_LEN);
             for _ in 0..PT_LEN - 1 {
                 page_alloc.alloc(0).unwrap();
             }
@@ -385,7 +427,7 @@ mod test {
 
             parallel(2, move |t| {
                 sync::init(t).unwrap();
-                let page_alloc = PageAllocator::new(begin, 2 * PT_LEN);
+                let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
 
                 match page_alloc.alloc(0) {
                     Err(crate::Error::CAS) => {
@@ -397,7 +439,7 @@ mod test {
                 sync::end().unwrap();
             });
 
-            let page_alloc = PageAllocator::new(begin, 2 * PT_LEN);
+            let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
             assert_eq!(page_alloc.pt2(0).get(0).pages(), PT_LEN);
             assert_eq!(page_alloc.pt2(1).get(0).pages(), 1);
         }
@@ -409,7 +451,7 @@ mod test {
         const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
         let buffer = aligned_buffer(MEM_SIZE);
 
-        let orders = vec![
+        let orders = [
             vec![0, 0, 0, 1, 1, 1], // first 0, then 1
             vec![0, 1, 0, 1, 0, 1],
             vec![0, 0, 1, 1, 1, 0],
@@ -419,7 +461,7 @@ mod test {
 
         // init
         {
-            let page_alloc = PageAllocator::new(buffer.as_ptr() as _, PT_LEN);
+            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, PT_LEN);
             pages[0] = page_alloc.alloc(0).unwrap().0;
             pages[1] = page_alloc.alloc(0).unwrap().0;
             warn!("setup single alloc");
@@ -435,7 +477,7 @@ mod test {
                 let pages = pages.clone();
                 move |t| {
                     sync::init(t).unwrap();
-                    let page_alloc = PageAllocator::new(begin, PT_LEN);
+                    let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
                     match page_alloc.free(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
@@ -448,7 +490,7 @@ mod test {
                 }
             });
 
-            let page_alloc = PageAllocator::new(begin, PT_LEN);
+            let page_alloc = LeafAllocator::new(begin, PT_LEN);
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 0);
         }
     }
@@ -459,7 +501,7 @@ mod test {
         const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
         let buffer = aligned_buffer(MEM_SIZE);
 
-        let orders = vec![
+        let orders = [
             vec![0, 0, 1, 1, 1],       // first 0, then 1
             vec![0, 1, 0, 1, 1, 1, 1], // 1 fails cas
             vec![0, 1, 1, 0, 0, 0, 0], // 0 fails cas
@@ -469,7 +511,7 @@ mod test {
 
         // init
         {
-            let page_alloc = PageAllocator::new(buffer.as_ptr() as _, PT_LEN);
+            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, PT_LEN);
             for page in &mut pages {
                 *page = page_alloc.alloc(0).unwrap().0;
             }
@@ -486,7 +528,7 @@ mod test {
                 let pages = pages.clone();
                 move |t| {
                     sync::init(t).unwrap();
-                    let page_alloc = PageAllocator::new(begin, PT_LEN);
+                    let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
                     match page_alloc.free(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
@@ -499,8 +541,75 @@ mod test {
                 }
             });
 
-            let page_alloc = PageAllocator::new(begin, PT_LEN);
+            let page_alloc = LeafAllocator::new(begin, PT_LEN);
             assert_eq!(page_alloc.pt2(0).get(0).pages(), PT_LEN - 2);
+        }
+    }
+
+    #[test]
+    fn alloc_free_last() {
+        logging();
+
+        const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
+        let buffer = aligned_buffer(MEM_SIZE);
+
+        let orders = [
+            vec![0, 0, 0, 1, 1, 1], // 0 free then 1 alloc
+            vec![1, 1, 0, 0],       // 1 alloc last then 0 free last
+            vec![0, 1, 1, 0, 0],    // first 0 free, 1 fails cas
+        ];
+
+        let mut pages = [0; PT_LEN];
+
+        {
+            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, PT_LEN);
+            for page in &mut pages[..PT_LEN - 1] {
+                *page = page_alloc.alloc(0).unwrap().0;
+            }
+            warn!("setup single alloc");
+        }
+
+        for order in orders {
+            warn!("order: {:?}", order);
+            let buffer = buffer.clone();
+            let begin = buffer.as_ptr() as usize;
+            sync::setup(2, order);
+
+            let handle = thread::spawn({
+                let pages = pages.clone();
+                move || {
+                    sync::init(1).unwrap();
+                    let page_alloc = LeafAllocator::new(begin, PT_LEN);
+
+                    match page_alloc.alloc(0) {
+                        Err(crate::Error::CAS) => {
+                            page_alloc.alloc(0).unwrap();
+                        }
+                        Err(e) => panic!("{:?}", e),
+                        Ok(_) => {}
+                    }
+                    sync::end().unwrap();
+                }
+            });
+
+            {
+                sync::init(0).unwrap();
+                let page_alloc = LeafAllocator::new(begin, PT_LEN);
+
+                match page_alloc.free(pages[0]) {
+                    Err(crate::Error::CAS) => {
+                        page_alloc.free(pages[0]).unwrap();
+                    }
+                    Err(e) => panic!("{:?}", e),
+                    Ok(_) => {}
+                }
+                sync::end().unwrap();
+            }
+
+            handle.join().unwrap();
+
+            let page_alloc = LeafAllocator::new(begin, PT_LEN);
+            assert_eq!(page_alloc.pt2(0).get(0).pages(), PT_LEN - 1);
         }
     }
 }
