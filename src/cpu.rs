@@ -5,7 +5,6 @@ use std::ptr::null_mut;
 use libc::cpu_set_t;
 use log::error;
 
-
 mod raw {
     use std::ffi::c_void;
     use std::os::raw::{c_int, c_uint};
@@ -65,8 +64,7 @@ pub fn affinity() -> CoreIDs {
 pub fn pin(core: usize) {
     let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
     unsafe { libc::CPU_SET(core, &mut set) };
-    let ret =
-        unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
+    let ret = unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) };
     if ret != 0 {
         error!("getcpu failed");
         unsafe { libc::perror(b"sched_setaffinity\0" as *const _ as _) };

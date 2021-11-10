@@ -141,7 +141,7 @@ impl Allocator {
 
         alloc.meta().active.fetch_add(1, Ordering::SeqCst);
 
-        return Ok(alloc);
+        Ok(alloc)
     }
 
     fn setup(begin: usize, length: usize) -> Result<Allocator> {
@@ -177,6 +177,7 @@ impl Allocator {
         unsafe { &mut *self.meta }
     }
 
+    #[cfg(test)]
     /// Returns the number of allocated pages.
     pub fn allocated_pages(&self) -> usize {
         let mut pages = 0;
@@ -193,7 +194,7 @@ impl Allocator {
     /// NVRAM: [ Pages & PT1 | PT2 | Meta ]
     /// ```
     fn pt(&self, layer: usize, page: usize) -> &Table {
-        assert!(layer >= 2 && layer <= LAYERS);
+        assert!((..=LAYERS).contains(&layer));
 
         let i = page >> (PT_LEN_BITS * layer);
         if layer == 2 {
@@ -286,13 +287,11 @@ impl Allocator {
                     continue;
                 }
 
-                if let Ok(_) = pt.reserve(i, true) {
+                if pt.reserve(i, true).is_ok() {
                     return Ok(start);
                 }
-            } else {
-                if let Ok(result) = self.reserve_pt2(layer - 1, start, size) {
-                    return Ok(result);
-                }
+            } else if let Ok(result) = self.reserve_pt2(layer - 1, start, size) {
+                return Ok(result);
             }
         }
         error!("Reserve failed!");
@@ -302,7 +301,7 @@ impl Allocator {
     fn unreserve_pt2(&self, start: usize) {
         let pt = self.pt(3, start);
         let i = Table::idx(3, start);
-        if let Err(_) = pt.reserve(i, false) {
+        if pt.reserve(i, false).is_err() {
             panic!("Unreserve failed")
         }
     }
@@ -314,7 +313,7 @@ impl Allocator {
         for i in Table::range(layer, start..self.pages) {
             let start = start + i * Table::span(layer - 1);
 
-            if let Ok(_) = pt.insert_page(i) {
+            if pt.insert_page(i).is_ok() {
                 return Ok((start, true));
             }
         }
@@ -354,13 +353,10 @@ impl Allocator {
                     && Table::span(size as usize) <= Table::span(layer - 1) - pte.pages())
             {
                 if let Ok((page, newentry)) = self.alloc(layer - 1, size, start) {
-                    match pt.inc(i, Table::span(size as _), newentry as _, 0) {
-                        Ok(pte) => return Ok((page, pte.pages() == 0)),
-                        Err(pte) => {
-                            error!("CAS: inc failed {:?}", pte);
-                            return Err(Error::Corruption);
-                        }
-                    }
+                    return match pt.inc(i, Table::span(size as _), newentry as _, 0) {
+                        Ok(pte) => Ok((page, pte.pages() == 0)),
+                        Err(pte) => Err(Error::Corruption(layer, i, pte)),
+                    };
                 }
             }
         }
@@ -400,10 +396,7 @@ impl Allocator {
             let i = Table::idx(layer, page);
             match pt.inc(i, Table::span(size as _), newentry as _, 0) {
                 Ok(pte) => newentry = pte.pages() == 0,
-                Err(pte) => {
-                    error!("CAS: inc failed {:?}", pte);
-                    return Err(Error::Corruption);
-                }
+                Err(pte) => return Err(Error::Corruption(layer, i, pte)),
             }
         }
 
@@ -442,10 +435,7 @@ impl Allocator {
 
             match pt.dec(i, Table::span(size as usize), cleared as _, 0) {
                 Ok(pte) => Ok(pte.pages() == Table::span(size as usize)),
-                Err(pte) => {
-                    error!("CAS: free dec l{} {:?}", layer, pte);
-                    Err(Error::Corruption)
-                }
+                Err(pte) => Err(Error::Corruption(layer, i, pte)),
             }
         } else {
             info!("free l{} i={}", layer, i);
@@ -529,6 +519,7 @@ impl Drop for Allocator {
 #[cfg(test)]
 mod test {
 
+    use std::os::raw::c_int;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -543,9 +534,9 @@ mod test {
 
     use super::Allocator;
 
-    fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a>, ()> {
-        if let Ok(file) = std::env::var("NVM_DAX") {
-            warn!("MMap dax {} l={}G", file, length >> 30);
+    fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a>, c_int> {
+        if let Ok(file) = std::env::var("NVM_FILE") {
+            warn!("MMap file {} l={}G", file, length >> 30);
             let f = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)

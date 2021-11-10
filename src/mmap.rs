@@ -117,7 +117,7 @@ pub const MAP_SYNC: c_int = 0x80000;
 pub const MAP_FIXED_NOREPLACE: c_int = 0x100000;
 
 pub fn perror(s: &str) {
-    let ref s = CString::new(s).unwrap();
+    let s = CString::new(s).unwrap();
     unsafe { libc::perror(s.as_ptr()) }
 }
 
@@ -126,8 +126,7 @@ pub struct MMap<'a> {
 }
 
 impl<'a> MMap<'a> {
-    /// Create a file based mapping.
-    pub fn file(begin: usize, length: usize, file: File) -> Result<MMap<'a>, ()> {
+    pub fn file(begin: usize, length: usize, file: File) -> Result<MMap<'a>, c_int> {
         let fd = file.as_raw_fd();
         let addr = unsafe {
             libc::mmap(
@@ -145,11 +144,11 @@ impl<'a> MMap<'a> {
             })
         } else {
             unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
-            Err(())
+            Err(unsafe { *libc::__errno_location() })
         }
     }
-    /// Create a mapping to the given Direct Memory Access device.
-    pub fn dax(begin: usize, length: usize, file: File) -> Result<MMap<'a>, ()> {
+
+    pub fn dax(begin: usize, length: usize, file: File) -> Result<MMap<'a>, c_int> {
         let fd = file.as_raw_fd();
         let addr = unsafe {
             libc::mmap(
@@ -167,11 +166,11 @@ impl<'a> MMap<'a> {
             })
         } else {
             unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
-            Err(())
+            Err(unsafe { *libc::__errno_location() })
         }
     }
-    /// Create an anonymous mapping without a file.
-    pub fn anon(begin: usize, length: usize) -> Result<MMap<'a>, ()> {
+
+    pub fn anon(begin: usize, length: usize) -> Result<MMap<'a>, c_int> {
         let addr = unsafe {
             libc::mmap(
                 begin as _,
@@ -188,7 +187,7 @@ impl<'a> MMap<'a> {
             })
         } else {
             unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
-            Err(())
+            Err(unsafe { *libc::__errno_location() })
         }
     }
 }

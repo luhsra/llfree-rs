@@ -3,7 +3,7 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Barrier;
 
-use log::{error, info};
+use log::{error, trace};
 
 struct SyncData {
     id: u8,
@@ -26,6 +26,7 @@ thread_local! {
     static DATA: RefCell<Option<SyncData>> = RefCell::new(None);
 }
 
+/// Initializes the order and number of threads. Has to be called before the init calls.
 pub fn setup(threads: u8, order: Vec<u8>) {
     unsafe {
         ORDER = order;
@@ -36,6 +37,7 @@ pub fn setup(threads: u8, order: Vec<u8>) {
     }
 }
 
+/// Per thread initialization. Has to be called on every thread that calls wait.
 pub fn init(id: u8) -> Result<()> {
     DATA.with(|data| {
         let mut data = data.borrow_mut();
@@ -53,6 +55,7 @@ pub fn init(id: u8) -> Result<()> {
     })
 }
 
+/// Synchronization point with the other threads.
 pub fn wait() -> Result<()> {
     // Check if activated
     if BARRIER.load(Ordering::SeqCst).is_null() {
@@ -63,21 +66,22 @@ pub fn wait() -> Result<()> {
         let data = data.as_mut().ok_or(Error::Uninitialized)?;
 
         for i in data.index..unsafe { ORDER.len() } {
-            info!("t{} wait for {}", data.id, i);
+            trace!("t{} wait for {}", data.id, i);
             unsafe { &*data.barrier }.wait();
 
             if unsafe { ORDER[i] == data.id } {
-                info!("run t{} for {}", data.id, i);
+                trace!("run t{} for {}", data.id, i);
                 data.index = i + 1;
                 return Ok(());
             }
         }
 
-        error!("Order to short {}", unsafe { ORDER.len() });
+        error!("Sync overflow ordering {}", unsafe { ORDER.len() });
         Err(Error::OverflowOrdering)
     })
 }
 
+/// Has to be called at the end of a thread.
 pub fn end() -> Result<()> {
     // Check if activated
     if BARRIER.load(Ordering::SeqCst).is_null() {
@@ -88,11 +92,11 @@ pub fn end() -> Result<()> {
         let data = data.as_mut().ok_or(Error::Uninitialized)?;
 
         for i in data.index..unsafe { ORDER.len() } {
-            info!("t{} wait for {}", data.id, i);
+            trace!("t{} wait for {}", data.id, i);
             unsafe { &*data.barrier }.wait();
 
             if unsafe { ORDER[i] == data.id } {
-                error!("Running ended t{} for {}", data.id, i);
+                error!("Wake suspended t{} for {}", data.id, i);
                 return Err(Error::WakeSuspended);
             }
         }
@@ -110,6 +114,8 @@ mod test {
         thread,
     };
 
+    use log::trace;
+
     use crate::util::logging;
 
     #[test]
@@ -124,19 +130,19 @@ mod test {
             super::init(1).unwrap();
 
             super::wait().unwrap();
-            println!("thread 1: 0");
+            trace!("thread 1: 0");
             counter_c
                 .compare_exchange(2, 3, Ordering::SeqCst, Ordering::SeqCst)
                 .unwrap();
 
             super::wait().unwrap();
-            println!("thread 1: 1");
+            trace!("thread 1: 1");
             counter_c
                 .compare_exchange(3, 4, Ordering::SeqCst, Ordering::SeqCst)
                 .unwrap();
 
             super::wait().unwrap();
-            println!("thread 1: 2");
+            trace!("thread 1: 2");
             counter_c
                 .compare_exchange(5, 6, Ordering::SeqCst, Ordering::SeqCst)
                 .unwrap();
@@ -146,19 +152,19 @@ mod test {
         super::init(0).unwrap();
 
         super::wait().unwrap();
-        println!("thread 0: 0");
+        trace!("thread 0: 0");
         counter
             .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
             .unwrap();
 
         super::wait().unwrap();
-        println!("thread 0: 1");
+        trace!("thread 0: 1");
         counter
             .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
             .unwrap();
 
         super::wait().unwrap();
-        println!("thread 0: 2");
+        trace!("thread 0: 2");
         counter
             .compare_exchange(4, 5, Ordering::SeqCst, Ordering::SeqCst)
             .unwrap();
