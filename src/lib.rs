@@ -7,14 +7,14 @@ mod alloc;
 mod cpu;
 pub mod mmap;
 mod leaf_alloc;
-mod paging;
+mod table;
 mod util;
+mod entry;
 
 #[cfg(test)]
 mod sync;
 
 use alloc::Allocator;
-use paging::Entry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -25,7 +25,7 @@ pub enum Error {
     /// Invalid address
     Address,
     /// Corrupted allocator state
-    Corruption(usize, usize, Entry),
+    Corruption(usize, usize, u64),
     /// Allocator not initialized
     Uninitialized,
 }
@@ -97,7 +97,7 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::paging::PT_LEN;
+    use crate::table::PT_LEN;
     use crate::util::logging;
     use crate::{Size, get, init, put};
 

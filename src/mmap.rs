@@ -210,7 +210,7 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::paging::PAGE_SIZE;
+    use crate::table::PAGE_SIZE;
     use crate::util::{_mm_clwb, logging};
 
     #[test]

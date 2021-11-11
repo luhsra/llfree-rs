@@ -1,6 +1,7 @@
 use log::{error, info, warn};
 
-use crate::paging::{Entry, Table, LAYERS, PAGE_SIZE, PT_LEN, PT_LEN_BITS};
+use crate::entry::{L1Entry, L2Entry};
+use crate::table::{self, Table, LAYERS, PAGE_SIZE, PT_LEN, PT_LEN_BITS};
 
 use crate::{Error, Result};
 
@@ -24,16 +25,21 @@ pub struct LeafAllocator {
     pages: usize,
 }
 
+#[repr(transparent)]
+struct Entry(u64);
+
 impl LeafAllocator {
     pub fn new(begin: usize, pages: usize) -> Self {
         Self { begin, pages }
     }
 
     /// Returns the l1 page table that contains the `page`.
-    fn pt1(&self, pte2: Entry, page: usize) -> Option<&Table> {
-        if pte2.is_table() && pte2.pages() < PT_LEN {
+    fn pt1(&self, pte2: L2Entry, page: usize) -> Option<&Table<L1Entry>> {
+        if pte2.has_i1() {
             let start = page & !(PT_LEN - 1);
-            Some(unsafe { &*((self.begin + (start + pte2.i1()) * PAGE_SIZE) as *const Table) })
+            Some(unsafe {
+                &*((self.begin + (start + pte2.i1()) * PAGE_SIZE) as *const Table<L1Entry>)
+            })
         } else {
             None
         }
@@ -43,10 +49,10 @@ impl LeafAllocator {
     /// ```text
     /// NVRAM: [ Pages & PT1 | PT2 | Meta ]
     /// ```
-    fn pt2(&self, page: usize) -> &Table {
+    fn pt2(&self, page: usize) -> &Table<L2Entry> {
         let i = page >> (PT_LEN_BITS * 2);
         // The l2 tables are stored after this area
-        let pt2 = (self.begin + (self.pages + i) * PAGE_SIZE) as *mut Table;
+        let pt2 = (self.begin + (self.pages + i) * PAGE_SIZE) as *mut Table<L2Entry>;
         unsafe { &mut *pt2 }
     }
 
@@ -54,7 +60,7 @@ impl LeafAllocator {
     pub fn alloc(&self, start: usize) -> Result<(usize, bool)> {
         let pt2 = self.pt2(start);
 
-        for i2 in Table::range(2, start..self.pages) {
+        for i2 in table::range(2, start..self.pages) {
             let start = start + i2 * PT_LEN;
 
             wait!();
@@ -67,9 +73,13 @@ impl LeafAllocator {
             }
 
             if pte2.pages() == PT_LEN - 1 {
+                if pte2.usage() > 0 {
+                    // Skip if free is in progress
+                    continue;
+                }
                 return self.alloc_last(pte2, start);
             }
-            if pte2.is_empty() {
+            if pte2.pages() == 0 {
                 return self.alloc_first(start);
             }
             match self.alloc_pt(pte2, start) {
@@ -81,25 +91,36 @@ impl LeafAllocator {
     }
 
     /// Search free page table entry.
-    fn alloc_pt(&self, pte2: Entry, start: usize) -> Result<(usize, bool)> {
+    fn alloc_pt(&self, pte2: L2Entry, start: usize) -> Result<(usize, bool)> {
         let pt2 = self.pt2(start);
         let pt1 = self.pt1(pte2, start).ok_or(Error::Memory)?;
 
-        for i in Table::range(1, start..self.pages) {
+        for i in table::range(1, start..self.pages) {
             let page = start + i;
 
             wait!();
 
-            if pt1.cas(i, Entry::empty(), Entry::page()).is_ok() {
+            if pt1.cas(i, L1Entry::empty(), L1Entry::page()).is_ok() {
                 info!("alloc l1 i={}: {}", i, page);
 
-                let i2 = Table::idx(2, page);
+                let i2 = table::idx(2, page);
 
                 wait!();
 
-                return match pt2.inc(i2, 1, 1, pte2.i1()) {
+                return match pt2.update(i2, |v| {
+                    if v.has_i1() && v.pages() < PT_LEN {
+                        Some(L2Entry::table(
+                            v.pages() + 1,
+                            v.usage(),
+                            v.i1(),
+                            v.is_reserved(),
+                        ))
+                    } else {
+                        None
+                    }
+                }) {
                     Ok(pte) => Ok((page, pte.pages() == 0)),
-                    Err(pte) => Err(Error::Corruption(2, i2, pte)),
+                    Err(pte) => panic!("Corruption l2 i{} {:?}", i2, pte),
                 };
             }
         }
@@ -112,11 +133,11 @@ impl LeafAllocator {
         assert!(start % PT_LEN == 0);
 
         let pt2 = self.pt2(start);
-        let i2 = Table::idx(2, start);
+        let i2 = table::idx(2, start);
 
         wait!();
 
-        match pt2.cas(i2, Entry::empty(), Entry::page_reserved()) {
+        match pt2.cas(i2, L2Entry::empty(), L2Entry::page_reserved()) {
             Ok(_) => {}
             Err(pte) => {
                 warn!("CAS: init pt1 {:?}", pte);
@@ -125,33 +146,33 @@ impl LeafAllocator {
         }
 
         // store pt1 at i=1, so that the allocated page is at i=0
-        let pt1 = unsafe { &*((self.begin + (start + 1) * PAGE_SIZE) as *const Table) };
-        pt1.set(0, Entry::page());
-        pt1.set(1, Entry::page_reserved());
+        let pt1 = unsafe { &*((self.begin + (start + 1) * PAGE_SIZE) as *const Table<L1Entry>) };
+        pt1.set(0, L1Entry::page());
+        pt1.set(1, L1Entry::reserved());
         for i1 in 2..PT_LEN {
-            pt1.set(i1, Entry::empty());
+            pt1.set(i1, L1Entry::empty());
         }
 
         wait!();
 
-        match pt2.cas(i2, Entry::page_reserved(), Entry::table(1, 1, 1, false)) {
+        match pt2.cas(i2, L2Entry::page_reserved(), L2Entry::table(1, 0, 1, false)) {
             Ok(_) => Ok((start, true)),
-            Err(pte) => Err(Error::Corruption(2, i2, pte)),
+            Err(pte) => Err(Error::Corruption(2, i2, pte.into())),
         }
     }
 
     /// Allocate the last page (the pt1 is reused as last page).
-    fn alloc_last(&self, pte2: Entry, start: usize) -> Result<(usize, bool)> {
+    fn alloc_last(&self, pte2: L2Entry, start: usize) -> Result<(usize, bool)> {
         let pt2 = self.pt2(start);
-        let i2 = Table::idx(2, start);
+        let i2 = table::idx(2, start);
 
-        assert!(pte2.is_table() && pte2.pages() == PT_LEN - 1);
+        assert!(pte2.has_i1() && pte2.pages() == PT_LEN - 1);
 
         wait!();
         info!("alloc last {} s={}", pte2.i1(), start);
 
         // Only modify pt2 as pt1 is returned as page.
-        match pt2.cas(i2, pte2, Entry::table(PT_LEN, PT_LEN, 0, false)) {
+        match pt2.cas(i2, pte2, L2Entry::table(PT_LEN, 0, 0, false)) {
             Ok(_) => Ok((start + pte2.i1(), false)),
             Err(pte) => {
                 warn!("CAS: alloc last pt2 {:?}", pte);
@@ -165,93 +186,84 @@ impl LeafAllocator {
         info!("free leaf page {}", page);
 
         let pt2 = self.pt2(page);
-        let i2 = Table::idx(2, page);
+        let i2 = table::idx(2, page);
 
         wait!();
 
-        // Try decrementing first
-        // match pt2.dec_nofull(i2, 1, 1) {
-        //     Ok(pte2) => {
-        //         let pt1 = self.pt1(pte2, page).unwrap();
-        //         let i1 = Table::idx(1, page);
-        //         match pt1.cas(i1, Entry::page(), Entry::empty()) {
-        //             Ok(_) => Ok(pte2.pages() == 1),
-        //             Err(_) => match pt2.inc(i2, 1, 1, pte2.i1()) {
-        //                 Ok(_) => Err(Error::Address),
-        //                 Err(pte) => Err(Error::Corruption(2, i2, pte)),
-        //             },
-        //         }
-        //     }
-        //     Err(pte) if pte.nonempty() >= PT_LEN => self.free_last(page),
-        //     Err(pte) if pte.nonempty() == 0 => {
-        //         let pt1 = self.pt1(pte2, page).unwrap();
-        //         let i1 = Table::idx(1, page);
-        //         let pte1 = pt1.get(i1);
-        //         if pte1.is_page() {
-        //             Err(Error::CAS)
-        //         } else {
-        //             Err(Error::Address)
-        //         }
-        //     }
-        //     Err(pte) => Err(Error::Corruption(2, i2, pte)),
-        // }
+        match pt2.update(i2, L2Entry::inc_usage) {
+            Ok(pte2) => {
+                let pt1 = self.pt1(pte2, page).unwrap();
+                let i1 = table::idx(1, page);
 
-        let pte2 = pt2.get(i2);
-        if pte2.is_page() {
-            Err(Error::Address)
-        } else if pte2.pages() < PT_LEN {
-            let pt1 = self.pt1(pte2, page).ok_or(Error::Address)?;
-            let i1 = Table::idx(1, page);
+                wait!();
 
-            wait!();
+                match pt1.cas(i1, L1Entry::page(), L1Entry::empty()) {
+                    Ok(_) => {
+                        // i1 is expected to be unchanged.
+                        // If not the page table has been moved in between, which should not be possible!
 
-            pt1.cas(i1, Entry::page(), Entry::empty())
-                .map_err(|_| Error::Address)?;
+                        wait!();
+                        info!("free dec i={} {:?}", i2, pte2);
 
-            wait!();
-            info!("free dec i={} {:?}", i2, pte2);
-
-            // i1 is expected to be unchanged.
-            // If not the page table has been moved in between, which should not be possible!
-
-            // TODO: A parallel alloc of the last page destroys pt2 -> detect & retry!
-            // In this case the write to pte1 remains!
-
-            // TODO: Parallel: free & alloc last & free full => may result in lost pte1
-
-            match pt2.dec(i2, 1, 1, pte2.i1()) {
-                Ok(pte) => Ok(pte.pages() == 1),
-                Err(pte) => Err(Error::Corruption(2, i2, pte)),
+                        match pt2.update(i2, |v| {
+                            if !v.is_huge()
+                                && !v.is_page()
+                                && !v.is_reserved()
+                                && pte2.i1() == v.i1()
+                                && v.pages() > 0
+                                && v.usage() > 0
+                            {
+                                Some(L2Entry::table(
+                                    v.pages() - 1,
+                                    v.usage() - 1,
+                                    v.i1(),
+                                    v.is_reserved(),
+                                ))
+                            } else {
+                                None
+                            }
+                        }) {
+                            Ok(pte) => Ok(pte.pages() == 1),
+                            Err(pte) => panic!("Corruption: l2 i{} {:?}", i2, pte),
+                        }
+                    }
+                    Err(_) => {
+                        error!("free invalid {}", page);
+                        pt2.update(i2, L2Entry::dec_usage).unwrap();
+                        Err(Error::Address)
+                    }
+                }
             }
-        } else {
-            // free last page of pt1 & rebuild pt1
-            self.free_last(page)
+            // Free last page of pt1 & rebuild pt1
+            Err(pte2) if pte2.pages() == PT_LEN => self.free_full(page),
+            // Large / huge page
+            Err(pte2) => Err(Error::Address),
         }
     }
 
     /// Free last page & rebuild pt1 in it
-    fn free_last(&self, page: usize) -> Result<bool> {
+    fn free_full(&self, page: usize) -> Result<bool> {
         // The new pt
         let pt2 = self.pt2(page);
-        let i = Table::idx(2, page);
+        let i = table::idx(2, page);
 
         wait!();
 
-        let pt1 = unsafe { &*((self.begin + page * PAGE_SIZE) as *const Table) };
+        let pt1 = unsafe { &*((self.begin + page * PAGE_SIZE) as *const Table<L1Entry>) };
         info!("free: init last pt1 {}", page);
 
         for j in 0..PT_LEN {
             if j == page % PT_LEN {
-                pt1.set(j, Entry::page_reserved());
+                pt1.set(j, L1Entry::reserved());
             } else {
-                pt1.set(j, Entry::page());
+                pt1.set(j, L1Entry::page());
             }
         }
 
         match pt2.cas(
             i,
-            Entry::table(PT_LEN, PT_LEN, 0, false),
-            Entry::table(PT_LEN - 1, PT_LEN - 1, page % PT_LEN, false),
+            L2Entry::table(PT_LEN, 0, 0, false),
+            L2Entry::table(PT_LEN - 1, 0, page % PT_LEN, false),
         ) {
             Ok(_) => Ok(false),
             Err(pte) => {
@@ -302,8 +314,8 @@ mod test {
 
     use log::warn;
 
-    use crate::paging::{PAGE_SIZE, PT_LEN};
     use crate::sync;
+    use crate::table::{PAGE_SIZE, PT_LEN};
     use crate::util::{logging, parallel};
 
     use super::LeafAllocator;
