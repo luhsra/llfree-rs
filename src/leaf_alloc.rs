@@ -567,19 +567,20 @@ mod test {
     fn alloc_free_last() {
         logging();
 
-        const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
+        const MEM_SIZE: usize = 2 * (PT_LEN + 1) * PAGE_SIZE;
         let buffer = aligned_buffer(MEM_SIZE);
 
         let orders = [
-            vec![0, 0, 0, 1, 1, 1], // 0 free then 1 alloc
-            vec![1, 1, 0, 0],       // 1 alloc last then 0 free last
-            vec![0, 1, 1, 0, 0],    // first 0 free, 1 fails cas
+            vec![0, 0, 0, 1, 1, 1],       // 0 free then 1 alloc
+            vec![1, 1, 0, 0],             // 1 alloc last then 0 free last
+            vec![0, 1, 1, 1, 1, 0, 0],    // 1 skips table
+            vec![1, 0, 1, 0, 0, 1, 1, 1], // 1 fails cas
         ];
 
         let mut pages = [0; PT_LEN];
 
         {
-            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, PT_LEN);
+            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, 2 * PT_LEN);
             for page in &mut pages[..PT_LEN - 1] {
                 *page = page_alloc.alloc(0).unwrap().0;
             }
@@ -594,7 +595,7 @@ mod test {
 
             let handle = thread::spawn(move || {
                 sync::init(1).unwrap();
-                let page_alloc = LeafAllocator::new(begin, PT_LEN);
+                let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
 
                 match page_alloc.alloc(0) {
                     Err(crate::Error::CAS) => {
@@ -608,7 +609,7 @@ mod test {
 
             {
                 sync::init(0).unwrap();
-                let page_alloc = LeafAllocator::new(begin, PT_LEN);
+                let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
 
                 match page_alloc.free(pages[0]) {
                     Err(crate::Error::CAS) => {
@@ -622,10 +623,17 @@ mod test {
 
             handle.join().unwrap();
 
-            let page_alloc = LeafAllocator::new(begin, PT_LEN);
+            let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
             let pt2 = page_alloc.pt2(0);
-            assert_eq!(pt2.get(0).pages(), PT_LEN - 1);
-            assert_eq!(count(page_alloc.pt1(pt2.get(0), 0).unwrap()), PT_LEN - 1);
+            if pt2.get(0).pages() == PT_LEN - 1 {
+                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0).unwrap()), PT_LEN - 1);
+            } else {
+                // Table entry skipped
+                assert_eq!(pt2.get(0).pages(), PT_LEN - 2);
+                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0).unwrap()), PT_LEN - 2);
+                assert_eq!(pt2.get(1).pages(), 1);
+                assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN).unwrap()), 1);
+            }
         }
     }
 }
