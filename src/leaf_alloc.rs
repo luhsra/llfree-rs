@@ -25,9 +25,6 @@ pub struct LeafAllocator {
     pages: usize,
 }
 
-#[repr(transparent)]
-struct Entry(u64);
-
 impl LeafAllocator {
     pub fn new(begin: usize, pages: usize) -> Self {
         Self { begin, pages }
@@ -68,19 +65,23 @@ impl LeafAllocator {
             let pte2 = pt2.get(i2);
             info!("i={} pte2={:?}", i2, pte2);
 
-            if pte2.pages() >= PT_LEN || pte2.is_reserved() {
+            if pte2.pages() >= PT_LEN {
                 continue;
+            }
+
+            if pte2.pages() == 0 {
+                return if pte2.is_reserved() {
+                    Err(Error::CAS)
+                } else {
+                    self.alloc_first(start)
+                };
             }
 
             if pte2.pages() == PT_LEN - 1 {
                 if pte2.usage() > 0 {
-                    // Skip if free is in progress
-                    continue;
+                    continue; // Skip if free is in progress
                 }
                 return self.alloc_last(pte2, start);
-            }
-            if pte2.pages() == 0 {
-                return self.alloc_first(start);
             }
             match self.alloc_pt(pte2, start) {
                 Err(Error::Memory) => {} // table full before inc
@@ -199,30 +200,12 @@ impl LeafAllocator {
 
                 match pt1.cas(i1, L1Entry::page(), L1Entry::empty()) {
                     Ok(_) => {
-                        // i1 is expected to be unchanged.
-                        // If not the page table has been moved in between, which should not be possible!
-
                         wait!();
                         info!("free dec i={} {:?}", i2, pte2);
 
-                        match pt2.update(i2, |v| {
-                            if !v.is_huge()
-                                && !v.is_page()
-                                && !v.is_reserved()
-                                && pte2.i1() == v.i1()
-                                && v.pages() > 0
-                                && v.usage() > 0
-                            {
-                                Some(L2Entry::table(
-                                    v.pages() - 1,
-                                    v.usage() - 1,
-                                    v.i1(),
-                                    v.is_reserved(),
-                                ))
-                            } else {
-                                None
-                            }
-                        }) {
+                        // i1 is expected to be unchanged.
+                        // If not the page table has been moved in between, which should not be possible!
+                        match pt2.update(i2, |v| v.dec_all(pte2.i1())) {
                             Ok(pte) => Ok(pte.pages() == 1),
                             Err(pte) => panic!("Corruption: l2 i{} {:?}", i2, pte),
                         }
@@ -237,7 +220,7 @@ impl LeafAllocator {
             // Free last page of pt1 & rebuild pt1
             Err(pte2) if pte2.pages() == PT_LEN => self.free_full(page),
             // Large / huge page
-            Err(pte2) => Err(Error::Address),
+            Err(_) => Err(Error::Address),
         }
     }
 
@@ -314,8 +297,9 @@ mod test {
 
     use log::warn;
 
+    use crate::entry::L1Entry;
     use crate::sync;
-    use crate::table::{PAGE_SIZE, PT_LEN};
+    use crate::table::{Table, PAGE_SIZE, PT_LEN};
     use crate::util::{logging, parallel};
 
     use super::LeafAllocator;
@@ -330,6 +314,14 @@ mod test {
         };
         assert!(buffer.as_ptr() as usize % PAGE_SIZE == 0);
         buffer
+    }
+
+    fn count(pt: &Table<L1Entry>) -> usize {
+        let mut pages = 0;
+        for i in 0..PT_LEN {
+            pages += (pt.get(i) == L1Entry::page()) as usize;
+        }
+        pages
     }
 
     #[test]
@@ -369,6 +361,10 @@ mod test {
 
             let page_alloc = LeafAllocator::new(begin, PT_LEN);
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 3);
+            assert_eq!(
+                count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0).unwrap()),
+                3
+            );
         }
     }
 
@@ -379,9 +375,10 @@ mod test {
         let buffer = aligned_buffer(MEM_SIZE);
 
         let orders = [
-            vec![0, 0, 1, 1, 1, 1, 1],       // first 0 complete, 1 normal
-            vec![0, 1, 0, 1, 1, 1, 1, 1, 1], // first 0, 1 fails cas
-            vec![1, 0, 1, 0, 0, 0, 0, 0, 0], // first 1, 0 fails cas
+            vec![0, 0, 0, 1, 1, 1, 1, 1],       // first 0 complete, 1 normal
+            vec![0, 1, 0, 0, 1, 1, 1, 1, 1, 1], // 1 fails cas
+            vec![1, 0, 1, 1, 0, 0, 0, 0, 0, 0], // 0 fails cas
+            vec![1, 0, 1, 0, 1, 0, 0, 0, 0, 0], // 0 fails cas
         ];
 
         for order in orders {
@@ -406,6 +403,10 @@ mod test {
 
             let page_alloc = LeafAllocator::new(begin, PT_LEN);
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 2);
+            assert_eq!(
+                count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0).unwrap()),
+                2
+            );
         }
     }
 
@@ -416,10 +417,10 @@ mod test {
         let buffer = aligned_buffer(MEM_SIZE);
 
         let orders = [
-            vec![0, 0, 1, 1, 1],       // first 0 complete, 1 normal
-            vec![0, 1, 0, 1, 1, 1, 1], // 1 fails cas
-            vec![1, 0, 0, 1, 1, 1, 1], // 1 fails cas
-            vec![1, 0, 1, 0, 0, 0, 0], // 0 fails cas
+            vec![0, 0, 1, 1, 1, 1],       // first 0 complete, 1 normal
+            vec![0, 1, 0, 1, 1, 1, 1, 1], // 1 fails cas
+            vec![1, 0, 0, 1, 1, 1, 1, 1], // 1 fails cas
+            vec![1, 0, 1, 0, 0, 0, 0, 0], // 0 fails cas
         ];
 
         // init
@@ -452,8 +453,10 @@ mod test {
             });
 
             let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
-            assert_eq!(page_alloc.pt2(0).get(0).pages(), PT_LEN);
-            assert_eq!(page_alloc.pt2(1).get(0).pages(), 1);
+            let pt2 = page_alloc.pt2(0);
+            assert_eq!(pt2.get(0).pages(), PT_LEN);
+            assert_eq!(pt2.get(1).pages(), 1);
+            assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN).unwrap()), 1);
         }
     }
 
@@ -554,7 +557,9 @@ mod test {
             });
 
             let page_alloc = LeafAllocator::new(begin, PT_LEN);
-            assert_eq!(page_alloc.pt2(0).get(0).pages(), PT_LEN - 2);
+            let pt2 = page_alloc.pt2(0);
+            assert_eq!(pt2.get(0).pages(), PT_LEN - 2);
+            assert_eq!(count(page_alloc.pt1(pt2.get(0), 0).unwrap()), PT_LEN - 2);
         }
     }
 
@@ -587,21 +592,18 @@ mod test {
             let begin = buffer.as_ptr() as usize;
             sync::setup(2, order);
 
-            let handle = thread::spawn({
-                let pages = pages.clone();
-                move || {
-                    sync::init(1).unwrap();
-                    let page_alloc = LeafAllocator::new(begin, PT_LEN);
+            let handle = thread::spawn(move || {
+                sync::init(1).unwrap();
+                let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
-                    match page_alloc.alloc(0) {
-                        Err(crate::Error::CAS) => {
-                            page_alloc.alloc(0).unwrap();
-                        }
-                        Err(e) => panic!("{:?}", e),
-                        Ok(_) => {}
+                match page_alloc.alloc(0) {
+                    Err(crate::Error::CAS) => {
+                        page_alloc.alloc(0).unwrap();
                     }
-                    sync::end().unwrap();
+                    Err(e) => panic!("{:?}", e),
+                    Ok(_) => {}
                 }
+                sync::end().unwrap();
             });
 
             {
@@ -621,7 +623,9 @@ mod test {
             handle.join().unwrap();
 
             let page_alloc = LeafAllocator::new(begin, PT_LEN);
-            assert_eq!(page_alloc.pt2(0).get(0).pages(), PT_LEN - 1);
+            let pt2 = page_alloc.pt2(0);
+            assert_eq!(pt2.get(0).pages(), PT_LEN - 1);
+            assert_eq!(count(page_alloc.pt1(pt2.get(0), 0).unwrap()), PT_LEN - 1);
         }
     }
 }

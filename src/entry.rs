@@ -187,6 +187,25 @@ impl L2Entry {
         }
     }
     #[inline(always)]
+    pub fn dec_all(self, i1: usize) -> Option<Self> {
+        if !self.is_huge()
+            && !self.is_page()
+            && !self.is_reserved()
+            && i1 == self.i1()
+            && self.pages() > 0
+            && self.usage() > 0
+        {
+            Some(L2Entry::table(
+                self.pages() - 1,
+                self.usage() - 1,
+                self.i1(),
+                self.is_reserved(),
+            ))
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
     pub fn is_empty(self) -> bool {
         self.0 & (PTE2_HUGE | PTE2_PAGE | PTE2_PAGES_MASK) == 0
     }

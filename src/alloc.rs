@@ -338,6 +338,20 @@ impl Allocator {
         Err(Error::Memory)
     }
 
+    /// Search free page table entry.
+    fn alloc_l2_page(&self, start: usize) -> Result<(usize, bool)> {
+        let pt = self.pt2(start);
+
+        for i in table::range(2, start..self.pages) {
+            let start = start + i * table::span(1);
+
+            if pt.cas(i, L2Entry::empty(), L2Entry::page()).is_ok() {
+                return Ok((start, true));
+            }
+        }
+        Err(Error::Memory)
+    }
+
     fn alloc(&self, layer: usize, size: Size, start: usize) -> Result<(usize, bool)> {
         assert!(layer > 1);
         assert!((size as usize) < layer);
@@ -345,8 +359,12 @@ impl Allocator {
 
         info!("alloc l{}, s={}", layer, start);
 
-        if layer == 2 && size == Size::Page {
-            return self.page_alloc().alloc(start);
+        if layer == 2 {
+            return if size == Size::Page {
+                self.page_alloc().alloc(start)
+            } else {
+                self.alloc_l2_page(start)
+            };
         }
 
         let pt = self.pt(layer, start);
@@ -371,11 +389,23 @@ impl Allocator {
                     && table::span(size as usize) <= table::span(layer - 1) - pte.pages())
             {
                 if let Ok((page, newentry)) = self.alloc(layer - 1, size, start) {
-                    // return match pt.inc(i, table::span(size as _), newentry as _, 0) {
-                    //     Ok(pte) => Ok((page, pte.pages() == 0)),
-                    //     Err(pte) => Err(Error::Corruption(layer, i, pte)),
-                    // };
-                    return todo!();
+                    return match pt.update(i, |v| {
+                        if !v.is_page()
+                            && v.nonempty() < PT_LEN
+                            && v.pages() <= table::span(layer - 1) - table::span(size as _)
+                        {
+                            Some(Entry::table(
+                                v.pages() + table::span(size as _),
+                                v.nonempty() + newentry as usize,
+                                v.is_reserved(),
+                            ))
+                        } else {
+                            None
+                        }
+                    }) {
+                        Ok(pte) => Ok((page, pte.pages() == 0)),
+                        Err(pte) => panic!("Corruption: l{} i{} {:?}", layer, i, pte),
+                    };
                 }
             }
         }
@@ -414,11 +444,23 @@ impl Allocator {
             let pt = self.pt(layer, page);
             let i = table::idx(layer, page);
 
-            // match pt.inc(i, table::span(size as _), newentry as _, 0) {
-            //     Ok(pte) => newentry = pte.pages() == 0,
-            //     Err(pte) => return Err(Error::Corruption(layer, i, pte)),
-            // }
-            todo!();
+            match pt.update(i, |v| {
+                if !v.is_page()
+                    && v.nonempty() < PT_LEN
+                    && v.pages() <= table::span(layer - 1) - table::span(size as _)
+                {
+                    Some(Entry::table(
+                        v.pages() + table::span(size as _),
+                        v.nonempty() + newentry as usize,
+                        v.is_reserved(),
+                    ))
+                } else {
+                    None
+                }
+            }) {
+                Ok(pte) => newentry = pte.pages() == 0,
+                Err(pte) => panic!("Corruption: l{} i{} {:?}", layer, i, pte),
+            }
         }
 
         let addr = (page * PAGE_SIZE) as u64 + self.begin as u64;
@@ -454,11 +496,20 @@ impl Allocator {
 
             let cleared = self.free(layer - 1, size, page)?;
 
-            todo!();
-            // match pt.dec(i, table::span(size as usize), cleared as _, 0) {
-            //     Ok(pte) => Ok(pte.pages() == table::span(size as usize)),
-            //     Err(pte) => Err(Error::Corruption(layer, i, pte)),
-            // }
+            match pt.update(i, |v| {
+                if !v.is_page() && v.nonempty() > 0 && v.pages() >= table::span(size as _) {
+                    Some(Entry::table(
+                        v.pages() - table::span(size as _),
+                        v.nonempty() - cleared as usize,
+                        v.is_reserved(),
+                    ))
+                } else {
+                    None
+                }
+            }) {
+                Ok(pte) => Ok(pte.pages() == table::span(size as usize)),
+                Err(pte) => panic!("Corruption: l{} i{} {:?}", layer, i, pte),
+            }
         } else {
             info!("free l{} i={}", layer, i);
             match pt.cas(i, Entry::page(), Entry::empty()) {
@@ -551,7 +602,7 @@ mod test {
 
     use crate::alloc::{Error, Size, VOLATILE};
     use crate::mmap::MMap;
-    use crate::table::{self, Table, PAGE_SIZE, PT_LEN};
+    use crate::table::{self, PAGE_SIZE, PT_LEN};
     use crate::util::logging;
 
     use super::Allocator;
