@@ -38,17 +38,17 @@ fn main() {
     info!("map file s={}", size);
 
     let mut mapping = MMap::file(0x1000_0000_0000_u64 as _, size, file).unwrap();
-    let data = &mut mapping.slice;
 
     info!("check read/write");
 
-    warn!("previously written {}", data[0]);
-    warn!("previously written {}", data[data.len() - 1]);
+    warn!("previously written {}", mapping[0]);
+    warn!("previously written {}", mapping[mapping.len() - 1]);
 
-    data[0] = 42;
-    data[data.len() - 1] = 33;
+    mapping[0] = 42;
+    let len = mapping.len();
+    mapping[len - 1] = 33;
 
-    if data[0] != 42 || data[data.len() - 1] != 33 {
+    if mapping[0] != 42 || mapping[mapping.len() - 1] != 33 {
         error!("Unexpected value!");
     }
 

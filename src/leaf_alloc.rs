@@ -58,7 +58,7 @@ impl LeafAllocator {
         let pt2 = self.pt2(start);
 
         for i2 in table::range(2, start..self.pages) {
-            let start = start + i2 * PT_LEN;
+            let start = table::page(2, start, i2);
 
             wait!();
 
@@ -97,7 +97,7 @@ impl LeafAllocator {
         let pt1 = self.pt1(pte2, start).ok_or(Error::Memory)?;
 
         for i in table::range(1, start..self.pages) {
-            let page = start + i;
+            let page = table::page(1, start, i);
 
             wait!();
 
@@ -108,18 +108,7 @@ impl LeafAllocator {
 
                 wait!();
 
-                return match pt2.update(i2, |v| {
-                    if v.has_i1() && v.pages() < PT_LEN {
-                        Some(L2Entry::table(
-                            v.pages() + 1,
-                            v.usage(),
-                            v.i1(),
-                            v.is_reserved(),
-                        ))
-                    } else {
-                        None
-                    }
-                }) {
+                return match pt2.update(i2, L2Entry::inc) {
                     Ok(pte) => Ok((page, pte.pages() == 0)),
                     Err(pte) => panic!("Corruption l2 i{} {:?}", i2, pte),
                 };
@@ -158,7 +147,7 @@ impl LeafAllocator {
 
         match pt2.cas(i2, L2Entry::page_reserved(), L2Entry::table(1, 0, 1, false)) {
             Ok(_) => Ok((start, true)),
-            Err(pte) => Err(Error::Corruption(2, i2, pte.into())),
+            Err(pte) => panic!("Corruption l2 i{} {:?}", i2, pte),
         }
     }
 

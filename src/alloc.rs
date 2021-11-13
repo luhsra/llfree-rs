@@ -233,9 +233,9 @@ impl Allocator {
             let pt = self.pt(layer, start);
 
             for i in table::range(layer, start..self.pages) {
-                let start = start + i * table::span(layer - 1);
+                let page = table::page(layer, start, i);
 
-                let (child_pages, child_nonempty) = self.recover_rec(layer - 1, start);
+                let (child_pages, child_nonempty) = self.recover_rec(layer - 1, page);
 
                 if child_pages > 0 {
                     pt.set(i, Entry::table(child_pages, child_nonempty, false));
@@ -283,8 +283,9 @@ impl Allocator {
 
     fn reserve_pt2(&self, layer: usize, start: usize, size: Size) -> Result<usize> {
         let pt = self.pt(layer, start);
-        for i in table::range(layer, start..self.pages) {
-            let start = start + i * table::span(layer - 1);
+        for i in 0..PT_LEN {
+            let i = (table::idx(layer, start) + i) % PT_LEN;
+            let page = table::page(layer, start, i);
 
             if layer == 3 {
                 let pte3 = pt.get(i);
@@ -293,6 +294,7 @@ impl Allocator {
                     .update(i, |v| {
                         // Is reserved or full?
                         if !pte3.is_reserved()
+                            && !pte3.is_page()
                             && ((size == Size::Page && pte3.pages() < table::span(layer - 1))
                                 || (size == Size::L1 && pte3.nonempty() < PT_LEN))
                         {
@@ -303,9 +305,9 @@ impl Allocator {
                     })
                     .is_ok()
                 {
-                    return Ok(start);
+                    return Ok(page);
                 }
-            } else if let Ok(result) = self.reserve_pt2(layer - 1, start, size) {
+            } else if let Ok(result) = self.reserve_pt2(layer - 1, page, size) {
                 return Ok(result);
             }
         }
@@ -325,14 +327,15 @@ impl Allocator {
     }
 
     /// Search free page table entry.
-    fn alloc_child_page(&self, layer: usize, start: usize) -> Result<(usize, bool)> {
+    fn alloc_huge_page(&self, layer: usize, start: usize) -> Result<(usize, bool)> {
         let pt = self.pt(layer, start);
 
         for i in table::range(layer, start..self.pages) {
-            let start = start + i * table::span(layer - 1);
-
             if pt.cas(i, Entry::empty(), Entry::page()).is_ok() {
-                return Ok((start, true));
+                let page = table::page(layer, start, i);
+                warn!("allocated l{} i{} p={} s={}", layer, i, page, start);
+                self.pt2(page).set(0, L2Entry::huge()); // Persist
+                return Ok((page, true));
             }
         }
         Err(Error::Memory)
@@ -346,7 +349,8 @@ impl Allocator {
 
             for i in table::range(2, start..self.pages) {
                 if pt.cas(i, L2Entry::empty(), L2Entry::page()).is_ok() {
-                    return Ok((start + i * PT_LEN, true));
+                    let page = table::page(2, start, i);
+                    return Ok((page, true));
                 }
             }
 
@@ -354,51 +358,47 @@ impl Allocator {
         };
     }
 
-    fn alloc(&self, layer: usize, size: Size, start: usize) -> Result<(usize, bool)> {
-        assert!(layer > 1);
+    fn alloc_huge(&self, layer: usize, size: Size, start: usize) -> Result<(usize, bool)> {
+        assert!(layer > 2);
+        assert!(size >= Size::L2);
         assert!((size as usize) < layer);
         assert!(start < self.pages);
 
         info!("alloc l{}, s={}", layer, start);
 
-        if layer == 2 {
-            return self.alloc_l2(size, start);
-        }
-
         if layer - 1 == size as usize {
-            return self.alloc_child_page(layer, start);
+            return self.alloc_huge_page(layer, start);
         }
 
         let pt = self.pt(layer, start);
         for i in table::range(layer, start..self.pages) {
-            let start = start + i * table::span(layer - 1);
+            let page = table::page(layer, start, i);
 
             let pte = pt.get(i);
 
+            // Already allocated or reserved
             if pte.is_page() || pte.is_reserved() {
                 continue;
             }
 
-            // Large / Huge Pages or enough pages in child pt
-            if (size as usize == layer - 2 && pte.nonempty() < PT_LEN)
+            // Not enough space in child table
+            if (size as usize == layer - 2 && pte.nonempty() >= PT_LEN)
                 || ((size as usize) < layer - 2
-                    && table::span(size as usize) <= table::span(layer - 1) - pte.pages())
+                    && table::span(size as _) > table::span(layer - 1) - pte.pages())
             {
-                if let Ok((page, newentry)) = self.alloc(layer - 1, size, start) {
-                    return match pt.update(i, |v| {
-                        let pages = v.pages() + table::span(size as _);
-                        let nonempty = v.nonempty() + newentry as usize;
-                        if !v.is_page() && nonempty <= PT_LEN && pages <= table::span(layer - 1) {
-                            Some(Entry::table(pages, nonempty, v.is_reserved()))
-                        } else {
-                            None
-                        }
-                    }) {
+                continue;
+            }
+
+            return match self.alloc_huge(layer - 1, size, page) {
+                Ok((page, newentry)) => {
+                    match pt.update(i, |v| v.inc(table::span(size as _), newentry as _)) {
                         Ok(pte) => Ok((page, pte.pages() == 0)),
                         Err(pte) => panic!("Corruption: l{} i{} {:?}", layer, i, pte),
-                    };
+                    }
                 }
-            }
+                Err(Error::Memory) => continue,
+                Err(e) => Err(e),
+            };
         }
 
         Err(Error::Memory)
@@ -412,43 +412,46 @@ impl Allocator {
         expected: u64,
     ) -> Result<()> {
         // Start at the reserved memory chunk for this thread
-        let mut start = match size {
-            Size::Page => self.small_start,
-            Size::L1 => self.large_start,
-            // TODO: check pte3 pages / entries & reserve next before alloc
-            _ => panic!("Huge pages are currently not supported!"),
-        };
-
-        let (page, mut newentry) = loop {
-            match self.alloc_l2(size, start) {
-                Ok(result) => break result,
-                Err(Error::CAS) => warn!("CAS: retry alloc"),
-                Err(Error::Memory) => {
-                    warn!("MEM: reserve & retry alloc");
-                    start = self.reserve_new(size)?;
+        let page = if size == Size::L2 {
+            loop {
+                match self.alloc_huge(LAYERS, size, self.small_start.max(self.large_start)) {
+                    Ok((page, _)) => break page,
+                    Err(Error::CAS) => warn!("CAS: retry alloc"),
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
             }
-        };
+        } else {
+            let mut start = match size {
+                Size::Page => self.small_start,
+                Size::L1 => self.large_start,
+                _ => panic!(),
+            };
 
-        // Increment parents
-        for layer in 3..=LAYERS {
-            let pt = self.pt(layer, page);
-            let i = table::idx(layer, page);
-
-            match pt.update(i, |v| {
-                let pages = v.pages() + table::span(size as _);
-                let nonempty = v.nonempty() + newentry as usize;
-                if !v.is_page() && nonempty <= PT_LEN && pages <= table::span(layer - 1) {
-                    Some(Entry::table(pages, nonempty, v.is_reserved()))
-                } else {
-                    None
+            // Allocate small / large pages in the reserved memory
+            let (page, mut newentry) = loop {
+                match self.alloc_l2(size, start) {
+                    Ok(result) => break result,
+                    Err(Error::CAS) => warn!("CAS: retry alloc"),
+                    Err(Error::Memory) => {
+                        warn!("MEM: reserve & retry alloc");
+                        start = self.reserve_new(size)?;
+                    }
+                    Err(e) => return Err(e),
                 }
-            }) {
-                Ok(pte) => newentry = pte.pages() == 0,
-                Err(pte) => panic!("Corruption: l{} i{} {:?}", layer, i, pte),
+            };
+
+            // Increment parents
+            for layer in 3..=LAYERS {
+                let pt = self.pt(layer, page);
+                let i = table::idx(layer, page);
+
+                match pt.update(i, |v| v.inc(table::span(size as _), newentry as _)) {
+                    Ok(pte) => newentry = pte.pages() == 0,
+                    Err(pte) => panic!("Corruption: l{} i{} {:?}", layer, i, pte),
+                }
             }
-        }
+            page
+        };
 
         let addr = (page * PAGE_SIZE) as u64 + self.begin as u64;
         let new = translate(addr);
@@ -463,48 +466,49 @@ impl Allocator {
     }
 
     fn free(&self, layer: usize, size: Size, page: usize) -> Result<bool> {
-        if size as usize >= layer {
-            return Err(Error::Memory);
-        }
+        assert!((size as usize) < layer);
+
         if layer == 2 {
             return self.free_l2(size, page);
         }
 
+        if size as usize == layer - 1 {
+            return self.free_huge(layer, page);
+        }
+
+        let pt = self.pt(layer, page);
+        let i = table::idx(layer, page);
+        let pte = pt.get(i);
+
+        if pte.is_page() {
+            error!("No table found l{} {:?}", layer, pte);
+            return Err(Error::Address);
+        }
+
+        let cleared = self.free(layer - 1, size, page)?;
+
+        match pt.update(i, |v| v.dec(table::span(size as _), cleared as _)) {
+            Ok(pte) => Ok(pte.pages() == table::span(size as usize)),
+            Err(pte) => panic!("Corruption: l{} i{} {:?}", layer, i, pte),
+        }
+    }
+
+    fn free_huge(&self, layer: usize, page: usize) -> Result<bool> {
+        assert!(layer >= 3);
+
         let pt = self.pt(layer, page);
         let i = table::idx(layer, page);
 
-        if (size as usize) < layer - 1 {
-            let pte = pt.get(i);
-
-            if pte.is_page() {
-                error!("No table found l{} {:?}", layer, pte);
-                return Err(Error::Address);
+        info!("free l{} i={}", layer, i);
+        match pt.cas(i, Entry::page(), Entry::empty()) {
+            Ok(_) => {
+                // Clear persistance
+                self.pt2(page).set(0, L2Entry::empty());
+                Ok(true)
             }
-
-            let cleared = self.free(layer - 1, size, page)?;
-
-            match pt.update(i, |v| {
-                if !v.is_page() && v.nonempty() > 0 && v.pages() >= table::span(size as _) {
-                    Some(Entry::table(
-                        v.pages() - table::span(size as _),
-                        v.nonempty() - cleared as usize,
-                        v.is_reserved(),
-                    ))
-                } else {
-                    None
-                }
-            }) {
-                Ok(pte) => Ok(pte.pages() == table::span(size as usize)),
-                Err(pte) => panic!("Corruption: l{} i{} {:?}", layer, i, pte),
-            }
-        } else {
-            info!("free l{} i={}", layer, i);
-            match pt.cas(i, Entry::page(), Entry::empty()) {
-                Ok(_) => Ok(true),
-                Err(pte) => {
-                    error!("CAS: free unexpected {:?}", pte);
-                    Err(Error::Address)
-                }
+            Err(pte) => {
+                error!("free unexpected l{} i{} p={} {:?}", layer, i, page, pte);
+                Err(Error::Address)
             }
         }
     }
@@ -524,10 +528,6 @@ impl Allocator {
     }
 
     pub fn put(&mut self, addr: u64, size: Size) -> Result<()> {
-        if size > Size::L1 {
-            panic!("Huge pages are currently not supported!");
-        }
-
         let addr = addr as usize;
 
         if addr % table::m_span(size as usize) != 0
@@ -542,11 +542,9 @@ impl Allocator {
             match self.free(LAYERS, size, page) {
                 Err(Error::CAS) => warn!("CAS: retry free"),
                 Err(e) => return Err(e),
-                Ok(_) => break,
+                Ok(_) => break Ok(()),
             }
         }
-
-        Ok(())
     }
 
     #[allow(dead_code)]
@@ -557,7 +555,7 @@ impl Allocator {
     fn dump_rec(&self, layer: usize, start: usize) {
         let pt = self.pt(layer, start);
         for i in table::range(layer, start..self.pages) {
-            let start = start + i * table::span(layer - 1);
+            let start = table::page(layer, start, i);
 
             let pte = pt.get(i);
 
@@ -628,7 +626,7 @@ mod test {
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
         let mapping = mapping(0x1000_0000_0000, MEM_SIZE).unwrap();
-        let begin = mapping.slice.as_ptr() as usize;
+        let begin = mapping.as_ptr() as usize;
 
         info!("mmap {} bytes at {:?}", MEM_SIZE, begin as *const u8);
 
@@ -643,6 +641,9 @@ mod test {
 
         let large = AtomicU64::new(0);
         alloc.get(Size::L1, &large, |v| v, 0).unwrap();
+
+        let huge = AtomicU64::new(0);
+        alloc.get(Size::L2, &huge, |v| v, 0).unwrap();
 
         // Unexpected value
         let small = AtomicU64::new(5);
@@ -660,7 +661,10 @@ mod test {
 
         warn!("check...");
 
-        assert_eq!(alloc.allocated_pages(), 1 + PT_LEN + pages.len());
+        assert_eq!(
+            alloc.allocated_pages(),
+            1 + PT_LEN + table::span(2) + pages.len()
+        );
 
         pages.sort_unstable_by(|a, b| a.load(Ordering::Relaxed).cmp(&b.load(Ordering::Relaxed)));
 
@@ -686,6 +690,7 @@ mod test {
         }
 
         alloc.put(large.load(Ordering::SeqCst), Size::L1).unwrap();
+        alloc.put(huge.load(Ordering::SeqCst), Size::L2).unwrap();
 
         // Realloc
         for page in &pages[10..PT_LEN + 10] {
@@ -710,8 +715,8 @@ mod test {
         const MEM_SIZE: usize = 2 * THREADS * table::m_span(2);
 
         let mapping = mapping(0x1000_0000_0000, MEM_SIZE).unwrap();
-        let begin = mapping.slice.as_ptr() as usize;
-        let size = mapping.slice.len();
+        let begin = mapping.as_ptr() as usize;
+        let size = mapping.len();
 
         info!("init alloc");
         drop(Allocator::init(begin, size).unwrap());
@@ -738,7 +743,7 @@ mod test {
         });
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        let alloc = Allocator::init(mapping.slice.as_ptr() as _, mapping.slice.len()).unwrap();
+        let alloc = Allocator::init(mapping.as_ptr() as _, mapping.len()).unwrap();
         assert_eq!(alloc.allocated_pages(), pages.len());
         warn!("allocated pages: {}", pages.len());
 
@@ -805,8 +810,8 @@ mod test {
         const MEM_SIZE: usize = 2 * THREADS * table::m_span(2);
 
         let mapping = mapping(0x1000_0000_0000, MEM_SIZE).unwrap();
-        let begin = mapping.slice.as_ptr() as usize;
-        let size = mapping.slice.len();
+        let begin = mapping.as_ptr() as usize;
+        let size = mapping.len();
 
         // Stress test
         let mut pages = Vec::with_capacity(ALLOC_PER_THREAD * THREADS);
@@ -834,7 +839,7 @@ mod test {
             }
         });
 
-        let alloc = Allocator::init(mapping.slice.as_ptr() as _, mapping.slice.len()).unwrap();
+        let alloc = Allocator::init(mapping.as_ptr() as _, mapping.len()).unwrap();
         assert_eq!(alloc.allocated_pages(), 0);
     }
 
@@ -845,8 +850,8 @@ mod test {
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 10);
 
         let mapping = mapping(0x1000_0000_0000, 8 << 30).unwrap();
-        let begin = mapping.slice.as_ptr() as usize;
-        let size = mapping.slice.len();
+        let begin = mapping.as_ptr() as usize;
+        let size = mapping.len();
 
         let mut alloc = Allocator::init(begin, size).unwrap();
 
@@ -897,7 +902,7 @@ mod test {
 
         let mapping = mapping(0x1000_0000_0000, 8 << 30).unwrap();
 
-        let mut alloc = Allocator::init(mapping.slice.as_ptr() as _, mapping.slice.len()).unwrap();
+        let mut alloc = Allocator::init(mapping.as_ptr() as _, mapping.len()).unwrap();
 
         for _ in 0..PT_LEN + 2 {
             let small = AtomicU64::new(0);
@@ -909,7 +914,7 @@ mod test {
         assert_eq!(alloc.allocated_pages(), PT_LEN + 2 + PT_LEN * (PT_LEN + 2));
 
         VOLATILE.store(std::ptr::null_mut(), Ordering::SeqCst);
-        let alloc = Allocator::init(mapping.slice.as_ptr() as _, mapping.slice.len()).unwrap();
+        let alloc = Allocator::init(mapping.as_ptr() as _, mapping.len()).unwrap();
 
         assert_eq!(alloc.allocated_pages(), PT_LEN + 2 + PT_LEN * (PT_LEN + 2));
     }

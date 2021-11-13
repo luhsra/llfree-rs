@@ -44,6 +44,16 @@ pub const fn idx(layer: usize, page: usize) -> usize {
     (page >> (PT_LEN_BITS * (layer - 1))) & (PT_LEN - 1)
 }
 
+#[inline(always)]
+pub const fn round(layer: usize, page: usize) -> usize {
+    page & !((1 << (PT_LEN_BITS * layer)) - 1)
+}
+
+#[inline(always)]
+pub const fn page(layer: usize, start: usize, i: usize) -> usize {
+    round(layer, start) + i * span(layer - 1)
+}
+
 /// Computes the index range for the given page range
 #[inline(always)]
 pub fn range(layer: usize, pages: Range<usize>) -> Range<usize> {
@@ -88,17 +98,17 @@ impl<T: Sized + From<u64> + Into<u64>> Table<T> {
             Ordering::SeqCst,
             Ordering::SeqCst,
         ) {
-            Ok(v) => Ok(T::from(v)),
-            Err(v) => Err(T::from(v)),
+            Ok(v) => Ok(v.into()),
+            Err(v) => Err(v.into()),
         }
     }
 
     pub fn update<F: FnMut(T) -> Option<T>>(&self, i: usize, mut f: F) -> Result<T, T> {
         match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-            f(T::from(v)).map(T::into)
+            f(v.into()).map(T::into)
         }) {
-            Ok(v) => Ok(T::from(v)),
-            Err(v) => Err(T::from(v)),
+            Ok(v) => Ok(v.into()),
+            Err(v) => Err(v.into()),
         }
     }
 }
@@ -136,5 +146,18 @@ mod test {
         assert_eq!(table::range(3, 0..table::span(3)), 0..PT_LEN);
 
         assert_eq!(table::range(3, 0..1), 0..1);
+
+        assert_eq!(table::round(1, 15), 0);
+        assert_eq!(table::round(1, PT_LEN), PT_LEN);
+        assert_eq!(table::round(1, table::span(2)), table::span(2));
+        assert_eq!(table::round(2, table::span(2)), table::span(2));
+        assert_eq!(table::round(3, table::span(2)), 0);
+        assert_eq!(table::round(3, 2 * table::span(3)), 2 * table::span(3));
+
+
+        assert_eq!(table::page(1, 15, 2), 2);
+        assert_eq!(table::page(1, PT_LEN, 2), PT_LEN + 2);
+        assert_eq!(table::page(1, table::span(2), 0), table::span(2));
+        assert_eq!(table::page(2, table::span(2), 1), table::span(2) + table::span(1));
     }
 }

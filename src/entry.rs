@@ -50,6 +50,28 @@ impl Entry {
         )
     }
     #[inline(always)]
+    pub fn inc(self, pages: usize, nonempty: usize) -> Option<Entry> {
+        let pages = self.pages() + pages;
+        let nonempty = self.nonempty() + nonempty;
+        if !self.is_page() && nonempty <= PT_LEN && pages < (1 << (PT_LEN_BITS * LAYERS)) {
+            Some(Entry::table(pages, nonempty, self.is_reserved()))
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    pub fn dec(self, pages: usize, nonempty: usize) -> Option<Entry> {
+        if !self.is_page() && self.nonempty() >= nonempty && self.pages() >= pages {
+            Some(Entry::table(
+                self.pages() - pages,
+                self.nonempty() - nonempty,
+                self.is_reserved(),
+            ))
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
     pub fn is_empty(self) -> bool {
         self.0 & (PTE_PAGE | PTE_NONEMPTY_MASK | PTE_PAGES_MASK) == 0
     }
@@ -159,6 +181,19 @@ impl L2Entry {
                 | ((i1 << PTE2_I1_OFF) as u64 & PTE2_I1_MASK)
                 | ((reserved as u64) << PTE2_RESERVED_OFF),
         )
+    }
+    #[inline(always)]
+    pub fn inc(self) -> Option<Self> {
+        if self.has_i1() && self.pages() < PT_LEN {
+            Some(L2Entry::table(
+                self.pages() + 1,
+                self.usage(),
+                self.i1(),
+                self.is_reserved(),
+            ))
+        } else {
+            None
+        }
     }
     #[inline(always)]
     pub fn inc_usage(self) -> Option<Self> {
@@ -317,8 +352,6 @@ impl fmt::Debug for L1Entry {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::AtomicU64;
-
     use crate::table::Table;
 
     #[test]

@@ -107,12 +107,12 @@ mod test {
 
         let mapping = MMap::anon(0x1000_0000_0000_u64 as _, 20 << 30).unwrap();
 
-        info!("mmap {} bytes", mapping.slice.len());
+        info!("mmap {} bytes", mapping.len());
 
         info!("init alloc");
 
-        let addr = mapping.slice.as_ptr() as usize;
-        let size = mapping.slice.len();
+        let addr = mapping.as_ptr() as usize;
+        let size = mapping.len();
 
         info!("init finished");
         const DEFAULT: AtomicU64 = AtomicU64::new(0);

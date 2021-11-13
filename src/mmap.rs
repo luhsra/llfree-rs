@@ -2,6 +2,7 @@
 
 use std::ffi::{c_void, CString};
 use std::fs::File;
+use std::ops::{Deref, DerefMut};
 use std::os::raw::c_int;
 use std::os::unix::prelude::AsRawFd;
 
@@ -121,8 +122,9 @@ pub fn perror(s: &str) {
     unsafe { libc::perror(s.as_ptr()) }
 }
 
+/// Chunk of mapped memory.
 pub struct MMap<'a> {
-    pub slice: &'a mut [u8],
+    slice: &'a mut [u8],
 }
 
 impl<'a> MMap<'a> {
@@ -192,6 +194,19 @@ impl<'a> MMap<'a> {
     }
 }
 
+impl<'a> Deref for MMap<'a> {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.slice
+    }
+}
+
+impl<'a> DerefMut for MMap<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.slice
+    }
+}
+
 impl<'a> Drop for MMap<'a> {
     fn drop(&mut self) {
         let ret = unsafe { libc::munmap(self.slice.as_ptr() as _, self.slice.len() as _) };
@@ -223,10 +238,10 @@ mod test {
             .unwrap();
         f.set_len(PAGE_SIZE as _).unwrap();
 
-        let mapping = MMap::file(0x0000_1000_0000_0000, PAGE_SIZE, f).unwrap();
+        let mut mapping = MMap::file(0x0000_1000_0000_0000, PAGE_SIZE, f).unwrap();
 
-        mapping.slice[0] = 42;
-        assert_eq!(mapping.slice[0], 42);
+        mapping[0] = 42;
+        assert_eq!(mapping[0], 42);
     }
 
     #[test]
@@ -243,27 +258,27 @@ mod test {
             .open(file)
             .unwrap();
 
-        let mapping = MMap::dax(0x0000_1000_0000_0000, 1 << 30, f).unwrap();
+        let mut mapping = MMap::dax(0x0000_1000_0000_0000, 1 << 30, f).unwrap();
 
-        info!("previously {}", mapping.slice[0]);
+        info!("previously {}", mapping[0]);
 
-        mapping.slice[0] = 42;
-        unsafe { _mm_clwb(mapping.slice.as_ptr() as _) };
+        mapping[0] = 42;
+        unsafe { _mm_clwb(mapping.as_ptr() as _) };
         unsafe { _mm_sfence() };
 
-        assert_eq!(mapping.slice[0], 42);
+        assert_eq!(mapping[0], 42);
     }
 
     #[test]
     fn anonymous() {
         logging();
 
-        let mapping = MMap::anon(0x0000_1000_0000_0000, PAGE_SIZE).unwrap();
+        let mut mapping = MMap::anon(0x0000_1000_0000_0000, PAGE_SIZE).unwrap();
 
-        mapping.slice[0] = 42;
-        assert_eq!(mapping.slice[0], 42);
+        mapping[0] = 42;
+        assert_eq!(mapping[0], 42);
 
-        let addr = mapping.slice.as_ptr() as usize;
+        let addr = mapping.as_ptr() as usize;
         info!("check own thread");
         assert_eq!(unsafe { *(addr as *const u8) }, 42);
         thread::spawn(move || {
@@ -276,6 +291,6 @@ mod test {
         .join()
         .unwrap();
 
-        assert_eq!(mapping.slice[0], 43);
+        assert_eq!(mapping[0], 43);
     }
 }
