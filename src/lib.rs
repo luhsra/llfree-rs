@@ -12,7 +12,7 @@ mod util;
 mod entry;
 
 #[cfg(test)]
-mod sync;
+mod wait;
 
 use alloc::Allocator;
 

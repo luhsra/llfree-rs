@@ -8,7 +8,7 @@ use crate::{Error, Result};
 #[cfg(test)]
 macro_rules! wait {
     () => {
-        if let Err(e) = crate::sync::wait() {
+        if let Err(e) = crate::wait::wait() {
             error!("{:?}", e);
             panic!("{:?}", e);
         }
@@ -282,12 +282,13 @@ impl LeafAllocator {
 #[cfg(test)]
 mod test {
     use std::alloc::{alloc_zeroed, Layout};
+    use std::sync::Arc;
     use std::thread;
 
     use log::warn;
 
     use crate::entry::L1Entry;
-    use crate::sync;
+    use crate::wait::{DbgWait, DbgWaitKey};
     use crate::table::{Table, PAGE_SIZE, PT_LEN};
     use crate::util::{logging, parallel};
 
@@ -337,14 +338,14 @@ mod test {
             warn!("order: {:?}", order);
             let copy = buffer.clone();
             let begin = copy.as_ptr() as usize;
-            sync::setup(2, order);
+            let wait = DbgWait::setup(2, order);
 
             parallel(2, move |t| {
-                sync::init(t).unwrap();
+                let key = DbgWaitKey::init(wait, t);
                 let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
                 let (page, newentry) = page_alloc.alloc(0).unwrap();
-                sync::end().unwrap();
+                drop(key);
                 assert!(page != 0 && !newentry);
             });
 
@@ -374,10 +375,10 @@ mod test {
             warn!("order: {:?}", order);
             let copy = buffer.clone();
             let begin = copy.as_ptr() as usize;
-            sync::setup(2, order);
+            let wait = DbgWait::setup(2, order);
 
             parallel(2, move |t| {
-                sync::init(t).unwrap();
+                let _key = DbgWaitKey::init(wait, t);
                 let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
                 match page_alloc.alloc(0) {
@@ -387,7 +388,6 @@ mod test {
                     Err(e) => panic!("{:?}", e),
                     Ok(_) => {}
                 }
-                sync::end().unwrap();
             });
 
             let page_alloc = LeafAllocator::new(begin, PT_LEN);
@@ -425,10 +425,10 @@ mod test {
             warn!("order: {:?}", order);
             let copy = buffer.clone();
             let begin = copy.as_ptr() as usize;
-            sync::setup(2, order);
+            let wait = DbgWait::setup(2, order);
 
             parallel(2, move |t| {
-                sync::init(t).unwrap();
+                let _key = DbgWaitKey::init(wait, t);
                 let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
 
                 match page_alloc.alloc(0) {
@@ -438,7 +438,6 @@ mod test {
                     Err(e) => panic!("{:?}", e),
                     Ok(_) => {}
                 }
-                sync::end().unwrap();
             });
 
             let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
@@ -475,12 +474,12 @@ mod test {
             warn!("order: {:?}", order);
             let copy = buffer.clone();
             let begin = copy.as_ptr() as usize;
-            sync::setup(2, order);
+            let wait = DbgWait::setup(2, order);
 
             parallel(2, {
                 let pages = pages.clone();
                 move |t| {
-                    sync::init(t).unwrap();
+                    let _key = DbgWaitKey::init(wait, t);
                     let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
                     match page_alloc.free(pages[t as usize]) {
@@ -490,7 +489,6 @@ mod test {
                         Err(e) => panic!("{:?}", e),
                         Ok(_) => {}
                     }
-                    sync::end().unwrap();
                 }
             });
 
@@ -526,12 +524,12 @@ mod test {
             warn!("order: {:?}", order);
             let buffer = buffer.clone();
             let begin = buffer.as_ptr() as usize;
-            sync::setup(2, order);
+            let wait = DbgWait::setup(2, order);
 
             parallel(2, {
                 let pages = pages.clone();
                 move |t| {
-                    sync::init(t).unwrap();
+                    let _key = DbgWaitKey::init(wait, t);
                     let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
                     match page_alloc.free(pages[t as usize]) {
@@ -541,7 +539,6 @@ mod test {
                         Err(e) => panic!("{:?}", e),
                         Ok(_) => {}
                     }
-                    sync::end().unwrap();
                 }
             });
 
@@ -580,10 +577,11 @@ mod test {
             warn!("order: {:?}", order);
             let buffer = buffer.clone();
             let begin = buffer.as_ptr() as usize;
-            sync::setup(2, order);
+            let wait = DbgWait::setup(2, order);
 
+            let wait_clone = Arc::clone(&wait);
             let handle = thread::spawn(move || {
-                sync::init(1).unwrap();
+                let _key = DbgWaitKey::init(wait_clone, 1);
                 let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
 
                 match page_alloc.alloc(0) {
@@ -593,11 +591,10 @@ mod test {
                     Err(e) => panic!("{:?}", e),
                     Ok(_) => {}
                 }
-                sync::end().unwrap();
             });
 
             {
-                sync::init(0).unwrap();
+                let _key = DbgWaitKey::init(wait, 0);
                 let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
 
                 match page_alloc.free(pages[0]) {
@@ -607,7 +604,6 @@ mod test {
                     Err(e) => panic!("{:?}", e),
                     Ok(_) => {}
                 }
-                sync::end().unwrap();
             }
 
             handle.join().unwrap();

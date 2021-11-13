@@ -9,7 +9,7 @@ pub const fn align_down(v: usize, align: usize) -> usize {
 #[cfg(test)]
 pub fn logging() {
     use std::{io::Write, thread::ThreadId};
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format(|buf, record| {
             writeln!(
                 buf,
@@ -29,7 +29,7 @@ pub fn logging() {
                 record.args()
             )
         })
-        .init();
+        .try_init();
 }
 
 #[cfg(test)]
