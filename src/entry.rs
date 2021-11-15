@@ -72,10 +72,6 @@ impl Entry {
         }
     }
     #[inline(always)]
-    pub fn is_empty(self) -> bool {
-        self.0 & (PTE_PAGE | PTE_NONEMPTY_MASK | PTE_PAGES_MASK) == 0
-    }
-    #[inline(always)]
     pub fn is_page(self) -> bool {
         self.0 & PTE_PAGE != 0
     }
@@ -151,7 +147,7 @@ const_assert!(PTE2_HUGE_OFF < PTE_SIZE * 8);
 ///
 /// ```text
 /// [ .. | huge | reserved | page | i1 | usage | pages ]
-///         1        1        1      9     10      10
+///         1        1        1     9     10      10
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct L2Entry(pub u64);
@@ -176,9 +172,9 @@ impl L2Entry {
     #[inline(always)]
     pub fn table(pages: usize, usage: usize, i1: usize, reserved: bool) -> Self {
         Self(
-            ((pages << PTE2_PAGES_OFF) as u64 & PTE2_PAGES_MASK)
-                | ((usage << PTE2_USAGE_OFF) as u64 & PTE2_USAGE_MASK)
-                | ((i1 << PTE2_I1_OFF) as u64 & PTE2_I1_MASK)
+            (((pages as u64) << PTE2_PAGES_OFF) & PTE2_PAGES_MASK)
+                | (((usage as u64) << PTE2_USAGE_OFF) & PTE2_USAGE_MASK)
+                | (((i1 as u64) << PTE2_I1_OFF) & PTE2_I1_MASK)
                 | ((reserved as u64) << PTE2_RESERVED_OFF),
         )
     }
@@ -210,10 +206,10 @@ impl L2Entry {
     }
     #[inline(always)]
     pub fn dec_usage(self) -> Option<Self> {
-        if !self.is_page() && !self.is_huge() && !self.is_reserved() {
+        if !self.is_page() && !self.is_huge() && !self.is_reserved() && self.usage() > 0 {
             Some(L2Entry::table(
                 self.pages(),
-                self.usage() + 1,
+                self.usage() - 1,
                 self.i1(),
                 self.is_reserved(),
             ))

@@ -1,10 +1,9 @@
-use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use static_assertions::{const_assert, const_assert_eq};
+use static_assertions::const_assert_eq;
 
 pub const PAGE_SIZE_BITS: usize = 12; // 2^12 => 4KiB
 pub const PAGE_SIZE: usize = 1 << PAGE_SIZE_BITS;
@@ -44,11 +43,13 @@ pub const fn idx(layer: usize, page: usize) -> usize {
     (page >> (PT_LEN_BITS * (layer - 1))) & (PT_LEN - 1)
 }
 
+/// Returns the starting page of the corresponding page table
 #[inline(always)]
 pub const fn round(layer: usize, page: usize) -> usize {
     page & !((1 << (PT_LEN_BITS * layer)) - 1)
 }
 
+/// Returns the page at the given index `i`
 #[inline(always)]
 pub const fn page(layer: usize, start: usize, i: usize) -> usize {
     round(layer, start) + i * span(layer - 1)
@@ -154,10 +155,12 @@ mod test {
         assert_eq!(table::round(3, table::span(2)), 0);
         assert_eq!(table::round(3, 2 * table::span(3)), 2 * table::span(3));
 
-
         assert_eq!(table::page(1, 15, 2), 2);
         assert_eq!(table::page(1, PT_LEN, 2), PT_LEN + 2);
         assert_eq!(table::page(1, table::span(2), 0), table::span(2));
-        assert_eq!(table::page(2, table::span(2), 1), table::span(2) + table::span(1));
+        assert_eq!(
+            table::page(2, table::span(2), 1),
+            table::span(2) + table::span(1)
+        );
     }
 }

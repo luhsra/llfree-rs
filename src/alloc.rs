@@ -14,7 +14,7 @@ use crate::util::{align_down, align_up};
 use crate::{Error, Result, Size};
 
 const MAGIC: usize = 0xdeadbeef;
-pub const MIN_SIZE: usize = table::m_span(2) * 2;
+pub const MIN_SIZE: usize = table::m_span(3);
 pub const MAX_SIZE: usize = table::m_span(LAYERS);
 
 /// Volatile per thread metadata
