@@ -68,12 +68,11 @@ impl Allocator {
                 Ok(_) => {
                     if meta.length.load(Ordering::SeqCst) == length
                         && meta.magic.load(Ordering::SeqCst) == MAGIC
-                        && false
                     {
-                        info!("Found allocator state. Recovery...");
+                        warn!("Found allocator state. Recovery...");
                         return Self::recover(begin, length);
                     } else {
-                        info!("Create new allocator state.");
+                        warn!("Create new allocator state.");
                         let alloc = Self::setup(begin, length)?;
                         alloc.meta().length.store(length, Ordering::SeqCst);
                         alloc.meta().magic.store(MAGIC, Ordering::SeqCst);
@@ -169,7 +168,7 @@ impl Allocator {
         }
 
         let (pages, nonempty) = alloc.recover_rec(LAYERS, 0);
-        info!("Recovered pages={}, nonempty={}", pages, nonempty);
+        warn!("Recovered pages={}, nonempty={}", pages, nonempty);
         Ok(alloc)
     }
 
@@ -237,7 +236,10 @@ impl Allocator {
 
                 let (child_pages, child_nonempty) = self.recover_rec(layer - 1, page);
 
-                if child_pages > 0 {
+                if child_nonempty == usize::MAX {
+                    pt.set(i, Entry::page());
+                    nonemtpy += 1;
+                } else if child_pages > 0 {
                     pt.set(i, Entry::table(child_pages, child_nonempty, false));
                     nonemtpy += 1;
                 } else {
@@ -252,7 +254,8 @@ impl Allocator {
                 let pte = pt.get(i);
                 nonemtpy += !pte.is_empty() as usize;
                 if pte.is_huge() {
-                    todo!();
+                    assert!(i == 0);
+                    return (table::span(layer), usize::MAX);
                 } else if pte.is_page() {
                     pages += PT_LEN;
                 } else {
@@ -902,20 +905,31 @@ mod test {
 
         let mapping = mapping(0x1000_0000_0000, 8 << 30).unwrap();
 
-        let mut alloc = Allocator::init(mapping.as_ptr() as _, mapping.len()).unwrap();
+        {
+            let mut alloc = Allocator::init(mapping.as_ptr() as _, mapping.len()).unwrap();
 
-        for _ in 0..PT_LEN + 2 {
-            let small = AtomicU64::new(0);
-            alloc.get(Size::Page, &small, |v| v, 0).unwrap();
-            let large = AtomicU64::new(0);
-            alloc.get(Size::L1, &large, |v| v, 0).unwrap();
+            for _ in 0..PT_LEN + 2 {
+                let small = AtomicU64::new(0);
+                alloc.get(Size::Page, &small, |v| v, 0).unwrap();
+                let large = AtomicU64::new(0);
+                alloc.get(Size::L1, &large, |v| v, 0).unwrap();
+            }
+
+            let huge = AtomicU64::new(0);
+            alloc.get(Size::L2, &huge, |v| v, 0).unwrap();
+
+            assert_eq!(
+                alloc.allocated_pages(),
+                table::span(2) + PT_LEN + 2 + PT_LEN * (PT_LEN + 2)
+            );
         }
-
-        assert_eq!(alloc.allocated_pages(), PT_LEN + 2 + PT_LEN * (PT_LEN + 2));
 
         VOLATILE.store(std::ptr::null_mut(), Ordering::SeqCst);
         let alloc = Allocator::init(mapping.as_ptr() as _, mapping.len()).unwrap();
 
-        assert_eq!(alloc.allocated_pages(), PT_LEN + 2 + PT_LEN * (PT_LEN + 2));
+        assert_eq!(
+            alloc.allocated_pages(),
+            table::span(2) + PT_LEN + 2 + PT_LEN * (PT_LEN + 2)
+        );
     }
 }
