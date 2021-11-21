@@ -14,7 +14,7 @@ use crate::util::{align_down, align_up};
 use crate::{Error, Result, Size};
 
 const MAGIC: usize = 0xdeadbeef;
-pub const MIN_SIZE: usize = table::m_span(3);
+pub const MIN_SIZE: usize = 2 * table::m_span(2);
 pub const MAX_SIZE: usize = table::m_span(LAYERS);
 
 /// Volatile per thread metadata
@@ -133,7 +133,7 @@ impl Allocator {
             pages,
             num_pt2,
             begin,
-            begin + pages * PT_LEN,
+            begin + pages * PAGE_SIZE,
             begin + length,
             alloc.small_start / table::span(2),
             alloc.large_start / table::span(2)
@@ -290,28 +290,18 @@ impl Allocator {
             let i = (table::idx(layer, start) + i) % PT_LEN;
             let page = table::page(layer, start, i);
 
-            if layer == 3 {
-                let pte3 = pt.get(i);
-
-                if pt
-                    .update(i, |v| {
-                        // Is reserved or full?
-                        if !pte3.is_reserved()
-                            && !pte3.is_page()
-                            && ((size == Size::Page && pte3.pages() < table::span(layer - 1))
-                                || (size == Size::L1 && pte3.nonempty() < PT_LEN))
-                        {
-                            Some(Entry::table(v.pages(), v.nonempty(), true))
-                        } else {
-                            None
-                        }
-                    })
-                    .is_ok()
-                {
-                    return Ok(page);
+            if layer > 3 {
+                if let Ok(result) = self.reserve_pt2(layer - 1, page, size) {
+                    return Ok(result);
                 }
-            } else if let Ok(result) = self.reserve_pt2(layer - 1, page, size) {
-                return Ok(result);
+                continue;
+            }
+
+            if pt
+                .update(i, |v| Entry::reserve(v, size == Size::Page))
+                .is_ok()
+            {
+                return Ok(page);
             }
         }
         error!("Reserve failed!");
@@ -519,14 +509,14 @@ impl Allocator {
     fn free_l2(&self, size: Size, page: usize) -> Result<bool> {
         if size == Size::Page {
             return self.leaf_alloc().free(page);
-        } else {
-            let pt = self.pt2(page);
-            let i = table::idx(2, page);
-            info!("free l2 i={}", i);
-            return match pt.cas(i, L2Entry::page(), L2Entry::empty()) {
-                Ok(_) => Ok(true),
-                Err(_) => Err(Error::Address),
-            };
+        }
+
+        let pt = self.pt2(page);
+        let i = table::idx(2, page);
+        info!("free l2 i={}", i);
+        match pt.cas(i, L2Entry::page(), L2Entry::empty()) {
+            Ok(_) => Ok(true),
+            Err(_) => Err(Error::Address),
         }
     }
 

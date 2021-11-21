@@ -127,26 +127,26 @@ impl LeafAllocator {
 
         wait!();
 
-        match pt2.cas(i2, L2Entry::empty(), L2Entry::page_reserved()) {
-            Ok(_) => {}
+        let i1 = match pt2.update(i2, L2Entry::reserve) {
+            Ok(pte) => pte.i1(),
             Err(pte) => {
                 warn!("CAS: init pt1 {:?}", pte);
                 return Err(Error::CAS);
             }
-        }
+        };
 
         // store pt1 at i=1, so that the allocated page is at i=0
         let pt1 = unsafe { &*((self.begin + (start + 1) * PAGE_SIZE) as *const Table<L1Entry>) };
-        pt1.set(0, L1Entry::page());
-        pt1.set(1, L1Entry::reserved());
-        for i1 in 2..PT_LEN {
+        for i1 in 0..PT_LEN {
             pt1.set(i1, L1Entry::empty());
         }
+        pt1.set((i1 == 0) as usize, L1Entry::page());
+        pt1.set(i1, L1Entry::reserved());
 
         wait!();
 
         match pt2.cas(i2, L2Entry::page_reserved(), L2Entry::table(1, 0, 1, false)) {
-            Ok(_) => Ok((start, true)),
+            Ok(_) => Ok((start + (i1 == 0) as usize, true)),
             Err(pte) => panic!("Corruption l2 i{} {:?}", i2, pte),
         }
     }
@@ -215,12 +215,12 @@ impl LeafAllocator {
 
     /// Free last page & rebuild pt1 in it
     fn free_full(&self, page: usize) -> Result<bool> {
-        // The new pt
         let pt2 = self.pt2(page);
         let i = table::idx(2, page);
 
         wait!();
 
+        // The new pt
         let pt1 = unsafe { &*((self.begin + page * PAGE_SIZE) as *const Table<L1Entry>) };
         info!("free: init last pt1 {}", page);
 
@@ -288,9 +288,9 @@ mod test {
     use log::warn;
 
     use crate::entry::L1Entry;
-    use crate::wait::{DbgWait, DbgWaitKey};
     use crate::table::{Table, PAGE_SIZE, PT_LEN};
     use crate::util::{logging, parallel};
+    use crate::wait::{DbgWait, DbgWaitKey};
 
     use super::LeafAllocator;
 
@@ -557,10 +557,10 @@ mod test {
         let buffer = aligned_buffer(MEM_SIZE);
 
         let orders = [
-            vec![0, 0, 0, 1, 1, 1],       // 0 free then 1 alloc
-            vec![1, 1, 0, 0],             // 1 alloc last then 0 free last
-            vec![0, 1, 1, 1, 1, 0, 0],    // 1 skips table
-            vec![1, 0, 1, 0, 0, 1, 1, 1], // 1 fails cas
+            vec![0, 0, 0, 1, 1, 1, 1],       // 0 free then 1 alloc
+            vec![1, 1, 0, 0],                // 1 alloc last then 0 free last
+            vec![0, 1, 1, 1, 1, 0, 0],       // 1 skips table
+            vec![1, 0, 1, 0, 0, 1, 1, 1, 1], // 1 fails cas
         ];
 
         let mut pages = [0; PT_LEN];

@@ -2,7 +2,7 @@ use core::fmt;
 
 use static_assertions::const_assert;
 
-use crate::table::{LAYERS, PTE_SIZE, PT_LEN, PT_LEN_BITS};
+use crate::table::{self, LAYERS, PTE_SIZE, PT_LEN, PT_LEN_BITS};
 
 const PTE_PAGES_OFF: usize = 0;
 const PTE_PAGES_BITS: usize = (PT_LEN_BITS + 1) * LAYERS;
@@ -67,6 +67,18 @@ impl Entry {
                 self.nonempty() - nonempty,
                 self.is_reserved(),
             ))
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    pub fn reserve(self, small: bool) -> Option<Entry> {
+        // Is reserved or full?
+        if !self.is_reserved()
+            && !self.is_page()
+            && ((small && self.pages() < table::span(2)) || (!small && self.nonempty() < PT_LEN))
+        {
+            Some(Entry::table(self.pages(), self.nonempty(), true))
         } else {
             None
         }
@@ -232,6 +244,19 @@ impl L2Entry {
                 self.i1(),
                 self.is_reserved(),
             ))
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    pub fn reserve(self) -> Option<Self> {
+        if !self.is_huge()
+            && !self.is_page()
+            && !self.is_reserved()
+            && self.pages() == 0
+            && self.usage() == 0
+        {
+            Some(L2Entry::page_reserved())
         } else {
             None
         }
