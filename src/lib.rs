@@ -35,7 +35,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Size {
     /// 4KiB
-    Page = 0,
+    L0 = 0,
     /// 2MiB
     L1 = 1,
     /// 1GiB
@@ -125,11 +125,11 @@ mod test {
 
                     let pages = [DEFAULT; PT_LEN];
                     for page in &pages {
-                        get(Size::Page, page, |v| v, 0).unwrap();
+                        get(Size::L0, page, |v| v, 0).unwrap();
                     }
 
                     for page in &pages {
-                        put(page.load(Ordering::SeqCst), Size::Page).unwrap();
+                        put(page.load(Ordering::SeqCst), Size::L0).unwrap();
                     }
                 })
             })

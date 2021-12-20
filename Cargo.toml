@@ -7,6 +7,7 @@ edition = "2018"
 static_assertions = "1.1"
 log = "0.4"
 libc = "0.2"
+modular-bitfield = "0.11.2"
 
 [dev-dependencies]
 env_logger = "0.9"

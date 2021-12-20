@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use log::{error, info, warn};
 use static_assertions::const_assert;
 
-use crate::entry::{Entry, L2Entry};
+use crate::entry::{Entry3, Entry2};
 use crate::leaf_alloc::LeafAllocator;
 use crate::table::{self, Table, LAYERS, PAGE_SIZE, PT_LEN, PT_LEN_BITS};
 use crate::util::{align_down, align_up};
@@ -21,13 +21,13 @@ pub const MAX_SIZE: usize = table::m_span(LAYERS);
 pub struct Allocator {
     begin: usize,
     pages: usize,
-    volatile: *mut Table<Entry>,
+    volatile: *mut Table<Entry3>,
     meta: *mut Meta,
     small_start: usize,
     large_start: usize,
 }
 
-static VOLATILE: AtomicPtr<Table<Entry>> = AtomicPtr::new(std::ptr::null_mut());
+static VOLATILE: AtomicPtr<Table<Entry3>> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Non-Volatile global metadata
 pub struct Meta {
@@ -57,7 +57,7 @@ impl Allocator {
 
         let meta = unsafe { &mut *((begin + length) as *mut Meta) };
 
-        const INITIALIZING: *mut Table<Entry> = usize::MAX as *mut _;
+        const INITIALIZING: *mut Table<Entry3> = usize::MAX as *mut _;
         loop {
             match VOLATILE.compare_exchange(
                 std::ptr::null_mut(),
@@ -90,7 +90,7 @@ impl Allocator {
         }
     }
 
-    fn new(begin: usize, length: usize, volatile: Option<&mut Table<Entry>>) -> Result<Allocator> {
+    fn new(begin: usize, length: usize, volatile: Option<&mut Table<Entry3>>) -> Result<Allocator> {
         let pages = length / PAGE_SIZE;
         let num_pt2 = (pages + table::span(2) - 1) / table::span(2);
         // Remaining number of pages
@@ -110,7 +110,7 @@ impl Allocator {
                 alloc_zeroed(Layout::from_size_align_unchecked(
                     pts * PAGE_SIZE,
                     PAGE_SIZE,
-                )) as *mut Table<Entry>
+                )) as *mut Table<Entry3>
             }
         };
         if volatile.is_null() {
@@ -125,7 +125,7 @@ impl Allocator {
             large_start: 0,
             meta: (begin + length) as *mut Meta,
         };
-        alloc.small_start = alloc.reserve_pt2(LAYERS, 0, Size::Page)?;
+        alloc.small_start = alloc.reserve_pt2(LAYERS, 0, Size::L0)?;
         alloc.large_start = alloc.reserve_pt2(LAYERS, 0, Size::L1)?;
 
         warn!(
@@ -192,10 +192,10 @@ impl Allocator {
     /// ```text
     /// NVRAM: [ Pages & PT1 | PT2 | Meta ]
     /// ```
-    fn pt2(&self, page: usize) -> &Table<L2Entry> {
+    fn pt2(&self, page: usize) -> &Table<Entry2> {
         let i = page >> (PT_LEN_BITS * 2);
         // Located in NVRAM
-        let pt2 = (self.begin + self.pages * PAGE_SIZE) as *mut Table<L2Entry>;
+        let pt2 = (self.begin + self.pages * PAGE_SIZE) as *mut Table<Entry2>;
         unsafe { &mut *pt2.add(i) }
     }
 
@@ -203,7 +203,7 @@ impl Allocator {
     /// ```text
     /// DRAM: [ PT4 | n*PT3 (| ...) ]
     /// ```
-    fn pt(&self, layer: usize, page: usize) -> &Table<Entry> {
+    fn pt(&self, layer: usize, page: usize) -> &Table<Entry3> {
         assert!((3..=LAYERS).contains(&layer));
 
         let i = page >> (PT_LEN_BITS * layer);
@@ -224,7 +224,7 @@ impl Allocator {
         LeafAllocator::new(self.begin, self.pages)
     }
 
-    fn recover_rec(&self, layer: usize, start: usize) -> (usize, usize) {
+    fn recover_rec(&self, layer: usize, start: usize) -> (usize, Size) {
         let mut pages = 0;
         let mut nonemtpy = 0;
 
@@ -234,16 +234,16 @@ impl Allocator {
             for i in table::range(layer, start..self.pages) {
                 let page = table::page(layer, start, i);
 
-                let (child_pages, child_nonempty) = self.recover_rec(layer - 1, page);
+                let (child_pages, child_size) = self.recover_rec(layer - 1, page);
 
-                if child_nonempty == usize::MAX {
-                    pt.set(i, Entry::page());
+                if child_size == Size::L1 {
+                    pt.set(i, Entry3::new_giant());
                     nonemtpy += 1;
                 } else if child_pages > 0 {
-                    pt.set(i, Entry::table(child_pages, child_nonempty, false));
+                    pt.set(i, Entry3::new_table(child_pages, child_size, false));
                     nonemtpy += 1;
                 } else {
-                    pt.set(i, Entry::empty());
+                    pt.set(i, Entry3::new());
                 }
                 pages += child_pages;
             }
@@ -271,7 +271,7 @@ impl Allocator {
         let result = self.reserve_pt2(LAYERS, 0, size)?;
         warn!("reserved new {} ({:?})", result / table::span(2), size);
         match size {
-            Size::Page => {
+            Size::L0 => {
                 self.unreserve_pt2(self.small_start);
                 self.small_start = result;
             }
@@ -298,7 +298,7 @@ impl Allocator {
             }
 
             if pt
-                .update(i, |v| Entry::reserve(v, size == Size::Page))
+                .update(i, |v| Entry3::reserve(v, size == Size::L0))
                 .is_ok()
             {
                 return Ok(page);
@@ -312,7 +312,7 @@ impl Allocator {
         let pt = self.pt(3, start);
         let i = table::idx(3, start);
         if pt
-            .update(i, |v| Some(Entry::table(v.pages(), v.nonempty(), false)))
+            .update(i, |v| Some(Entry3::new_table(v.pages(), v.size(), false)))
             .is_err()
         {
             panic!("Unreserve failed")
@@ -324,10 +324,10 @@ impl Allocator {
         let pt = self.pt(layer, start);
 
         for i in table::range(layer, start..self.pages) {
-            if pt.cas(i, Entry::empty(), Entry::page()).is_ok() {
+            if pt.cas(i, Entry3::empty(), Entry3::page()).is_ok() {
                 let page = table::page(layer, start, i);
                 warn!("allocated l{} i{} p={} s={}", layer, i, page, start);
-                self.pt2(page).set(0, L2Entry::huge()); // Persist
+                self.pt2(page).set(0, Entry2::huge()); // Persist
                 return Ok((page, true));
             }
         }
@@ -335,13 +335,13 @@ impl Allocator {
     }
 
     fn alloc_l2(&self, size: Size, start: usize) -> Result<(usize, bool)> {
-        return if size == Size::Page {
+        return if size == Size::L0 {
             self.leaf_alloc().alloc(start)
         } else {
             let pt = self.pt2(start);
 
             for i in table::range(2, start..self.pages) {
-                if pt.cas(i, L2Entry::empty(), L2Entry::page()).is_ok() {
+                if pt.cas(i, Entry2::empty(), Entry2::page()).is_ok() {
                     let page = table::page(2, start, i);
                     return Ok((page, true));
                 }
@@ -415,7 +415,7 @@ impl Allocator {
             }
         } else {
             let mut start = match size {
-                Size::Page => self.small_start,
+                Size::L0 => self.small_start,
                 Size::L1 => self.large_start,
                 _ => panic!(),
             };
@@ -481,7 +481,7 @@ impl Allocator {
         let cleared = self.free(layer - 1, size, page)?;
 
         match pt.update(i, |v| v.dec(table::span(size as _), cleared as _)) {
-            Ok(pte) => Ok(pte.pages() == table::span(size as usize)),
+            Ok(pte) => Ok(pte.pages() as usize == table::span(size as usize)),
             Err(pte) => panic!("Corruption: l{} i{} {:?}", layer, i, pte),
         }
     }
@@ -493,10 +493,10 @@ impl Allocator {
         let i = table::idx(layer, page);
 
         info!("free l{} i={}", layer, i);
-        match pt.cas(i, Entry::page(), Entry::empty()) {
+        match pt.cas(i, Entry3::page(), Entry3::new()) {
             Ok(_) => {
                 // Clear persistance
-                self.pt2(page).set(0, L2Entry::empty());
+                self.pt2(page).set(0, Entry2::new());
                 Ok(true)
             }
             Err(pte) => {
@@ -507,14 +507,14 @@ impl Allocator {
     }
 
     fn free_l2(&self, size: Size, page: usize) -> Result<bool> {
-        if size == Size::Page {
+        if size == Size::L0 {
             return self.leaf_alloc().free(page);
         }
 
         let pt = self.pt2(page);
         let i = table::idx(2, page);
         info!("free l2 i={}", i);
-        match pt.cas(i, L2Entry::page(), L2Entry::empty()) {
+        match pt.cas(i, Entry2::page(), Entry2::empty()) {
             Ok(_) => Ok(true),
             Err(_) => Err(Error::Address),
         }
@@ -630,7 +630,7 @@ mod test {
         warn!("start alloc...");
 
         let small = AtomicU64::new(0);
-        alloc.get(Size::Page, &small, |v| v, 0).unwrap();
+        alloc.get(Size::L0, &small, |v| v, 0).unwrap();
 
         let large = AtomicU64::new(0);
         alloc.get(Size::L1, &large, |v| v, 0).unwrap();
@@ -640,13 +640,13 @@ mod test {
 
         // Unexpected value
         let small = AtomicU64::new(5);
-        assert_eq!(alloc.get(Size::Page, &small, |v| v, 0), Err(Error::CAS));
+        assert_eq!(alloc.get(Size::L0, &small, |v| v, 0), Err(Error::CAS));
 
         // Stress test
         let mut pages = Vec::with_capacity(PT_LEN * PT_LEN);
         pages.resize_with(PT_LEN * PT_LEN, AtomicU64::default);
         for page in &pages {
-            alloc.get(Size::Page, page, |v| v, 0).unwrap();
+            alloc.get(Size::L0, page, |v| v, 0).unwrap();
         }
 
         // alloc.dump();
@@ -679,7 +679,7 @@ mod test {
         // Free some
         for page in &pages[10..PT_LEN + 10] {
             let addr = page.swap(0, Ordering::SeqCst);
-            alloc.put(addr, Size::Page).unwrap();
+            alloc.put(addr, Size::L0).unwrap();
         }
 
         alloc.put(large.load(Ordering::SeqCst), Size::L1).unwrap();
@@ -687,7 +687,7 @@ mod test {
 
         // Realloc
         for page in &pages[10..PT_LEN + 10] {
-            alloc.get(Size::Page, page, |v| v, 0).unwrap();
+            alloc.get(Size::L0, page, |v| v, 0).unwrap();
         }
 
         warn!("free...");
@@ -695,7 +695,7 @@ mod test {
         // Free all
         for page in &pages {
             let addr = page.swap(0, Ordering::SeqCst);
-            alloc.put(addr, Size::Page).unwrap();
+            alloc.put(addr, Size::L0).unwrap();
         }
     }
 
@@ -731,7 +731,7 @@ mod test {
                 let dst = unsafe {
                     &*(pages_begin as *const AtomicU64).add(t as usize * ALLOC_PER_THREAD + i)
                 };
-                alloc.get(Size::Page, dst, |v| v, 0).unwrap();
+                alloc.get(Size::L0, dst, |v| v, 0).unwrap();
             }
         });
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
@@ -824,11 +824,11 @@ mod test {
             };
 
             for page in pages.iter_mut() {
-                alloc.get(Size::Page, page, |v| v, 0).unwrap();
+                alloc.get(Size::L0, page, |v| v, 0).unwrap();
             }
 
             for page in pages {
-                alloc.put(page.load(Ordering::SeqCst), Size::Page).unwrap();
+                alloc.put(page.load(Ordering::SeqCst), Size::L0).unwrap();
             }
         });
 
@@ -854,7 +854,7 @@ mod test {
         let mut pages = Vec::with_capacity(ALLOC_PER_THREAD);
         pages.resize_with(ALLOC_PER_THREAD, AtomicU64::default);
         for page in pages.iter() {
-            alloc.get(Size::Page, page, |v| v, 0).unwrap();
+            alloc.get(Size::L0, page, |v| v, 0).unwrap();
         }
 
         let handle = {
@@ -867,7 +867,7 @@ mod test {
                 // Free on another thread
                 for page in pages.iter() {
                     let addr = page.load(Ordering::SeqCst);
-                    alloc.put(addr, Size::Page).unwrap();
+                    alloc.put(addr, Size::L0).unwrap();
                 }
             })
         };
@@ -879,7 +879,7 @@ mod test {
 
         // Simultaneously alloc on first thread
         for page in pages.iter() {
-            alloc.get(Size::Page, page, |v| v, 0).unwrap();
+            alloc.get(Size::L0, page, |v| v, 0).unwrap();
         }
 
         handle.join().unwrap();
@@ -900,7 +900,7 @@ mod test {
 
             for _ in 0..PT_LEN + 2 {
                 let small = AtomicU64::new(0);
-                alloc.get(Size::Page, &small, |v| v, 0).unwrap();
+                alloc.get(Size::L0, &small, |v| v, 0).unwrap();
                 let large = AtomicU64::new(0);
                 alloc.get(Size::L1, &large, |v| v, 0).unwrap();
             }
