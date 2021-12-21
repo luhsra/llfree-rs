@@ -2,7 +2,7 @@ use core::fmt;
 use std::sync::atomic::AtomicU64;
 use std::{convert::TryInto, mem::size_of};
 
-use modular_bitfield::{bitfield, prelude::*};
+use bitfield_struct::bitfield;
 use static_assertions::{const_assert, const_assert_eq};
 
 use crate::table::span;
@@ -11,9 +11,9 @@ use crate::{
     Size,
 };
 
-#[bitfield(bits = 64)]
+#[bitfield(u64)]
 pub struct Entry {
-    pub pages: B64,
+    pub pages: u64,
 }
 
 impl Entry {
@@ -42,70 +42,44 @@ impl fmt::Debug for Entry {
     }
 }
 
-#[derive(BitfieldSpecifier, PartialEq, Eq, Debug)]
-#[bits = 2]
-pub enum ESize {
-    None = 0,
-    L0 = 1,
-    L1 = 2,
-    L2 = 3,
-}
-
-impl From<Size> for ESize {
-    fn from(s: Size) -> Self {
-        match s {
-            Size::L0 => Self::L0,
-            Size::L1 => Self::L1,
-            Size::L2 => Self::L2,
-        }
-    }
-}
-
-impl TryInto<Size> for ESize {
-    type Error = ();
-    fn try_into(self) -> Result<Size, Self::Error> {
-        match self {
-            ESize::None => Err(()),
-            ESize::L0 => Ok(Size::L0),
-            ESize::L1 => Ok(Size::L1),
-            ESize::L2 => Ok(Size::L2),
-        }
-    }
-}
-
-impl PartialEq<Size> for ESize {
-    fn eq(&self, other: &Size) -> bool {
-        Self::from(*other) == *self
-    }
-}
-
-#[bitfield(bits = 64)]
+#[bitfield(u64)]
 pub struct Entry3 {
-    pub pages: B44,
-    pub size: ESize,
-    pub usage: B18,
+    #[bits(44)]
+    pub pages: usize,
+    #[bits(2)]
+    pub size_n: usize,
+    #[bits(18)]
+    pub usage: usize,
 }
 
 impl Entry3 {
     #[inline(always)]
     pub fn new_giant() -> Entry3 {
-        Entry3::new().with_size(ESize::L2)
+        Entry3::new().with_size_n(3)
     }
     #[inline(always)]
     pub fn new_table(pages: usize, size: Size, usage: usize) -> Entry3 {
         Entry3::new()
-            .with_pages(pages as _)
-            .with_size(size.into())
-            .with_usage(usage as _)
+            .with_pages(pages)
+            .with_size_n(size as usize + 1)
+            .with_usage(usage)
     }
+    pub fn size(self) -> Option<Size> {
+        let s = self.size_n();
+        match s {
+            _ => None,
+            1..3 => Some(unsafe { std::mem::transmute(s - 1) }),
+        }
+    }
+
     #[inline(always)]
     pub fn inc(self, size: Size, max: usize) -> Option<Entry3> {
-        if self.size() == ESize::L2 || (self.pages() != 0 && self.size() != ESize::from(size)) {
+        if self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size)) {
             return None;
         }
 
-        let pages = self.pages() + span(size as usize) as u64;
-        if pages < span(2) as u64 && pages < max as u64 {
+        let pages = self.pages() + span(size as usize);
+        if pages < span(2) && pages < max {
             Some(self.with_pages(pages))
         } else {
             None
@@ -113,19 +87,19 @@ impl Entry3 {
     }
     #[inline(always)]
     pub fn dec(self, size: Size) -> Option<Entry3> {
-        if self.size() == ESize::L2 || (self.pages() != 0 && self.size() != ESize::from(size)) {
+        if self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size)) {
             return None;
         }
 
-        if self.pages() >= span(size as usize) as u64 {
-            Some(self.with_pages(self.pages() - span(size as usize) as u64))
+        if self.pages() >= span(size as usize) {
+            Some(self.with_pages(self.pages() - span(size as usize)))
         } else {
             None
         }
     }
     #[inline(always)]
     pub fn inc_usage(self, size: Size, max: usize) -> Option<Entry3> {
-        if self.size() == ESize::L2 || (self.pages() != 0 && self.size() != ESize::from(size)) {
+        if self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size)) {
             return None;
         }
 
@@ -137,23 +111,11 @@ impl Entry3 {
     }
     #[inline(always)]
     pub fn dec_usage(self) -> Option<Entry3> {
-        if self.size() != ESize::L2 && self.usage() > 0 {
+        if self.size_n() != 3 && self.usage() > 0 {
             Some(self.with_usage(self.usage() - 1))
         } else {
             None
         }
-    }
-}
-
-impl From<u64> for Entry3 {
-    fn from(v: u64) -> Self {
-        Self::from_bytes(v.to_le_bytes())
-    }
-}
-
-impl Into<u64> for Entry3 {
-    fn into(self) -> u64 {
-        u64::from_le_bytes(self.into_bytes())
     }
 }
 
@@ -167,26 +129,26 @@ impl fmt::Debug for Entry3 {
     }
 }
 
-#[bitfield(bits = 64, filled = false)]
+#[bitfield(u64)]
 pub struct Entry2 {
-    pub pages: B10,
-    pub i1: B9,
+    #[bits(10)]
+    pub pages: usize,
+    #[bits(9)]
+    pub i1: usize,
     pub page: bool,
     pub giant: bool,
+    #[bits(43)]
+    _p: u64,
 }
 
 impl Entry2 {
     #[inline(always)]
     pub fn new_table(pages: usize, i1: usize) -> Self {
-        Self::new().with_pages(pages as _).with_i1(i1 as _)
+        Self::new().with_pages(pages).with_i1(i1)
     }
     #[inline(always)]
     pub fn inc(self, i1: usize) -> Option<Self> {
-        if !self.page()
-            && !self.giant()
-            && self.i1() as usize == i1
-            && (self.pages() as usize) < PT_LEN
-        {
+        if !self.page() && !self.giant() && self.i1() == i1 && self.pages() < PT_LEN {
             Some(self.with_pages(pages + 1))
         } else {
             None
@@ -196,9 +158,9 @@ impl Entry2 {
     pub fn dec(self, i1: usize) -> Option<Self> {
         if !self.giant()
             && !self.page()
-            && i1 == self.i1() as usize
+            && i1 == self.i1()
             && self.pages() > 0
-            && (self.pages() as usize) < PT_LEN
+            && self.pages() < PT_LEN
         {
             Some(self.with_pages(self.pages() - 1))
         } else {
@@ -208,18 +170,6 @@ impl Entry2 {
     #[inline(always)]
     pub fn is_empty(self) -> bool {
         !self.giant() && !self.page() && self.pages() == 0
-    }
-}
-
-impl From<u64> for Entry2 {
-    fn from(v: u64) -> Self {
-        Self::from_bytes(v.to_le_bytes()).unwrap()
-    }
-}
-
-impl Into<u64> for Entry2 {
-    fn into(self) -> u64 {
-        u64::from_le_bytes(self.into_bytes())
     }
 }
 
