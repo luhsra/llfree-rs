@@ -8,7 +8,11 @@ static_assertions = "1.1"
 log = "0.4"
 libc = "0.2"
 bitfield-struct = "0.1.0"
+num_cpus = "1.13"
+raw-cpuid = { version = "10.2", optional = true }
 
 [dev-dependencies]
 env_logger = "0.9"
-raw-cpuid = "10.2"
+
+[features]
+x86 = ["raw-cpuid"]

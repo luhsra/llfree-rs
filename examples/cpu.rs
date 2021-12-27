@@ -1,6 +1,6 @@
-use raw_cpuid::CpuId;
-
+#[cfg(feature = "x86")]
 fn main() {
+    use raw_cpuid::CpuId;
     let cpuid = CpuId::new();
     if let Some(info) = cpuid.get_vendor_info() {
         println!("Vendor: {}", info)
@@ -12,4 +12,8 @@ fn main() {
         println!("avx2:     {}", info.has_avx2());
         println!("avx512f:  {}", info.has_avx512f());
     }
+}
+
+fn main() {
+    panic!("unsupported")
 }

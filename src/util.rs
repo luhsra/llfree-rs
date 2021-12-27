@@ -8,7 +8,11 @@ pub const fn align_down(v: usize, align: usize) -> usize {
 
 #[cfg(test)]
 pub fn logging() {
-    use std::{io::Write, thread::ThreadId};
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+    use std::thread::ThreadId;
+
+    use crate::cpu::PINNED;
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format(|buf, record| {
             writeln!(
@@ -23,7 +27,7 @@ pub fn logging() {
                 },
                 record.level(),
                 unsafe { std::mem::transmute::<ThreadId, u64>(std::thread::current().id()) },
-                unsafe { libc::sched_getcpu() },
+                PINNED.with(|p| p.load(Ordering::SeqCst)),
                 record.file().unwrap_or_default(),
                 record.line().unwrap_or_default(),
                 record.args()
@@ -33,7 +37,7 @@ pub fn logging() {
 }
 
 #[cfg(test)]
-pub fn parallel<F: FnOnce(u8) + Clone + Send + 'static>(n: u8, f: F) {
+pub fn parallel<F: FnOnce(usize) + Clone + Send + 'static>(n: usize, f: F) {
     let handles = (0..n)
         .into_iter()
         .map(|t| {
@@ -46,6 +50,7 @@ pub fn parallel<F: FnOnce(u8) + Clone + Send + 'static>(n: u8, f: F) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub unsafe fn _mm_clwb(addr: *const ()) {
     asm!("clwb [rax]", in("rax") addr);
@@ -54,6 +59,7 @@ pub unsafe fn _mm_clwb(addr: *const ()) {
 #[cfg(test)]
 mod test {
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn clwb() {
         let mut data = Box::new(43_u64);
         *data = 44;

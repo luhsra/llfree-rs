@@ -103,8 +103,8 @@ mod test {
 
     use log::trace;
 
-    use crate::wait::{wait, DbgWait, DbgWaitKey};
     use crate::util::logging;
+    use crate::wait::{wait, DbgWait, DbgWaitKey};
 
     #[test]
     fn sync() {

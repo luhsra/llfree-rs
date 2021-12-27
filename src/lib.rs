@@ -1,20 +1,20 @@
-#![feature(asm)]
 //! Simple reduced alloc example.
 
-use std::{cell::RefCell, sync::atomic::AtomicU64};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod alloc;
 mod cpu;
-pub mod mmap;
+mod entry;
 mod leaf_alloc;
+pub mod mmap;
 mod table;
 mod util;
-mod entry;
 
 #[cfg(test)]
 mod wait;
 
-use alloc::Allocator;
+use alloc::alloc;
+use table::PAGE_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -42,68 +42,54 @@ pub enum Size {
     L2 = 2,
 }
 
-thread_local! {
-    static ALLOC: RefCell<Option<Allocator>> = RefCell::new(None);
+pub fn init(cores: usize, addr: *mut (), size: usize) -> Result<()> {
+    alloc().init(cores, addr as usize, size)
 }
 
-pub fn init(addr: *mut (), size: usize) -> Result<()> {
-    ALLOC.with(|a| {
-        *a.borrow_mut() = Some(Allocator::init(addr as usize, size)?);
-        Ok(())
-    })?;
-
-    Ok(())
+pub fn uninit() {
+    alloc().uninit();
 }
 
 pub fn get<F: FnOnce(u64) -> u64>(
+    core: usize,
     size: Size,
     dst: &AtomicU64,
     translate: F,
     expected: u64,
 ) -> Result<()> {
-    ALLOC.with(|a| {
-        let mut a = a.borrow_mut();
-
-        if let Some(a) = a.as_mut() {
-            a.get(size, dst, translate, expected)
-        } else {
-            Err(Error::Uninitialized)
-        }
-    })?;
-
-    Ok(())
+    let page = alloc().get(core, size)?;
+    let new = translate((page * PAGE_SIZE) as u64);
+    match dst.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(Error::CAS),
+    }
 }
 
-pub fn put(addr: u64, size: Size) -> Result<()> {
-    ALLOC.with(|a| {
-        let mut a = a.borrow_mut();
+pub fn put(core: usize, addr: u64) -> Result<()> {
+    if addr % PAGE_SIZE as u64 != 0 {
+        return Err(Error::Address);
+    }
+    let page = addr as usize / PAGE_SIZE;
 
-        if let Some(a) = a.as_mut() {
-            a.put(addr, size)
-        } else {
-            Err(Error::Uninitialized)
-        }
-    })?;
-
-    Ok(())
+    alloc().put(core, page).map(|_| ())
 }
 
 #[cfg(test)]
 mod test {
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::thread;
-    use std::time::Duration;
 
     use log::info;
 
     use crate::mmap::MMap;
     use crate::table::PT_LEN;
-    use crate::util::logging;
-    use crate::{Size, get, init, put};
+    use crate::util::{logging, parallel};
+    use crate::{get, init, put, Size};
 
     #[test]
     fn threading() {
         logging();
+
+        const THREADS: usize = 8;
 
         let mapping = MMap::anon(0x1000_0000_0000_u64 as _, 20 << 30).unwrap();
 
@@ -116,30 +102,18 @@ mod test {
 
         info!("init finished");
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
+        init(THREADS, addr as _, size).unwrap();
 
-        let threads = (0..10)
-            .into_iter()
-            .map(|_| {
-                thread::spawn(move || {
-                    init(addr as _, size).unwrap();
+        parallel(THREADS, |t| {
+            let pages = [DEFAULT; PT_LEN];
+            for page in &pages {
+                get(t, Size::L0, page, |v| v, 0).unwrap();
+            }
 
-                    let pages = [DEFAULT; PT_LEN];
-                    for page in &pages {
-                        get(Size::L0, page, |v| v, 0).unwrap();
-                    }
-
-                    for page in &pages {
-                        put(page.load(Ordering::SeqCst), Size::L0).unwrap();
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-
-        thread::sleep(Duration::from_secs(1));
-
-        for t in threads {
-            t.join().unwrap();
-        }
+            for page in &pages {
+                put(t, page.load(Ordering::SeqCst)).unwrap();
+            }
+        });
 
         info!("Finish");
     }

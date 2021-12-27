@@ -1,33 +1,27 @@
 use core::fmt;
-use std::sync::atomic::AtomicU64;
-use std::{convert::TryInto, mem::size_of};
 
 use bitfield_struct::bitfield;
-use static_assertions::{const_assert, const_assert_eq};
 
 use crate::table::span;
-use crate::{
-    table::{self, LAYERS, PTE_SIZE, PT_LEN, PT_LEN_BITS},
-    Size,
-};
+use crate::{table::PT_LEN, Size};
 
 #[bitfield(u64)]
 pub struct Entry {
-    pub pages: u64,
+    pub pages: usize,
 }
 
 impl Entry {
     pub fn inc(self, size: Size, layer: usize, max: usize) -> Option<Self> {
-        let pages = self.pages() + span(size as _) as u64;
-        if pages <= span(layer) as u64 && pages <= max as u64 {
+        let pages = self.pages() + span(size as _);
+        if pages <= span(layer) && pages <= max {
             Some(Entry::new().with_pages(pages))
         } else {
             None
         }
     }
     pub fn dec(self, size: Size) -> Option<Self> {
-        if self.pages() >= span(size as _) as u64 {
-            Some(Entry::new().with_pages(self.pages() - span(size as _) as u64))
+        if self.pages() >= span(size as _) {
+            Some(Entry::new().with_pages(self.pages() - span(size as _)))
         } else {
             None
         }
@@ -47,7 +41,7 @@ pub struct Entry3 {
     #[bits(44)]
     pub pages: usize,
     #[bits(2)]
-    pub size_n: usize,
+    pub size_n: u8,
     #[bits(18)]
     pub usage: usize,
 }
@@ -61,14 +55,14 @@ impl Entry3 {
     pub fn new_table(pages: usize, size: Size, usage: usize) -> Entry3 {
         Entry3::new()
             .with_pages(pages)
-            .with_size_n(size as usize + 1)
+            .with_size_n(size as u8 + 1)
             .with_usage(usage)
     }
     pub fn size(self) -> Option<Size> {
         let s = self.size_n();
         match s {
+            1..=3 => Some(unsafe { std::mem::transmute(s - 1) }),
             _ => None,
-            1..3 => Some(unsafe { std::mem::transmute(s - 1) }),
         }
     }
 
@@ -149,7 +143,7 @@ impl Entry2 {
     #[inline(always)]
     pub fn inc(self, i1: usize) -> Option<Self> {
         if !self.page() && !self.giant() && self.i1() == i1 && self.pages() < PT_LEN {
-            Some(self.with_pages(pages + 1))
+            Some(self.with_pages(self.pages() + 1))
         } else {
             None
         }
@@ -167,10 +161,6 @@ impl Entry2 {
             None
         }
     }
-    #[inline(always)]
-    pub fn is_empty(self) -> bool {
-        !self.giant() && !self.page() && self.pages() == 0
-    }
 }
 
 impl fmt::Debug for Entry2 {
@@ -187,7 +177,7 @@ impl fmt::Debug for Entry2 {
 /// Level 1 page table entry
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u64)]
-enum Entry1 {
+pub enum Entry1 {
     Empty = 0,
     Page = 1,
     Reserved = 2,

@@ -55,6 +55,10 @@ pub const fn page(layer: usize, start: usize, i: usize) -> usize {
     round(layer, start) + i * span(layer - 1)
 }
 
+pub const fn num_pts(layer: usize, pages: usize) -> usize {
+    (pages + span(layer) - 1) / span(layer)
+}
+
 /// Computes the index range for the given page range
 #[inline(always)]
 pub fn range(layer: usize, pages: Range<usize>) -> Range<usize> {
@@ -69,7 +73,6 @@ pub fn range(layer: usize, pages: Range<usize>) -> Range<usize> {
 }
 
 impl<T: Sized + From<u64> + Into<u64>> Table<T> {
-    #[cfg(test)]
     pub fn empty() -> Self {
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
         Self {
@@ -110,6 +113,21 @@ impl<T: Sized + From<u64> + Into<u64>> Table<T> {
         }) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
+        }
+    }
+}
+
+
+impl<T: Sized + From<u64> + Into<u64>> Clone for Table<T> {
+    fn clone(&self) -> Self {
+        const DEFAULT: AtomicU64 = AtomicU64::new(0);
+        let entries = [DEFAULT; PT_LEN];
+        for i in 0..PT_LEN {
+            entries[i].store(self.entries[i].load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+        Self {
+            entries,
+            phantom: self.phantom.clone(),
         }
     }
 }

@@ -1,9 +1,12 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use log::{error, info, warn};
 
+use crate::alloc::alloc;
 use crate::entry::{Entry1, Entry2};
 use crate::table::{self, Table, LAYERS, PAGE_SIZE, PT_LEN, PT_LEN_BITS};
 
-use crate::{Error, Result};
+use crate::{Error, Result, Size};
 
 #[cfg(test)]
 macro_rules! wait {
@@ -20,26 +23,55 @@ macro_rules! wait {
 }
 
 /// Layer 2 page allocator.
+#[repr(align(64))]
 pub struct LeafAllocator {
-    begin: usize,
-    pages: usize,
+    pub begin: usize,
+    pub pages: usize,
+    alloc_pt1: AtomicUsize,
+    pub small_start: usize,
+    pub huge_start: usize,
+}
+
+impl Clone for LeafAllocator {
+    fn clone(&self) -> Self {
+        Self {
+            begin: self.begin,
+            pages: self.pages,
+            alloc_pt1: AtomicUsize::new(0),
+            small_start: self.small_start,
+            huge_start: self.huge_start,
+        }
+    }
 }
 
 impl LeafAllocator {
-    pub fn new(begin: usize, pages: usize) -> Self {
-        Self { begin, pages }
+    pub const fn new(begin: usize, pages: usize) -> Self {
+        Self {
+            begin,
+            pages,
+            alloc_pt1: AtomicUsize::new(0),
+            small_start: 0,
+            huge_start: 0,
+        }
+    }
+
+    pub fn clear(&self) {
+        // Init pt2
+        for i in 0..table::num_pts(2, self.pages) {
+            let pt2 = self.pt2(i * table::span(2));
+            pt2.clear();
+        }
+        // Init pt1
+        for i in 0..table::num_pts(1, self.pages) {
+            let pt1 = unsafe { &*((self.begin + i * table::m_span(1)) as *const Table<Entry1>) };
+            pt1.clear();
+        }
     }
 
     /// Returns the l1 page table that contains the `page`.
-    fn pt1(&self, pte2: Entry2, page: usize) -> Option<&Table<Entry1>> {
-        if pte2.has_i1() {
-            let start = page & !(PT_LEN - 1);
-            Some(unsafe {
-                &*((self.begin + (start + pte2.i1()) * PAGE_SIZE) as *const Table<Entry1>)
-            })
-        } else {
-            None
-        }
+    fn pt1(&self, pte2: Entry2, page: usize) -> &Table<Entry1> {
+        let page = table::page(1, page, pte2.i1());
+        unsafe { &*((self.begin + page * PAGE_SIZE) as *const Table<Entry1>) }
     }
 
     /// Returns the l2 page table that contains the `page`.
@@ -48,201 +80,269 @@ impl LeafAllocator {
     /// ```
     fn pt2(&self, page: usize) -> &Table<Entry2> {
         let i = page >> (PT_LEN_BITS * 2);
-        // The l2 tables are stored after this area
-        let pt2 = (self.begin + (self.pages + i) * PAGE_SIZE) as *mut Table<Entry2>;
-        unsafe { &mut *pt2 }
+        unsafe { &*((self.begin + (self.pages + i) * PAGE_SIZE) as *mut Table<Entry2>) }
+    }
+
+    pub fn recover(&self, start: usize, deep: bool) -> (usize, Size) {
+        let mut pages = 0;
+        let mut size = Size::L0;
+
+        let pt = self.pt2(start);
+        for i in table::range(2, start..self.pages) {
+            let pte = pt.get(i);
+            if pte.giant() {
+                return (table::span(2), Size::L2);
+            } else if pte.page() {
+                size = Size::L1;
+                pages += table::span(1);
+            } else if deep {
+                let p = self.recover_l1(table::page(1, start, i), pte);
+                if pte.pages() != p {
+                    warn!(
+                        "Invalid PTE2 start=0x{:x} i{}: {} != %{}",
+                        start,
+                        i,
+                        pte.pages(),
+                        p
+                    );
+                    pt.set(i, pte.with_pages(p));
+                }
+                pages += p;
+            } else {
+                pages += pte.pages();
+            }
+        }
+
+        (pages, size)
+    }
+
+    fn recover_l1(&self, start: usize, pte2: Entry2) -> usize {
+        let pt = self.pt1(pte2, start);
+        let mut pages = 0;
+        for i in table::range(1, start..self.pages) {
+            if pt.get(i) == Entry1::Page {
+                pages += 1;
+            }
+        }
+        return pages;
     }
 
     /// Allocate a single page
-    pub fn alloc(&self, start: usize) -> Result<(usize, bool)> {
+    pub fn get(&self, start: usize) -> usize {
         let pt2 = self.pt2(start);
 
-        for i2 in table::range(2, start..self.pages) {
-            let start = table::page(2, start, i2);
-
-            wait!();
-
-            let pte2 = pt2.get(i2);
-            info!("i={} pte2={:?}", i2, pte2);
-
-            if pte2.pages() as usize >= PT_LEN {
-                continue;
-            }
-
-            if pte2.pages() == 0 {
-                return if pte2.is_reserved() {
-                    Err(Error::CAS)
-                } else {
-                    self.alloc_first(start)
-                };
-            }
-
-            if pte2.pages() as usize == PT_LEN - 1 {
-                if pte2.usage() > 0 {
-                    continue; // Skip if free is in progress
-                }
-                return self.alloc_last(pte2, start);
-            }
-            match self.alloc_pt(pte2, start) {
-                Err(Error::Memory) => {} // table full before inc
-                r => return r,
-            }
-        }
-        Err(Error::Memory)
-    }
-
-    /// Search free page table entry.
-    fn alloc_pt(&self, pte2: Entry2, start: usize) -> Result<(usize, bool)> {
-        let pt2 = self.pt2(start);
-        let pt1 = self.pt1(pte2, start).ok_or(Error::Memory)?;
-
-        for i in table::range(1, start..self.pages) {
-            let page = table::page(1, start, i);
-
-            wait!();
-
-            if pt1.cas(i, Entry1::empty(), Entry1::page()).is_ok() {
-                info!("alloc l1 i={}: {}", i, page);
-
-                let i2 = table::idx(2, page);
+        loop {
+            for i2 in table::range(2, start..self.pages) {
+                let newstart = table::page(2, start, i2);
 
                 wait!();
 
-                return match pt2.update(i2, |pte| pte.inc(pte2.i1() as _)) {
-                    Ok(pte) => Ok((page, pte.pages() == 0)),
-                    Err(pte) => panic!("Corruption l2 i{} {:?}", i2, pte),
-                };
+                let pte2 = pt2.get(i2);
+
+                if pte2.page() || pte2.pages() as usize >= PT_LEN {
+                    continue;
+                }
+
+                self.alloc_pt1
+                    .store(!table::page(1, start, pte2.i1()), Ordering::SeqCst);
+
+                wait!();
+
+                if let Err(_) = pt2.update(i2, |pte| pte.inc(pte2.i1())) {
+                    self.alloc_pt1.store(0, Ordering::SeqCst);
+                    continue;
+                }
+
+                if pte2.pages() == PT_LEN - 1 {
+                    return self.get_last(pte2, newstart);
+                }
+                return self.get_table(pte2, newstart);
             }
         }
-        Err(Error::Memory)
     }
 
-    /// Split and alloc new page table.
-    fn alloc_first(&self, start: usize) -> Result<(usize, bool)> {
-        info!("alloc init pt1 s={}", start);
-        assert!(start % PT_LEN == 0);
+    /// Search free page table entry.
+    fn get_table(&self, pte2: Entry2, start: usize) -> usize {
+        let pt1 = self.pt1(pte2, start);
 
-        let pt2 = self.pt2(start);
-        let i2 = table::idx(2, start);
+        loop {
+            for i in table::range(1, start..self.pages) {
+                if i == pte2.i1() {
+                    continue;
+                }
 
-        wait!();
+                if pt1.get(i) != Entry1::Empty {
+                    continue;
+                }
 
-        let i1 = match pt2.update(i2, Entry2::reserve) {
-            Ok(pte) => pte.i1(),
-            Err(pte) => {
-                warn!("CAS: init pt1 {:?}", pte);
-                return Err(Error::CAS);
+                wait!();
+
+                if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
+                    let page = table::page(1, start, i);
+                    info!("alloc l1 i={}: {}", i, page);
+
+                    self.alloc_pt1.store(0, Ordering::SeqCst);
+                    return page;
+                }
             }
-        };
 
-        // store pt1 at i=1, so that the allocated page is at i=0
-        let pt1 = unsafe { &*((self.begin + (start + 1) * PAGE_SIZE) as *const Table<Entry1>) };
-        for i1 in 0..PT_LEN {
-            pt1.set(i1, Entry1::empty());
-        }
-        pt1.set((i1 == 0) as usize, Entry1::page());
-        pt1.set(i1, Entry1::reserved());
-
-        wait!();
-
-        match pt2.cas(i2, Entry2::page_reserved(), Entry2::new_table(1, 1)) {
-            Ok(_) => Ok((start + (i1 == 0) as usize, true)),
-            Err(pte) => panic!("Corruption l2 i{} {:?}", i2, pte),
+            warn!("nothing found retry...");
+            wait!();
         }
     }
 
     /// Allocate the last page (the pt1 is reused as last page).
-    fn alloc_last(&self, pte2: Entry2, start: usize) -> Result<(usize, bool)> {
-        let pt2 = self.pt2(start);
-        let i2 = table::idx(2, start);
-
-        assert!(pte2.pages() as usize == PT_LEN - 1);
-
+    fn get_last(&self, pte2: Entry2, start: usize) -> usize {
         wait!();
         info!("alloc last {} s={}", pte2.i1(), start);
 
-        // Only modify pt2 as pt1 is returned as page.
-        match pt2.cas(i2, pte2, Entry2::new_table(PT_LEN, 0)) {
-            Ok(_) => Ok((start + pte2.i1() as usize, false)),
-            Err(pte) => {
-                warn!("CAS: alloc last pt2 {:?}", pte);
-                Err(Error::CAS)
+        let pt1 = self.pt1(pte2, start);
+        let i1 = pte2.i1();
+        let alloc_p1 = !table::page(1, start, i1);
+
+        // Wait for others to finish
+        for (i, leaf) in alloc().local.iter().enumerate() {
+            if leaf as *const _ != self as *const _ {
+                while leaf.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
+                    warn!("Waiting for cpu {} on {}", i, unsafe {
+                        (self as *const Self).offset_from(&alloc().local[0] as *const _)
+                    });
+                    wait!();
+                }
+            }
+        }
+
+        if pt1.cas(i1, Entry1::Empty, Entry1::Page).is_err() {
+            panic!("Corruption l1 i{}", i1);
+        }
+
+        self.alloc_pt1.store(0, Ordering::SeqCst);
+        start + pte2.i1()
+    }
+
+    pub fn get_huge(&self, start: usize) -> usize {
+        let pt = self.pt2(start);
+        loop {
+            for i in table::range(2, start..self.pages) {
+                if pt
+                    .cas(i, Entry2::new(), Entry2::new().with_page(true))
+                    .is_ok()
+                {
+                    info!("alloc l2 i={}: {}", i, table::page(2, start, i));
+                    return table::page(2, start, i);
+                }
             }
         }
     }
 
     /// Free single page
-    pub fn free(&self, page: usize) -> Result<bool> {
-        info!("free leaf page {}", page);
-
+    pub fn put(&self, page: usize) -> Result<Size> {
         let pt2 = self.pt2(page);
         let i2 = table::idx(2, page);
 
         wait!();
 
-        match pt2.update(i2, Entry2::inc_usage) {
-            Ok(pte2) => {
-                let pt1 = self.pt1(pte2, page).unwrap();
-                let i1 = table::idx(1, page);
+        let old = pt2.get(i2);
 
-                wait!();
-
-                match pt1.cas(i1, Entry1::page(), Entry1::empty()) {
-                    Ok(_) => {
-                        wait!();
-                        info!("free dec i={} {:?}", i2, pte2);
-
-                        // i1 is expected to be unchanged.
-                        // If not the page table has been moved in between, which should not be possible!
-                        match pt2.update(i2, |v| v.dec_all(pte2.i1())) {
-                            Ok(pte) => Ok(pte.pages() == 1),
-                            Err(pte) => panic!("Corruption: l2 i{} {:?}", i2, pte),
-                        }
-                    }
-                    Err(_) => {
-                        error!("free invalid {}", page);
-                        pt2.update(i2, Entry2::dec_usage).unwrap();
-                        Err(Error::Address)
-                    }
-                }
+        if old.page() {
+            // Free huge page
+            if page % table::span(Size::L1 as _) != 0 {
+                error!("Invalid address {}", page);
+                return Err(Error::Address);
             }
-            // Free last page of pt1 & rebuild pt1
-            Err(pte2) if pte2.pages() as usize == PT_LEN => self.free_full(page),
-            // Large / huge page
-            Err(_) => Err(Error::Address),
+
+            let pt1 = unsafe { &*((self.begin + page * PAGE_SIZE) as *const Table<Entry1>) };
+            pt1.clear();
+
+            match pt2.cas(i2, old, Entry2::new()) {
+                Ok(_) => Ok(Size::L1),
+                Err(_) => panic!("Corruption l2 i{}", i2),
+            }
+        } else if !old.giant() && old.pages() > 0 {
+            self.put_small(old, page).map(|_| Size::L0)
+        } else {
+            Err(Error::Address)
         }
     }
 
-    /// Free last page & rebuild pt1 in it
-    fn free_full(&self, page: usize) -> Result<bool> {
+    fn put_small(&self, pte2: Entry2, page: usize) -> Result<()> {
+        info!("free leaf page {}", page);
         let pt2 = self.pt2(page);
-        let i = table::idx(2, page);
+        let i2 = table::idx(2, page);
+
+        if pte2.pages() == PT_LEN {
+            return self.put_full(page);
+        }
+
+        let pt1 = self.pt1(pte2, page);
+        let i1 = table::idx(1, page);
+        let pte1 = pt1.get(i1);
+
+        if pte1 != Entry1::Page {
+            error!("Invalid Addr l1 i{} p={}", i1, page);
+            return Err(Error::Address);
+        }
 
         wait!();
 
-        // The new pt
+        if let Err(pte2) = pt2.update(i2, |pte| pte.dec(pte2.i1())) {
+            return if pte2.pages() == 0 {
+                error!("Invalid Addr l1 i{} p={}", i1, page);
+                Err(Error::Address)
+            } else {
+                Err(Error::CAS)
+            };
+        }
+
+        if pt1.cas(i1, Entry1::Page, Entry1::Empty).is_err() {
+            panic!("Corruption l1 i{}", i1);
+        }
+
+        Ok(())
+    }
+
+    /// Free last page & rebuild pt1 in it
+    fn put_full(&self, page: usize) -> Result<()> {
+        let pt2 = self.pt2(page);
+        let i2 = table::idx(2, page);
+
+        wait!();
+
+        // The freed page becomes the new pt
         let pt1 = unsafe { &*((self.begin + page * PAGE_SIZE) as *const Table<Entry1>) };
         info!("free: init last pt1 {}", page);
 
         for j in 0..PT_LEN {
             if j == page % PT_LEN {
-                pt1.set(j, Entry1::reserved());
+                pt1.set(j, Entry1::Reserved);
             } else {
-                pt1.set(j, Entry1::page());
+                pt1.set(j, Entry1::Page);
             }
         }
 
         match pt2.cas(
-            i,
+            i2,
             Entry2::new_table(PT_LEN, 0),
             Entry2::new_table(PT_LEN - 1, page % PT_LEN),
         ) {
-            Ok(_) => Ok(false),
+            Ok(_) => Ok(()),
             Err(pte) => {
                 warn!("CAS: create pt1 {:?}", pte);
                 Err(Error::CAS)
             }
         }
+    }
+
+    pub fn clear_giant(&self, page: usize) {
+        for j in table::range(2, page..self.pages) {
+            // i1 is initially 0
+            let pt1 = unsafe {
+                &*((self.begin + (page + j * table::span(1)) * PAGE_SIZE) as *const Table<Entry1>)
+            };
+            pt1.clear();
+        }
+        // Clear the persist flag
+        self.pt2(page).set(0, Entry2::new());
     }
 
     pub fn dump(&self, start: usize) {
@@ -262,7 +362,8 @@ impl LeafAllocator {
                 start * PAGE_SIZE,
                 pte2
             );
-            if let Some(pt1) = self.pt1(pte2, start) {
+            if !pte2.giant() && !pte2.page() && pte2.pages() > 0 && pte2.pages() < PT_LEN {
+                let pt1 = self.pt1(pte2, start);
                 for i1 in 0..PT_LEN {
                     let pte1 = pt1.get(i1);
                     info!(
@@ -287,10 +388,12 @@ mod test {
 
     use log::warn;
 
+    use crate::alloc::alloc;
     use crate::entry::Entry1;
     use crate::table::{Table, PAGE_SIZE, PT_LEN};
     use crate::util::{logging, parallel};
     use crate::wait::{DbgWait, DbgWaitKey};
+    use crate::{cpu, table};
 
     use super::LeafAllocator;
 
@@ -309,7 +412,7 @@ mod test {
     fn count(pt: &Table<Entry1>) -> usize {
         let mut pages = 0;
         for i in 0..PT_LEN {
-            pages += (pt.get(i) == Entry1::page()) as usize;
+            pages += (pt.get(i) == Entry1::Page) as usize;
         }
         pages
     }
@@ -317,44 +420,42 @@ mod test {
     #[test]
     fn alloc_normal() {
         logging();
-        const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
-        let buffer = aligned_buffer(MEM_SIZE);
-
+        let buffer = aligned_buffer(4 * table::m_span(2));
+        alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
         // init
         {
-            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, PT_LEN);
-            let (page, newentry) = page_alloc.alloc(0).unwrap();
-            warn!("setup single alloc {} {}", page, newentry);
+            let page = alloc().leaf_alloc(0).get(0);
+            warn!("setup single alloc {}", page);
         }
+        alloc().uninit();
 
         let orders = [
-            vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1], // first 0 complete, 1 fails cas
-            vec![0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0], // 0 first cas, but inc out of order
-            vec![1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0], // 1 first cas, but inc out of order
-            vec![1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 0], // 1 first cas, but inc out of order
+            vec![0, 0, 0, 1, 1, 1],
+            vec![0, 0, 1, 1, 1, 0, 0],
+            vec![1, 1, 0, 0, 0, 1, 1],
+            vec![1, 0, 1, 0, 1, 0, 0],
         ];
 
         for order in orders {
             warn!("order: {:?}", order);
             let copy = buffer.clone();
-            let begin = copy.as_ptr() as usize;
+            alloc().init(2, copy.as_ptr() as _, copy.len()).unwrap();
+
             let wait = DbgWait::setup(2, order);
 
             parallel(2, move |t| {
-                let key = DbgWaitKey::init(wait, t);
-                let page_alloc = LeafAllocator::new(begin, PT_LEN);
+                cpu::pin(t);
+                let key = DbgWaitKey::init(wait, t as _);
+                let page_alloc = alloc().leaf_alloc(t);
 
-                let (page, newentry) = page_alloc.alloc(0).unwrap();
+                let page = page_alloc.get(0);
                 drop(key);
-                assert!(page != 0 && !newentry);
+                assert!(page != 0);
             });
 
-            let page_alloc = LeafAllocator::new(begin, PT_LEN);
+            let page_alloc = alloc().leaf_alloc(0);
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 3);
-            assert_eq!(
-                count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0).unwrap()),
-                3
-            );
+            assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 3);
         }
     }
 
@@ -365,10 +466,10 @@ mod test {
         let buffer = aligned_buffer(MEM_SIZE);
 
         let orders = [
-            vec![0, 0, 0, 1, 1, 1, 1, 1],       // first 0 complete, 1 normal
-            vec![0, 1, 0, 0, 1, 1, 1, 1, 1, 1], // 1 fails cas
-            vec![1, 0, 1, 1, 0, 0, 0, 0, 0, 0], // 0 fails cas
-            vec![1, 0, 1, 0, 1, 0, 0, 0, 0, 0], // 0 fails cas
+            vec![0, 0, 0, 1, 1, 1],
+            vec![0, 1, 1, 0, 0, 1, 1],
+            vec![0, 1, 0, 1, 0, 1, 1],
+            vec![0, 1, 1, 1, 0, 0],
         ];
 
         for order in orders {
@@ -378,24 +479,16 @@ mod test {
             let wait = DbgWait::setup(2, order);
 
             parallel(2, move |t| {
-                let _key = DbgWaitKey::init(wait, t);
+                cpu::pin(t);
+                let _key = DbgWaitKey::init(wait, t as _);
                 let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
-                match page_alloc.alloc(0) {
-                    Err(crate::Error::CAS) => {
-                        page_alloc.alloc(0).unwrap();
-                    }
-                    Err(e) => panic!("{:?}", e),
-                    Ok(_) => {}
-                }
+                page_alloc.get(0);
             });
 
             let page_alloc = LeafAllocator::new(begin, PT_LEN);
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 2);
-            assert_eq!(
-                count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0).unwrap()),
-                2
-            );
+            assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 2);
         }
     }
 
@@ -406,17 +499,17 @@ mod test {
         let buffer = aligned_buffer(MEM_SIZE);
 
         let orders = [
-            vec![0, 0, 1, 1, 1, 1],       // first 0 complete, 1 normal
-            vec![0, 1, 0, 1, 1, 1, 1, 1], // 1 fails cas
-            vec![1, 0, 0, 1, 1, 1, 1, 1], // 1 fails cas
-            vec![1, 0, 1, 0, 0, 0, 0, 0], // 0 fails cas
+            vec![0, 0, 0, 1, 1, 1, 1],
+            vec![0, 0, 1, 1, 0, 1, 1, 0], // wait for other cpu
+            vec![1, 0, 0, 1, 1, 1, 1, 0],
+            vec![1, 1, 0, 1, 0, 0, 0],
         ];
 
         // init
         {
             let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, 2 * PT_LEN);
             for _ in 0..PT_LEN - 1 {
-                page_alloc.alloc(0).unwrap();
+                page_alloc.get(0);
             }
             warn!("setup single alloc");
         }
@@ -428,23 +521,18 @@ mod test {
             let wait = DbgWait::setup(2, order);
 
             parallel(2, move |t| {
-                let _key = DbgWaitKey::init(wait, t);
+                cpu::pin(t);
+                let _key = DbgWaitKey::init(wait, t as _);
                 let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
 
-                match page_alloc.alloc(0) {
-                    Err(crate::Error::CAS) => {
-                        page_alloc.alloc(0).unwrap();
-                    }
-                    Err(e) => panic!("{:?}", e),
-                    Ok(_) => {}
-                }
+                page_alloc.get(0);
             });
 
             let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
             let pt2 = page_alloc.pt2(0);
             assert_eq!(pt2.get(0).pages(), PT_LEN);
             assert_eq!(pt2.get(1).pages(), 1);
-            assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN).unwrap()), 1);
+            assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN)), 1);
         }
     }
 
@@ -465,8 +553,8 @@ mod test {
         // init
         {
             let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, PT_LEN);
-            pages[0] = page_alloc.alloc(0).unwrap().0;
-            pages[1] = page_alloc.alloc(0).unwrap().0;
+            pages[0] = page_alloc.get(0);
+            pages[1] = page_alloc.get(0);
             warn!("setup single alloc");
         }
 
@@ -479,12 +567,12 @@ mod test {
             parallel(2, {
                 let pages = pages.clone();
                 move |t| {
-                    let _key = DbgWaitKey::init(wait, t);
+                    let _key = DbgWaitKey::init(wait, t as _);
                     let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
-                    match page_alloc.free(pages[t as usize]) {
+                    match page_alloc.put(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
-                            page_alloc.free(pages[t as usize]).unwrap();
+                            page_alloc.put(pages[t as usize]).unwrap();
                         }
                         Err(e) => panic!("{:?}", e),
                         Ok(_) => {}
@@ -515,7 +603,7 @@ mod test {
         {
             let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, PT_LEN);
             for page in &mut pages {
-                *page = page_alloc.alloc(0).unwrap().0;
+                *page = page_alloc.get(0);
             }
             warn!("setup single alloc");
         }
@@ -529,12 +617,12 @@ mod test {
             parallel(2, {
                 let pages = pages.clone();
                 move |t| {
-                    let _key = DbgWaitKey::init(wait, t);
+                    let _key = DbgWaitKey::init(wait, t as _);
                     let page_alloc = LeafAllocator::new(begin, PT_LEN);
 
-                    match page_alloc.free(pages[t as usize]) {
+                    match page_alloc.put(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
-                            page_alloc.free(pages[t as usize]).unwrap();
+                            page_alloc.put(pages[t as usize]).unwrap();
                         }
                         Err(e) => panic!("{:?}", e),
                         Ok(_) => {}
@@ -545,7 +633,7 @@ mod test {
             let page_alloc = LeafAllocator::new(begin, PT_LEN);
             let pt2 = page_alloc.pt2(0);
             assert_eq!(pt2.get(0).pages(), PT_LEN - 2);
-            assert_eq!(count(page_alloc.pt1(pt2.get(0), 0).unwrap()), PT_LEN - 2);
+            assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 2);
         }
     }
 
@@ -568,7 +656,7 @@ mod test {
         {
             let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, 2 * PT_LEN);
             for page in &mut pages[..PT_LEN - 1] {
-                *page = page_alloc.alloc(0).unwrap().0;
+                *page = page_alloc.get(0);
             }
             warn!("setup single alloc");
         }
@@ -583,23 +671,16 @@ mod test {
             let handle = thread::spawn(move || {
                 let _key = DbgWaitKey::init(wait_clone, 1);
                 let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
-
-                match page_alloc.alloc(0) {
-                    Err(crate::Error::CAS) => {
-                        page_alloc.alloc(0).unwrap();
-                    }
-                    Err(e) => panic!("{:?}", e),
-                    Ok(_) => {}
-                }
+                page_alloc.get(0);
             });
 
             {
                 let _key = DbgWaitKey::init(wait, 0);
                 let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
 
-                match page_alloc.free(pages[0]) {
+                match page_alloc.put(pages[0]) {
                     Err(crate::Error::CAS) => {
-                        page_alloc.free(pages[0]).unwrap();
+                        page_alloc.put(pages[0]).unwrap();
                     }
                     Err(e) => panic!("{:?}", e),
                     Ok(_) => {}
@@ -611,13 +692,13 @@ mod test {
             let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
             let pt2 = page_alloc.pt2(0);
             if pt2.get(0).pages() == PT_LEN - 1 {
-                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0).unwrap()), PT_LEN - 1);
+                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 1);
             } else {
                 // Table entry skipped
                 assert_eq!(pt2.get(0).pages(), PT_LEN - 2);
-                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0).unwrap()), PT_LEN - 2);
+                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 2);
                 assert_eq!(pt2.get(1).pages(), 1);
-                assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN).unwrap()), 1);
+                assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN)), 1);
             }
         }
     }
