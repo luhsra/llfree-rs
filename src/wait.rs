@@ -1,3 +1,5 @@
+#![cfg(feature = "wait")]
+
 use std::cell::RefCell;
 use std::sync::{Arc, Barrier};
 

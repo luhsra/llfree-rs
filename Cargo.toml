@@ -4,15 +4,20 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
-static_assertions = "1.1"
 log = "0.4"
 libc = "0.2"
-bitfield-struct = "0.1.0"
+bitfield-struct = "0.1.1"
 num_cpus = "1.13"
-raw-cpuid = { version = "10.2", optional = true }
 
 [dev-dependencies]
-env_logger = "0.9"
+env_logger = { version = "0.9", default-features = false }
 
 [features]
-x86 = ["raw-cpuid"]
+wait = []
+log_debug = ["log/max_level_debug"]
+log_info = ["log/max_level_info"]
+log_warn = ["log/max_level_warn"]
+log_error = ["log/max_level_error"]
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+raw-cpuid = "10.2"

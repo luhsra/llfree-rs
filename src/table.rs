@@ -3,8 +3,6 @@ use std::mem::size_of;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use static_assertions::const_assert_eq;
-
 pub const PAGE_SIZE_BITS: usize = 12; // 2^12 => 4KiB
 pub const PAGE_SIZE: usize = 1 << PAGE_SIZE_BITS;
 pub const PTE_SIZE_BITS: usize = 3; // 2^3 => 8B => 64b
@@ -21,9 +19,9 @@ pub struct Table<T> {
     phantom: PhantomData<T>,
 }
 
-const_assert_eq!(size_of::<AtomicU64>(), PTE_SIZE);
-const_assert_eq!(size_of::<Table<u64>>(), PAGE_SIZE);
-const_assert_eq!(size_of::<usize>(), size_of::<u64>());
+const _: () = assert!(size_of::<AtomicU64>() == PTE_SIZE);
+const _: () = assert!(size_of::<Table<u64>>() == PAGE_SIZE);
+const _: () = assert!(size_of::<usize>() == size_of::<u64>());
 
 /// Area in bytes that a page table covers
 #[inline(always)]
@@ -127,7 +125,7 @@ impl<T: Sized + From<u64> + Into<u64>> Clone for Table<T> {
         }
         Self {
             entries,
-            phantom: self.phantom.clone(),
+            phantom: self.phantom,
         }
     }
 }

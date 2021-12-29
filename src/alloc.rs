@@ -4,7 +4,6 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
-use static_assertions::const_assert;
 
 use crate::entry::{Entry, Entry2, Entry3};
 use crate::leaf_alloc::LeafAllocator;
@@ -47,7 +46,7 @@ pub struct Meta {
     length: AtomicUsize,
     active: AtomicUsize,
 }
-const_assert!(size_of::<Meta>() <= PAGE_SIZE);
+const _: () = assert!(size_of::<Meta>() <= PAGE_SIZE);
 
 impl Allocator {
     const fn new() -> Self {
@@ -63,12 +62,16 @@ impl Allocator {
 
     /// Allows init from multiple threads.
     pub fn init(&mut self, cores: usize, begin: usize, length: usize) -> Result<()> {
-        if let Err(_) = self.initialized.compare_exchange(
-            Init::None as _,
-            Init::Initializing as _,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
+        if self
+            .initialized
+            .compare_exchange(
+                Init::None as _,
+                Init::Initializing as _,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_err()
+        {
             return Err(Error::Uninitialized);
         }
 
@@ -114,22 +117,26 @@ impl Allocator {
             warn!("Recovered pages {}", pages);
         } else {
             warn!("Setup allocator state p={}", self.pages);
-            self.leaf_alloc(0).clear();
+            self.local[0].clear();
             meta.length.store(length, Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
         }
 
         // init all leaf_allocs
         for (i, leaf) in self.local.iter_mut().enumerate() {
-            leaf.small_start = 2 * i * table::span(2);
-            leaf.huge_start = (2 * i + 1) * table::span(2);
+            leaf.start_l0
+                .store(2 * i * table::span(2), Ordering::Relaxed);
+            leaf.start_l1
+                .store((2 * i + 1) * table::span(2), Ordering::Relaxed);
             warn!(
                 "init {} small={} huge={}",
-                i, leaf.small_start, leaf.huge_start
+                i,
+                leaf.start_l0.load(Ordering::Relaxed),
+                leaf.start_l1.load(Ordering::Relaxed),
             );
         }
         // TODO: reserve for low memory
-        assert!(self.local.last().unwrap().huge_start < self.pages);
+        assert!(self.local.last().unwrap().start_l1.load(Ordering::Relaxed) < self.pages);
 
         meta.active.store(1, Ordering::SeqCst);
         self.initialized.store(Init::Ready as _, Ordering::SeqCst);
@@ -205,11 +212,6 @@ impl Allocator {
         (self.pages + span - 1) / span
     }
 
-    #[inline(always)]
-    pub fn leaf_alloc(&self, core: usize) -> &mut LeafAllocator {
-        unsafe { &mut *(&self.local[core] as *const _ as *mut _) }
-    }
-
     fn recover_rec(&self, layer: usize, start: usize, deep: bool) -> usize {
         let mut pages = 0;
         let pt = self.pt(layer, start);
@@ -236,7 +238,7 @@ impl Allocator {
         for i in table::range(3, start..self.pages) {
             let page = table::page(3, start, i);
 
-            let (c_pages, size) = self.leaf_alloc(0).recover(page, deep);
+            let (c_pages, size) = self.local[0].recover(page, deep);
             if size == Size::L2 {
                 pt.set(i, Entry3::new_giant());
             } else if c_pages > 0 {
@@ -291,26 +293,25 @@ impl Allocator {
                 }
             }
         } else {
-            let leaf = self.leaf_alloc(core);
-
-            let start = match size {
-                Size::L0 => &mut leaf.small_start,
-                Size::L1 => &mut leaf.huge_start,
-                _ => panic!(),
-            };
-
-            *start = self.increment_parents(*start, size)?;
+            let leaf = &self.local[core];
 
             match size {
                 Size::L0 => {
-                    leaf.small_start = self.increment_parents(leaf.small_start, size)?;
-                    leaf.get(leaf.small_start)
+                    let start = leaf.start_l0.load(Ordering::SeqCst);
+                    let new = self.increment_parents(start, size)?;
+                    if start != new {
+                        leaf.start_l0.store(new, Ordering::SeqCst);
+                    }
+                    leaf.get(new)
                 }
                 Size::L1 => {
-                    leaf.huge_start = self.increment_parents(leaf.huge_start, size)?;
-                    leaf.get_huge(leaf.huge_start)
+                    let start = leaf.start_l1.load(Ordering::SeqCst);
+                    let new = self.increment_parents(start, size)?;
+                    if start != new {
+                        leaf.start_l1.store(new, Ordering::SeqCst);
+                    }
+                    leaf.get_huge(new)
                 }
-
                 Size::L2 => panic!(),
             }
         };
@@ -323,7 +324,7 @@ impl Allocator {
         for layer in (4..=LAYERS).into_iter().rev() {
             let pt = self.pt(layer, start);
             let i = table::idx(layer, start);
-            if !pt
+            if pt
                 .update(i, |v| {
                     v.inc(size, layer, self.pages - table::round(layer, start))
                 })
@@ -341,7 +342,10 @@ impl Allocator {
         // Increment pt 3
         let pt3 = self.pt3(start);
         let i3 = table::idx(3, start);
-        if let Err(_) = pt3.update(i3, |v| v.inc(size, self.pages - table::round(3, start))) {
+        if pt3
+            .update(i3, |v| v.inc(size, self.pages - table::round(3, start)))
+            .is_err()
+        {
             warn!("reserve new l3 i{}", i3);
             self.unreserve_pt2(start);
             match self.reserve_pt2(3, start, size) {
@@ -448,8 +452,7 @@ impl Allocator {
             return Err(Error::Address);
         }
 
-        let leaf = self.leaf_alloc(core);
-        let size = leaf.put(page)?;
+        let size = self.local[core].put(page)?;
 
         if let Err(pte3) = pt3.update(i3, |v| v.dec(size)) {
             panic!("Corruption l3 i{} p={} - {:?}", i3, pte3.pages(), size)
@@ -468,8 +471,7 @@ impl Allocator {
         }
 
         // Clear pt1's & remove pt2 flag
-        let leaf = self.leaf_alloc(core);
-        leaf.clear_giant(page);
+        self.local[core].clear_giant(page);
 
         let pt = self.pt3(page);
         let i = table::idx(3, page);
@@ -533,7 +535,7 @@ impl Allocator {
             );
 
             match pte.size() {
-                Some(Size::L0 | Size::L1) if pte.pages() > 0 => self.leaf_alloc(0).dump(start),
+                Some(Size::L0 | Size::L1) if pte.pages() > 0 => self.local[0].dump(start),
                 _ => {}
             }
         }
@@ -543,8 +545,8 @@ impl Allocator {
 impl Drop for Allocator {
     fn drop(&mut self) {
         for local in &self.local {
-            self.unreserve_pt2(local.small_start);
-            self.unreserve_pt2(local.huge_start);
+            self.unreserve_pt2(local.start_l0.load(Ordering::SeqCst));
+            self.unreserve_pt2(local.start_l1.load(Ordering::SeqCst));
         }
         self.meta().active.store(0, Ordering::SeqCst);
     }
@@ -612,7 +614,7 @@ mod test {
         }
 
         // alloc().dump();
-        alloc().leaf_alloc(0).dump(0);
+        alloc().local[0].dump(0);
 
         warn!("check...");
 
@@ -654,6 +656,8 @@ mod test {
         for page in &pages {
             alloc().put(0, *page).unwrap();
         }
+
+        alloc().uninit();
     }
 
     #[test]
@@ -704,6 +708,8 @@ mod test {
             assert!(p1 % PAGE_SIZE == 0 && p1 >= begin && p1 - begin < MEM_SIZE);
             assert!(p1 != p2);
         }
+
+        alloc().uninit();
     }
 
     #[test]
@@ -746,6 +752,8 @@ mod test {
             let p2 = pages[i + 1].load(Ordering::Relaxed);
             assert!(p1 != p2);
         }
+
+        alloc().uninit();
     }
 
     #[test]
@@ -789,6 +797,7 @@ mod test {
         });
 
         assert_eq!(alloc().allocated_pages(), 0);
+        alloc().uninit();
     }
 
     #[test]
@@ -839,6 +848,7 @@ mod test {
         assert_eq!(alloc().allocated_pages(), ALLOC_PER_THREAD);
 
         alloc().dump();
+        alloc().uninit();
     }
 
     #[test]
@@ -874,5 +884,6 @@ mod test {
             alloc().allocated_pages(),
             table::span(2) + PT_LEN + 2 + PT_LEN * (PT_LEN + 2)
         );
+        alloc().uninit();
     }
 }

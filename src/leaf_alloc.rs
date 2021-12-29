@@ -8,7 +8,7 @@ use crate::table::{self, Table, LAYERS, PAGE_SIZE, PT_LEN, PT_LEN_BITS};
 
 use crate::{Error, Result, Size};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "wait"))]
 macro_rules! wait {
     () => {
         if let Err(e) = crate::wait::wait() {
@@ -17,19 +17,19 @@ macro_rules! wait {
         }
     };
 }
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "wait")))]
 macro_rules! wait {
     () => {};
 }
 
-/// Layer 2 page allocator.
+/// Layer 2 page allocator, per core.
 #[repr(align(64))]
 pub struct LeafAllocator {
     pub begin: usize,
     pub pages: usize,
     alloc_pt1: AtomicUsize,
-    pub small_start: usize,
-    pub huge_start: usize,
+    pub start_l0: AtomicUsize,
+    pub start_l1: AtomicUsize,
 }
 
 impl Clone for LeafAllocator {
@@ -38,8 +38,8 @@ impl Clone for LeafAllocator {
             begin: self.begin,
             pages: self.pages,
             alloc_pt1: AtomicUsize::new(0),
-            small_start: self.small_start,
-            huge_start: self.huge_start,
+            start_l0: AtomicUsize::new(0),
+            start_l1: AtomicUsize::new(0),
         }
     }
 }
@@ -50,8 +50,8 @@ impl LeafAllocator {
             begin,
             pages,
             alloc_pt1: AtomicUsize::new(0),
-            small_start: 0,
-            huge_start: 0,
+            start_l0: AtomicUsize::new(0),
+            start_l1: AtomicUsize::new(0),
         }
     }
 
@@ -124,7 +124,7 @@ impl LeafAllocator {
                 pages += 1;
             }
         }
-        return pages;
+        pages
     }
 
     /// Allocate a single page
@@ -148,7 +148,7 @@ impl LeafAllocator {
 
                 wait!();
 
-                if let Err(_) = pt2.update(i2, |pte| pte.inc(pte2.i1())) {
+                if pt2.update(i2, |pte| pte.inc(pte2.i1())).is_err() {
                     self.alloc_pt1.store(0, Ordering::SeqCst);
                     continue;
                 }
@@ -380,9 +380,11 @@ impl LeafAllocator {
     }
 }
 
+#[cfg(feature = "wait")]
 #[cfg(test)]
 mod test {
     use std::alloc::{alloc_zeroed, Layout};
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::thread;
 
@@ -424,7 +426,7 @@ mod test {
         alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
         // init
         {
-            let page = alloc().leaf_alloc(0).get(0);
+            let page = alloc().local[0].get(0);
             warn!("setup single alloc {}", page);
         }
         alloc().uninit();
@@ -446,24 +448,26 @@ mod test {
             parallel(2, move |t| {
                 cpu::pin(t);
                 let key = DbgWaitKey::init(wait, t as _);
-                let page_alloc = alloc().leaf_alloc(t);
+                let page_alloc = &alloc().local[t];
+                page_alloc.start_l0.store(0, Ordering::Relaxed);
+                page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                 let page = page_alloc.get(0);
                 drop(key);
                 assert!(page != 0);
             });
 
-            let page_alloc = alloc().leaf_alloc(0);
+            let page_alloc = &alloc().local[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 3);
             assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 3);
+            alloc().uninit();
         }
     }
 
     #[test]
     fn alloc_first() {
         logging();
-        const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
-        let buffer = aligned_buffer(MEM_SIZE);
+        let buffer = aligned_buffer(4 * table::m_span(2));
 
         let orders = [
             vec![0, 0, 0, 1, 1, 1],
@@ -475,28 +479,31 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             let copy = buffer.clone();
-            let begin = copy.as_ptr() as usize;
+            alloc().init(2, copy.as_ptr() as _, copy.len()).unwrap();
+
             let wait = DbgWait::setup(2, order);
 
             parallel(2, move |t| {
                 cpu::pin(t);
                 let _key = DbgWaitKey::init(wait, t as _);
-                let page_alloc = LeafAllocator::new(begin, PT_LEN);
+                let page_alloc = &alloc().local[t];
+                page_alloc.start_l0.store(0, Ordering::Relaxed);
+                page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                 page_alloc.get(0);
             });
 
-            let page_alloc = LeafAllocator::new(begin, PT_LEN);
+            let page_alloc = &alloc().local[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 2);
             assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 2);
+            alloc().uninit();
         }
     }
 
     #[test]
     fn alloc_last() {
         logging();
-        const MEM_SIZE: usize = 2 * (PT_LEN + 1) * PAGE_SIZE;
-        let buffer = aligned_buffer(MEM_SIZE);
+        let buffer = aligned_buffer(4 * table::m_span(2));
 
         let orders = [
             vec![0, 0, 0, 1, 1, 1, 1],
@@ -507,40 +514,44 @@ mod test {
 
         // init
         {
+            alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
             let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, 2 * PT_LEN);
             for _ in 0..PT_LEN - 1 {
                 page_alloc.get(0);
             }
             warn!("setup single alloc");
+            alloc().uninit();
         }
 
         for order in orders {
             warn!("order: {:?}", order);
             let copy = buffer.clone();
-            let begin = copy.as_ptr() as usize;
+            alloc().init(2, copy.as_ptr() as _, copy.len()).unwrap();
             let wait = DbgWait::setup(2, order);
 
             parallel(2, move |t| {
                 cpu::pin(t);
                 let _key = DbgWaitKey::init(wait, t as _);
-                let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
+                let page_alloc = &alloc().local[t];
+                page_alloc.start_l0.store(0, Ordering::Relaxed);
+                page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                 page_alloc.get(0);
             });
 
-            let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
+            let page_alloc = &alloc().local[0];
             let pt2 = page_alloc.pt2(0);
             assert_eq!(pt2.get(0).pages(), PT_LEN);
             assert_eq!(pt2.get(1).pages(), 1);
             assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN)), 1);
+            alloc().uninit();
         }
     }
 
     #[test]
     fn free_normal() {
         logging();
-        const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
-        let buffer = aligned_buffer(MEM_SIZE);
+        let buffer = aligned_buffer(4 * table::span(2));
 
         let orders = [
             vec![0, 0, 0, 1, 1, 1], // first 0, then 1
@@ -552,23 +563,27 @@ mod test {
 
         // init
         {
-            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, PT_LEN);
+            alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
+            let page_alloc = &alloc().local[0];
             pages[0] = page_alloc.get(0);
             pages[1] = page_alloc.get(0);
             warn!("setup single alloc");
+            alloc().uninit();
         }
 
         for order in orders {
             warn!("order: {:?}", order);
             let copy = buffer.clone();
-            let begin = copy.as_ptr() as usize;
+            alloc().init(2, copy.as_ptr() as _, copy.len()).unwrap();
             let wait = DbgWait::setup(2, order);
 
             parallel(2, {
                 let pages = pages.clone();
                 move |t| {
                     let _key = DbgWaitKey::init(wait, t as _);
-                    let page_alloc = LeafAllocator::new(begin, PT_LEN);
+                    let page_alloc = &alloc().local[t];
+                    page_alloc.start_l0.store(0, Ordering::Relaxed);
+                    page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                     match page_alloc.put(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
@@ -580,8 +595,9 @@ mod test {
                 }
             });
 
-            let page_alloc = LeafAllocator::new(begin, PT_LEN);
+            let page_alloc = &alloc().local[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 0);
+            alloc().uninit();
         }
     }
 
@@ -601,24 +617,28 @@ mod test {
 
         // init
         {
-            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, PT_LEN);
+            alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
+            let page_alloc = &alloc().local[0];
             for page in &mut pages {
                 *page = page_alloc.get(0);
             }
             warn!("setup single alloc");
+            alloc().uninit();
         }
 
         for order in orders {
             warn!("order: {:?}", order);
-            let buffer = buffer.clone();
-            let begin = buffer.as_ptr() as usize;
+            let copy = buffer.clone();
+            alloc().init(2, copy.as_ptr() as _, copy.len()).unwrap();
             let wait = DbgWait::setup(2, order);
 
             parallel(2, {
                 let pages = pages.clone();
                 move |t| {
                     let _key = DbgWaitKey::init(wait, t as _);
-                    let page_alloc = LeafAllocator::new(begin, PT_LEN);
+                    let page_alloc = &alloc().local[t];
+                    page_alloc.start_l0.store(0, Ordering::Relaxed);
+                    page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                     match page_alloc.put(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
@@ -630,19 +650,18 @@ mod test {
                 }
             });
 
-            let page_alloc = LeafAllocator::new(begin, PT_LEN);
+            let page_alloc = &alloc().local[0];
             let pt2 = page_alloc.pt2(0);
             assert_eq!(pt2.get(0).pages(), PT_LEN - 2);
             assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 2);
+            alloc().uninit();
         }
     }
 
     #[test]
     fn alloc_free_last() {
         logging();
-
-        const MEM_SIZE: usize = 2 * (PT_LEN + 1) * PAGE_SIZE;
-        let buffer = aligned_buffer(MEM_SIZE);
+        let buffer = aligned_buffer(4 * table::span(2));
 
         let orders = [
             vec![0, 0, 0, 1, 1, 1, 1],       // 0 free then 1 alloc
@@ -652,31 +671,36 @@ mod test {
         ];
 
         let mut pages = [0; PT_LEN];
-
         {
-            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, 2 * PT_LEN);
+            alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
+            let page_alloc = &alloc().local[0];
             for page in &mut pages[..PT_LEN - 1] {
                 *page = page_alloc.get(0);
             }
             warn!("setup single alloc");
+            alloc().uninit();
         }
 
         for order in orders {
             warn!("order: {:?}", order);
-            let buffer = buffer.clone();
-            let begin = buffer.as_ptr() as usize;
+            let clone = buffer.clone();
+            alloc().init(2, clone.as_ptr() as _, clone.len()).unwrap();
             let wait = DbgWait::setup(2, order);
 
             let wait_clone = Arc::clone(&wait);
             let handle = thread::spawn(move || {
                 let _key = DbgWaitKey::init(wait_clone, 1);
-                let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
+                let page_alloc = &alloc().local[1];
+                page_alloc.start_l0.store(0, Ordering::Relaxed);
+                page_alloc.start_l1.store(1, Ordering::Relaxed);
                 page_alloc.get(0);
             });
 
             {
                 let _key = DbgWaitKey::init(wait, 0);
-                let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
+                let page_alloc = &alloc().local[0];
+                page_alloc.start_l0.store(0, Ordering::Relaxed);
+                page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                 match page_alloc.put(pages[0]) {
                     Err(crate::Error::CAS) => {
@@ -689,7 +713,7 @@ mod test {
 
             handle.join().unwrap();
 
-            let page_alloc = LeafAllocator::new(begin, 2 * PT_LEN);
+            let page_alloc = &alloc().local[0];
             let pt2 = page_alloc.pt2(0);
             if pt2.get(0).pages() == PT_LEN - 1 {
                 assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 1);
@@ -700,6 +724,7 @@ mod test {
                 assert_eq!(pt2.get(1).pages(), 1);
                 assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN)), 1);
             }
+            alloc().uninit();
         }
     }
 }

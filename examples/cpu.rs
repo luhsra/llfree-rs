@@ -1,4 +1,4 @@
-#[cfg(feature = "x86")]
+#[cfg(target_arch = "x86_64")]
 fn main() {
     use raw_cpuid::CpuId;
     let cpuid = CpuId::new();
