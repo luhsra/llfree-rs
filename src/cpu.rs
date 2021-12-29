@@ -1,4 +1,4 @@
-use std::{os::raw::c_uint, sync::atomic::AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 
 thread_local! {
     pub static PINNED: AtomicUsize = AtomicUsize::new(0);
@@ -7,9 +7,8 @@ thread_local! {
 #[cfg(target_os = "linux")]
 pub fn pin(core: usize) {
     use std::panic;
-    use std::ptr::null_mut;
+    use std::sync::atomic::Ordering;
 
-    use libc::cpu_set_t;
     use log::error;
 
     let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
