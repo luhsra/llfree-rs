@@ -74,7 +74,7 @@ impl Entry3 {
 
         let pages = self.pages() + span(size as usize);
         if pages < span(2) && pages < max {
-            Some(self.with_pages(pages))
+            Some(self.with_pages(pages).with_size_n(size as u8 + 1))
         } else {
             None
         }
@@ -98,7 +98,10 @@ impl Entry3 {
         }
 
         if self.pages() as usize + span(size as usize) < span(2) && (self.usage() as usize) < max {
-            Some(self.with_usage(self.usage() + 1))
+            Some(
+                self.with_usage(self.usage() + 1)
+                    .with_size_n(size as u8 + 1),
+            )
         } else {
             None
         }

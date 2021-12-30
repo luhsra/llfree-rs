@@ -14,8 +14,9 @@ mod util;
 #[cfg(test)]
 mod wait;
 
-use alloc::alloc;
-use table::PAGE_SIZE;
+use alloc::{alloc, Allocator};
+use table::{Page, PAGE_SIZE};
+use util::{align_down, align_up};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -44,11 +45,15 @@ pub enum Size {
 }
 
 pub fn init(cores: usize, addr: *mut (), size: usize) -> Result<()> {
-    alloc().init(cores, addr as usize, size)
+    let begin = align_up(addr as usize, PAGE_SIZE) as *mut Page;
+    let size = align_down(addr as usize + size, PAGE_SIZE).saturating_sub(begin as usize);
+    let memory = unsafe { std::slice::from_raw_parts_mut(begin, size / PAGE_SIZE) };
+
+    Allocator::init(cores, memory)
 }
 
 pub fn uninit() {
-    alloc().uninit();
+    Allocator::uninit();
 }
 
 pub fn get<F: FnOnce(u64) -> u64>(
@@ -62,7 +67,10 @@ pub fn get<F: FnOnce(u64) -> u64>(
     let new = translate((page * PAGE_SIZE) as u64);
     match dst.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
         Ok(_) => Ok(()),
-        Err(_) => Err(Error::CAS),
+        Err(_) => {
+            alloc().put(core, page).unwrap();
+            Err(Error::CAS)
+        }
     }
 }
 
@@ -82,7 +90,7 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::table::PT_LEN;
+    use crate::table::{Page, PT_LEN};
     use crate::util::{logging, parallel};
     use crate::{get, init, put, Size};
 
@@ -92,7 +100,7 @@ mod test {
 
         const THREADS: usize = 8;
 
-        let mapping = MMap::anon(0x1000_0000_0000_u64 as _, 20 << 30).unwrap();
+        let mapping: MMap<'_, Page> = MMap::anon(0x1000_0000_0000_u64 as _, 20 << 18).unwrap();
 
         info!("mmap {} bytes", mapping.len());
 

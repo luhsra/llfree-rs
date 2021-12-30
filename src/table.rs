@@ -1,3 +1,5 @@
+use std::alloc::Layout;
+use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
@@ -13,7 +15,7 @@ pub const PT_LEN: usize = 1 << PT_LEN_BITS;
 pub const LAYERS: usize = 4;
 
 /// Page table with atomic entries
-#[repr(align(128))]
+#[repr(align(0x1000))]
 pub struct Table<T> {
     entries: [AtomicU64; PT_LEN],
     phantom: PhantomData<T>,
@@ -72,9 +74,8 @@ pub fn range(layer: usize, pages: Range<usize>) -> Range<usize> {
 
 impl<T: Sized + From<u64> + Into<u64>> Table<T> {
     pub fn empty() -> Self {
-        const DEFAULT: AtomicU64 = AtomicU64::new(0);
         Self {
-            entries: [DEFAULT; PT_LEN],
+            entries: unsafe { std::mem::zeroed() },
             phantom: PhantomData,
         }
     }
@@ -115,17 +116,46 @@ impl<T: Sized + From<u64> + Into<u64>> Table<T> {
     }
 }
 
-
 impl<T: Sized + From<u64> + Into<u64>> Clone for Table<T> {
     fn clone(&self) -> Self {
-        const DEFAULT: AtomicU64 = AtomicU64::new(0);
-        let entries = [DEFAULT; PT_LEN];
+        let entries: [AtomicU64; PT_LEN] = unsafe { std::mem::zeroed() };
         for i in 0..PT_LEN {
             entries[i].store(self.entries[i].load(Ordering::Relaxed), Ordering::Relaxed);
         }
         Self {
             entries,
             phantom: self.phantom,
+        }
+    }
+}
+
+impl<T: fmt::Debug + From<u64>> fmt::Debug for Table<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Table {{")?;
+        for (i, entry) in self.entries.iter().enumerate() {
+            writeln!(
+                f,
+                "    {:>3}; {:?},",
+                i,
+                T::from(entry.load(Ordering::SeqCst))
+            )?;
+        }
+        writeln!(f, "}}")
+    }
+}
+
+/// Correctly sized and aligned page.
+#[derive(Clone)]
+#[repr(align(0x1000))]
+pub struct Page {
+    _data: [u8; PAGE_SIZE],
+}
+const _: () = assert!(Layout::new::<Page>().size() == PAGE_SIZE);
+const _: () = assert!(Layout::new::<Page>().align() == PAGE_SIZE);
+impl Page {
+    pub const fn new() -> Self {
+        Self {
+            _data: [0; PAGE_SIZE],
         }
     }
 }

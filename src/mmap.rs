@@ -2,6 +2,7 @@
 
 use std::ffi::CString;
 use std::fs::File;
+use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::prelude::AsRawFd;
 
@@ -11,17 +12,17 @@ pub fn perror(s: &str) {
 }
 
 /// Chunk of mapped memory.
-pub struct MMap<'a> {
-    slice: &'a mut [u8],
+pub struct MMap<'a, T> {
+    slice: &'a mut [T],
 }
 
-impl<'a> MMap<'a> {
-    pub fn file(begin: usize, length: usize, file: File) -> Result<MMap<'a>, ()> {
+impl<'a, T> MMap<'a, T> {
+    pub fn file(begin: usize, len: usize, file: File) -> Result<MMap<'a, T>, ()> {
         let fd = file.as_raw_fd();
         let addr = unsafe {
             libc::mmap(
                 begin as _,
-                length as _,
+                (len * size_of::<T>()) as _,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
                 fd,
@@ -30,7 +31,7 @@ impl<'a> MMap<'a> {
         };
         if addr != libc::MAP_FAILED {
             Ok(MMap {
-                slice: unsafe { std::slice::from_raw_parts_mut(addr as _, length) },
+                slice: unsafe { std::slice::from_raw_parts_mut(addr as _, len) },
             })
         } else {
             unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
@@ -39,12 +40,12 @@ impl<'a> MMap<'a> {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn dax(begin: usize, length: usize, file: File) -> Result<MMap<'a>, ()> {
+    pub fn dax(begin: usize, len: usize, file: File) -> Result<MMap<'a, T>, ()> {
         let fd = file.as_raw_fd();
         let addr = unsafe {
             libc::mmap(
                 begin as _,
-                length as _,
+                (len * size_of::<T>()) as _,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED_VALIDATE | libc::MAP_SYNC,
                 fd,
@@ -53,7 +54,7 @@ impl<'a> MMap<'a> {
         };
         if addr != libc::MAP_FAILED {
             Ok(MMap {
-                slice: unsafe { std::slice::from_raw_parts_mut(addr as _, length) },
+                slice: unsafe { std::slice::from_raw_parts_mut(addr as _, len) },
             })
         } else {
             unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
@@ -61,11 +62,11 @@ impl<'a> MMap<'a> {
         }
     }
 
-    pub fn anon(begin: usize, length: usize) -> Result<MMap<'a>, ()> {
+    pub fn anon(begin: usize, len: usize) -> Result<MMap<'a, T>, ()> {
         let addr = unsafe {
             libc::mmap(
                 begin as _,
-                length as _,
+                (len * size_of::<T>()) as _,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
                 -1,
@@ -74,7 +75,7 @@ impl<'a> MMap<'a> {
         };
         if addr != libc::MAP_FAILED {
             Ok(MMap {
-                slice: unsafe { std::slice::from_raw_parts_mut(addr as _, length) },
+                slice: unsafe { std::slice::from_raw_parts_mut(addr as _, len) },
             })
         } else {
             unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
@@ -83,20 +84,20 @@ impl<'a> MMap<'a> {
     }
 }
 
-impl<'a> Deref for MMap<'a> {
-    type Target = [u8];
+impl<'a, T> Deref for MMap<'a, T> {
+    type Target = [T];
     fn deref(&self) -> &Self::Target {
         self.slice
     }
 }
 
-impl<'a> DerefMut for MMap<'a> {
+impl<'a, T> DerefMut for MMap<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.slice
     }
 }
 
-impl<'a> Drop for MMap<'a> {
+impl<'a, T> Drop for MMap<'a, T> {
     fn drop(&mut self) {
         let ret = unsafe { libc::munmap(self.slice.as_ptr() as _, self.slice.len() as _) };
         if ret != 0 {

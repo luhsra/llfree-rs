@@ -165,6 +165,8 @@ impl LeafAllocator {
     fn get_table(&self, pte2: Entry2, start: usize) -> usize {
         let pt1 = self.pt1(pte2, start);
 
+        info!("get table");
+
         loop {
             for i in table::range(1, start..self.pages) {
                 if i == pte2.i1() {
@@ -235,6 +237,10 @@ impl LeafAllocator {
         }
     }
 
+    pub fn persist(&self, page: usize) {
+        self.pt2(page).set(0, Entry2::new().with_giant(true));
+    }
+
     /// Free single page
     pub fn put(&self, page: usize) -> Result<Size> {
         let pt2 = self.pt2(page);
@@ -274,6 +280,8 @@ impl LeafAllocator {
             return self.put_full(page);
         }
 
+        wait!();
+
         let pt1 = self.pt1(pte2, page);
         let i1 = table::idx(1, page);
         let pte1 = pt1.get(i1);
@@ -293,6 +301,8 @@ impl LeafAllocator {
                 Err(Error::CAS)
             };
         }
+
+        wait!();
 
         if pt1.cas(i1, Entry1::Page, Entry1::Empty).is_err() {
             panic!("Corruption l1 i{}", i1);
@@ -383,33 +393,18 @@ impl LeafAllocator {
 #[cfg(feature = "wait")]
 #[cfg(test)]
 mod test {
-    use std::alloc::{alloc_zeroed, Layout};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::thread;
 
     use log::warn;
 
-    use crate::alloc::alloc;
+    use crate::alloc::{alloc, Allocator};
     use crate::entry::Entry1;
-    use crate::table::{Table, PAGE_SIZE, PT_LEN};
+    use crate::table::{Page, Table, PT_LEN};
     use crate::util::{logging, parallel};
     use crate::wait::{DbgWait, DbgWaitKey};
     use crate::{cpu, table};
-
-    use super::LeafAllocator;
-
-    fn aligned_buffer(size: usize) -> Vec<u8> {
-        let buffer = unsafe {
-            Vec::from_raw_parts(
-                alloc_zeroed(Layout::from_size_align_unchecked(size, PAGE_SIZE)),
-                size,
-                size,
-            )
-        };
-        assert!(buffer.as_ptr() as usize % PAGE_SIZE == 0);
-        buffer
-    }
 
     fn count(pt: &Table<Entry1>) -> usize {
         let mut pages = 0;
@@ -422,14 +417,6 @@ mod test {
     #[test]
     fn alloc_normal() {
         logging();
-        let buffer = aligned_buffer(4 * table::m_span(2));
-        alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
-        // init
-        {
-            let page = alloc().local[0].get(0);
-            warn!("setup single alloc {}", page);
-        }
-        alloc().uninit();
 
         let orders = [
             vec![0, 0, 0, 1, 1, 1],
@@ -438,10 +425,12 @@ mod test {
             vec![1, 0, 1, 0, 1, 0, 0],
         ];
 
+        let mut buffer = vec![Page::new(); 4 * table::span(2)];
+
         for order in orders {
             warn!("order: {:?}", order);
-            let copy = buffer.clone();
-            alloc().init(2, copy.as_ptr() as _, copy.len()).unwrap();
+            Allocator::init(2, &mut buffer).unwrap();
+            alloc().local[0].get(0);
 
             let wait = DbgWait::setup(2, order);
 
@@ -449,8 +438,6 @@ mod test {
                 cpu::pin(t);
                 let key = DbgWaitKey::init(wait, t as _);
                 let page_alloc = &alloc().local[t];
-                page_alloc.start_l0.store(0, Ordering::Relaxed);
-                page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                 let page = page_alloc.get(0);
                 drop(key);
@@ -460,14 +447,15 @@ mod test {
             let page_alloc = &alloc().local[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 3);
             assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 3);
-            alloc().uninit();
+
+            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::uninit();
         }
     }
 
     #[test]
     fn alloc_first() {
         logging();
-        let buffer = aligned_buffer(4 * table::m_span(2));
 
         let orders = [
             vec![0, 0, 0, 1, 1, 1],
@@ -476,10 +464,11 @@ mod test {
             vec![0, 1, 1, 1, 0, 0],
         ];
 
+        let mut buffer = vec![Page::new(); 4 * table::span(2)];
+
         for order in orders {
             warn!("order: {:?}", order);
-            let copy = buffer.clone();
-            alloc().init(2, copy.as_ptr() as _, copy.len()).unwrap();
+            Allocator::init(2, &mut buffer).unwrap();
 
             let wait = DbgWait::setup(2, order);
 
@@ -487,8 +476,6 @@ mod test {
                 cpu::pin(t);
                 let _key = DbgWaitKey::init(wait, t as _);
                 let page_alloc = &alloc().local[t];
-                page_alloc.start_l0.store(0, Ordering::Relaxed);
-                page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                 page_alloc.get(0);
             });
@@ -496,14 +483,15 @@ mod test {
             let page_alloc = &alloc().local[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 2);
             assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 2);
-            alloc().uninit();
+
+            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::uninit();
         }
     }
 
     #[test]
     fn alloc_last() {
         logging();
-        let buffer = aligned_buffer(4 * table::m_span(2));
 
         let orders = [
             vec![0, 0, 0, 1, 1, 1, 1],
@@ -512,29 +500,21 @@ mod test {
             vec![1, 1, 0, 1, 0, 0, 0],
         ];
 
-        // init
-        {
-            alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
-            let page_alloc = LeafAllocator::new(buffer.as_ptr() as _, 2 * PT_LEN);
-            for _ in 0..PT_LEN - 1 {
-                page_alloc.get(0);
-            }
-            warn!("setup single alloc");
-            alloc().uninit();
-        }
+        let mut buffer = vec![Page::new(); 4 * table::span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
-            let copy = buffer.clone();
-            alloc().init(2, copy.as_ptr() as _, copy.len()).unwrap();
+            Allocator::init(2, &mut buffer).unwrap();
+            let page_alloc = &alloc().local[0];
+            for _ in 0..PT_LEN - 1 {
+                page_alloc.get(0);
+            }
             let wait = DbgWait::setup(2, order);
 
             parallel(2, move |t| {
                 cpu::pin(t);
                 let _key = DbgWaitKey::init(wait, t as _);
                 let page_alloc = &alloc().local[t];
-                page_alloc.start_l0.store(0, Ordering::Relaxed);
-                page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                 page_alloc.get(0);
             });
@@ -544,37 +524,31 @@ mod test {
             assert_eq!(pt2.get(0).pages(), PT_LEN);
             assert_eq!(pt2.get(1).pages(), 1);
             assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN)), 1);
-            alloc().uninit();
+
+            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::uninit();
         }
     }
 
     #[test]
     fn free_normal() {
         logging();
-        let buffer = aligned_buffer(4 * table::span(2));
 
         let orders = [
-            vec![0, 0, 0, 1, 1, 1], // first 0, then 1
-            vec![0, 1, 0, 1, 0, 1],
-            vec![0, 0, 1, 1, 1, 0],
+            vec![0, 0, 0, 0, 1, 1, 1, 1], // first 0, then 1
+            vec![0, 1, 0, 1, 0, 1, 0, 1],
+            vec![0, 0, 1, 1, 1, 1, 0, 0],
         ];
 
         let mut pages = [0; 2];
-
-        // init
-        {
-            alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
-            let page_alloc = &alloc().local[0];
-            pages[0] = page_alloc.get(0);
-            pages[1] = page_alloc.get(0);
-            warn!("setup single alloc");
-            alloc().uninit();
-        }
+        let mut buffer = vec![Page::new(); 4 * table::span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
-            let copy = buffer.clone();
-            alloc().init(2, copy.as_ptr() as _, copy.len()).unwrap();
+            Allocator::init(2, &mut buffer).unwrap();
+            let page_alloc = &alloc().local[0];
+            pages[0] = page_alloc.get(0);
+            pages[1] = page_alloc.get(0);
             let wait = DbgWait::setup(2, order);
 
             parallel(2, {
@@ -582,8 +556,6 @@ mod test {
                 move |t| {
                     let _key = DbgWaitKey::init(wait, t as _);
                     let page_alloc = &alloc().local[t];
-                    page_alloc.start_l0.store(0, Ordering::Relaxed);
-                    page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                     match page_alloc.put(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
@@ -597,39 +569,32 @@ mod test {
 
             let page_alloc = &alloc().local[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 0);
-            alloc().uninit();
+
+            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::uninit();
         }
     }
 
     #[test]
     fn free_last() {
         logging();
-        const MEM_SIZE: usize = (PT_LEN + 1) * PAGE_SIZE;
-        let buffer = aligned_buffer(MEM_SIZE);
 
         let orders = [
-            vec![0, 0, 1, 1, 1],       // first 0, then 1
-            vec![0, 1, 0, 1, 1, 1, 1], // 1 fails cas
-            vec![0, 1, 1, 0, 0, 0, 0], // 0 fails cas
+            vec![0, 0, 1, 1, 1, 1],       // first 0, then 1
+            vec![0, 1, 0, 1, 1, 1, 1, 1], // 1 fails cas
+            vec![0, 1, 1, 0, 0, 0, 0, 0], // 0 fails cas
         ];
 
         let mut pages = [0; PT_LEN];
+        let mut buffer = vec![Page::new(); 4 * table::span(2)];
 
-        // init
-        {
-            alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
+        for order in orders {
+            warn!("order: {:?}", order);
+            Allocator::init(2, &mut buffer).unwrap();
             let page_alloc = &alloc().local[0];
             for page in &mut pages {
                 *page = page_alloc.get(0);
             }
-            warn!("setup single alloc");
-            alloc().uninit();
-        }
-
-        for order in orders {
-            warn!("order: {:?}", order);
-            let copy = buffer.clone();
-            alloc().init(2, copy.as_ptr() as _, copy.len()).unwrap();
             let wait = DbgWait::setup(2, order);
 
             parallel(2, {
@@ -637,8 +602,6 @@ mod test {
                 move |t| {
                     let _key = DbgWaitKey::init(wait, t as _);
                     let page_alloc = &alloc().local[t];
-                    page_alloc.start_l0.store(0, Ordering::Relaxed);
-                    page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                     match page_alloc.put(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
@@ -654,53 +617,48 @@ mod test {
             let pt2 = page_alloc.pt2(0);
             assert_eq!(pt2.get(0).pages(), PT_LEN - 2);
             assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 2);
-            alloc().uninit();
+
+            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::uninit();
         }
     }
 
     #[test]
-    fn alloc_free_last() {
+    fn realloc_last() {
         logging();
-        let buffer = aligned_buffer(4 * table::span(2));
 
         let orders = [
-            vec![0, 0, 0, 1, 1, 1, 1],       // 0 free then 1 alloc
-            vec![1, 1, 0, 0],                // 1 alloc last then 0 free last
-            vec![0, 1, 1, 1, 1, 0, 0],       // 1 skips table
-            vec![1, 0, 1, 0, 0, 1, 1, 1, 1], // 1 fails cas
+            vec![0, 0, 0, 0, 1, 1, 1],    // free then alloc
+            vec![1, 1, 1, 0, 0],          // alloc last then free last
+            vec![0, 1, 1, 1, 0, 0, 0, 0], // 1 skips table
+            vec![0, 1, 0, 1, 0, 1, 0, 0], // 1 skips table
+            vec![0, 0, 1, 0, 1, 0, 1],
+            vec![0, 0, 0, 1, 1, 0, 1, 1], // nothing found & retry
         ];
 
         let mut pages = [0; PT_LEN];
-        {
-            alloc().init(2, buffer.as_ptr() as _, buffer.len()).unwrap();
+        let mut buffer = vec![Page::new(); 4 * table::span(2)];
+
+        for order in orders {
+            warn!("order: {:?}", order);
+            Allocator::init(2, &mut buffer).unwrap();
             let page_alloc = &alloc().local[0];
             for page in &mut pages[..PT_LEN - 1] {
                 *page = page_alloc.get(0);
             }
-            warn!("setup single alloc");
-            alloc().uninit();
-        }
-
-        for order in orders {
-            warn!("order: {:?}", order);
-            let clone = buffer.clone();
-            alloc().init(2, clone.as_ptr() as _, clone.len()).unwrap();
             let wait = DbgWait::setup(2, order);
 
             let wait_clone = Arc::clone(&wait);
             let handle = thread::spawn(move || {
                 let _key = DbgWaitKey::init(wait_clone, 1);
                 let page_alloc = &alloc().local[1];
-                page_alloc.start_l0.store(0, Ordering::Relaxed);
-                page_alloc.start_l1.store(1, Ordering::Relaxed);
+
                 page_alloc.get(0);
             });
 
             {
                 let _key = DbgWaitKey::init(wait, 0);
                 let page_alloc = &alloc().local[0];
-                page_alloc.start_l0.store(0, Ordering::Relaxed);
-                page_alloc.start_l1.store(1, Ordering::Relaxed);
 
                 match page_alloc.put(pages[0]) {
                     Err(crate::Error::CAS) => {
@@ -724,7 +682,9 @@ mod test {
                 assert_eq!(pt2.get(1).pages(), 1);
                 assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN)), 1);
             }
-            alloc().uninit();
+
+            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::uninit();
         }
     }
 }

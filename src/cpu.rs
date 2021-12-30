@@ -1,3 +1,4 @@
+#![cfg(test)]
 use std::sync::atomic::AtomicUsize;
 
 thread_local! {
