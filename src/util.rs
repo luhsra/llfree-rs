@@ -9,22 +9,27 @@ pub const fn align_down(v: usize, align: usize) -> usize {
 #[cfg(test)]
 pub fn logging() {
     use std::io::Write;
+    use std::panic::{self, Location};
     use std::sync::atomic::Ordering;
     use std::thread::ThreadId;
+
+    use log::{Level, Record};
 
     use crate::cpu::PINNED;
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format(|buf, record| {
+            let color = match record.level() {
+                log::Level::Error => "\x1b[91m",
+                log::Level::Warn => "\x1b[93m",
+                log::Level::Info => "\x1b[90m",
+                log::Level::Debug => "\x1b[90m",
+                log::Level::Trace => "\x1b[90m",
+            };
+
             writeln!(
                 buf,
-                "{}[{:5} {:2?}@{:<2?} {}:{}] {}\x1b[0m",
-                match record.level() {
-                    log::Level::Error => "\x1b[91m",
-                    log::Level::Warn => "\x1b[93m",
-                    log::Level::Info => "\x1b[90m",
-                    log::Level::Debug => "\x1b[90m",
-                    log::Level::Trace => "\x1b[90m",
-                },
+                "{}[{:5} {:02?}@{:02?} {}:{}] {}\x1b[0m",
+                color,
                 record.level(),
                 unsafe { std::mem::transmute::<ThreadId, u64>(std::thread::current().id()) },
                 PINNED.with(|p| p.load(Ordering::SeqCst)),
@@ -34,6 +39,39 @@ pub fn logging() {
             )
         })
         .try_init();
+
+    panic::set_hook(Box::new(|info| {
+        if let Some(args) = info.message() {
+            log::logger().log(
+                &Record::builder()
+                    .args(*args)
+                    .level(Level::Error)
+                    .file(info.location().map(Location::file))
+                    .line(info.location().map(Location::line))
+                    .build(),
+            );
+        } else if let Some(&payload) = info.payload().downcast_ref::<&'static str>() {
+            log::logger().log(
+                &Record::builder()
+                    .args(format_args!("{}", payload))
+                    .level(Level::Error)
+                    .file(info.location().map(Location::file))
+                    .line(info.location().map(Location::line))
+                    .build(),
+            );
+        } else {
+            log::logger().log(
+                &Record::builder()
+                    .args(format_args!("panic!"))
+                    .level(Level::Error)
+                    .file(info.location().map(Location::file))
+                    .line(info.location().map(Location::line))
+                    .build(),
+            )
+        }
+
+        log::logger().flush();
+    }));
 }
 
 #[cfg(test)]

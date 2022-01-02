@@ -183,11 +183,11 @@ impl fmt::Debug for Entry2 {
 pub enum Entry1 {
     Empty = 0,
     Page = 1,
-    Reserved = 2,
 }
 
 impl From<u64> for Entry1 {
     fn from(v: u64) -> Self {
+        assert!(v <= Self::Page as u64);
         unsafe { std::mem::transmute(v) }
     }
 }

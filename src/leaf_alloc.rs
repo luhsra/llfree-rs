@@ -12,7 +12,6 @@ use crate::{Error, Result, Size};
 macro_rules! wait {
     () => {
         if let Err(e) = crate::wait::wait() {
-            error!("{:?}", e);
             panic!("{:?}", e);
         }
     };
@@ -124,6 +123,9 @@ impl LeafAllocator {
                 pages += 1;
             }
         }
+        if pt.get(pte2.i1()) != Entry1::Empty {
+            panic!("Missing pt1 not found i1={}", pte2.i1());
+        }
         pages
     }
 
@@ -148,15 +150,17 @@ impl LeafAllocator {
 
                 wait!();
 
-                if pt2.update(i2, |pte| pte.inc(pte2.i1())).is_err() {
+                if let Ok(pte2) = pt2.update(i2, |v| v.inc(pte2.i1())) {
+                    assert!(pte2.pages() < PT_LEN);
+                    let page = if pte2.pages() == PT_LEN - 1 {
+                        self.get_last(pte2, newstart)
+                    } else {
+                        self.get_table(pte2, newstart)
+                    };
                     self.alloc_pt1.store(0, Ordering::SeqCst);
-                    continue;
+                    return page;
                 }
-
-                if pte2.pages() == PT_LEN - 1 {
-                    return self.get_last(pte2, newstart);
-                }
-                return self.get_table(pte2, newstart);
+                self.alloc_pt1.store(0, Ordering::SeqCst);
             }
         }
     }
@@ -165,14 +169,13 @@ impl LeafAllocator {
     fn get_table(&self, pte2: Entry2, start: usize) -> usize {
         let pt1 = self.pt1(pte2, start);
 
-        info!("get table");
-
         loop {
             for i in table::range(1, start..self.pages) {
                 if i == pte2.i1() {
                     continue;
                 }
 
+                #[cfg(feature = "wait")]
                 if pt1.get(i) != Entry1::Empty {
                     continue;
                 }
@@ -182,8 +185,6 @@ impl LeafAllocator {
                 if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
                     let page = table::page(1, start, i);
                     info!("alloc l1 i={}: {}", i, page);
-
-                    self.alloc_pt1.store(0, Ordering::SeqCst);
                     return page;
                 }
             }
@@ -199,8 +200,7 @@ impl LeafAllocator {
         info!("alloc last {} s={}", pte2.i1(), start);
 
         let pt1 = self.pt1(pte2, start);
-        let i1 = pte2.i1();
-        let alloc_p1 = !table::page(1, start, i1);
+        let alloc_p1 = !table::page(1, start, pte2.i1());
 
         // Wait for others to finish
         for (i, leaf) in alloc().local.iter().enumerate() {
@@ -214,12 +214,11 @@ impl LeafAllocator {
             }
         }
 
-        if pt1.cas(i1, Entry1::Empty, Entry1::Page).is_err() {
-            panic!("Corruption l1 i{}", i1);
+        if pt1.cas(pte2.i1(), Entry1::Empty, Entry1::Page).is_err() {
+            panic!("Corruption l1 i{} {:?}", pte2.i1(), pte2);
         }
 
-        self.alloc_pt1.store(0, Ordering::SeqCst);
-        start + pte2.i1()
+        table::page(1, start, pte2.i1())
     }
 
     pub fn get_huge(&self, start: usize) -> usize {
@@ -324,7 +323,7 @@ impl LeafAllocator {
 
         for j in 0..PT_LEN {
             if j == page % PT_LEN {
-                pt1.set(j, Entry1::Reserved);
+                pt1.set(j, Entry1::Empty);
             } else {
                 pt1.set(j, Entry1::Page);
             }
@@ -632,7 +631,7 @@ mod test {
             vec![1, 1, 1, 0, 0],          // alloc last then free last
             vec![0, 1, 1, 1, 0, 0, 0, 0], // 1 skips table
             vec![0, 1, 0, 1, 0, 1, 0, 0], // 1 skips table
-            vec![0, 0, 1, 0, 1, 0, 1],
+            vec![0, 0, 1, 0, 1, 0, 1, 1],
             vec![0, 0, 0, 1, 1, 0, 1, 1], // nothing found & retry
         ];
 

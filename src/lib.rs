@@ -1,5 +1,6 @@
 //! Simple reduced alloc example.
 #![feature(asm)]
+#![feature(panic_info_message)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -64,8 +64,7 @@ impl Drop for DbgWaitKey {
                 data.wait.barrier.wait();
 
                 if data.wait.order[i] == data.id {
-                    error!("Wake suspended t{} for {}", data.id, i);
-                    panic!("Wake suspended");
+                    panic!("Wake suspended t{} for {}", data.id, i);
                 }
             }
         })

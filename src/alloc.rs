@@ -77,10 +77,9 @@ impl Allocator {
 
         if memory.len() < (MIN_SIZE * cores) / PAGE_SIZE {
             error!(
-                "memory size {:?} {} < {}",
-                memory.as_ptr_range(),
+                "memory size {} < {}",
                 memory.len(),
-                (MIN_SIZE * cores) / PAGE_SIZE / PAGE_SIZE
+                (MIN_SIZE * cores) / PAGE_SIZE
             );
             return Err(Error::Memory);
         }
@@ -563,7 +562,7 @@ impl Drop for Allocator {
 #[cfg(test)]
 mod test {
 
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::Instant;
@@ -592,7 +591,7 @@ mod test {
         }
     }
     #[cfg(not(target_os = "linux"))]
-    fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a>, ()> {
+    fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
         MMap::anon(begin, length)
     }
 
@@ -796,14 +795,14 @@ mod test {
     #[test]
     fn alloc_free() {
         logging();
+        const THREADS: usize = 2;
+        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 10) / 2;
 
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 10);
+        let mut mapping = mapping(0x1000_0000_0000, 4 * table::span(2)).unwrap();
 
-        let mut mapping = mapping(0x1000_0000_0000, 8 << 18).unwrap();
+        Allocator::init(THREADS, &mut mapping).unwrap();
 
-        Allocator::init(2, &mut mapping).unwrap();
-
-        let barrier = Arc::new(Barrier::new(2));
+        let barrier = Arc::new(Barrier::new(THREADS));
 
         // Alloc on first thread
         cpu::pin(0);
@@ -838,7 +837,6 @@ mod test {
 
         assert_eq!(alloc().allocated_pages(), ALLOC_PER_THREAD);
 
-        alloc().dump();
         Allocator::uninit();
     }
 
