@@ -276,7 +276,7 @@ impl LeafAllocator {
         let i2 = table::idx(2, page);
 
         if pte2.pages() == PT_LEN {
-            return self.put_full(page);
+            return self.put_full(pte2, page);
         }
 
         wait!();
@@ -311,7 +311,7 @@ impl LeafAllocator {
     }
 
     /// Free last page & rebuild pt1 in it
-    fn put_full(&self, page: usize) -> Result<()> {
+    fn put_full(&self, pte2: Entry2, page: usize) -> Result<()> {
         let pt2 = self.pt2(page);
         let i2 = table::idx(2, page);
 
@@ -329,11 +329,7 @@ impl LeafAllocator {
             }
         }
 
-        match pt2.cas(
-            i2,
-            Entry2::new_table(PT_LEN, 0),
-            Entry2::new_table(PT_LEN - 1, page % PT_LEN),
-        ) {
+        match pt2.cas(i2, pte2, Entry2::new_table(PT_LEN - 1, page % PT_LEN)) {
             Ok(_) => Ok(()),
             Err(pte) => {
                 warn!("CAS: create pt1 {:?}", pte);
