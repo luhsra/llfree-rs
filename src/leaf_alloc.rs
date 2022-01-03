@@ -134,8 +134,8 @@ impl LeafAllocator {
         let pt2 = self.pt2(start);
 
         loop {
-            for i2 in table::range(2, start..self.pages) {
-                let newstart = table::page(2, start, i2);
+            for newstart in table::iterate(2, start, self.pages) {
+                let i2 = table::idx(2, newstart);
 
                 wait!();
 
@@ -170,7 +170,8 @@ impl LeafAllocator {
         let pt1 = self.pt1(pte2, start);
 
         loop {
-            for i in table::range(1, start..self.pages) {
+            for page in table::iterate(1, start, self.pages) {
+                let i = table::idx(1, page);
                 if i == pte2.i1() {
                     continue;
                 }
@@ -183,7 +184,6 @@ impl LeafAllocator {
                 wait!();
 
                 if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
-                    let page = table::page(1, start, i);
                     info!("alloc l1 i={}: {}", i, page);
                     return page;
                 }
@@ -224,13 +224,14 @@ impl LeafAllocator {
     pub fn get_huge(&self, start: usize) -> usize {
         let pt = self.pt2(start);
         loop {
-            for i in table::range(2, start..self.pages) {
+            for page in table::iterate(2, start, self.pages) {
+                let i = table::idx(2, page);
                 if pt
                     .cas(i, Entry2::new(), Entry2::new().with_page(true))
                     .is_ok()
                 {
-                    info!("alloc l2 i={}: {}", i, table::page(2, start, i));
-                    return table::page(2, start, i);
+                    info!("alloc l2 i={}: {}", i, page);
+                    return page;
                 }
             }
         }
@@ -352,11 +353,8 @@ impl LeafAllocator {
 
     pub fn dump(&self, start: usize) {
         let pt2 = self.pt2(start);
-        for i2 in 0..PT_LEN {
-            let start = start + i2 * PT_LEN;
-            if start >= self.pages {
-                return;
-            }
+        for i2 in table::range(2, start..self.pages) {
+            let start = table::page(2, start, i2);
 
             let pte2 = pt2.get(i2);
             info!(
@@ -369,14 +367,15 @@ impl LeafAllocator {
             );
             if !pte2.giant() && !pte2.page() && pte2.pages() > 0 && pte2.pages() < PT_LEN {
                 let pt1 = self.pt1(pte2, start);
-                for i1 in 0..PT_LEN {
+                for i1 in table::range(1, start..self.pages) {
+                    let page = table::page(1, start, i1);
                     let pte1 = pt1.get(i1);
                     info!(
                         "{:1$}l1 i={2} 0x{3:x}: {4:?}",
                         "",
                         (LAYERS - 1) * 4,
                         i1,
-                        (start + i1) * PAGE_SIZE,
+                        page * PAGE_SIZE,
                         pte1
                     );
                 }

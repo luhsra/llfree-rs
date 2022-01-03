@@ -60,16 +60,27 @@ pub const fn num_pts(layer: usize, pages: usize) -> usize {
 }
 
 /// Computes the index range for the given page range
-#[inline(always)]
 pub fn range(layer: usize, pages: Range<usize>) -> Range<usize> {
     let bits = PT_LEN_BITS * (layer - 1);
     let start = pages.start >> bits;
     let end = (pages.end >> bits) + (pages.end.trailing_zeros() < bits as _) as usize;
 
-    let end = (end.saturating_sub(start & !(PT_LEN - 1))).min(PT_LEN);
+    let end = end.saturating_sub(start & !(PT_LEN - 1)).min(PT_LEN);
     let start = start & (PT_LEN - 1);
 
     start..end
+}
+
+/// Iterates over the table pages beginning with `start`.
+/// It wraps around the end and ends one before `start`.
+pub fn iterate(layer: usize, start: usize, pages: usize) -> impl Iterator<Item = usize> {
+    assert!(layer >= 1 && start < pages);
+
+    let bits = PT_LEN_BITS * (layer - 1);
+    let pt_start = round(layer, start);
+    let max = (pages.saturating_sub(pt_start) >> bits).min(PT_LEN);
+    let offset = (start >> bits) % PT_LEN;
+    std::iter::once(start).chain((1..max).into_iter().map(move |v| (((offset + v) % max) << bits) + pt_start))
 }
 
 impl<T: Sized + From<u64> + Into<u64>> Table<T> {
@@ -162,7 +173,10 @@ impl Page {
 
 #[cfg(test)]
 mod test {
-    use crate::table::{self, PAGE_SIZE, PT_LEN};
+    use crate::{
+        table::{self, PAGE_SIZE, PT_LEN},
+        util::logging,
+    };
 
     #[test]
     fn pt_size() {
@@ -208,5 +222,41 @@ mod test {
             table::page(2, table::span(2), 1),
             table::span(2) + table::span(1)
         );
+    }
+
+    #[test]
+    fn iterate() {
+        logging();
+        // 5 -> 5, 6, .., 499, 0, 1, 2, 3, 4,
+        let mut iter = table::iterate(1, 5, 500).enumerate();
+        assert_eq!(iter.next(), Some((0, 5)));
+        assert_eq!(iter.next(), Some((1, 6)));
+        assert_eq!(iter.last(), Some((499, 4)));
+
+        let mut iter = table::iterate(1, 5 + 2 * table::span(1), 500 + 2 * table::span(1)).enumerate();
+        assert_eq!(iter.next(), Some((0, 5 + 2 * table::span(1))));
+        assert_eq!(iter.next(), Some((1, 6 + 2 * table::span(1))));
+        assert_eq!(iter.last(), Some((499, 4 + 2 * table::span(1))));
+
+        let mut iter = table::iterate(2, 5 * table::span(1), 500 * table::span(1)).enumerate();
+        assert_eq!(iter.next(), Some((0, 5 * table::span(1))));
+        assert_eq!(iter.last(), Some((499, 4 * table::span(1))));
+
+        let mut iter = table::iterate(2, 0, 500 * table::span(1)).enumerate();
+        assert_eq!(iter.next(), Some((0, 0)));
+        assert_eq!(iter.last(), Some((499, 499 * table::span(1))));
+
+        let mut iter = table::iterate(2, 500, 500 * table::span(1)).enumerate();
+        assert_eq!(iter.next(), Some((0, 500)));
+        assert_eq!(iter.next(), Some((1, table::span(1))));
+        assert_eq!(iter.last(), Some((499, 499 * table::span(1))));
+
+        let mut iter = table::iterate(2, 499 * table::span(1), 500 * table::span(1)).enumerate();
+        assert_eq!(iter.next(), Some((0, 499 * table::span(1))));
+        assert_eq!(iter.last(), Some((499, 498 * table::span(1))));
+
+        let mut iter = table::iterate(2, 499 * table::span(1), 1000 * table::span(1)).enumerate();
+        assert_eq!(iter.next(), Some((0, 499 * table::span(1))));
+        assert_eq!(iter.last(), Some((511, 498 * table::span(1))));
     }
 }

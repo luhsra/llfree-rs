@@ -11,13 +11,13 @@ use crate::table::{self, Page, Table, LAYERS, PAGE_SIZE, PT_LEN, PT_LEN_BITS};
 use crate::{Error, Result, Size};
 
 const MAGIC: usize = 0xdeadbeef;
-pub const MIN_SIZE: usize = 2 * table::m_span(2);
-pub const MAX_SIZE: usize = table::m_span(LAYERS);
+const MIN_PAGES: usize = 2 * table::span(2);
+const MAX_PAGES: usize = table::span(LAYERS);
 
 /// Non-Volatile global metadata
 pub struct Meta {
     pub magic: AtomicUsize,
-    length: AtomicUsize,
+    pages: AtomicUsize,
     active: AtomicUsize,
 }
 const _: () = assert!(size_of::<Meta>() <= PAGE_SIZE);
@@ -59,7 +59,13 @@ pub fn alloc<'a>() -> &'a Allocator {
 impl Allocator {
     /// Allows init from multiple threads.
     pub fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
-        info!("init cores={} mem={:?}", cores, memory.as_ptr_range());
+        info!(
+            "init cores={} mem={:?} ({})",
+            cores,
+            memory.as_ptr_range(),
+            memory.len()
+        );
+
         let alloc = unsafe { &mut SHARED };
 
         if alloc
@@ -75,30 +81,18 @@ impl Allocator {
             return Err(Error::Uninitialized);
         }
 
-        if memory.len() < (MIN_SIZE * cores) / PAGE_SIZE {
-            error!(
-                "memory size {} < {}",
-                memory.len(),
-                (MIN_SIZE * cores) / PAGE_SIZE
-            );
+        if memory.len() < MIN_PAGES * cores {
+            error!("memory {} < {}", memory.len(), MIN_PAGES * cores);
             return Err(Error::Memory);
         }
 
         // Last frame is reserved for metadata
-        let length = (memory.len() * PAGE_SIZE - PAGE_SIZE).min(MAX_SIZE);
-        let begin = memory.as_ptr() as usize;
-        info!(
-            "Alloc: {:?}-{:?} - {} pages",
-            begin as *const (),
-            (begin + length) as *const (),
-            length / PAGE_SIZE
-        );
+        alloc.pages = (memory.len() - 1).min(MAX_PAGES);
+        alloc.begin = memory.as_ptr() as usize;
 
-        alloc.meta = (begin + length) as *mut Meta;
+        alloc.meta = (alloc.begin + alloc.pages * PAGE_SIZE) as *mut Meta;
         let meta = unsafe { &mut *alloc.meta };
 
-        alloc.begin = begin;
-        alloc.pages = length / PAGE_SIZE;
         // level 2 tables are stored at the end of the NVM
         alloc.pages -= table::num_pts(2, alloc.pages);
 
@@ -109,7 +103,7 @@ impl Allocator {
         alloc.tables = vec![Table::empty(); num_pt];
         alloc.local = vec![LeafAllocator::new(alloc.begin, alloc.pages); cores];
 
-        if meta.length.load(Ordering::SeqCst) == length
+        if meta.pages.load(Ordering::SeqCst) == alloc.pages
             && meta.magic.load(Ordering::SeqCst) == MAGIC
         {
             warn!("Recover allocator state p={}", alloc.pages);
@@ -122,7 +116,7 @@ impl Allocator {
         } else {
             warn!("Setup allocator state p={}", alloc.pages);
             alloc.local[0].clear();
-            meta.length.store(length, Ordering::SeqCst);
+            meta.pages.store(alloc.pages, Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
         }
 
@@ -140,8 +134,6 @@ impl Allocator {
                 leaf.start_l1.load(Ordering::Relaxed),
             );
         }
-
-        info!("{:?}", alloc.pt3(0));
 
         meta.active.store(1, Ordering::SeqCst);
         alloc.initialized.store(Init::Ready as _, Ordering::SeqCst);
@@ -293,18 +285,16 @@ impl Allocator {
                 Size::L0 => {
                     let start = leaf.start_l0.load(Ordering::SeqCst);
                     let new = self.increment_parents(LAYERS, start, size)?;
-                    if start != new {
-                        leaf.start_l0.store(new, Ordering::SeqCst);
-                    }
-                    leaf.get(new)
+                    let page = leaf.get(new);
+                    leaf.start_l0.store(page, Ordering::SeqCst);
+                    page
                 }
                 Size::L1 => {
                     let start = leaf.start_l1.load(Ordering::SeqCst);
                     let new = self.increment_parents(LAYERS, start, size)?;
-                    if start != new {
-                        leaf.start_l1.store(new, Ordering::SeqCst);
-                    }
-                    leaf.get_huge(new)
+                    let page = leaf.get_huge(new);
+                    leaf.start_l1.store(page, Ordering::SeqCst);
+                    page
                 }
                 Size::L2 => panic!(),
             }
@@ -320,8 +310,8 @@ impl Allocator {
 
         // Increment parents
         let pt = self.pt(layer, start);
-        for i in table::range(layer, start..self.pages) {
-            let page = table::page(layer, start, i).max(start);
+        for page in table::iterate(layer, start, self.pages) {
+            let i = table::idx(layer, page);
 
             if let Ok(_) = pt.update(i, |v| {
                 v.inc(size, layer, self.pages - table::round(layer, page))
@@ -337,8 +327,8 @@ impl Allocator {
 
     fn increment_parents_l3(&self, start: usize, size: Size) -> Result<usize> {
         let pt = self.pt3(start);
-        for i in table::range(3, start..self.pages) {
-            let page = table::page(3, start, i);
+        for page in table::iterate(3, start, self.pages) {
+            let i = table::idx(3, page);
 
             if page != start {
                 if pt.update(i, |v| v.inc_usage(size, 1)).is_err() {
@@ -562,7 +552,6 @@ impl Drop for Allocator {
 #[cfg(test)]
 mod test {
 
-    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::Instant;
@@ -763,28 +752,20 @@ mod test {
         Allocator::init(THREADS, &mut mapping).unwrap();
 
         // Stress test
-        let mut pages = Vec::with_capacity(ALLOC_PER_THREAD * THREADS);
-        pages.resize_with(ALLOC_PER_THREAD * THREADS, AtomicU64::default);
         let barrier = Arc::new(Barrier::new(THREADS));
-        let pages_begin = pages.as_ptr() as usize;
 
         parallel(THREADS as _, move |t| {
             cpu::pin(t);
             barrier.wait();
 
-            let pages = unsafe {
-                std::slice::from_raw_parts_mut(
-                    (pages_begin as *mut usize).add(t as usize * ALLOC_PER_THREAD),
-                    ALLOC_PER_THREAD,
-                )
-            };
+            let mut pages = vec![0; ALLOC_PER_THREAD];
 
-            for page in pages.iter_mut() {
+            for page in &mut pages {
                 *page = alloc().get(t, Size::L0).unwrap();
             }
 
             for page in pages {
-                alloc().put(t, *page).unwrap();
+                alloc().put(t, page).unwrap();
             }
         });
 
