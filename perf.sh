@@ -1,0 +1,32 @@
+perf stat -e \
+\
+task-clock,\
+context-switches,\
+cpu-migrations,\
+page-faults,\
+cycles,\
+instructions,\
+branches,\
+branch-misses,\
+\
+mem-loads,\
+mem-stores,\
+cache-references,\
+cache-misses,\
+\
+LLC-loads,\
+LLC-load-misses,\
+LLC-stores,\
+LLC-store-misses,\
+\
+L1-dcache-loads,\
+L1-dcache-load-misses,\
+L1-icache-loads,\
+L1-icache-load-misses,\
+\
+dTLB-loads,\
+dTLB-load-misses,\
+iTLB-loads,\
+iTLB-load-misses\
+ \
+$*

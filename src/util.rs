@@ -6,18 +6,25 @@ pub const fn align_down(v: usize, align: usize) -> usize {
     v & !(align - 1)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "logger"))]
 pub fn logging() {
     use std::io::Write;
     use std::panic::{self, Location};
-    use std::sync::atomic::Ordering;
     use std::thread::ThreadId;
 
     use log::{Level, Record};
 
-    use crate::cpu::PINNED;
+    #[cfg(feature = "thread")]
+    let core = {
+        use crate::thread::PINNED;
+        use std::sync::atomic::Ordering;
+        PINNED.with(|p| p.load(Ordering::SeqCst))
+    };
+    #[cfg(not(feature = "thread"))]
+    let core = 0usize;
+
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
-        .format(|buf, record| {
+        .format(move |buf, record| {
             let color = match record.level() {
                 log::Level::Error => "\x1b[91m",
                 log::Level::Warn => "\x1b[93m",
@@ -32,7 +39,7 @@ pub fn logging() {
                 color,
                 record.level(),
                 unsafe { std::mem::transmute::<ThreadId, u64>(std::thread::current().id()) },
-                PINNED.with(|p| p.load(Ordering::SeqCst)),
+                core,
                 record.file().unwrap_or_default(),
                 record.line().unwrap_or_default(),
                 record.args()
@@ -72,20 +79,6 @@ pub fn logging() {
 
         log::logger().flush();
     }));
-}
-
-#[cfg(test)]
-pub fn parallel<F: FnOnce(usize) + Clone + Send + 'static>(n: usize, f: F) {
-    let handles = (0..n)
-        .into_iter()
-        .map(|t| {
-            let f = f.clone();
-            std::thread::spawn(move || f(t))
-        })
-        .collect::<Vec<_>>();
-    for handle in handles {
-        handle.join().unwrap();
-    }
 }
 
 #[cfg(target_arch = "x86_64")]

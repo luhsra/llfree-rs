@@ -8,6 +8,7 @@ log = "0.4"
 libc = "0.2"
 bitfield-struct = "0.1.1"
 num_cpus = "1.13"
+env_logger = { version = "0.9", default-features = false, optional = true }
 
 [dev-dependencies]
 env_logger = { version = "0.9", default-features = false }
@@ -18,6 +19,12 @@ log_debug = ["log/max_level_debug"]
 log_info = ["log/max_level_info"]
 log_warn = ["log/max_level_warn"]
 log_error = ["log/max_level_error"]
+thread = []
+logger = ["env_logger"]
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 raw-cpuid = "10.2"
+
+[[example]]
+name = "alloc"
+required-features = ["logger", "thread"]

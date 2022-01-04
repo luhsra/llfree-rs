@@ -1,12 +1,11 @@
-use std::alloc::Layout;
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const PAGE_SIZE_BITS: usize = 12; // 2^12 => 4KiB
-pub const PAGE_SIZE: usize = 1 << PAGE_SIZE_BITS;
+use crate::{PAGE_SIZE, PAGE_SIZE_BITS};
+
 pub const PTE_SIZE_BITS: usize = 3; // 2^3 => 8B => 64b
 pub const PTE_SIZE: usize = 1 << PTE_SIZE_BITS;
 pub const PT_LEN_BITS: usize = PAGE_SIZE_BITS - PTE_SIZE_BITS;
@@ -80,7 +79,11 @@ pub fn iterate(layer: usize, start: usize, pages: usize) -> impl Iterator<Item =
     let pt_start = round(layer, start);
     let max = (pages.saturating_sub(pt_start) >> bits).min(PT_LEN);
     let offset = (start >> bits) % PT_LEN;
-    std::iter::once(start).chain((1..max).into_iter().map(move |v| (((offset + v) % max) << bits) + pt_start))
+    std::iter::once(start).chain(
+        (1..max)
+            .into_iter()
+            .map(move |v| (((offset + v) % max) << bits) + pt_start),
+    )
 }
 
 impl<T: Sized + From<u64> + Into<u64>> Table<T> {
@@ -155,28 +158,11 @@ impl<T: fmt::Debug + From<u64>> fmt::Debug for Table<T> {
     }
 }
 
-/// Correctly sized and aligned page.
-#[derive(Clone)]
-#[repr(align(0x1000))]
-pub struct Page {
-    _data: [u8; PAGE_SIZE],
-}
-const _: () = assert!(Layout::new::<Page>().size() == PAGE_SIZE);
-const _: () = assert!(Layout::new::<Page>().align() == PAGE_SIZE);
-impl Page {
-    pub const fn new() -> Self {
-        Self {
-            _data: [0; PAGE_SIZE],
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
-    use crate::{
-        table::{self, PAGE_SIZE, PT_LEN},
-        util::logging,
-    };
+    use crate::table::{self, PT_LEN};
+    use crate::util::logging;
+    use crate::PAGE_SIZE;
 
     #[test]
     fn pt_size() {
@@ -233,7 +219,8 @@ mod test {
         assert_eq!(iter.next(), Some((1, 6)));
         assert_eq!(iter.last(), Some((499, 4)));
 
-        let mut iter = table::iterate(1, 5 + 2 * table::span(1), 500 + 2 * table::span(1)).enumerate();
+        let mut iter =
+            table::iterate(1, 5 + 2 * table::span(1), 500 + 2 * table::span(1)).enumerate();
         assert_eq!(iter.next(), Some((0, 5 + 2 * table::span(1))));
         assert_eq!(iter.next(), Some((1, 6 + 2 * table::span(1))));
         assert_eq!(iter.last(), Some((499, 4 + 2 * table::span(1))));

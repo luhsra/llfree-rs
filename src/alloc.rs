@@ -7,12 +7,12 @@ use log::{error, info, warn};
 
 use crate::entry::{Entry, Entry3};
 use crate::leaf_alloc::LeafAllocator;
-use crate::table::{self, Page, Table, LAYERS, PAGE_SIZE, PT_LEN, PT_LEN_BITS};
-use crate::{Error, Result, Size};
+use crate::table::{self, Table, LAYERS, PT_LEN, PT_LEN_BITS};
+use crate::{Error, Page, Result, Size, PAGE_SIZE};
 
-const MAGIC: usize = 0xdeadbeef;
-const MIN_PAGES: usize = 2 * table::span(2);
-const MAX_PAGES: usize = table::span(LAYERS);
+pub const MAGIC: usize = 0xdeadbeef;
+pub const MIN_PAGES: usize = 2 * table::span(2);
+pub const MAX_PAGES: usize = table::span(LAYERS);
 
 /// Non-Volatile global metadata
 pub struct Meta {
@@ -166,7 +166,6 @@ impl Allocator {
         unsafe { &mut *self.meta }
     }
 
-    #[cfg(test)]
     /// Returns the number of allocated pages.
     pub fn allocated_pages(&self) -> usize {
         assert_eq!(self.initialized.load(Ordering::SeqCst), Init::Ready as _);
@@ -318,6 +317,11 @@ impl Allocator {
             }) {
                 match self.increment_parents(layer - 1, page, size) {
                     Ok(result) => return Ok(result),
+                    Err(Error::Memory) => {
+                        // TODO: special behavior on fragmentation
+                        pt.update(i, |v| v.dec(size)).unwrap();
+                        return Err(Error::Memory);
+                    }
                     Err(_) => todo!("special behavior on fragmentation"),
                 }
             };
@@ -334,12 +338,13 @@ impl Allocator {
                 if pt.update(i, |v| v.inc_usage(size, 1)).is_err() {
                     continue;
                 }
+                warn!("reserved {}", i);
             }
 
             match pt.update(i, |v| v.inc(size, self.pages - table::round(3, start))) {
                 Ok(_) => return Ok(page),
-                Err(pte) => {
-                    warn!("try reserve new i{} {:?}", i, pte);
+                Err(_) => {
+                    warn!("try reserve {}", i);
                     pt.update(i, Entry3::dec_usage).unwrap()
                 }
             };
@@ -553,22 +558,21 @@ impl Drop for Allocator {
 mod test {
 
     use std::sync::{Arc, Barrier};
-    use std::thread;
     use std::time::Instant;
 
     use log::{info, warn};
 
     use crate::alloc::{alloc, Allocator, Size};
-    use crate::cpu;
     use crate::mmap::MMap;
-    use crate::table::Page;
-    use crate::table::{self, PAGE_SIZE, PT_LEN};
-    use crate::util::{logging, parallel};
+    use crate::table::{self, PT_LEN};
+    use crate::thread;
+    use crate::util::logging;
+    use crate::{Page, PAGE_SIZE};
 
     #[cfg(target_os = "linux")]
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
         if let Ok(file) = std::env::var("NVM_FILE") {
-            warn!("MMap file {} l={}G", file, length >> 30);
+            warn!("MMap file {} l={}G", file, (length * PAGE_SIZE) >> 30);
             let f = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -671,8 +675,8 @@ mod test {
         let pages_begin = pages.as_ptr() as usize;
         let timer = Instant::now();
 
-        parallel(THREADS as _, move |t| {
-            cpu::pin(t);
+        thread::parallel(THREADS as _, move |t| {
+            thread::pin(t);
             barrier.wait();
 
             for i in 0..ALLOC_PER_THREAD {
@@ -713,8 +717,8 @@ mod test {
         let barrier = Arc::new(Barrier::new(THREADS));
         let timer = Instant::now();
 
-        parallel(THREADS as _, move |t| {
-            cpu::pin(t);
+        thread::parallel(THREADS as _, move |t| {
+            thread::pin(t);
             barrier.wait();
 
             for i in 0..ALLOC_PER_THREAD {
@@ -754,8 +758,8 @@ mod test {
         // Stress test
         let barrier = Arc::new(Barrier::new(THREADS));
 
-        parallel(THREADS as _, move |t| {
-            cpu::pin(t);
+        thread::parallel(THREADS as _, move |t| {
+            thread::pin(t);
             barrier.wait();
 
             let mut pages = vec![0; ALLOC_PER_THREAD];
@@ -786,7 +790,7 @@ mod test {
         let barrier = Arc::new(Barrier::new(THREADS));
 
         // Alloc on first thread
-        cpu::pin(0);
+        thread::pin(0);
         let mut pages = vec![0; ALLOC_PER_THREAD];
         for page in &mut pages {
             *page = alloc().get(0, Size::L0).unwrap();
@@ -795,8 +799,8 @@ mod test {
         let handle = {
             let barrier = barrier.clone();
 
-            thread::spawn(move || {
-                cpu::pin(1);
+            std::thread::spawn(move || {
+                thread::pin(1);
                 barrier.wait();
                 // Free on another thread
                 for page in &pages {

@@ -1,4 +1,4 @@
-#![cfg(test)]
+#![cfg(any(test, feature = "thread"))]
 use std::sync::atomic::AtomicUsize;
 
 thread_local! {
@@ -75,6 +75,20 @@ pub fn pin(core: usize) {
     PINNED.with(|p| {
         p.store(core, Ordering::SeqCst);
     });
+}
+
+pub fn parallel<T: Send + 'static, F: FnOnce(usize) -> T + Clone + Send + 'static>(
+    n: usize,
+    f: F,
+) -> Vec<T> {
+    let handles = (0..n)
+        .into_iter()
+        .map(|t| {
+            let f = f.clone();
+            std::thread::spawn(move || f(t))
+        })
+        .collect::<Vec<_>>();
+    handles.into_iter().map(|t| t.join().unwrap()).collect()
 }
 
 #[cfg(test)]

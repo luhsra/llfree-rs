@@ -4,7 +4,8 @@ use log::{error, info, warn};
 
 use crate::alloc::alloc;
 use crate::entry::{Entry1, Entry2};
-use crate::table::{self, Table, LAYERS, PAGE_SIZE, PT_LEN, PT_LEN_BITS};
+use crate::table::{self, Table, LAYERS, PT_LEN, PT_LEN_BITS};
+use crate::PAGE_SIZE;
 
 use crate::{Error, Result, Size};
 
@@ -389,16 +390,15 @@ impl LeafAllocator {
 mod test {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
-    use std::thread;
 
     use log::warn;
 
     use crate::alloc::{alloc, Allocator};
     use crate::entry::Entry1;
-    use crate::table::{Page, Table, PT_LEN};
-    use crate::util::{logging, parallel};
+    use crate::table::{self, Table, PT_LEN};
+    use crate::util::logging;
     use crate::wait::{DbgWait, DbgWaitKey};
-    use crate::{cpu, table};
+    use crate::{thread, Page};
 
     fn count(pt: &Table<Entry1>) -> usize {
         let mut pages = 0;
@@ -428,8 +428,8 @@ mod test {
 
             let wait = DbgWait::setup(2, order);
 
-            parallel(2, move |t| {
-                cpu::pin(t);
+            thread::parallel(2, move |t| {
+                thread::pin(t);
                 let key = DbgWaitKey::init(wait, t as _);
                 let page_alloc = &alloc().local[t];
 
@@ -466,8 +466,8 @@ mod test {
 
             let wait = DbgWait::setup(2, order);
 
-            parallel(2, move |t| {
-                cpu::pin(t);
+            thread::parallel(2, move |t| {
+                thread::pin(t);
                 let _key = DbgWaitKey::init(wait, t as _);
                 let page_alloc = &alloc().local[t];
 
@@ -505,8 +505,8 @@ mod test {
             }
             let wait = DbgWait::setup(2, order);
 
-            parallel(2, move |t| {
-                cpu::pin(t);
+            thread::parallel(2, move |t| {
+                thread::pin(t);
                 let _key = DbgWaitKey::init(wait, t as _);
                 let page_alloc = &alloc().local[t];
 
@@ -545,7 +545,7 @@ mod test {
             pages[1] = page_alloc.get(0);
             let wait = DbgWait::setup(2, order);
 
-            parallel(2, {
+            thread::parallel(2, {
                 let pages = pages.clone();
                 move |t| {
                     let _key = DbgWaitKey::init(wait, t as _);
@@ -591,7 +591,7 @@ mod test {
             }
             let wait = DbgWait::setup(2, order);
 
-            parallel(2, {
+            thread::parallel(2, {
                 let pages = pages.clone();
                 move |t| {
                     let _key = DbgWaitKey::init(wait, t as _);
@@ -643,7 +643,7 @@ mod test {
             let wait = DbgWait::setup(2, order);
 
             let wait_clone = Arc::clone(&wait);
-            let handle = thread::spawn(move || {
+            let handle = std::thread::spawn(move || {
                 let _key = DbgWaitKey::init(wait_clone, 1);
                 let page_alloc = &alloc().local[1];
 

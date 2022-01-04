@@ -2,21 +2,23 @@
 #![feature(asm)]
 #![feature(panic_info_message)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    alloc::Layout,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-mod alloc;
-mod cpu;
-mod entry;
+pub mod alloc;
+pub mod entry;
 mod leaf_alloc;
 pub mod mmap;
-mod table;
-mod util;
+pub mod table;
+pub mod thread;
+pub mod util;
 
 #[cfg(test)]
 mod wait;
 
 use alloc::{alloc, Allocator};
-use table::{Page, PAGE_SIZE};
 use util::{align_down, align_up};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +86,25 @@ pub fn put(core: usize, addr: u64) -> Result<()> {
     alloc().put(core, page).map(|_| ())
 }
 
+pub const PAGE_SIZE_BITS: usize = 12; // 2^12 => 4KiB
+pub const PAGE_SIZE: usize = 1 << PAGE_SIZE_BITS;
+
+/// Correctly sized and aligned page.
+#[derive(Clone)]
+#[repr(align(0x1000))]
+pub struct Page {
+    _data: [u8; PAGE_SIZE],
+}
+const _: () = assert!(Layout::new::<Page>().size() == PAGE_SIZE);
+const _: () = assert!(Layout::new::<Page>().align() == PAGE_SIZE);
+impl Page {
+    pub const fn new() -> Self {
+        Self {
+            _data: [0; PAGE_SIZE],
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -91,9 +112,10 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::table::{Page, PT_LEN};
-    use crate::util::{logging, parallel};
-    use crate::{get, init, put, Size};
+    use crate::table::PT_LEN;
+    use crate::thread::parallel;
+    use crate::util::logging;
+    use crate::{get, init, put, Page, Size};
 
     #[test]
     fn threading() {

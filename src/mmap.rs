@@ -115,7 +115,7 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::table::PAGE_SIZE;
+    use crate::PAGE_SIZE;
 
     #[test]
     fn mapping() {

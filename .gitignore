@@ -6,3 +6,5 @@ Cargo.lock
 memfile
 .vscode
 /test
+perf.data*
+perf.out
