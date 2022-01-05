@@ -5,6 +5,10 @@ thread_local! {
     pub static PINNED: AtomicUsize = AtomicUsize::new(0);
 }
 
+/// Useful if we only want to operate on a single numa node.
+/// Pin then only selects every n'th cpu.
+const NUMA_NODES: usize = 1;
+
 #[cfg(target_os = "linux")]
 pub fn pin(core: usize) {
     use std::panic;
@@ -13,7 +17,7 @@ pub fn pin(core: usize) {
     use log::error;
 
     let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
-    unsafe { libc::CPU_SET(core, &mut set) };
+    unsafe { libc::CPU_SET(NUMA_NODES * core, &mut set) };
     let ret = unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) };
     if ret != 0 {
         error!("getcpu failed");

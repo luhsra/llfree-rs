@@ -14,13 +14,13 @@ pub fn logging() {
 
     use log::{Level, Record};
 
-    #[cfg(feature = "thread")]
+    #[cfg(any(test, feature = "thread"))]
     let core = {
         use crate::thread::PINNED;
         use std::sync::atomic::Ordering;
         PINNED.with(|p| p.load(Ordering::SeqCst))
     };
-    #[cfg(not(feature = "thread"))]
+    #[cfg(not(any(test, feature = "thread")))]
     let core = 0usize;
 
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))

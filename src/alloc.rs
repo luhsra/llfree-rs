@@ -562,7 +562,7 @@ mod test {
 
     use log::{info, warn};
 
-    use crate::alloc::{alloc, Allocator, Size};
+    use crate::alloc::{alloc, Allocator, Size, MIN_PAGES};
     use crate::mmap::MMap;
     use crate::table::{self, PT_LEN};
     use crate::thread;
@@ -692,8 +692,52 @@ mod test {
 
         // Check that the same page was not allocated twice
         pages.sort_unstable();
+        for i in 0..pages.len() - 1 {
+            let p1 = pages[i];
+            let p2 = pages[i + 1];
+            assert!(p1 < PAGES && p2 < PAGES);
+            assert!(p1 != p2);
+        }
+
+        Allocator::uninit();
+    }
+
+    #[test]
+    fn parallel_huge_alloc() {
+        logging();
+
+        const THREADS: usize = 4;
+        const ALLOC_PER_THREAD: usize = PT_LEN - 1;
+        const PAGES: usize = THREADS * MIN_PAGES;
+
+        let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
+
+        info!("init alloc");
+        Allocator::init(THREADS, &mut mapping).unwrap();
+
+        // Stress test
+        let mut pages = vec![0usize; ALLOC_PER_THREAD * THREADS];
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let pages_begin = pages.as_ptr() as usize;
+        let timer = Instant::now();
+
+        thread::parallel(THREADS as _, move |t| {
+            thread::pin(t);
+            barrier.wait();
+
+            for i in 0..ALLOC_PER_THREAD {
+                let dst =
+                    unsafe { &mut *(pages_begin as *mut usize).add(t * ALLOC_PER_THREAD + i) };
+                *dst = alloc().get(t, Size::L1).unwrap();
+            }
+        });
+        warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
+
+        assert_eq!(alloc().allocated_pages(), pages.len() * table::span(1));
+        warn!("allocated pages: {}", pages.len());
 
         // Check that the same page was not allocated twice
+        pages.sort_unstable();
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
@@ -733,8 +777,6 @@ mod test {
 
         // Check that the same page was not allocated twice
         pages.sort_unstable();
-
-        // Check that the same page was not allocated twice
         let mut last = None;
         for p in pages {
             assert!(last != Some(p));
@@ -830,6 +872,7 @@ mod test {
         logging();
 
         let mut mapping = mapping(0x1000_0000_0000, 8 << 18).unwrap();
+        thread::pin(0);
 
         {
             Allocator::init(1, &mut mapping).unwrap();

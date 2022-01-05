@@ -1,6 +1,7 @@
 #![cfg(all(feature = "thread", feature = "logger"))]
 
-use std::sync::{atomic::Ordering, Arc, Barrier};
+use std::sync::{Arc, Barrier};
+use std::time::Instant;
 
 use log::warn;
 
@@ -37,7 +38,7 @@ fn main() {
     const THREADS: usize = 6;
     const MEM_PAGES: usize = 2 * THREADS * MIN_PAGES;
 
-    warn!("pages={}", MEM_PAGES);
+    warn!("pages={MEM_PAGES}");
     let mut mapping = mapping(0x1000_0000_0000, MEM_PAGES).unwrap();
 
     Allocator::init(THREADS, &mut mapping).unwrap();
@@ -46,25 +47,44 @@ fn main() {
 
     thread::parallel(THREADS as _, move |t| {
         thread::pin(t);
-        assert!(thread::PINNED.with(|v| v.load(Ordering::SeqCst)) == t);
         barrier.wait();
 
         let mut pages = Vec::new();
 
+        let mut min = u128::MAX;
+        let mut max = 0;
+        let mut sum = 0;
+
         loop {
+            let timer = Instant::now();
             match alloc().get(t, Size::L0) {
                 Ok(page) => pages.push(page),
                 Err(Error::Memory) => break,
                 Err(e) => panic!("{:?}", e),
             }
+            let elapsed = timer.elapsed().as_nanos();
+            min = min.min(elapsed);
+            max = max.max(elapsed);
+            sum += elapsed;
         }
+        let len = pages.len() as u128;
 
-        warn!("thread {} allocated {}", t, pages.len());
+        warn!("thread {t} allocated {} [{min}, {}, {max}]", len, sum / len);
         barrier.wait();
 
-        for page in &pages {
-            alloc().put(t, *page).unwrap();
+        let mut min = u128::MAX;
+        let mut max = 0;
+        let mut sum = 0;
+
+        for page in pages {
+            let timer = Instant::now();
+            alloc().put(t, page).unwrap();
+            let elapsed = timer.elapsed().as_nanos();
+            min = min.min(elapsed);
+            max = max.max(elapsed);
+            sum += elapsed;
         }
+        warn!("thread {t} freed {} [{min}, {}, {max}]", len, sum / len);
     });
 
     assert_eq!(alloc().allocated_pages(), 0);

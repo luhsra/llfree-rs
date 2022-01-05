@@ -3,6 +3,10 @@ name = "nvalloc-rs"
 version = "0.1.0"
 edition = "2018"
 
+[profile.release]
+lto = "thin"
+opt-level = 3
+
 [dependencies]
 log = "0.4"
 libc = "0.2"
@@ -12,6 +16,7 @@ env_logger = { version = "0.9", default-features = false, optional = true }
 
 [dev-dependencies]
 env_logger = { version = "0.9", default-features = false }
+criterion = { version = "0.3", default-features = false }
 
 [features]
 wait = []
@@ -28,3 +33,9 @@ raw-cpuid = "10.2"
 [[example]]
 name = "alloc"
 required-features = ["logger", "thread"]
+
+[[bench]]
+name = "benchmarks"
+harness = false
+test = false
+required-features = ["logger", "log_error", "thread"]
