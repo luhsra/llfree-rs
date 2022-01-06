@@ -2,12 +2,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
 
-use crate::alloc::alloc;
 use crate::entry::{Entry1, Entry2};
-use crate::table::{self, Table, LAYERS, PT_LEN, PT_LEN_BITS};
+use crate::table::{self, AtomicBuffer, Table, LAYERS, PT_LEN, PT_LEN_BITS};
 use crate::PAGE_SIZE;
+use crate::{Alloc, Allocator};
 
 use crate::{Error, Result, Size};
+
+const CAS_RETRIES: usize = 4;
 
 #[cfg(all(test, feature = "wait"))]
 macro_rules! wait {
@@ -83,7 +85,7 @@ impl LeafAllocator {
         unsafe { &*((self.begin + (self.pages + i) * PAGE_SIZE) as *mut Table<Entry2>) }
     }
 
-    pub fn recover(&self, start: usize, deep: bool) -> (usize, Size) {
+    pub fn recover(&self, start: usize, deep: bool) -> Result<(usize, Size)> {
         let mut pages = 0;
         let mut size = Size::L0;
 
@@ -91,12 +93,12 @@ impl LeafAllocator {
         for i in table::range(2, start..self.pages) {
             let pte = pt.get(i);
             if pte.giant() {
-                return (table::span(2), Size::L2);
+                return Ok((table::span(2), Size::L2));
             } else if pte.page() {
                 size = Size::L1;
                 pages += table::span(1);
-            } else if deep {
-                let p = self.recover_l1(table::page(1, start, i), pte);
+            } else if deep && pte.pages() > 0 {
+                let p = self.recover_l1(table::page(1, start, i), pte)?;
                 if pte.pages() != p {
                     warn!(
                         "Invalid PTE2 start=0x{:x} i{}: {} != %{}",
@@ -107,16 +109,18 @@ impl LeafAllocator {
                     );
                     pt.set(i, pte.with_pages(p));
                 }
+                assert!(size == Size::L0 || pte.pages() == 0);
                 pages += p;
             } else {
+                assert!(size == Size::L0 || pte.pages() == 0);
                 pages += pte.pages();
             }
         }
 
-        (pages, size)
+        Ok((pages, size))
     }
 
-    fn recover_l1(&self, start: usize, pte2: Entry2) -> usize {
+    fn recover_l1(&self, start: usize, pte2: Entry2) -> Result<usize> {
         let pt = self.pt1(pte2, start);
         let mut pages = 0;
         for i in table::range(1, start..self.pages) {
@@ -125,16 +129,17 @@ impl LeafAllocator {
             }
         }
         if pt.get(pte2.i1()) != Entry1::Empty {
-            panic!("Missing pt1 not found i1={}", pte2.i1());
+            error!("Missing pt1 not found i1={}", pte2.i1());
+            return Err(Error::Corruption);
         }
-        pages
+        Ok(pages)
     }
 
     /// Allocate a single page
-    pub fn get(&self, start: usize) -> usize {
+    pub fn get(&self, start: usize) -> Result<usize> {
         let pt2 = self.pt2(start);
 
-        loop {
+        for _ in 0..CAS_RETRIES {
             for newstart in table::iterate(2, start, self.pages) {
                 let i2 = table::idx(2, newstart);
 
@@ -164,13 +169,15 @@ impl LeafAllocator {
                 self.alloc_pt1.store(0, Ordering::SeqCst);
             }
         }
+        error!("exceeding retries {start}");
+        Err(Error::Corruption)
     }
 
     /// Search free page table entry.
-    fn get_table(&self, pte2: Entry2, start: usize) -> usize {
+    fn get_table(&self, pte2: Entry2, start: usize) -> Result<usize> {
         let pt1 = self.pt1(pte2, start);
 
-        loop {
+        for _ in 0..CAS_RETRIES {
             for page in table::iterate(1, start, self.pages) {
                 let i = table::idx(1, page);
                 if i == pte2.i1() {
@@ -186,17 +193,19 @@ impl LeafAllocator {
 
                 if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
                     info!("alloc l1 i={}: {}", i, page);
-                    return page;
+                    return Ok(page);
                 }
             }
 
             warn!("nothing found retry...");
             wait!();
         }
+        error!("exceeding retries");
+        Err(Error::Corruption)
     }
 
     /// Allocate the last page (the pt1 is reused as last page).
-    fn get_last(&self, pte2: Entry2, start: usize) -> usize {
+    fn get_last(&self, pte2: Entry2, start: usize) -> Result<usize> {
         wait!();
         info!("alloc last {} s={}", pte2.i1(), start);
 
@@ -204,11 +213,12 @@ impl LeafAllocator {
         let alloc_p1 = !table::page(1, start, pte2.i1());
 
         // Wait for others to finish
-        for (i, leaf) in alloc().local.iter().enumerate() {
+        for (i, leaf) in Allocator::instance().local.iter().enumerate() {
             if leaf as *const _ != self as *const _ {
                 while leaf.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
                     warn!("Waiting for cpu {} on {}", i, unsafe {
-                        (self as *const Self).offset_from(&alloc().local[0] as *const _)
+                        (self as *const Self)
+                            .offset_from(&Allocator::instance().local[0] as *const _)
                     });
                     wait!();
                 }
@@ -216,15 +226,16 @@ impl LeafAllocator {
         }
 
         if pt1.cas(pte2.i1(), Entry1::Empty, Entry1::Page).is_err() {
-            panic!("Corruption l1 i{} {:?}", pte2.i1(), pte2);
+            error!("Corruption l1 i{} {:?}", pte2.i1(), pte2);
+            return Err(Error::Corruption);
         }
 
-        table::page(1, start, pte2.i1())
+        Ok(table::page(1, start, pte2.i1()))
     }
 
-    pub fn get_huge(&self, start: usize) -> usize {
+    pub fn get_huge(&self, start: usize) -> Result<usize> {
         let pt = self.pt2(start);
-        loop {
+        for _ in 0..CAS_RETRIES {
             for page in table::iterate(2, start, self.pages) {
                 let i = table::idx(2, page);
                 if pt
@@ -232,10 +243,12 @@ impl LeafAllocator {
                     .is_ok()
                 {
                     info!("alloc l2 i={}: {}", i, page);
-                    return page;
+                    return Ok(page);
                 }
             }
         }
+        error!("exceeding retries");
+        Err(Error::Corruption)
     }
 
     pub fn persist(&self, page: usize) {
@@ -250,6 +263,7 @@ impl LeafAllocator {
         wait!();
 
         let old = pt2.get(i2);
+        // warn!("{} i{i2}: {old:?}", page / table::span(2));
 
         if old.page() {
             // Free huge page
@@ -263,7 +277,10 @@ impl LeafAllocator {
 
             match pt2.cas(i2, old, Entry2::new()) {
                 Ok(_) => Ok(Size::L1),
-                Err(_) => panic!("Corruption l2 i{}", i2),
+                Err(_) => {
+                    error!("Corruption l2 i{}", i2);
+                    Err(Error::Corruption)
+                }
             }
         } else if !old.giant() && old.pages() > 0 {
             self.put_small(old, page).map(|_| Size::L0)
@@ -306,7 +323,8 @@ impl LeafAllocator {
         wait!();
 
         if pt1.cas(i1, Entry1::Page, Entry1::Empty).is_err() {
-            panic!("Corruption l1 i{}", i1);
+            error!("Corruption l1 i{}", i1);
+            return Err(Error::Corruption);
         }
 
         Ok(())
@@ -393,12 +411,12 @@ mod test {
 
     use log::warn;
 
-    use crate::alloc::{alloc, Allocator};
     use crate::entry::Entry1;
-    use crate::table::{self, Table, PT_LEN};
+    use crate::table::{self, AtomicBuffer, Table, PT_LEN};
     use crate::util::logging;
     use crate::wait::{DbgWait, DbgWaitKey};
     use crate::{thread, Page};
+    use crate::{Alloc, Allocator};
 
     fn count(pt: &Table<Entry1>) -> usize {
         let mut pages = 0;
@@ -424,25 +442,28 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
-            alloc().local[0].get(0);
+            Allocator::instance().local[0].get(0).unwrap();
 
             let wait = DbgWait::setup(2, order);
 
             thread::parallel(2, move |t| {
                 thread::pin(t);
                 let key = DbgWaitKey::init(wait, t as _);
-                let page_alloc = &alloc().local[t];
+                let page_alloc = &Allocator::instance().local[t];
 
-                let page = page_alloc.get(0);
+                let page = page_alloc.get(0).unwrap();
                 drop(key);
                 assert!(page != 0);
             });
 
-            let page_alloc = &alloc().local[0];
+            let page_alloc = &Allocator::instance().local[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 3);
             assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 3);
 
-            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::instance()
+                .meta()
+                .magic
+                .store(0, Ordering::SeqCst);
             Allocator::uninit();
         }
     }
@@ -469,16 +490,19 @@ mod test {
             thread::parallel(2, move |t| {
                 thread::pin(t);
                 let _key = DbgWaitKey::init(wait, t as _);
-                let page_alloc = &alloc().local[t];
+                let page_alloc = &Allocator::instance().local[t];
 
-                page_alloc.get(0);
+                page_alloc.get(0).unwrap();
             });
 
-            let page_alloc = &alloc().local[0];
+            let page_alloc = &Allocator::instance().local[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 2);
             assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 2);
 
-            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::instance()
+                .meta()
+                .magic
+                .store(0, Ordering::SeqCst);
             Allocator::uninit();
         }
     }
@@ -499,27 +523,30 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
-            let page_alloc = &alloc().local[0];
+            let page_alloc = &Allocator::instance().local[0];
             for _ in 0..PT_LEN - 1 {
-                page_alloc.get(0);
+                page_alloc.get(0).unwrap();
             }
             let wait = DbgWait::setup(2, order);
 
             thread::parallel(2, move |t| {
                 thread::pin(t);
                 let _key = DbgWaitKey::init(wait, t as _);
-                let page_alloc = &alloc().local[t];
+                let page_alloc = &Allocator::instance().local[t];
 
-                page_alloc.get(0);
+                page_alloc.get(0).unwrap();
             });
 
-            let page_alloc = &alloc().local[0];
+            let page_alloc = &Allocator::instance().local[0];
             let pt2 = page_alloc.pt2(0);
             assert_eq!(pt2.get(0).pages(), PT_LEN);
             assert_eq!(pt2.get(1).pages(), 1);
             assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN)), 1);
 
-            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::instance()
+                .meta()
+                .magic
+                .store(0, Ordering::SeqCst);
             Allocator::uninit();
         }
     }
@@ -540,16 +567,16 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
-            let page_alloc = &alloc().local[0];
-            pages[0] = page_alloc.get(0);
-            pages[1] = page_alloc.get(0);
+            let page_alloc = &Allocator::instance().local[0];
+            pages[0] = page_alloc.get(0).unwrap();
+            pages[1] = page_alloc.get(0).unwrap();
             let wait = DbgWait::setup(2, order);
 
             thread::parallel(2, {
                 let pages = pages.clone();
                 move |t| {
                     let _key = DbgWaitKey::init(wait, t as _);
-                    let page_alloc = &alloc().local[t];
+                    let page_alloc = &Allocator::instance().local[t];
 
                     match page_alloc.put(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
@@ -561,10 +588,13 @@ mod test {
                 }
             });
 
-            let page_alloc = &alloc().local[0];
+            let page_alloc = &Allocator::instance().local[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 0);
 
-            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::instance()
+                .meta()
+                .magic
+                .store(0, Ordering::SeqCst);
             Allocator::uninit();
         }
     }
@@ -585,9 +615,9 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
-            let page_alloc = &alloc().local[0];
+            let page_alloc = &Allocator::instance().local[0];
             for page in &mut pages {
-                *page = page_alloc.get(0);
+                *page = page_alloc.get(0).unwrap();
             }
             let wait = DbgWait::setup(2, order);
 
@@ -595,7 +625,7 @@ mod test {
                 let pages = pages.clone();
                 move |t| {
                     let _key = DbgWaitKey::init(wait, t as _);
-                    let page_alloc = &alloc().local[t];
+                    let page_alloc = &Allocator::instance().local[t];
 
                     match page_alloc.put(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
@@ -607,12 +637,15 @@ mod test {
                 }
             });
 
-            let page_alloc = &alloc().local[0];
+            let page_alloc = &Allocator::instance().local[0];
             let pt2 = page_alloc.pt2(0);
             assert_eq!(pt2.get(0).pages(), PT_LEN - 2);
             assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 2);
 
-            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::instance()
+                .meta()
+                .magic
+                .store(0, Ordering::SeqCst);
             Allocator::uninit();
         }
     }
@@ -636,23 +669,23 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
-            let page_alloc = &alloc().local[0];
+            let page_alloc = &Allocator::instance().local[0];
             for page in &mut pages[..PT_LEN - 1] {
-                *page = page_alloc.get(0);
+                *page = page_alloc.get(0).unwrap();
             }
             let wait = DbgWait::setup(2, order);
 
             let wait_clone = Arc::clone(&wait);
             let handle = std::thread::spawn(move || {
                 let _key = DbgWaitKey::init(wait_clone, 1);
-                let page_alloc = &alloc().local[1];
+                let page_alloc = &Allocator::instance().local[1];
 
-                page_alloc.get(0);
+                page_alloc.get(0).unwrap();
             });
 
             {
                 let _key = DbgWaitKey::init(wait, 0);
-                let page_alloc = &alloc().local[0];
+                let page_alloc = &Allocator::instance().local[0];
 
                 match page_alloc.put(pages[0]) {
                     Err(crate::Error::CAS) => {
@@ -665,7 +698,7 @@ mod test {
 
             handle.join().unwrap();
 
-            let page_alloc = &alloc().local[0];
+            let page_alloc = &Allocator::instance().local[0];
             let pt2 = page_alloc.pt2(0);
             if pt2.get(0).pages() == PT_LEN - 1 {
                 assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 1);
@@ -677,7 +710,10 @@ mod test {
                 assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN)), 1);
             }
 
-            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::instance()
+                .meta()
+                .magic
+                .store(0, Ordering::SeqCst);
             Allocator::uninit();
         }
     }

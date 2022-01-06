@@ -77,7 +77,7 @@ pub fn iterate(layer: usize, start: usize, pages: usize) -> impl Iterator<Item =
 
     let bits = PT_LEN_BITS * (layer - 1);
     let pt_start = round(layer, start);
-    let max = (pages.saturating_sub(pt_start) >> bits).min(PT_LEN);
+    let max = ((pages.saturating_sub(pt_start) + span(layer - 1) - 1) >> bits).min(PT_LEN);
     let offset = (start >> bits) % PT_LEN;
     std::iter::once(start).chain(
         (1..max)
@@ -94,22 +94,32 @@ impl<T: Sized + From<u64> + Into<u64>> Table<T> {
         }
     }
 
-    pub fn get(&self, i: usize) -> T {
-        T::from(self.entries[i].load(Ordering::SeqCst))
-    }
-
-    pub fn set(&self, i: usize, e: T) {
-        self.entries[i].store(e.into(), Ordering::SeqCst);
-    }
-
     pub fn clear(&self) {
         for i in 0..PT_LEN {
             self.entries[i].store(0, Ordering::SeqCst);
         }
     }
+}
 
-    pub fn cas(&self, i: usize, expected: T, new: T) -> Result<T, T> {
-        match self.entries[i].compare_exchange(
+impl<T: Sized + From<u64> + Into<u64>> AtomicBuffer<T> for Table<T> {
+    fn entry<'a>(&'a self, i: usize) -> &'a AtomicU64 {
+        &self.entries[i]
+    }
+}
+
+pub trait AtomicBuffer<T: Sized + From<u64> + Into<u64>> {
+    fn entry<'a>(&'a self, i: usize) -> &'a AtomicU64;
+
+    fn get(&self, i: usize) -> T {
+        T::from(self.entry(i).load(Ordering::SeqCst))
+    }
+
+    fn set(&self, i: usize, e: T) {
+        self.entry(i).store(e.into(), Ordering::SeqCst);
+    }
+
+    fn cas(&self, i: usize, expected: T, new: T) -> Result<T, T> {
+        match self.entry(i).compare_exchange(
             expected.into(),
             new.into(),
             Ordering::SeqCst,
@@ -120,10 +130,12 @@ impl<T: Sized + From<u64> + Into<u64>> Table<T> {
         }
     }
 
-    pub fn update<F: FnMut(T) -> Option<T>>(&self, i: usize, mut f: F) -> Result<T, T> {
-        match self.entries[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-            f(v.into()).map(T::into)
-        }) {
+    fn update<F: FnMut(T) -> Option<T>>(&self, i: usize, mut f: F) -> Result<T, T> {
+        match self
+            .entry(i)
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                f(v.into()).map(T::into)
+            }) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
@@ -245,5 +257,11 @@ mod test {
         let mut iter = table::iterate(2, 499 * table::span(1), 1000 * table::span(1)).enumerate();
         assert_eq!(iter.next(), Some((0, 499 * table::span(1))));
         assert_eq!(iter.last(), Some((511, 498 * table::span(1))));
+
+        let mut iter = table::iterate(2, 0, 2 * table::span(1) + 1).enumerate();
+        assert_eq!(iter.next(), Some((0, 0)));
+        assert_eq!(iter.next(), Some((1, 1 * table::span(1))));
+        assert_eq!(iter.next(), Some((2, 2 * table::span(1))));
+        assert_eq!(iter.next(), None);
     }
 }

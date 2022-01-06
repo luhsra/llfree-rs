@@ -2,8 +2,8 @@ use core::fmt;
 
 use bitfield_struct::bitfield;
 
-use crate::table::span;
-use crate::{table::PT_LEN, Size};
+use crate::table::{span, PT_LEN};
+use crate::Size;
 
 #[bitfield(u64)]
 pub struct Entry {
@@ -42,8 +42,9 @@ pub struct Entry3 {
     pub pages: usize,
     #[bits(2)]
     pub size_n: u8,
-    #[bits(18)]
-    pub usage: usize,
+    pub reserved: bool,
+    #[bits(17)]
+    pub _p: usize,
 }
 
 impl Entry3 {
@@ -52,11 +53,11 @@ impl Entry3 {
         Entry3::new().with_size_n(3)
     }
     #[inline(always)]
-    pub fn new_table(pages: usize, size: Size, usage: usize) -> Entry3 {
+    pub fn new_table(pages: usize, size: Size, reserved: bool) -> Entry3 {
         Entry3::new()
             .with_pages(pages)
             .with_size_n(size as u8 + 1)
-            .with_usage(usage)
+            .with_reserved(reserved)
     }
     pub fn size(self) -> Option<Size> {
         let s = self.size_n();
@@ -65,7 +66,7 @@ impl Entry3 {
             _ => None,
         }
     }
-
+    /// Increments the pages counter and sets the size and reserved bits.
     #[inline(always)]
     pub fn inc(self, size: Size, max: usize) -> Option<Entry3> {
         if self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size)) {
@@ -74,42 +75,66 @@ impl Entry3 {
 
         let pages = self.pages() + span(size as usize);
         if pages < span(2) && pages < max {
-            Some(self.with_pages(pages).with_size_n(size as u8 + 1))
-        } else {
-            None
-        }
-    }
-    #[inline(always)]
-    pub fn dec(self, size: Size) -> Option<Entry3> {
-        if self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size)) {
-            return None;
-        }
-
-        if self.pages() >= span(size as usize) {
-            Some(self.with_pages(self.pages() - span(size as usize)))
-        } else {
-            None
-        }
-    }
-    #[inline(always)]
-    pub fn inc_usage(self, size: Size, max: usize) -> Option<Entry3> {
-        if self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size)) {
-            return None;
-        }
-
-        if self.pages() as usize + span(size as usize) < span(2) && (self.usage() as usize) < max {
             Some(
-                self.with_usage(self.usage() + 1)
-                    .with_size_n(size as u8 + 1),
+                self.with_pages(pages)
+                    .with_size_n(size as u8 + 1)
+                    .with_reserved(true),
+            )
+        } else {
+            None
+        }
+    }
+    /// Increments the pages counter and sets the size and reserved bits.
+    #[inline(always)]
+    pub fn inc_reserve(self, size: Size, max: usize) -> Option<Entry3> {
+        if self.reserved() || self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size))
+        {
+            return None;
+        }
+
+        let pages = self.pages() + span(size as usize);
+        if pages < span(2) && pages < max {
+            Some(
+                self.with_pages(pages)
+                    .with_size_n(size as u8 + 1)
+                    .with_reserved(true),
             )
         } else {
             None
         }
     }
     #[inline(always)]
-    pub fn dec_usage(self) -> Option<Entry3> {
-        if self.size_n() != 3 && self.usage() > 0 {
-            Some(self.with_usage(self.usage() - 1))
+    pub fn dec(self, size: Size) -> Option<Entry3> {
+        if self.size_n() == 3 || self.size() != Some(size) {
+            return None;
+        }
+
+        if self.pages() > span(size as usize) {
+            Some(self.with_pages(self.pages() - span(size as usize)))
+        } else if self.pages() == span(size as usize) {
+            Some(self.with_pages(0).with_size_n(0))
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    pub fn reserve(self, size: Size, max: usize) -> Option<Entry3> {
+        if self.reserved() || self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size))
+        {
+            return None;
+        }
+
+        let pages = self.pages() + span(size as usize);
+        if pages < span(2) && pages < max {
+            Some(self.with_reserved(true).with_size_n(size as u8 + 1))
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    pub fn unreserve(self) -> Option<Entry3> {
+        if self.size_n() != 3 && self.reserved() {
+            Some(self.with_reserved(false))
         } else {
             None
         }
@@ -121,7 +146,7 @@ impl fmt::Debug for Entry3 {
         f.debug_struct("Entry3")
             .field("pages", &self.pages())
             .field("size", &self.size())
-            .field("usage", &self.usage())
+            .field("reserved", &self.reserved())
             .finish()
     }
 }
@@ -200,7 +225,7 @@ impl Into<u64> for Entry1 {
 
 #[cfg(test)]
 mod test {
-    use crate::table::Table;
+    use crate::table::{AtomicBuffer, Table};
 
     #[test]
     fn pt() {

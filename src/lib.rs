@@ -2,13 +2,11 @@
 #![feature(asm)]
 #![feature(panic_info_message)]
 
-use std::{
-    alloc::Layout,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{alloc::Layout, sync::atomic::AtomicUsize};
 
-pub mod alloc;
+mod alloc;
 pub mod entry;
+pub use alloc::{Alloc, AllocStack, AllocTables};
 mod leaf_alloc;
 pub mod mmap;
 pub mod table;
@@ -18,21 +16,26 @@ pub mod util;
 #[cfg(test)]
 mod wait;
 
-use alloc::{alloc, Allocator};
-use util::{align_down, align_up};
+pub type Allocator = AllocTables;
+
+use table::LAYERS;
+
+pub const MAGIC: usize = 0xdeadbeef;
+pub const MIN_PAGES: usize = 2 * table::span(2);
+pub const MAX_PAGES: usize = table::span(LAYERS);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// Not enough memory
-    Memory,
+    Memory = 1,
     /// Failed comapare and swap operation
-    CAS,
+    CAS = 2,
     /// Invalid address
-    Address,
-    /// Corrupted allocator state
-    Corruption(usize, usize, u64),
+    Address = 3,
     /// Allocator not initialized
-    Uninitialized,
+    Uninitialized = 4,
+    /// Corrupted allocator state
+    Corruption = 5,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -47,43 +50,58 @@ pub enum Size {
     L2 = 2,
 }
 
-pub fn init(cores: usize, addr: *mut (), size: usize) -> Result<()> {
-    let begin = align_up(addr as usize, PAGE_SIZE) as *mut Page;
-    let size = align_down(addr as usize + size, PAGE_SIZE).saturating_sub(begin as usize);
-    let memory = unsafe { std::slice::from_raw_parts_mut(begin, size / PAGE_SIZE) };
+pub mod raw {
+    use std::{ffi::c_void, sync::atomic::AtomicU64};
 
-    Allocator::init(cores, memory)
-}
+    use log::error;
 
-pub fn uninit() {
-    Allocator::uninit();
-}
+    use crate::{Alloc, Allocator, Error, Page, Size, PAGE_SIZE};
 
-pub fn get<F: FnOnce(u64) -> u64>(
-    core: usize,
-    size: Size,
-    dst: &AtomicU64,
-    translate: F,
-    expected: u64,
-) -> Result<()> {
-    let page = alloc().get(core, size)?;
-    let new = translate((page * PAGE_SIZE) as u64);
-    match dst.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            alloc().put(core, page).unwrap();
-            Err(Error::CAS)
+    #[no_mangle]
+    pub extern "C" fn nvalloc_init(cores: usize, addr: *mut c_void, pages: usize) -> i64 {
+        let memory = unsafe { std::slice::from_raw_parts_mut(addr as *mut Page, pages) };
+        match Allocator::init(cores, memory) {
+            Ok(_) => 0,
+            Err(e) => -(e as usize as i64),
         }
     }
-}
 
-pub fn put(core: usize, addr: u64) -> Result<()> {
-    if addr % PAGE_SIZE as u64 != 0 {
-        return Err(Error::Address);
+    pub fn nvalloc_uninit() {
+        Allocator::uninit();
     }
-    let page = addr as usize / PAGE_SIZE;
 
-    alloc().put(core, page).map(|_| ())
+    pub fn nvalloc_get(core: usize, size: Size) -> i64 {
+        match Allocator::instance().get(core, size) {
+            Ok(page) => (page * PAGE_SIZE) as i64,
+            Err(e) => -(e as usize as i64),
+        }
+    }
+
+    pub fn nvalloc_get_cas(
+        core: usize,
+        size: Size,
+        dst: *const u64,
+        translate: fn(u64) -> u64,
+        expected: u64,
+    ) -> i64 {
+        let dst = unsafe { &*(dst as *const AtomicU64) };
+        match Allocator::instance().get_cas(core, size, dst, translate, expected) {
+            Ok(_) => 0,
+            Err(e) => -(e as usize as i64),
+        }
+    }
+
+    pub fn nvalloc_put(core: usize, addr: u64) -> i64 {
+        if addr % PAGE_SIZE as u64 != 0 {
+            error!("Invalid align {addr:x}");
+            return -(Error::Address as usize as i64);
+        }
+        let page = addr as usize / PAGE_SIZE;
+        match Allocator::instance().put(core, page) {
+            Ok(_) => 0,
+            Err(e) => -(e as usize as i64),
+        }
+    }
 }
 
 pub const PAGE_SIZE_BITS: usize = 12; // 2^12 => 4KiB
@@ -104,6 +122,19 @@ impl Page {
         }
     }
 }
+/// Non-Volatile global metadata
+pub struct Meta {
+    pub magic: AtomicUsize,
+    pages: AtomicUsize,
+    active: AtomicUsize,
+}
+const _: () = assert!(core::mem::size_of::<Meta>() <= PAGE_SIZE);
+
+enum Init {
+    None,
+    Initializing,
+    Ready,
+}
 
 #[cfg(test)]
 mod test {
@@ -115,7 +146,7 @@ mod test {
     use crate::table::PT_LEN;
     use crate::thread::parallel;
     use crate::util::logging;
-    use crate::{get, init, put, Page, Size};
+    use crate::{Alloc, Allocator, Page, Size};
 
     #[test]
     fn threading() {
@@ -123,27 +154,27 @@ mod test {
 
         const THREADS: usize = 8;
 
-        let mapping: MMap<'_, Page> = MMap::anon(0x1000_0000_0000_u64 as _, 20 << 18).unwrap();
+        let mut mapping: MMap<'_, Page> = MMap::anon(0x1000_0000_0000_u64 as _, 20 << 18).unwrap();
 
         info!("mmap {} bytes", mapping.len());
 
         info!("init alloc");
 
-        let addr = mapping.as_ptr() as usize;
-        let size = mapping.len();
-
-        info!("init finished");
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
-        init(THREADS, addr as _, size).unwrap();
+        Allocator::init(THREADS, &mut mapping[..]).unwrap();
 
         parallel(THREADS, |t| {
             let pages = [DEFAULT; PT_LEN];
             for page in &pages {
-                get(t, Size::L0, page, |v| v, 0).unwrap();
+                Allocator::instance()
+                    .get_cas(t, Size::L0, page, |v| v, 0)
+                    .unwrap();
             }
 
             for page in &pages {
-                put(t, page.load(Ordering::SeqCst)).unwrap();
+                Allocator::instance()
+                    .put(t, page.load(Ordering::SeqCst) as usize)
+                    .unwrap();
             }
         });
 

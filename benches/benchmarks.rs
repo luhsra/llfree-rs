@@ -2,9 +2,8 @@ use std::sync::atomic::Ordering;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-use nvalloc_rs::alloc::{alloc, Allocator, MIN_PAGES};
-use nvalloc_rs::util::logging;
-use nvalloc_rs::{Page, Size};
+use nvalloc::util::logging;
+use nvalloc::{Alloc, Allocator, Page, Size, MIN_PAGES};
 
 fn alloc_free_small_normal(c: &mut Criterion) {
     logging();
@@ -16,14 +15,17 @@ fn alloc_free_small_normal(c: &mut Criterion) {
 
             let mut pages = Vec::with_capacity(MIN_PAGES);
             for _ in 0..MIN_PAGES {
-                pages.push(alloc().get(black_box(0), Size::L0).unwrap());
+                pages.push(nvalloc::get(black_box(0), Size::L0).unwrap());
             }
             pages = black_box(pages);
             for page in pages {
-                alloc().put(black_box(0), page).unwrap();
+                nvalloc::put(black_box(0), page).unwrap();
             }
 
-            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::instance()
+                .meta()
+                .magic
+                .store(0, Ordering::SeqCst);
             Allocator::uninit();
         });
     });
@@ -38,11 +40,14 @@ fn alloc_free_small_direct(c: &mut Criterion) {
             Allocator::init(1, &mut memory).unwrap();
 
             for _ in 0..MIN_PAGES {
-                let page = alloc().get(black_box(0), Size::L0).unwrap();
+                let page = Allocator::get(black_box(0), Size::L0).unwrap();
                 let page = black_box(page);
-                alloc().put(black_box(0), page).unwrap();
+                Allocator::put(black_box(0), page).unwrap();
             }
-            alloc().meta().magic.store(0, Ordering::SeqCst);
+            Allocator::instance()
+                .meta()
+                .magic
+                .store(0, Ordering::SeqCst);
             Allocator::uninit();
         });
     });

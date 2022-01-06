@@ -2,7 +2,7 @@ use std::env::args;
 use std::fs::metadata;
 
 use log::{error, info, warn};
-use nvalloc_rs::mmap::MMap;
+use nvalloc::mmap::MMap;
 
 fn main() {
     logging();

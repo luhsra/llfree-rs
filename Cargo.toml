@@ -1,5 +1,5 @@
 [package]
-name = "nvalloc-rs"
+name = "nvalloc"
 version = "0.1.0"
 edition = "2018"
 
