@@ -1,12 +1,10 @@
-//! Simple reduced alloc example.
-#![feature(asm)]
+//! # Persistent non-volatile memory allocator
+//!
+//! This project contains multiple allocator designs for NVM and benchmarks comparing them.
 #![feature(panic_info_message)]
 
-use std::{alloc::Layout, sync::atomic::AtomicUsize};
-
-mod alloc;
+pub mod alloc;
 pub mod entry;
-pub use alloc::{Alloc, Allocator};
 mod leaf_alloc;
 pub mod mmap;
 pub mod table;
@@ -16,131 +14,87 @@ pub mod util;
 #[cfg(test)]
 mod wait;
 
-use table::Table;
+use std::ffi::c_void;
+use std::sync::atomic::AtomicU64;
 
-pub const MAGIC: usize = 0xdeadbeef;
-pub const MIN_PAGES: usize = 2 * Table::span(2);
-pub const MAX_PAGES: usize = Table::span(Table::LAYERS);
+use log::error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
-    /// Not enough memory
-    Memory = 1,
-    /// Failed comapare and swap operation
-    CAS = 2,
-    /// Invalid address
-    Address = 3,
-    /// Allocator not initialized
-    Uninitialized = 4,
-    /// Corrupted allocator state
-    Corruption = 5,
-}
+use alloc::{Alloc, Allocator, Error, Size};
+use util::Page;
 
-pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Size {
-    /// 4KiB
-    L0 = 0,
-    /// 2MiB
-    L1 = 1,
-    /// 1GiB
-    L2 = 2,
-}
-
-pub mod raw {
-    use std::{ffi::c_void, sync::atomic::AtomicU64};
-
-    use log::error;
-
-    use crate::{Alloc, Allocator, Error, Page, Size};
-
-    #[no_mangle]
-    pub extern "C" fn nvalloc_init(cores: usize, addr: *mut c_void, pages: usize) -> i64 {
-        let memory = unsafe { std::slice::from_raw_parts_mut(addr as *mut Page, pages) };
-        match Allocator::init(cores, memory) {
-            Ok(_) => 0,
-            Err(e) => -(e as usize as i64),
-        }
-    }
-
-    pub fn nvalloc_uninit() {
-        Allocator::uninit();
-    }
-
-    pub fn nvalloc_get(core: usize, size: Size) -> i64 {
-        let alloc = Allocator::instance();
-        let begin = alloc.begin();
-        match alloc.get(core, size) {
-            Ok(page) => (page * Page::SIZE + begin) as i64,
-            Err(e) => -(e as usize as i64),
-        }
-    }
-
-    pub fn nvalloc_get_cas(
-        core: usize,
-        size: Size,
-        dst: *const u64,
-        translate: fn(u64) -> u64,
-        expected: u64,
-    ) -> i64 {
-        let dst = unsafe { &*(dst as *const AtomicU64) };
-        let alloc = Allocator::instance();
-        let begin = alloc.begin();
-        match alloc.get_cas(
-            core,
-            size,
-            dst,
-            |p| translate(p * Page::SIZE as u64 + begin as u64),
-            expected,
-        ) {
-            Ok(_) => 0,
-            Err(e) => -(e as usize as i64),
-        }
-    }
-
-    pub fn nvalloc_put(core: usize, addr: u64) -> i64 {
-        if addr % Page::SIZE as u64 != 0 {
-            error!("Invalid align {addr:x}");
-            return -(Error::Address as usize as i64);
-        }
-        let page = addr as usize / Page::SIZE;
-        match Allocator::instance().put(core, page) {
-            Ok(_) => 0,
-            Err(e) => -(e as usize as i64),
-        }
+#[no_mangle]
+pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64) -> i64 {
+    let memory = unsafe { std::slice::from_raw_parts_mut(addr as *mut Page, pages as _) };
+    match Allocator::init(cores as _, memory) {
+        Ok(_) => 0,
+        Err(e) => -(e as usize as i64),
     }
 }
 
-/// Correctly sized and aligned page.
-#[derive(Clone)]
-#[repr(align(0x1000))]
-pub struct Page {
-    _data: [u8; Page::SIZE],
+#[no_mangle]
+pub extern "C" fn nvalloc_uninit() {
+    Allocator::uninit();
 }
-const _: () = assert!(Layout::new::<Page>().size() == Page::SIZE);
-const _: () = assert!(Layout::new::<Page>().align() == Page::SIZE);
-impl Page {
-    pub const SIZE_BITS: usize = 12; // 2^12 => 4KiB
-    pub const SIZE: usize = 1 << Page::SIZE_BITS;
-    pub const fn new() -> Self {
-        Self {
-            _data: [0; Page::SIZE],
-        }
+
+#[no_mangle]
+pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
+    let size = match size {
+        0 => Size::L0,
+        1 => Size::L1,
+        2 => Size::L2,
+        _ => return -(Error::Memory as usize as i64),
+    };
+
+    let alloc = Allocator::instance();
+    let begin = alloc.begin();
+    match alloc.get(core as _, size) {
+        Ok(page) => (page * Page::SIZE + begin) as i64,
+        Err(e) => -(e as usize as i64),
     }
 }
-/// Non-Volatile global metadata
-pub struct Meta {
-    pub magic: AtomicUsize,
-    pages: AtomicUsize,
-    active: AtomicUsize,
-}
-const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
-enum Init {
-    None,
-    Initializing,
-    Ready,
+#[no_mangle]
+pub extern "C" fn nvalloc_get_cas(
+    core: u32,
+    size: u32,
+    dst: *const u64,
+    translate: extern "C" fn(u64) -> u64,
+    expected: u64,
+) -> i64 {
+    let size = match size {
+        0 => Size::L0,
+        1 => Size::L1,
+        2 => Size::L2,
+        _ => return -(Error::Memory as usize as i64),
+    };
+
+    let dst = unsafe { &*(dst as *const AtomicU64) };
+    let alloc = Allocator::instance();
+    let begin = alloc.begin();
+
+    match alloc.get_cas(
+        core as _,
+        size,
+        dst,
+        |p| translate(p * Page::SIZE as u64 + begin as u64),
+        expected,
+    ) {
+        Ok(_) => 0,
+        Err(e) => -(e as usize as i64),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nvalloc_put(core: u32, addr: u64) -> i64 {
+    if addr % Page::SIZE as u64 != 0 {
+        error!("Invalid align {addr:x}");
+        return -(Error::Address as usize as i64);
+    }
+    let page = addr as usize / Page::SIZE;
+    match Allocator::instance().put(core as _, page) {
+        Ok(_) => 0,
+        Err(e) => -(e as usize as i64),
+    }
 }
 
 #[cfg(test)]

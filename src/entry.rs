@@ -14,7 +14,7 @@ pub struct Entry {
 impl Entry {
     pub fn inc(self, size: Size, layer: usize, max: usize) -> Option<Self> {
         let pages = self.pages() + Table::span(size as _);
-        if pages <= Table::span(layer) && pages <= max {
+        if pages <= Table::span(layer) && pages < max {
             Some(Entry::new().with_pages(pages))
         } else {
             None
@@ -75,7 +75,7 @@ impl Entry3 {
         }
 
         let pages = self.pages() + Table::span(size as usize);
-        if pages < Table::span(2) && pages < max {
+        if pages <= Table::span(2) && pages < max {
             Some(
                 self.with_pages(pages)
                     .with_size_n(size as u8 + 1)
@@ -94,7 +94,7 @@ impl Entry3 {
         }
 
         let pages = self.pages() + Table::span(size as usize);
-        if pages < Table::span(2) && pages < max {
+        if pages <= Table::span(2) && pages < max {
             Some(
                 self.with_pages(pages)
                     .with_size_n(size as u8 + 1)
@@ -124,8 +124,8 @@ impl Entry3 {
         }
 
         let pages = self.pages() + Table::span(size as usize);
-        if pages < Table::span(2) && pages < max {
-            Some(self.with_reserved(true).with_size_n(size as u8 + 1))
+        if pages <= Table::span(2) && pages < max {
+            Some(self.with_reserved(true))
         } else {
             None
         }
@@ -166,6 +166,14 @@ impl Entry2 {
     #[inline(always)]
     pub fn new_table(pages: usize, i1: usize) -> Self {
         Self::new().with_pages(pages).with_i1(i1)
+    }
+    #[inline(always)]
+    pub fn mark_huge(self) -> Option<Self> {
+        if !self.giant() && !self.page() && self.pages() == 0 {
+            Some(Entry2::new().with_page(true))
+        } else {
+            None
+        }
     }
     #[inline(always)]
     pub fn inc(self, i1: usize) -> Option<Self> {

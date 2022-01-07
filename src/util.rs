@@ -1,4 +1,24 @@
+use std::alloc::Layout;
+use std::arch::asm;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// Correctly sized and aligned page.
+#[derive(Clone)]
+#[repr(align(0x1000))]
+pub struct Page {
+    _data: [u8; Page::SIZE],
+}
+const _: () = assert!(Layout::new::<Page>().size() == Page::SIZE);
+const _: () = assert!(Layout::new::<Page>().align() == Page::SIZE);
+impl Page {
+    pub const SIZE_BITS: usize = 12; // 2^12 => 4KiB
+    pub const SIZE: usize = 1 << Page::SIZE_BITS;
+    pub const fn new() -> Self {
+        Self {
+            _data: [0; Page::SIZE],
+        }
+    }
+}
 
 pub const fn align_up(v: usize, align: usize) -> usize {
     (v + align - 1) & !(align - 1)

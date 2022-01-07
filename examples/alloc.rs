@@ -5,9 +5,10 @@ use std::time::Instant;
 
 use log::warn;
 
+use nvalloc::alloc::{Alloc, Allocator, Error, Size, MIN_PAGES};
 use nvalloc::mmap::MMap;
-use nvalloc::util::Cycles;
-use nvalloc::{thread, util, Alloc, Allocator, Error, Page, Size, MIN_PAGES};
+use nvalloc::util::{Cycles, Page};
+use nvalloc::{thread, util};
 
 fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
     #[cfg(target_os = "linux")]
@@ -40,52 +41,64 @@ fn main() {
 
     let barrier = Arc::new(Barrier::new(THREADS));
 
-    let timer = Instant::now();
+    for size in [Size::L0, Size::L1, Size::L2, Size::L0] {
+        let timer = Instant::now();
 
-    thread::parallel(THREADS as _, move |t| {
-        thread::pin(t);
-        barrier.wait();
+        warn!("alloc {size:?}");
 
-        let mut pages = Vec::new();
+        let barrier = barrier.clone();
+        thread::parallel(THREADS as _, move |t| {
+            thread::pin(t);
+            barrier.wait();
 
-        let mut min = u64::MAX;
-        let mut max = 0;
-        let mut sum = 0;
+            let mut pages = Vec::new();
 
-        loop {
-            let timer = Cycles::now();
-            match Allocator::instance().get(t, Size::L0) {
-                Ok(page) => pages.push(page),
-                Err(Error::Memory) => break,
-                Err(e) => panic!("{:?}", e),
+            let mut min = u64::MAX;
+            let mut max = 0;
+            let mut sum = 0;
+
+            loop {
+                let timer = Cycles::now();
+                match Allocator::instance().get(t, size) {
+                    Ok(page) => pages.push(page),
+                    Err(Error::Memory) => break,
+                    Err(e) => panic!("{:?}", e),
+                }
+                let elapsed = timer.elapsed();
+                min = min.min(elapsed);
+                max = max.max(elapsed);
+                sum += elapsed;
             }
-            let elapsed = timer.elapsed();
-            min = min.min(elapsed);
-            max = max.max(elapsed);
-            sum += elapsed;
-        }
-        let len = pages.len() as u64;
+            let len = pages.len() as u64;
 
-        warn!("thread {t} allocated {} [{min}, {}, {max}]", len, sum / len);
-        barrier.wait();
+            warn!(
+                "thread {t} allocated {len} [{min}, {}, {max}]",
+                sum / len.max(1)
+            );
+            barrier.wait();
 
-        let mut min = u64::MAX;
-        let mut max = 0;
-        let mut sum = 0;
+            let mut min = u64::MAX;
+            let mut max = 0;
+            let mut sum = 0;
 
-        for page in pages {
-            let timer = Cycles::now();
-            Allocator::instance().put(t, page).unwrap();
-            let elapsed = timer.elapsed();
-            min = min.min(elapsed);
-            max = max.max(elapsed);
-            sum += elapsed;
-        }
-        warn!("thread {t} freed {} [{min}, {}, {max}]", len, sum / len);
-    });
+            for page in pages {
+                let timer = Cycles::now();
+                Allocator::instance().put(t, page).unwrap();
+                let elapsed = timer.elapsed();
+                min = min.min(elapsed);
+                max = max.max(elapsed);
+                sum += elapsed;
+            }
+            warn!(
+                "thread {t} freed {len} [{min}, {}, {max}]",
+                sum / len.max(1)
+            );
+        });
 
-    warn!("time {}ms", timer.elapsed().as_millis());
+        warn!("time {}ms", timer.elapsed().as_millis());
 
-    assert_eq!(Allocator::instance().allocated_pages(), 0);
+        assert_eq!(Allocator::instance().allocated_pages(), 0);
+    }
+
     Allocator::uninit();
 }

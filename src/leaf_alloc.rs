@@ -2,11 +2,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
 
+use crate::alloc::{Alloc, Allocator, Error, Result, Size};
 use crate::entry::{Entry1, Entry2};
 use crate::table::{AtomicBuffer, Table};
-use crate::{Alloc, Allocator, Page};
-
-use crate::{Error, Result, Size};
+use crate::Page;
 
 const CAS_RETRIES: usize = 4;
 
@@ -29,8 +28,8 @@ pub struct LeafAllocator {
     pub begin: usize,
     pub pages: usize,
     alloc_pt1: AtomicUsize,
-    pub start_l0: AtomicUsize,
-    pub start_l1: AtomicUsize,
+    start_l0: AtomicUsize,
+    start_l1: AtomicUsize,
 }
 
 impl Clone for LeafAllocator {
@@ -66,6 +65,14 @@ impl LeafAllocator {
         for i in 0..Table::num_pts(1, self.pages) {
             let pt1 = unsafe { &*((self.begin + i * Table::m_span(1)) as *const Table<Entry1>) };
             pt1.clear();
+        }
+    }
+
+    pub fn start(&self, size: Size) -> &AtomicUsize {
+        if size == Size::L0 {
+            &self.start_l0
+        } else {
+            &self.start_l1
         }
     }
 
@@ -237,10 +244,7 @@ impl LeafAllocator {
         for _ in 0..CAS_RETRIES {
             for page in Table::iterate(2, start, self.pages) {
                 let i = Table::idx(2, page);
-                if pt
-                    .cas(i, Entry2::new(), Entry2::new().with_page(true))
-                    .is_ok()
-                {
+                if pt.update(i, Entry2::mark_huge).is_ok() {
                     info!("alloc l2 i={}: {}", i, page);
                     return Ok(page);
                 }

@@ -2,8 +2,8 @@ use std::sync::atomic::Ordering;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-use nvalloc::util::logging;
-use nvalloc::{Alloc, Allocator, Page, Size, MIN_PAGES};
+use nvalloc::alloc::{Alloc, Allocator, Size, MIN_PAGES};
+use nvalloc::util::{logging, Page};
 
 fn alloc_free_small_normal(c: &mut Criterion) {
     logging();

@@ -4,11 +4,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
 
-use super::Alloc;
+use super::{Alloc, Error, Init, Meta, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Entry, Entry3};
 use crate::leaf_alloc::LeafAllocator;
 use crate::table::{AtomicBuffer, Table};
-use crate::{Error, Init, Meta, Page, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use crate::util::Page;
 
 /// Volatile shared metadata
 #[repr(align(64))]
@@ -97,14 +97,14 @@ impl Alloc for AllocTables {
         let mut start = 0;
         for (i, leaf) in alloc.local.iter().enumerate() {
             start = alloc.reserve_pt2(Table::LAYERS, start, Size::L0)?;
-            leaf.start_l0.store(start, Ordering::Relaxed);
+            leaf.start(Size::L0).store(start, Ordering::Relaxed);
             start = alloc.reserve_pt2(Table::LAYERS, start, Size::L1)?;
-            leaf.start_l1.store(start, Ordering::Relaxed);
+            leaf.start(Size::L1).store(start, Ordering::Relaxed);
             info!(
                 "init {} small={} huge={}",
                 i,
-                leaf.start_l0.load(Ordering::Relaxed),
-                leaf.start_l1.load(Ordering::Relaxed),
+                leaf.start(Size::L0).load(Ordering::Relaxed),
+                leaf.start(Size::L1).load(Ordering::Relaxed),
             );
         }
 
@@ -167,24 +167,17 @@ impl Alloc for AllocTables {
             }
         } else {
             let leaf = &self.local[core];
+            let start = leaf.start(size);
+            let old = start.load(Ordering::SeqCst);
+            let new = self.increment_parents(Table::LAYERS, old, size)?;
 
-            match size {
-                Size::L0 => {
-                    let start = leaf.start_l0.load(Ordering::SeqCst);
-                    let new = self.increment_parents(Table::LAYERS, start, size)?;
-                    let page = leaf.get(new)?;
-                    leaf.start_l0.store(page, Ordering::SeqCst);
-                    page
-                }
-                Size::L1 => {
-                    let start = leaf.start_l1.load(Ordering::SeqCst);
-                    let new = self.increment_parents(Table::LAYERS, start, size)?;
-                    let page = leaf.get_huge(new)?;
-                    leaf.start_l1.store(page, Ordering::SeqCst);
-                    page
-                }
+            let page = match size {
+                Size::L0 => leaf.get(new)?,
+                Size::L1 => leaf.get_huge(new)?,
                 Size::L2 => panic!(),
-            }
+            };
+            start.store(page, Ordering::SeqCst);
+            page
         };
 
         Ok(page)
@@ -207,8 +200,10 @@ impl Alloc for AllocTables {
 
         let mut pages = 0;
         let pt = self.pt(Table::LAYERS, 0);
-        for i in 0..Table::LEN {
-            pages += pt.get(i).pages();
+        for i in Table::range(Table::LAYERS, 0..self.pages) {
+            let pte = pt.get(i);
+            warn!("{i:>3} {pte:?}");
+            pages += pte.pages();
         }
         pages
     }
@@ -301,14 +296,6 @@ impl AllocTables {
         Err(Error::Memory)
     }
 
-    fn unreserve_pt2(&self, start: usize) {
-        let pt = self.pt3(start);
-        let i = Table::idx(3, start);
-        if pt.update(i, Entry3::unreserve).is_err() {
-            panic!("Unreserve failed")
-        }
-    }
-
     fn increment_parents(&self, layer: usize, start: usize, size: Size) -> Result<usize> {
         if layer <= 3 {
             return self.increment_parents_l3(start, size);
@@ -345,9 +332,9 @@ impl AllocTables {
                     return Ok(page);
                 }
                 warn!("try reserve next {i}");
-                pt.update(i, Entry3::unreserve).unwrap();
             } else if pt.update(i, |v| v.inc_reserve(size, max)).is_ok() {
                 warn!("reserved {i}");
+                pt.update(Table::idx(3, start), Entry3::unreserve).unwrap();
                 return Ok(page);
             }
         }
@@ -355,16 +342,12 @@ impl AllocTables {
     }
 
     fn get_giant(&self, core: usize, layer: usize, start: usize) -> Result<usize> {
-        info!("alloc l{}, s={}", layer, start);
-
         if layer == 3 {
             return self.get_giant_page(core, start);
         }
 
         let pt = self.pt(layer, start);
         for i in Table::range(layer, start..self.pages) {
-            info!("get giant l{} i{}", layer, i);
-
             let page = Table::page(layer, start, i);
             let pte = pt.get(i);
 
@@ -379,18 +362,26 @@ impl AllocTables {
                 continue;
             }
 
-            if pt
-                .update(i, |pte| pte.inc(Size::L2, layer, self.pages - page))
-                .is_err()
-            {
-                warn!("giant update failed");
+            let max = self.pages - page;
+            if let Err(pte) = pt.update(i, |pte| pte.inc(Size::L2, layer, max)) {
+                warn!("giant update failed {pte:?}");
                 continue;
             }
 
-            return self.get_giant(core, layer - 1, page);
+            return match self.get_giant(core, layer - 1, page) {
+                Ok(page) => Ok(page),
+                Err(Error::Memory) => match pt.update(i, |pte| pte.dec(Size::L2)) {
+                    Ok(_) => Err(Error::Memory),
+                    Err(pte) => {
+                        error!("revocation failed {layer} {pte:?}");
+                        Err(Error::Corruption)
+                    }
+                },
+                Err(e) => Err(e),
+            };
         }
 
-        error!("Nothing found l{} s={}", layer, start);
+        error!("Nothing found l{layer} s={start}");
         Err(Error::Memory)
     }
 
@@ -401,12 +392,12 @@ impl AllocTables {
         for i in Table::range(3, start..self.pages) {
             if pt.cas(i, Entry3::new(), Entry3::new_giant()).is_ok() {
                 let page = Table::page(3, start, i);
-                warn!("allocated l3 i{} p={} s={}", i, page, start);
+                info!("allocated l3 i{} p={} s={}", i, page, start);
                 self.local[core].persist(page);
                 return Ok(page);
             }
         }
-        error!("Nothing found s={}", start);
+        error!("Nothing found l3 s={start}");
         Err(Error::Memory)
     }
 
@@ -482,70 +473,5 @@ impl AllocTables {
                 Err(Error::Address)
             }
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn dump(&self) {
-        self.dump_rec(Table::LAYERS, 0);
-    }
-
-    fn dump_rec(&self, layer: usize, start: usize) {
-        let pt = self.pt(layer, start);
-        for i in Table::range(layer, start..self.pages) {
-            let start = Table::page(layer, start, i);
-
-            let pte = pt.get(i);
-
-            info!(
-                "{:1$}l{5} i={2} 0x{3:x}: {4:?}",
-                "",
-                (Table::LAYERS - layer) * 4,
-                i,
-                start * Page::SIZE,
-                pte,
-                layer
-            );
-
-            if pte.pages() > 0 {
-                if layer > 3 {
-                    self.dump_rec(layer - 1, start);
-                } else {
-                    self.dump_l3(start);
-                }
-            }
-        }
-    }
-
-    fn dump_l3(&self, start: usize) {
-        let pt = self.pt3(start);
-        for i in Table::range(3, start..self.pages) {
-            let start = Table::page(3, start, i);
-
-            let pte = pt.get(i);
-
-            info!(
-                "{:1$}l3 i={2} 0x{3:x}: {4:?}",
-                "",
-                (Table::LAYERS - 3) * 4,
-                i,
-                start * Page::SIZE,
-                pte,
-            );
-
-            match pte.size() {
-                Some(Size::L0 | Size::L1) if pte.pages() > 0 => self.local[0].dump(start),
-                _ => {}
-            }
-        }
-    }
-}
-
-impl Drop for AllocTables {
-    fn drop(&mut self) {
-        for local in &self.local {
-            self.unreserve_pt2(local.start_l0.load(Ordering::SeqCst));
-            self.unreserve_pt2(local.start_l1.load(Ordering::SeqCst));
-        }
-        self.meta().active.store(0, Ordering::SeqCst);
     }
 }

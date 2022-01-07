@@ -1,15 +1,58 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use log::error;
 
-use crate::{Error, Meta, Page, Result, Size};
+use crate::table::Table;
+use crate::util::Page;
 
-mod stack;
-pub use stack::AllocStack;
-mod tables;
-pub use tables::AllocTables;
+pub mod stack;
+pub mod tables;
 
-pub type Allocator = AllocStack;
+pub const MAGIC: usize = 0xdeadbeef;
+pub const MIN_PAGES: usize = 2 * Table::span(2);
+pub const MAX_PAGES: usize = Table::span(Table::LAYERS);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    /// Not enough memory
+    Memory = 1,
+    /// Failed comapare and swap operation
+    CAS = 2,
+    /// Invalid address
+    Address = 3,
+    /// Allocator not initialized
+    Uninitialized = 4,
+    /// Corrupted allocator state
+    Corruption = 5,
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Size {
+    /// 4KiB
+    L0 = 0,
+    /// 2MiB
+    L1 = 1,
+    /// 1GiB
+    L2 = 2,
+}
+
+/// Non-Volatile global metadata
+pub struct Meta {
+    pub magic: AtomicUsize,
+    pages: AtomicUsize,
+    active: AtomicUsize,
+}
+const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
+
+enum Init {
+    None,
+    Initializing,
+    Ready,
+}
+
+pub type Allocator = stack::AllocStack;
 
 pub trait Alloc {
     /// Initialize the allocator.
@@ -64,10 +107,11 @@ mod test {
     use log::{info, warn};
 
     use super::{Alloc, Allocator};
+    use crate::alloc::MIN_PAGES;
     use crate::mmap::MMap;
     use crate::table::Table;
-    use crate::util::logging;
-    use crate::{thread, Page, Size, MIN_PAGES};
+    use crate::util::{logging, Page};
+    use crate::{thread, Size};
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
         #[cfg(target_os = "linux")]

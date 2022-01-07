@@ -4,13 +4,13 @@ use std::sync::{Mutex, MutexGuard};
 
 use log::{error, info, warn};
 
-use super::Alloc;
+use super::{Alloc, Error, Meta, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
 use crate::leaf_alloc::LeafAllocator;
 use crate::table::{AtomicBuffer, Table};
-use crate::{Error, Meta, Page, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use crate::util::Page;
 
-const PTE3_FULL: usize = Table::span(2) - 2 * Table::span(1);
+const PTE3_FULL: usize = Table::span(2) - 4 * Table::span(1);
 
 /// Volatile shared metadata
 #[repr(align(64))]
@@ -84,15 +84,11 @@ impl Alloc for AllocStack {
 
         // init all leaf_allocs
         for (i, leaf) in alloc.local.iter().enumerate() {
-            leaf.start_l0
-                .store(alloc.reserve(Size::L0)?, Ordering::Relaxed);
-            leaf.start_l1
-                .store(alloc.reserve(Size::L1)?, Ordering::Relaxed);
-            info!(
-                "init {i} small={} huge={}",
-                leaf.start_l0.load(Ordering::Relaxed),
-                leaf.start_l1.load(Ordering::Relaxed),
-            );
+            let l0 = alloc.reserve(Size::L0)?;
+            leaf.start(Size::L0).store(l0, Ordering::Relaxed);
+            let l1 = alloc.reserve(Size::L1)?;
+            leaf.start(Size::L1).store(l1, Ordering::Relaxed);
+            info!("init {i} small={l0} huge={l1}");
         }
 
         meta.active.store(1, Ordering::SeqCst);
@@ -131,35 +127,10 @@ impl Alloc for AllocStack {
     }
 
     fn get(&self, core: usize, size: Size) -> Result<usize> {
-        if Size::L2 == size {
-            return self.get_giant(core);
+        match size {
+            Size::L2 => self.get_giant(core),
+            _ => self.get_small(core, size),
         }
-        let local = &self.local[core];
-        let start_a = if Size::L0 == size {
-            &local.start_l0
-        } else {
-            &local.start_l1
-        };
-        let start = start_a.load(Ordering::Relaxed);
-        let i = start / Table::span(2);
-        let max = self.pages - Table::round(2, start);
-        let new = match self.entries.update(i, |v| v.inc(size, max)) {
-            Ok(_) => start,
-            Err(pte3) => {
-                info!("Try reserve new {pte3:?}");
-                // reserve *and* increment next
-                let new = self.reserve_inc(size)?;
-                self.unreserve(start);
-                new
-            }
-        };
-        let page = if size == Size::L0 {
-            local.get(new)?
-        } else {
-            local.get_huge(new)?
-        };
-        start_a.store(page, Ordering::Relaxed);
-        Ok(page)
     }
 
     fn put(&self, core: usize, page: usize) -> Result<Size> {
@@ -313,6 +284,30 @@ impl AllocStack {
         }
     }
 
+    fn get_small(&self, core: usize, size: Size) -> Result<usize> {
+        let local = &self.local[core];
+        let start_a = local.start(size);
+        let start = start_a.load(Ordering::Relaxed);
+        let i = start / Table::span(2);
+        let max = self.pages - Table::round(2, start);
+        let new = match self.entries.update(i, |v| v.inc(size, max)) {
+            Ok(_) => start,
+            Err(pte3) => {
+                info!("Try reserve new {pte3:?}");
+                // reserve *and* increment next
+                let new = self.reserve_inc(size)?;
+                self.unreserve(start);
+                new
+            }
+        };
+        let page = match size {
+            Size::L0 => local.get(new)?,
+            _ => local.get_huge(new)?,
+        };
+        start_a.store(page, Ordering::Relaxed);
+        Ok(page)
+    }
+
     fn get_giant(&self, core: usize) -> Result<usize> {
         if let Some(i) = self.empty.lock().unwrap().pop() {
             match self.entries.cas(i, Entry3::new(), Entry3::new_giant()) {
@@ -358,23 +353,24 @@ impl AllocStack {
         }
 
         let i = page / Table::span(2);
-        let size = self.local[core].put(page)?;
+        let local = &self.local[core];
+        let size = local.put(page)?;
         match self.entries.update(i, |v| v.dec(size)) {
             Ok(pte3) => {
-                let new_pages = pte3.pages() - Table::span(size as _);
-
-                if pte3.pages() >= PTE3_FULL && new_pages < PTE3_FULL {
-                    // Add back to partial
-                    self.partial(size).push(i);
-                } else if new_pages == 0 {
-                    // Add back to empty
-                    let mut partial = self.partial(size);
-                    if let Some(idx) = partial.iter().copied().position(|v| v == i) {
-                        partial.swap_remove(idx);
+                if !pte3.reserved() {
+                    let new_pages = pte3.pages() - Table::span(size as _);
+                    if pte3.pages() >= PTE3_FULL && new_pages < PTE3_FULL {
+                        // Add back to partial
+                        self.partial(size).push(i);
+                    } else if new_pages == 0 {
+                        // Add back to empty
+                        let mut partial = self.partial(size);
+                        if let Some(idx) = partial.iter().copied().position(|v| v == i) {
+                            partial.swap_remove(idx);
+                        }
+                        self.empty.lock().unwrap().push(i);
                     }
-                    self.empty.lock().unwrap().push(i);
                 }
-
                 Ok(size)
             }
             Err(_) => {
