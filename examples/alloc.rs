@@ -1,11 +1,12 @@
 #![cfg(all(feature = "thread", feature = "logger"))]
 
 use std::sync::{Arc, Barrier};
+use std::time::Instant;
 
 use log::warn;
 
 use nvalloc::mmap::MMap;
-use nvalloc::util::_mm_rdtsc;
+use nvalloc::util::Cycles;
 use nvalloc::{thread, util, Alloc, Allocator, Error, Page, Size, MIN_PAGES};
 
 fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
@@ -39,6 +40,8 @@ fn main() {
 
     let barrier = Arc::new(Barrier::new(THREADS));
 
+    let timer = Instant::now();
+
     thread::parallel(THREADS as _, move |t| {
         thread::pin(t);
         barrier.wait();
@@ -50,13 +53,13 @@ fn main() {
         let mut sum = 0;
 
         loop {
-            let timer = unsafe { _mm_rdtsc() };
+            let timer = Cycles::now();
             match Allocator::instance().get(t, Size::L0) {
                 Ok(page) => pages.push(page),
                 Err(Error::Memory) => break,
                 Err(e) => panic!("{:?}", e),
             }
-            let elapsed = unsafe { _mm_rdtsc() }.wrapping_sub(timer);
+            let elapsed = timer.elapsed();
             min = min.min(elapsed);
             max = max.max(elapsed);
             sum += elapsed;
@@ -71,15 +74,17 @@ fn main() {
         let mut sum = 0;
 
         for page in pages {
-            let timer = unsafe { _mm_rdtsc() };
+            let timer = Cycles::now();
             Allocator::instance().put(t, page).unwrap();
-            let elapsed = unsafe { _mm_rdtsc() }.wrapping_sub(timer);
+            let elapsed = timer.elapsed();
             min = min.min(elapsed);
             max = max.max(elapsed);
             sum += elapsed;
         }
         warn!("thread {t} freed {} [{min}, {}, {max}]", len, sum / len);
     });
+
+    warn!("time {}ms", timer.elapsed().as_millis());
 
     assert_eq!(Allocator::instance().allocated_pages(), 0);
     Allocator::uninit();

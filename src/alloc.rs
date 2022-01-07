@@ -2,12 +2,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use log::error;
 
-use crate::{Error, Meta, Page, Result, Size, PAGE_SIZE};
+use crate::{Error, Meta, Page, Result, Size};
 
 mod stack;
 pub use stack::AllocStack;
 mod tables;
 pub use tables::AllocTables;
+
+pub type Allocator = AllocStack;
 
 pub trait Alloc {
     /// Initialize the allocator.
@@ -17,11 +19,15 @@ pub trait Alloc {
     /// Return the initialized allocator instance (or panic if it is not initialized)
     fn instance<'a>() -> &'a Self;
 
+    fn begin(&self) -> usize;
+    fn pages(&self) -> usize;
     /// Return the metadata page, that contains size information and checksums
     fn meta<'a>(&self) -> &'a Meta;
 
     /// Allocate a new page.
     fn get(&self, core: usize, size: Size) -> Result<usize>;
+    /// Allocates a new page and writes the value after translation into `dst`.
+    /// If `dst` has an other value than `expected` the operation is revoked and `Error::CAS` is returned.
     fn get_cas<F: FnOnce(u64) -> u64>(
         &self,
         core: usize,
@@ -31,7 +37,7 @@ pub trait Alloc {
         expected: u64,
     ) -> Result<()> {
         let page = self.get(core, size)?;
-        let new = translate((page * PAGE_SIZE) as u64);
+        let new = translate(page as u64);
         match dst.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => Ok(()),
             Err(_) => {
@@ -57,29 +63,23 @@ mod test {
 
     use log::{info, warn};
 
+    use super::{Alloc, Allocator};
     use crate::mmap::MMap;
-    use crate::table::{self, PT_LEN};
+    use crate::table::Table;
     use crate::util::logging;
-    use crate::{thread, Size, MIN_PAGES};
-    use crate::{Alloc, Allocator};
-    use crate::{Page, PAGE_SIZE};
+    use crate::{thread, Page, Size, MIN_PAGES};
 
-    #[cfg(target_os = "linux")]
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
+        #[cfg(target_os = "linux")]
         if let Ok(file) = std::env::var("NVM_FILE") {
-            warn!("MMap file {} l={}G", file, (length * PAGE_SIZE) >> 30);
+            warn!("MMap file {} l={}G", file, (length * Page::SIZE) >> 30);
             let f = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(file)
                 .unwrap();
-            MMap::dax(begin, length, f)
-        } else {
-            MMap::anon(begin, length)
+            return MMap::dax(begin, length, f);
         }
-    }
-    #[cfg(not(target_os = "linux"))]
-    fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
         MMap::anon(begin, length)
     }
 
@@ -88,7 +88,7 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
-        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / PAGE_SIZE).unwrap();
+        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
         info!("mmap {} bytes at {:?}", MEM_SIZE, mapping.as_ptr());
 
@@ -103,12 +103,12 @@ mod test {
 
         assert_eq!(
             Allocator::instance().allocated_pages(),
-            1 + PT_LEN + table::span(2)
+            1 + Table::LEN + Table::span(2)
         );
         assert!(small != huge && small != giant && huge != giant);
 
         // Stress test
-        let mut pages = vec![0; PT_LEN * PT_LEN];
+        let mut pages = vec![0; Table::LEN * Table::LEN];
         for page in &mut pages {
             *page = Allocator::instance().get(0, Size::L0).unwrap();
         }
@@ -117,7 +117,7 @@ mod test {
 
         assert_eq!(
             Allocator::instance().allocated_pages(),
-            1 + PT_LEN + table::span(2) + pages.len()
+            1 + Table::LEN + Table::span(2) + pages.len()
         );
 
         pages.sort_unstable();
@@ -134,7 +134,7 @@ mod test {
         warn!("realloc...");
 
         // Free some
-        for page in &pages[10..PT_LEN + 10] {
+        for page in &pages[10..Table::LEN + 10] {
             Allocator::instance().put(0, *page).unwrap();
         }
 
@@ -143,7 +143,7 @@ mod test {
         Allocator::instance().put(0, giant).unwrap();
 
         // Realloc
-        for page in &mut pages[10..PT_LEN + 10] {
+        for page in &mut pages[10..Table::LEN + 10] {
             *page = Allocator::instance().get(0, Size::L0).unwrap();
         }
 
@@ -162,8 +162,8 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
-        const PAGES: usize = 2 * THREADS * table::span(2);
+        const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 2 * THREADS);
+        const PAGES: usize = 2 * THREADS * Table::span(2);
 
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
 
@@ -208,7 +208,7 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = PT_LEN - 1;
+        const ALLOC_PER_THREAD: usize = Table::LEN - 1;
         const PAGES: usize = THREADS * MIN_PAGES;
 
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
@@ -236,7 +236,7 @@ mod test {
 
         assert_eq!(
             Allocator::instance().allocated_pages(),
-            pages.len() * table::span(1)
+            pages.len() * Table::span(1)
         );
         warn!("allocated pages: {}", pages.len());
 
@@ -257,7 +257,7 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
+        const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 2 * THREADS);
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -271,7 +271,7 @@ mod test {
 
             for i in 0..ALLOC_PER_THREAD {
                 let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
-                *dst = unsafe { libc::malloc(PAGE_SIZE) } as u64;
+                *dst = unsafe { libc::malloc(Page::SIZE) } as u64;
                 assert!(*dst != 0);
             }
         });
@@ -294,7 +294,7 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
+        const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 2 * THREADS);
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -311,7 +311,7 @@ mod test {
                 *dst = unsafe {
                     libc::mmap(
                         null_mut(),
-                        PAGE_SIZE,
+                        Page::SIZE,
                         libc::PROT_READ | libc::PROT_WRITE,
                         libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
                         -1,
@@ -330,7 +330,7 @@ mod test {
         let mut last = None;
         for p in pages {
             assert!(last != Some(p));
-            unsafe { libc::munmap(p as _, PAGE_SIZE) };
+            unsafe { libc::munmap(p as _, Page::SIZE) };
             last = Some(p);
         }
     }
@@ -340,10 +340,10 @@ mod test {
         logging();
 
         const THREADS: usize = 8;
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
-        const MEM_SIZE: usize = 2 * THREADS * table::m_span(2);
+        const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 2 * THREADS);
+        const MEM_SIZE: usize = 2 * THREADS * Table::m_span(2);
 
-        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / PAGE_SIZE).unwrap();
+        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
         Allocator::init(THREADS, &mut mapping).unwrap();
 
@@ -373,9 +373,9 @@ mod test {
     fn alloc_free() {
         logging();
         const THREADS: usize = 2;
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 10) / 2;
+        const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 10) / 2;
 
-        let mut mapping = mapping(0x1000_0000_0000, 4 * table::span(2)).unwrap();
+        let mut mapping = mapping(0x1000_0000_0000, 4 * Table::span(2)).unwrap();
 
         Allocator::init(THREADS, &mut mapping).unwrap();
 
@@ -427,7 +427,7 @@ mod test {
         {
             Allocator::init(1, &mut mapping).unwrap();
 
-            for _ in 0..PT_LEN + 2 {
+            for _ in 0..Table::LEN + 2 {
                 Allocator::instance().get(0, Size::L0).unwrap();
                 Allocator::instance().get(0, Size::L1).unwrap();
             }
@@ -436,7 +436,7 @@ mod test {
 
             assert_eq!(
                 Allocator::instance().allocated_pages(),
-                table::span(2) + PT_LEN + 2 + PT_LEN * (PT_LEN + 2)
+                Table::span(2) + Table::LEN + 2 + Table::LEN * (Table::LEN + 2)
             );
             Allocator::uninit();
         }
@@ -445,7 +445,7 @@ mod test {
 
         assert_eq!(
             Allocator::instance().allocated_pages(),
-            table::span(2) + PT_LEN + 2 + PT_LEN * (PT_LEN + 2)
+            Table::span(2) + Table::LEN + 2 + Table::LEN * (Table::LEN + 2)
         );
         Allocator::uninit();
     }

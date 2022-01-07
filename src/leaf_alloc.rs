@@ -3,9 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use log::{error, info, warn};
 
 use crate::entry::{Entry1, Entry2};
-use crate::table::{self, AtomicBuffer, Table, LAYERS, PT_LEN, PT_LEN_BITS};
-use crate::PAGE_SIZE;
-use crate::{Alloc, Allocator};
+use crate::table::{AtomicBuffer, Table};
+use crate::{Alloc, Allocator, Page};
 
 use crate::{Error, Result, Size};
 
@@ -59,21 +58,21 @@ impl LeafAllocator {
 
     pub fn clear(&self) {
         // Init pt2
-        for i in 0..table::num_pts(2, self.pages) {
-            let pt2 = self.pt2(i * table::span(2));
+        for i in 0..Table::num_pts(2, self.pages) {
+            let pt2 = self.pt2(i * Table::span(2));
             pt2.clear();
         }
         // Init pt1
-        for i in 0..table::num_pts(1, self.pages) {
-            let pt1 = unsafe { &*((self.begin + i * table::m_span(1)) as *const Table<Entry1>) };
+        for i in 0..Table::num_pts(1, self.pages) {
+            let pt1 = unsafe { &*((self.begin + i * Table::m_span(1)) as *const Table<Entry1>) };
             pt1.clear();
         }
     }
 
     /// Returns the l1 page table that contains the `page`.
     fn pt1(&self, pte2: Entry2, page: usize) -> &Table<Entry1> {
-        let page = table::page(1, page, pte2.i1());
-        unsafe { &*((self.begin + page * PAGE_SIZE) as *const Table<Entry1>) }
+        let page = Table::page(1, page, pte2.i1());
+        unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) }
     }
 
     /// Returns the l2 page table that contains the `page`.
@@ -81,8 +80,8 @@ impl LeafAllocator {
     /// NVRAM: [ Pages & PT1 | PT2 | Meta ]
     /// ```
     fn pt2(&self, page: usize) -> &Table<Entry2> {
-        let i = page >> (PT_LEN_BITS * 2);
-        unsafe { &*((self.begin + (self.pages + i) * PAGE_SIZE) as *mut Table<Entry2>) }
+        let i = page >> (Table::LEN_BITS * 2);
+        unsafe { &*((self.begin + (self.pages + i) * Page::SIZE) as *mut Table<Entry2>) }
     }
 
     pub fn recover(&self, start: usize, deep: bool) -> Result<(usize, Size)> {
@@ -90,15 +89,15 @@ impl LeafAllocator {
         let mut size = Size::L0;
 
         let pt = self.pt2(start);
-        for i in table::range(2, start..self.pages) {
+        for i in Table::range(2, start..self.pages) {
             let pte = pt.get(i);
             if pte.giant() {
-                return Ok((table::span(2), Size::L2));
+                return Ok((Table::span(2), Size::L2));
             } else if pte.page() {
                 size = Size::L1;
-                pages += table::span(1);
+                pages += Table::span(1);
             } else if deep && pte.pages() > 0 {
-                let p = self.recover_l1(table::page(1, start, i), pte)?;
+                let p = self.recover_l1(Table::page(1, start, i), pte)?;
                 if pte.pages() != p {
                     warn!(
                         "Invalid PTE2 start=0x{:x} i{}: {} != %{}",
@@ -123,7 +122,7 @@ impl LeafAllocator {
     fn recover_l1(&self, start: usize, pte2: Entry2) -> Result<usize> {
         let pt = self.pt1(pte2, start);
         let mut pages = 0;
-        for i in table::range(1, start..self.pages) {
+        for i in Table::range(1, start..self.pages) {
             if pt.get(i) == Entry1::Page {
                 pages += 1;
             }
@@ -140,25 +139,25 @@ impl LeafAllocator {
         let pt2 = self.pt2(start);
 
         for _ in 0..CAS_RETRIES {
-            for newstart in table::iterate(2, start, self.pages) {
-                let i2 = table::idx(2, newstart);
+            for newstart in Table::iterate(2, start, self.pages) {
+                let i2 = Table::idx(2, newstart);
 
                 wait!();
 
                 let pte2 = pt2.get(i2);
 
-                if pte2.page() || pte2.pages() as usize >= PT_LEN {
+                if pte2.page() || pte2.pages() as usize >= Table::LEN {
                     continue;
                 }
 
                 self.alloc_pt1
-                    .store(!table::page(1, start, pte2.i1()), Ordering::SeqCst);
+                    .store(!Table::page(1, start, pte2.i1()), Ordering::SeqCst);
 
                 wait!();
 
                 if let Ok(pte2) = pt2.update(i2, |v| v.inc(pte2.i1())) {
-                    assert!(pte2.pages() < PT_LEN);
-                    let page = if pte2.pages() == PT_LEN - 1 {
+                    assert!(pte2.pages() < Table::LEN);
+                    let page = if pte2.pages() == Table::LEN - 1 {
                         self.get_last(pte2, newstart)
                     } else {
                         self.get_table(pte2, newstart)
@@ -178,8 +177,8 @@ impl LeafAllocator {
         let pt1 = self.pt1(pte2, start);
 
         for _ in 0..CAS_RETRIES {
-            for page in table::iterate(1, start, self.pages) {
-                let i = table::idx(1, page);
+            for page in Table::iterate(1, start, self.pages) {
+                let i = Table::idx(1, page);
                 if i == pte2.i1() {
                     continue;
                 }
@@ -210,7 +209,7 @@ impl LeafAllocator {
         info!("alloc last {} s={}", pte2.i1(), start);
 
         let pt1 = self.pt1(pte2, start);
-        let alloc_p1 = !table::page(1, start, pte2.i1());
+        let alloc_p1 = !Table::page(1, start, pte2.i1());
 
         // Wait for others to finish
         for (i, leaf) in Allocator::instance().local.iter().enumerate() {
@@ -230,14 +229,14 @@ impl LeafAllocator {
             return Err(Error::Corruption);
         }
 
-        Ok(table::page(1, start, pte2.i1()))
+        Ok(Table::page(1, start, pte2.i1()))
     }
 
     pub fn get_huge(&self, start: usize) -> Result<usize> {
         let pt = self.pt2(start);
         for _ in 0..CAS_RETRIES {
-            for page in table::iterate(2, start, self.pages) {
-                let i = table::idx(2, page);
+            for page in Table::iterate(2, start, self.pages) {
+                let i = Table::idx(2, page);
                 if pt
                     .cas(i, Entry2::new(), Entry2::new().with_page(true))
                     .is_ok()
@@ -258,21 +257,21 @@ impl LeafAllocator {
     /// Free single page
     pub fn put(&self, page: usize) -> Result<Size> {
         let pt2 = self.pt2(page);
-        let i2 = table::idx(2, page);
+        let i2 = Table::idx(2, page);
 
         wait!();
 
         let old = pt2.get(i2);
-        // warn!("{} i{i2}: {old:?}", page / table::span(2));
+        // warn!("{} i{i2}: {old:?}", page / Table::span(2));
 
         if old.page() {
             // Free huge page
-            if page % table::span(Size::L1 as _) != 0 {
+            if page % Table::span(Size::L1 as _) != 0 {
                 error!("Invalid address {}", page);
                 return Err(Error::Address);
             }
 
-            let pt1 = unsafe { &*((self.begin + page * PAGE_SIZE) as *const Table<Entry1>) };
+            let pt1 = unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) };
             pt1.clear();
 
             match pt2.cas(i2, old, Entry2::new()) {
@@ -292,16 +291,16 @@ impl LeafAllocator {
     fn put_small(&self, pte2: Entry2, page: usize) -> Result<()> {
         info!("free leaf page {}", page);
         let pt2 = self.pt2(page);
-        let i2 = table::idx(2, page);
+        let i2 = Table::idx(2, page);
 
-        if pte2.pages() == PT_LEN {
+        if pte2.pages() == Table::LEN {
             return self.put_full(pte2, page);
         }
 
         wait!();
 
         let pt1 = self.pt1(pte2, page);
-        let i1 = table::idx(1, page);
+        let i1 = Table::idx(1, page);
         let pte1 = pt1.get(i1);
 
         if pte1 != Entry1::Page {
@@ -333,23 +332,27 @@ impl LeafAllocator {
     /// Free last page & rebuild pt1 in it
     fn put_full(&self, pte2: Entry2, page: usize) -> Result<()> {
         let pt2 = self.pt2(page);
-        let i2 = table::idx(2, page);
+        let i2 = Table::idx(2, page);
 
         wait!();
 
         // The freed page becomes the new pt
-        let pt1 = unsafe { &*((self.begin + page * PAGE_SIZE) as *const Table<Entry1>) };
+        let pt1 = unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) };
         info!("free: init last pt1 {}", page);
 
-        for j in 0..PT_LEN {
-            if j == page % PT_LEN {
+        for j in 0..Table::LEN {
+            if j == page % Table::LEN {
                 pt1.set(j, Entry1::Empty);
             } else {
                 pt1.set(j, Entry1::Page);
             }
         }
 
-        match pt2.cas(i2, pte2, Entry2::new_table(PT_LEN - 1, page % PT_LEN)) {
+        match pt2.cas(
+            i2,
+            pte2,
+            Entry2::new_table(Table::LEN - 1, page % Table::LEN),
+        ) {
             Ok(_) => Ok(()),
             Err(pte) => {
                 warn!("CAS: create pt1 {:?}", pte);
@@ -359,10 +362,10 @@ impl LeafAllocator {
     }
 
     pub fn clear_giant(&self, page: usize) {
-        for j in table::range(2, page..self.pages) {
+        for j in Table::range(2, page..self.pages) {
             // i1 is initially 0
             let pt1 = unsafe {
-                &*((self.begin + (page + j * table::span(1)) * PAGE_SIZE) as *const Table<Entry1>)
+                &*((self.begin + (page + j * Table::span(1)) * Page::SIZE) as *const Table<Entry1>)
             };
             pt1.clear();
         }
@@ -372,29 +375,29 @@ impl LeafAllocator {
 
     pub fn dump(&self, start: usize) {
         let pt2 = self.pt2(start);
-        for i2 in table::range(2, start..self.pages) {
-            let start = table::page(2, start, i2);
+        for i2 in Table::range(2, start..self.pages) {
+            let start = Table::page(2, start, i2);
 
             let pte2 = pt2.get(i2);
             info!(
                 "{:1$}l2 i={2} 0x{3:x}: {4:?}",
                 "",
-                (LAYERS - 2) * 4,
+                (Table::LAYERS - 2) * 4,
                 i2,
-                start * PAGE_SIZE,
+                start * Page::SIZE,
                 pte2
             );
-            if !pte2.giant() && !pte2.page() && pte2.pages() > 0 && pte2.pages() < PT_LEN {
+            if !pte2.giant() && !pte2.page() && pte2.pages() > 0 && pte2.pages() < Table::LEN {
                 let pt1 = self.pt1(pte2, start);
-                for i1 in table::range(1, start..self.pages) {
-                    let page = table::page(1, start, i1);
+                for i1 in Table::range(1, start..self.pages) {
+                    let page = Table::page(1, start, i1);
                     let pte1 = pt1.get(i1);
                     info!(
                         "{:1$}l1 i={2} 0x{3:x}: {4:?}",
                         "",
-                        (LAYERS - 1) * 4,
+                        (Table::LAYERS - 1) * 4,
                         i1,
-                        page * PAGE_SIZE,
+                        page * Page::SIZE,
                         pte1
                     );
                 }
@@ -412,7 +415,7 @@ mod test {
     use log::warn;
 
     use crate::entry::Entry1;
-    use crate::table::{self, AtomicBuffer, Table, PT_LEN};
+    use crate::table::{AtomicBuffer, Table};
     use crate::util::logging;
     use crate::wait::{DbgWait, DbgWaitKey};
     use crate::{thread, Page};
@@ -420,7 +423,7 @@ mod test {
 
     fn count(pt: &Table<Entry1>) -> usize {
         let mut pages = 0;
-        for i in 0..PT_LEN {
+        for i in 0..Table::LEN {
             pages += (pt.get(i) == Entry1::Page) as usize;
         }
         pages
@@ -437,7 +440,7 @@ mod test {
             vec![1, 0, 1, 0, 1, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * table::span(2)];
+        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
@@ -479,7 +482,7 @@ mod test {
             vec![0, 1, 1, 1, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * table::span(2)];
+        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
@@ -518,13 +521,13 @@ mod test {
             vec![1, 1, 0, 1, 0, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * table::span(2)];
+        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
             let page_alloc = &Allocator::instance().local[0];
-            for _ in 0..PT_LEN - 1 {
+            for _ in 0..Table::LEN - 1 {
                 page_alloc.get(0).unwrap();
             }
             let wait = DbgWait::setup(2, order);
@@ -539,9 +542,9 @@ mod test {
 
             let page_alloc = &Allocator::instance().local[0];
             let pt2 = page_alloc.pt2(0);
-            assert_eq!(pt2.get(0).pages(), PT_LEN);
+            assert_eq!(pt2.get(0).pages(), Table::LEN);
             assert_eq!(pt2.get(1).pages(), 1);
-            assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN)), 1);
+            assert_eq!(count(page_alloc.pt1(pt2.get(1), Table::LEN)), 1);
 
             Allocator::instance()
                 .meta()
@@ -562,7 +565,7 @@ mod test {
         ];
 
         let mut pages = [0; 2];
-        let mut buffer = vec![Page::new(); 4 * table::span(2)];
+        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
@@ -609,8 +612,8 @@ mod test {
             vec![0, 1, 1, 0, 0, 0, 0, 0], // 0 fails cas
         ];
 
-        let mut pages = [0; PT_LEN];
-        let mut buffer = vec![Page::new(); 4 * table::span(2)];
+        let mut pages = [0; Table::LEN];
+        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
@@ -639,8 +642,8 @@ mod test {
 
             let page_alloc = &Allocator::instance().local[0];
             let pt2 = page_alloc.pt2(0);
-            assert_eq!(pt2.get(0).pages(), PT_LEN - 2);
-            assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 2);
+            assert_eq!(pt2.get(0).pages(), Table::LEN - 2);
+            assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), Table::LEN - 2);
 
             Allocator::instance()
                 .meta()
@@ -663,14 +666,14 @@ mod test {
             vec![0, 0, 0, 1, 1, 0, 1, 1], // nothing found & retry
         ];
 
-        let mut pages = [0; PT_LEN];
-        let mut buffer = vec![Page::new(); 4 * table::span(2)];
+        let mut pages = [0; Table::LEN];
+        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
             let page_alloc = &Allocator::instance().local[0];
-            for page in &mut pages[..PT_LEN - 1] {
+            for page in &mut pages[..Table::LEN - 1] {
                 *page = page_alloc.get(0).unwrap();
             }
             let wait = DbgWait::setup(2, order);
@@ -700,14 +703,14 @@ mod test {
 
             let page_alloc = &Allocator::instance().local[0];
             let pt2 = page_alloc.pt2(0);
-            if pt2.get(0).pages() == PT_LEN - 1 {
-                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 1);
+            if pt2.get(0).pages() == Table::LEN - 1 {
+                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), Table::LEN - 1);
             } else {
                 // Table entry skipped
-                assert_eq!(pt2.get(0).pages(), PT_LEN - 2);
-                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), PT_LEN - 2);
+                assert_eq!(pt2.get(0).pages(), Table::LEN - 2);
+                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), Table::LEN - 2);
                 assert_eq!(pt2.get(1).pages(), 1);
-                assert_eq!(count(page_alloc.pt1(pt2.get(1), PT_LEN)), 1);
+                assert_eq!(count(page_alloc.pt1(pt2.get(1), Table::LEN)), 1);
             }
 
             Allocator::instance()

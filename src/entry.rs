@@ -1,8 +1,9 @@
 use core::fmt;
+use std::cmp::Ordering;
 
 use bitfield_struct::bitfield;
 
-use crate::table::{span, PT_LEN};
+use crate::table::Table;
 use crate::Size;
 
 #[bitfield(u64)]
@@ -12,16 +13,16 @@ pub struct Entry {
 
 impl Entry {
     pub fn inc(self, size: Size, layer: usize, max: usize) -> Option<Self> {
-        let pages = self.pages() + span(size as _);
-        if pages <= span(layer) && pages <= max {
+        let pages = self.pages() + Table::span(size as _);
+        if pages <= Table::span(layer) && pages <= max {
             Some(Entry::new().with_pages(pages))
         } else {
             None
         }
     }
     pub fn dec(self, size: Size) -> Option<Self> {
-        if self.pages() >= span(size as _) {
-            Some(Entry::new().with_pages(self.pages() - span(size as _)))
+        if self.pages() >= Table::span(size as _) {
+            Some(Entry::new().with_pages(self.pages() - Table::span(size as _)))
         } else {
             None
         }
@@ -73,8 +74,8 @@ impl Entry3 {
             return None;
         }
 
-        let pages = self.pages() + span(size as usize);
-        if pages < span(2) && pages < max {
+        let pages = self.pages() + Table::span(size as usize);
+        if pages < Table::span(2) && pages < max {
             Some(
                 self.with_pages(pages)
                     .with_size_n(size as u8 + 1)
@@ -92,8 +93,8 @@ impl Entry3 {
             return None;
         }
 
-        let pages = self.pages() + span(size as usize);
-        if pages < span(2) && pages < max {
+        let pages = self.pages() + Table::span(size as usize);
+        if pages < Table::span(2) && pages < max {
             Some(
                 self.with_pages(pages)
                     .with_size_n(size as u8 + 1)
@@ -109,12 +110,10 @@ impl Entry3 {
             return None;
         }
 
-        if self.pages() > span(size as usize) {
-            Some(self.with_pages(self.pages() - span(size as usize)))
-        } else if self.pages() == span(size as usize) {
-            Some(self.with_pages(0).with_size_n(0))
-        } else {
-            None
+        match self.pages().cmp(&Table::span(size as _)) {
+            Ordering::Less => None,
+            Ordering::Equal => Some(self.with_pages(0).with_size_n(0)),
+            Ordering::Greater => Some(self.with_pages(self.pages() - Table::span(size as usize))),
         }
     }
     #[inline(always)]
@@ -124,8 +123,8 @@ impl Entry3 {
             return None;
         }
 
-        let pages = self.pages() + span(size as usize);
-        if pages < span(2) && pages < max {
+        let pages = self.pages() + Table::span(size as usize);
+        if pages < Table::span(2) && pages < max {
             Some(self.with_reserved(true).with_size_n(size as u8 + 1))
         } else {
             None
@@ -170,7 +169,7 @@ impl Entry2 {
     }
     #[inline(always)]
     pub fn inc(self, i1: usize) -> Option<Self> {
-        if !self.page() && !self.giant() && self.i1() == i1 && self.pages() < PT_LEN {
+        if !self.page() && !self.giant() && self.i1() == i1 && self.pages() < Table::LEN {
             Some(self.with_pages(self.pages() + 1))
         } else {
             None
@@ -182,7 +181,7 @@ impl Entry2 {
             && !self.page()
             && i1 == self.i1()
             && self.pages() > 0
-            && self.pages() < PT_LEN
+            && self.pages() < Table::LEN
         {
             Some(self.with_pages(self.pages() - 1))
         } else {
@@ -217,9 +216,9 @@ impl From<u64> for Entry1 {
     }
 }
 
-impl Into<u64> for Entry1 {
-    fn into(self) -> u64 {
-        self as u64
+impl From<Entry1> for u64 {
+    fn from(v: Entry1) -> u64 {
+        v as u64
     }
 }
 

@@ -130,19 +130,52 @@ pub fn logging() {
     }));
 }
 
+/// Executes CLWB (cache-line write back) for the given address.
+///
+/// # Safety
+/// Directly executes an asm instruction.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub unsafe fn _mm_clwb(addr: *const ()) {
     asm!("clwb [rax]", in("rax") addr);
 }
 
+/// Executes RDTSC (read time-stamp counter) and returns the current cycle count.
+///
+/// # Safety
+/// Directly executes an asm instruction.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-pub unsafe fn _mm_rdtsc() -> u64 {
+unsafe fn time_stamp_counter() -> u64 {
     let mut lo: u32;
     let mut hi: u32;
     asm!("rdtsc", out("eax") lo, out("edx") hi);
     lo as u64 | (hi as u64) << 32
+}
+
+/// Reads the `CNTVCT_EL0` register and returns the current cycle count.
+///
+/// # Safety
+/// Directly executes an asm instruction.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn time_stamp_counter() -> u64 {
+    let mut val: u64;
+    asm!("mrs {}, cntvct_e10", out(reg) val);
+    val
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(transparent)]
+pub struct Cycles(u64);
+
+impl Cycles {
+    pub fn now() -> Self {
+        Self(unsafe { time_stamp_counter() })
+    }
+    pub fn elapsed(self) -> u64 {
+        unsafe { time_stamp_counter() }.wrapping_sub(self.0)
+    }
 }
 
 #[cfg(test)]

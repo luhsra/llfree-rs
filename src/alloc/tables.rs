@@ -7,8 +7,8 @@ use log::{error, info, warn};
 use super::Alloc;
 use crate::entry::{Entry, Entry3};
 use crate::leaf_alloc::LeafAllocator;
-use crate::table::{self, AtomicBuffer, Table, LAYERS, PT_LEN, PT_LEN_BITS};
-use crate::{Error, Init, Meta, Page, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES, PAGE_SIZE};
+use crate::table::{AtomicBuffer, Table};
+use crate::{Error, Init, Meta, Page, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 
 /// Volatile shared metadata
 #[repr(align(64))]
@@ -63,15 +63,15 @@ impl Alloc for AllocTables {
         alloc.pages = (memory.len() - 1).min(MAX_PAGES);
         alloc.begin = memory.as_ptr() as usize;
 
-        alloc.meta = (alloc.begin + alloc.pages * PAGE_SIZE) as *mut Meta;
+        alloc.meta = (alloc.begin + alloc.pages * Page::SIZE) as *mut Meta;
         let meta = unsafe { &mut *alloc.meta };
 
         // level 2 tables are stored at the end of the NVM
-        alloc.pages -= table::num_pts(2, alloc.pages);
+        alloc.pages -= Table::num_pts(2, alloc.pages);
 
         let mut num_pt = 0;
-        for layer in 3..=LAYERS {
-            num_pt += table::num_pts(layer, alloc.pages);
+        for layer in 3..=Table::LAYERS {
+            num_pt += Table::num_pts(layer, alloc.pages);
         }
         alloc.tables = vec![Table::empty(); num_pt];
         alloc.local = vec![LeafAllocator::new(alloc.begin, alloc.pages); cores];
@@ -84,7 +84,7 @@ impl Alloc for AllocTables {
             if deep {
                 error!("Allocator unexpectedly terminated");
             }
-            let pages = alloc.recover_rec(LAYERS, 0, deep)?;
+            let pages = alloc.recover_rec(Table::LAYERS, 0, deep)?;
             warn!("Recovered pages {}", pages);
         } else {
             warn!("Setup allocator state p={}", alloc.pages);
@@ -96,9 +96,9 @@ impl Alloc for AllocTables {
         // init all leaf_allocs
         let mut start = 0;
         for (i, leaf) in alloc.local.iter().enumerate() {
-            start = alloc.reserve_pt2(LAYERS, start, Size::L0)?;
+            start = alloc.reserve_pt2(Table::LAYERS, start, Size::L0)?;
             leaf.start_l0.store(start, Ordering::Relaxed);
-            start = alloc.reserve_pt2(LAYERS, start, Size::L1)?;
+            start = alloc.reserve_pt2(Table::LAYERS, start, Size::L1)?;
             leaf.start_l1.store(start, Ordering::Relaxed);
             info!(
                 "init {} small={} huge={}",
@@ -143,6 +143,14 @@ impl Alloc for AllocTables {
         alloc
     }
 
+    fn begin(&self) -> usize {
+        self.begin
+    }
+
+    fn pages(&self) -> usize {
+        self.pages
+    }
+
     fn meta<'a>(&self) -> &'a Meta {
         unsafe { &*self.meta }
     }
@@ -151,7 +159,7 @@ impl Alloc for AllocTables {
         // Start at the reserved memory chunk for this thread
         let page = if size == Size::L2 {
             loop {
-                match self.get_giant(core, LAYERS, 0) {
+                match self.get_giant(core, Table::LAYERS, 0) {
                     Ok(page) => break page,
                     Err(Error::CAS) => warn!("CAS: retry alloc"),
                     Err(e) => return Err(e),
@@ -163,14 +171,14 @@ impl Alloc for AllocTables {
             match size {
                 Size::L0 => {
                     let start = leaf.start_l0.load(Ordering::SeqCst);
-                    let new = self.increment_parents(LAYERS, start, size)?;
+                    let new = self.increment_parents(Table::LAYERS, start, size)?;
                     let page = leaf.get(new)?;
                     leaf.start_l0.store(page, Ordering::SeqCst);
                     page
                 }
                 Size::L1 => {
                     let start = leaf.start_l1.load(Ordering::SeqCst);
-                    let new = self.increment_parents(LAYERS, start, size)?;
+                    let new = self.increment_parents(Table::LAYERS, start, size)?;
                     let page = leaf.get_huge(new)?;
                     leaf.start_l1.store(page, Ordering::SeqCst);
                     page
@@ -184,7 +192,7 @@ impl Alloc for AllocTables {
 
     fn put(&self, core: usize, page: usize) -> Result<Size> {
         loop {
-            match self.put_rec(core, LAYERS, page) {
+            match self.put_rec(core, Table::LAYERS, page) {
                 Err(Error::CAS) => warn!("CAS: retry free"),
                 r => return r,
             }
@@ -198,8 +206,8 @@ impl Alloc for AllocTables {
         );
 
         let mut pages = 0;
-        let pt = self.pt(LAYERS, 0);
-        for i in 0..PT_LEN {
+        let pt = self.pt(Table::LAYERS, 0);
+        for i in 0..Table::LEN {
             pages += pt.get(i).pages();
         }
         pages
@@ -212,10 +220,12 @@ impl AllocTables {
     /// DRAM: [ PT4 | n*PT3 (| ...) ]
     /// ```
     fn pt(&self, layer: usize, page: usize) -> &Table<Entry> {
-        assert!((4..=LAYERS).contains(&layer));
+        assert!((4..=Table::LAYERS).contains(&layer));
 
-        let i = page >> (PT_LEN_BITS * layer);
-        let offset: usize = (layer..LAYERS).map(|i| table::num_pts(i, self.pages)).sum();
+        let i = page >> (Table::LEN_BITS * layer);
+        let offset: usize = (layer..Table::LAYERS)
+            .map(|i| Table::num_pts(i, self.pages))
+            .sum();
         &self.tables[offset + i]
     }
 
@@ -224,16 +234,18 @@ impl AllocTables {
     /// DRAM: [ PT4 | n*PT3 (| ...) ]
     /// ```
     fn pt3(&self, page: usize) -> &Table<Entry3> {
-        let i = page >> (PT_LEN_BITS * 3);
-        let offset: usize = (3..LAYERS).map(|i| table::num_pts(i, self.pages)).sum();
+        let i = page >> (Table::LEN_BITS * 3);
+        let offset: usize = (3..Table::LAYERS)
+            .map(|i| Table::num_pts(i, self.pages))
+            .sum();
         unsafe { &*(&self.tables[offset + i] as *const _ as *const Table<Entry3>) }
     }
 
     fn recover_rec(&self, layer: usize, start: usize, deep: bool) -> Result<usize> {
         let mut pages = 0;
         let pt = self.pt(layer, start);
-        for i in table::range(layer, start..self.pages) {
-            let page = table::page(layer, start, i);
+        for i in Table::range(layer, start..self.pages) {
+            let page = Table::page(layer, start, i);
 
             let c_pages = if layer - 1 == 3 {
                 self.recover_l3(page, deep)?
@@ -252,8 +264,8 @@ impl AllocTables {
         let mut pages = 0;
         let pt = self.pt3(start);
 
-        for i in table::range(3, start..self.pages) {
-            let page = table::page(3, start, i);
+        for i in Table::range(3, start..self.pages) {
+            let page = Table::page(3, start, i);
 
             let (c_pages, size) = self.local[0].recover(page, deep)?;
             if size == Size::L2 {
@@ -269,9 +281,9 @@ impl AllocTables {
     }
 
     fn reserve_pt2(&self, layer: usize, start: usize, size: Size) -> Result<usize> {
-        for i in 0..PT_LEN {
-            let i = (table::idx(layer, start) + i) % PT_LEN;
-            let page = table::page(layer, start, i);
+        for i in 0..Table::LEN {
+            let i = (Table::idx(layer, start) + i) % Table::LEN;
+            let page = Table::page(layer, start, i);
 
             if layer > 3 {
                 if let Ok(result) = self.reserve_pt2(layer - 1, page, size) {
@@ -291,7 +303,7 @@ impl AllocTables {
 
     fn unreserve_pt2(&self, start: usize) {
         let pt = self.pt3(start);
-        let i = table::idx(3, start);
+        let i = Table::idx(3, start);
         if pt.update(i, Entry3::unreserve).is_err() {
             panic!("Unreserve failed")
         }
@@ -304,11 +316,11 @@ impl AllocTables {
 
         // Increment parents
         let pt = self.pt(layer, start);
-        for page in table::iterate(layer, start, self.pages) {
-            let i = table::idx(layer, page);
+        for page in Table::iterate(layer, start, self.pages) {
+            let i = Table::idx(layer, page);
 
-            let max = self.pages - table::round(layer, page);
-            if let Ok(_) = pt.update(i, |v| v.inc(size, layer, max)) {
+            let max = self.pages - Table::round(layer, page);
+            if pt.update(i, |v| v.inc(size, layer, max)).is_ok() {
                 match self.increment_parents(layer - 1, page, size) {
                     Ok(result) => return Ok(result),
                     Err(Error::Memory) => {
@@ -324,21 +336,19 @@ impl AllocTables {
 
     fn increment_parents_l3(&self, start: usize, size: Size) -> Result<usize> {
         let pt = self.pt3(start);
-        for page in table::iterate(3, start, self.pages) {
-            let i = table::idx(3, page);
+        for page in Table::iterate(3, start, self.pages) {
+            let i = Table::idx(3, page);
 
-            let max = self.pages - table::round(2, page);
+            let max = self.pages - Table::round(2, page);
             if page == start {
-                if let Ok(_) = pt.update(i, |v| v.inc(size, max)) {
+                if pt.update(i, |v| v.inc(size, max)).is_ok() {
                     return Ok(page);
                 }
                 warn!("try reserve next {i}");
                 pt.update(i, Entry3::unreserve).unwrap();
-            } else {
-                if let Ok(_) = pt.update(i, |v| v.inc_reserve(size, max)) {
-                    warn!("reserved {i}");
-                    return Ok(page);
-                }
+            } else if pt.update(i, |v| v.inc_reserve(size, max)).is_ok() {
+                warn!("reserved {i}");
+                return Ok(page);
             }
         }
         Err(Error::Memory)
@@ -352,19 +362,19 @@ impl AllocTables {
         }
 
         let pt = self.pt(layer, start);
-        for i in table::range(layer, start..self.pages) {
+        for i in Table::range(layer, start..self.pages) {
             info!("get giant l{} i{}", layer, i);
 
-            let page = table::page(layer, start, i);
+            let page = Table::page(layer, start, i);
             let pte = pt.get(i);
 
             // Already allocated or reserved
-            if pte.pages() > table::span(layer - 1) - table::span(Size::L2 as _) {
+            if pte.pages() > Table::span(layer - 1) - Table::span(Size::L2 as _) {
                 warn!(
                     "giant no space {} > {} - {}",
                     pte.pages(),
-                    table::span(layer - 1),
-                    table::span(Size::L2 as _)
+                    Table::span(layer - 1),
+                    Table::span(Size::L2 as _)
                 );
                 continue;
             }
@@ -388,9 +398,9 @@ impl AllocTables {
     fn get_giant_page(&self, core: usize, start: usize) -> Result<usize> {
         let pt = self.pt3(start);
 
-        for i in table::range(3, start..self.pages) {
+        for i in Table::range(3, start..self.pages) {
             if pt.cas(i, Entry3::new(), Entry3::new_giant()).is_ok() {
-                let page = table::page(3, start, i);
+                let page = Table::page(3, start, i);
                 warn!("allocated l3 i{} p={} s={}", i, page, start);
                 self.local[core].persist(page);
                 return Ok(page);
@@ -406,7 +416,7 @@ impl AllocTables {
         }
 
         let pt = self.pt(layer, page);
-        let i = table::idx(layer, page);
+        let i = Table::idx(layer, page);
         let pte = pt.get(i);
 
         if pte.pages() == 0 {
@@ -427,7 +437,7 @@ impl AllocTables {
 
     fn put_l3(&self, core: usize, page: usize) -> Result<Size> {
         let pt = self.pt3(page);
-        let i3 = table::idx(3, page);
+        let i3 = Table::idx(3, page);
         let pte3 = pt.get(i3);
 
         if pte3.size() == Some(Size::L2) {
@@ -450,10 +460,10 @@ impl AllocTables {
     }
 
     fn put_giant(&self, core: usize, page: usize) -> Result<Size> {
-        if (page % table::span(Size::L2 as _)) != 0 {
+        if (page % Table::span(Size::L2 as _)) != 0 {
             error!(
                 "Invalid alignment p={page:x} a={:x}",
-                table::span(Size::L2 as _)
+                Table::span(Size::L2 as _)
             );
             return Err(Error::Address);
         }
@@ -462,7 +472,7 @@ impl AllocTables {
         self.local[core].clear_giant(page);
 
         let pt = self.pt3(page);
-        let i = table::idx(3, page);
+        let i = Table::idx(3, page);
 
         info!("free l3 i{}", i);
         match pt.cas(i, Entry3::new_giant(), Entry3::new()) {
@@ -476,22 +486,22 @@ impl AllocTables {
 
     #[allow(dead_code)]
     pub fn dump(&self) {
-        self.dump_rec(LAYERS, 0);
+        self.dump_rec(Table::LAYERS, 0);
     }
 
     fn dump_rec(&self, layer: usize, start: usize) {
         let pt = self.pt(layer, start);
-        for i in table::range(layer, start..self.pages) {
-            let start = table::page(layer, start, i);
+        for i in Table::range(layer, start..self.pages) {
+            let start = Table::page(layer, start, i);
 
             let pte = pt.get(i);
 
             info!(
                 "{:1$}l{5} i={2} 0x{3:x}: {4:?}",
                 "",
-                (LAYERS - layer) * 4,
+                (Table::LAYERS - layer) * 4,
                 i,
-                start * PAGE_SIZE,
+                start * Page::SIZE,
                 pte,
                 layer
             );
@@ -508,17 +518,17 @@ impl AllocTables {
 
     fn dump_l3(&self, start: usize) {
         let pt = self.pt3(start);
-        for i in table::range(3, start..self.pages) {
-            let start = table::page(3, start, i);
+        for i in Table::range(3, start..self.pages) {
+            let start = Table::page(3, start, i);
 
             let pte = pt.get(i);
 
             info!(
                 "{:1$}l3 i={2} 0x{3:x}: {4:?}",
                 "",
-                (LAYERS - 3) * 4,
+                (Table::LAYERS - 3) * 4,
                 i,
-                start * PAGE_SIZE,
+                start * Page::SIZE,
                 pte,
             );
 

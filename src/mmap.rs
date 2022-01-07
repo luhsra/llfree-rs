@@ -115,7 +115,7 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::PAGE_SIZE;
+    use crate::Page;
 
     #[test]
     fn mapping() {
@@ -125,9 +125,9 @@ mod test {
             .write(true)
             .open("memfile")
             .unwrap();
-        f.set_len(PAGE_SIZE as _).unwrap();
+        f.set_len(Page::SIZE as _).unwrap();
 
-        let mut mapping = MMap::file(0x0000_1000_0000_0000, PAGE_SIZE, f).unwrap();
+        let mut mapping = MMap::file(0x0000_1000_0000_0000, Page::SIZE, f).unwrap();
 
         mapping[0] = 42;
         assert_eq!(mapping[0], 42);
@@ -166,7 +166,7 @@ mod test {
     fn anonymous() {
         logging();
 
-        let mut mapping = MMap::anon(0x0000_1000_0000_0000, PAGE_SIZE).unwrap();
+        let mut mapping = MMap::anon(0x0000_1000_0000_0000, Page::SIZE).unwrap();
 
         mapping[0] = 42;
         assert_eq!(mapping[0], 42);

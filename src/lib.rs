@@ -6,7 +6,7 @@ use std::{alloc::Layout, sync::atomic::AtomicUsize};
 
 mod alloc;
 pub mod entry;
-pub use alloc::{Alloc, AllocStack, AllocTables};
+pub use alloc::{Alloc, Allocator};
 mod leaf_alloc;
 pub mod mmap;
 pub mod table;
@@ -16,13 +16,11 @@ pub mod util;
 #[cfg(test)]
 mod wait;
 
-pub type Allocator = AllocTables;
-
-use table::LAYERS;
+use table::Table;
 
 pub const MAGIC: usize = 0xdeadbeef;
-pub const MIN_PAGES: usize = 2 * table::span(2);
-pub const MAX_PAGES: usize = table::span(LAYERS);
+pub const MIN_PAGES: usize = 2 * Table::span(2);
+pub const MAX_PAGES: usize = Table::span(Table::LAYERS);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -55,7 +53,7 @@ pub mod raw {
 
     use log::error;
 
-    use crate::{Alloc, Allocator, Error, Page, Size, PAGE_SIZE};
+    use crate::{Alloc, Allocator, Error, Page, Size};
 
     #[no_mangle]
     pub extern "C" fn nvalloc_init(cores: usize, addr: *mut c_void, pages: usize) -> i64 {
@@ -71,8 +69,10 @@ pub mod raw {
     }
 
     pub fn nvalloc_get(core: usize, size: Size) -> i64 {
-        match Allocator::instance().get(core, size) {
-            Ok(page) => (page * PAGE_SIZE) as i64,
+        let alloc = Allocator::instance();
+        let begin = alloc.begin();
+        match alloc.get(core, size) {
+            Ok(page) => (page * Page::SIZE + begin) as i64,
             Err(e) => -(e as usize as i64),
         }
     }
@@ -85,18 +85,26 @@ pub mod raw {
         expected: u64,
     ) -> i64 {
         let dst = unsafe { &*(dst as *const AtomicU64) };
-        match Allocator::instance().get_cas(core, size, dst, translate, expected) {
+        let alloc = Allocator::instance();
+        let begin = alloc.begin();
+        match alloc.get_cas(
+            core,
+            size,
+            dst,
+            |p| translate(p * Page::SIZE as u64 + begin as u64),
+            expected,
+        ) {
             Ok(_) => 0,
             Err(e) => -(e as usize as i64),
         }
     }
 
     pub fn nvalloc_put(core: usize, addr: u64) -> i64 {
-        if addr % PAGE_SIZE as u64 != 0 {
+        if addr % Page::SIZE as u64 != 0 {
             error!("Invalid align {addr:x}");
             return -(Error::Address as usize as i64);
         }
-        let page = addr as usize / PAGE_SIZE;
+        let page = addr as usize / Page::SIZE;
         match Allocator::instance().put(core, page) {
             Ok(_) => 0,
             Err(e) => -(e as usize as i64),
@@ -104,21 +112,20 @@ pub mod raw {
     }
 }
 
-pub const PAGE_SIZE_BITS: usize = 12; // 2^12 => 4KiB
-pub const PAGE_SIZE: usize = 1 << PAGE_SIZE_BITS;
-
 /// Correctly sized and aligned page.
 #[derive(Clone)]
 #[repr(align(0x1000))]
 pub struct Page {
-    _data: [u8; PAGE_SIZE],
+    _data: [u8; Page::SIZE],
 }
-const _: () = assert!(Layout::new::<Page>().size() == PAGE_SIZE);
-const _: () = assert!(Layout::new::<Page>().align() == PAGE_SIZE);
+const _: () = assert!(Layout::new::<Page>().size() == Page::SIZE);
+const _: () = assert!(Layout::new::<Page>().align() == Page::SIZE);
 impl Page {
+    pub const SIZE_BITS: usize = 12; // 2^12 => 4KiB
+    pub const SIZE: usize = 1 << Page::SIZE_BITS;
     pub const fn new() -> Self {
         Self {
-            _data: [0; PAGE_SIZE],
+            _data: [0; Page::SIZE],
         }
     }
 }
@@ -128,7 +135,7 @@ pub struct Meta {
     pages: AtomicUsize,
     active: AtomicUsize,
 }
-const _: () = assert!(core::mem::size_of::<Meta>() <= PAGE_SIZE);
+const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
 enum Init {
     None,
@@ -143,7 +150,7 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::table::PT_LEN;
+    use crate::table::Table;
     use crate::thread::parallel;
     use crate::util::logging;
     use crate::{Alloc, Allocator, Page, Size};
@@ -164,7 +171,7 @@ mod test {
         Allocator::init(THREADS, &mut mapping[..]).unwrap();
 
         parallel(THREADS, |t| {
-            let pages = [DEFAULT; PT_LEN];
+            let pages = [DEFAULT; Table::LEN];
             for page in &pages {
                 Allocator::instance()
                     .get_cas(t, Size::L0, page, |v| v, 0)
