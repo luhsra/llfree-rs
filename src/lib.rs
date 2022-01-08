@@ -17,8 +17,6 @@ mod wait;
 use std::ffi::c_void;
 use std::sync::atomic::AtomicU64;
 
-use log::error;
-
 use alloc::{Alloc, Allocator, Error, Size};
 use util::Page;
 
@@ -46,9 +44,8 @@ pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
     };
 
     let alloc = Allocator::instance();
-    let begin = alloc.begin();
     match alloc.get(core as _, size) {
-        Ok(page) => (page * Page::SIZE + begin) as i64,
+        Ok(addr) => addr as i64,
         Err(e) => -(e as usize as i64),
     }
 }
@@ -70,15 +67,8 @@ pub extern "C" fn nvalloc_get_cas(
 
     let dst = unsafe { &*(dst as *const AtomicU64) };
     let alloc = Allocator::instance();
-    let begin = alloc.begin();
 
-    match alloc.get_cas(
-        core as _,
-        size,
-        dst,
-        |p| translate(p * Page::SIZE as u64 + begin as u64),
-        expected,
-    ) {
+    match alloc.get_cas(core as _, size, dst, |p| translate(p), expected) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
     }
@@ -86,12 +76,7 @@ pub extern "C" fn nvalloc_get_cas(
 
 #[no_mangle]
 pub extern "C" fn nvalloc_put(core: u32, addr: u64) -> i64 {
-    if addr % Page::SIZE as u64 != 0 {
-        error!("Invalid align {addr:x}");
-        return -(Error::Address as usize as i64);
-    }
-    let page = addr as usize / Page::SIZE;
-    match Allocator::instance().put(core as _, page) {
+    match Allocator::instance().put(core as _, addr) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
     }
@@ -126,15 +111,15 @@ mod test {
 
         parallel(THREADS, |t| {
             let pages = [DEFAULT; Table::LEN];
-            for page in &pages {
+            for addr in &pages {
                 Allocator::instance()
-                    .get_cas(t, Size::L0, page, |v| v, 0)
+                    .get_cas(t, Size::L0, addr, |v| v, 0)
                     .unwrap();
             }
 
-            for page in &pages {
+            for addr in &pages {
                 Allocator::instance()
-                    .put(t, page.load(Ordering::SeqCst) as usize)
+                    .put(t, addr.load(Ordering::SeqCst))
                     .unwrap();
             }
         });

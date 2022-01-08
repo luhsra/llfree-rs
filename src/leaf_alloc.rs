@@ -1,8 +1,9 @@
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
 
-use crate::alloc::{Alloc, Allocator, Error, Result, Size};
+use crate::alloc::{Error, Result, Size};
 use crate::entry::{Entry1, Entry2};
 use crate::table::{AtomicBuffer, Table};
 use crate::Page;
@@ -22,17 +23,22 @@ macro_rules! wait {
     () => {};
 }
 
+pub trait Leafs: Sized {
+    fn leafs<'a>() -> &'a [LeafAllocator<Self>];
+}
+
 /// Layer 2 page allocator, per core.
 #[repr(align(64))]
-pub struct LeafAllocator {
+pub struct LeafAllocator<A: Leafs> {
     pub begin: usize,
     pub pages: usize,
     alloc_pt1: AtomicUsize,
     start_l0: AtomicUsize,
     start_l1: AtomicUsize,
+    _phantom: PhantomData<A>,
 }
 
-impl Clone for LeafAllocator {
+impl<A: Leafs> Clone for LeafAllocator<A> {
     fn clone(&self) -> Self {
         Self {
             begin: self.begin,
@@ -40,18 +46,20 @@ impl Clone for LeafAllocator {
             alloc_pt1: AtomicUsize::new(0),
             start_l0: AtomicUsize::new(0),
             start_l1: AtomicUsize::new(0),
+            _phantom: PhantomData,
         }
     }
 }
 
-impl LeafAllocator {
-    pub const fn new(begin: usize, pages: usize) -> Self {
+impl<A: Leafs> LeafAllocator<A> {
+    pub fn new(begin: usize, pages: usize) -> Self {
         Self {
             begin,
             pages,
             alloc_pt1: AtomicUsize::new(0),
             start_l0: AtomicUsize::new(0),
             start_l1: AtomicUsize::new(0),
+            _phantom: PhantomData,
         }
     }
 
@@ -219,12 +227,11 @@ impl LeafAllocator {
         let alloc_p1 = !Table::page(1, start, pte2.i1());
 
         // Wait for others to finish
-        for (i, leaf) in Allocator::instance().local.iter().enumerate() {
+        for (i, leaf) in A::leafs().iter().enumerate() {
             if leaf as *const _ != self as *const _ {
                 while leaf.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
                     warn!("Waiting for cpu {} on {}", i, unsafe {
-                        (self as *const Self)
-                            .offset_from(&Allocator::instance().local[0] as *const _)
+                        (self as *const Self).offset_from(&A::leafs()[0] as *const _)
                     });
                     wait!();
                 }
@@ -413,17 +420,19 @@ impl LeafAllocator {
 #[cfg(feature = "wait")]
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     use log::warn;
 
+    use super::Leafs;
+    use crate::alloc::{stack::StackAlloc, Alloc};
     use crate::entry::Entry1;
     use crate::table::{AtomicBuffer, Table};
-    use crate::util::logging;
+    use crate::thread;
+    use crate::util::{logging, Page};
     use crate::wait::{DbgWait, DbgWaitKey};
-    use crate::{thread, Page};
-    use crate::{Alloc, Allocator};
+
+    type Allocator = StackAlloc;
 
     fn count(pt: &Table<Entry1>) -> usize {
         let mut pages = 0;
@@ -449,29 +458,25 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
-            Allocator::instance().local[0].get(0).unwrap();
+            Allocator::leafs()[0].get(0).unwrap();
 
             let wait = DbgWait::setup(2, order);
 
             thread::parallel(2, move |t| {
                 thread::pin(t);
                 let key = DbgWaitKey::init(wait, t as _);
-                let page_alloc = &Allocator::instance().local[t];
+                let page_alloc = &Allocator::leafs()[t];
 
                 let page = page_alloc.get(0).unwrap();
                 drop(key);
                 assert!(page != 0);
             });
 
-            let page_alloc = &Allocator::instance().local[0];
+            let page_alloc = &Allocator::leafs()[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 3);
             assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 3);
 
-            Allocator::instance()
-                .meta()
-                .magic
-                .store(0, Ordering::SeqCst);
-            Allocator::uninit();
+            Allocator::destroy()
         }
     }
 
@@ -497,20 +502,16 @@ mod test {
             thread::parallel(2, move |t| {
                 thread::pin(t);
                 let _key = DbgWaitKey::init(wait, t as _);
-                let page_alloc = &Allocator::instance().local[t];
+                let page_alloc = &Allocator::leafs()[t];
 
                 page_alloc.get(0).unwrap();
             });
 
-            let page_alloc = &Allocator::instance().local[0];
+            let page_alloc = &Allocator::leafs()[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 2);
             assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 2);
 
-            Allocator::instance()
-                .meta()
-                .magic
-                .store(0, Ordering::SeqCst);
-            Allocator::uninit();
+            Allocator::destroy()
         }
     }
 
@@ -530,7 +531,7 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
-            let page_alloc = &Allocator::instance().local[0];
+            let page_alloc = &Allocator::leafs()[0];
             for _ in 0..Table::LEN - 1 {
                 page_alloc.get(0).unwrap();
             }
@@ -539,22 +540,18 @@ mod test {
             thread::parallel(2, move |t| {
                 thread::pin(t);
                 let _key = DbgWaitKey::init(wait, t as _);
-                let page_alloc = &Allocator::instance().local[t];
+                let page_alloc = &Allocator::leafs()[t];
 
                 page_alloc.get(0).unwrap();
             });
 
-            let page_alloc = &Allocator::instance().local[0];
+            let page_alloc = &Allocator::leafs()[0];
             let pt2 = page_alloc.pt2(0);
             assert_eq!(pt2.get(0).pages(), Table::LEN);
             assert_eq!(pt2.get(1).pages(), 1);
             assert_eq!(count(page_alloc.pt1(pt2.get(1), Table::LEN)), 1);
 
-            Allocator::instance()
-                .meta()
-                .magic
-                .store(0, Ordering::SeqCst);
-            Allocator::uninit();
+            Allocator::destroy()
         }
     }
 
@@ -574,7 +571,7 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
-            let page_alloc = &Allocator::instance().local[0];
+            let page_alloc = &Allocator::leafs()[0];
             pages[0] = page_alloc.get(0).unwrap();
             pages[1] = page_alloc.get(0).unwrap();
             let wait = DbgWait::setup(2, order);
@@ -583,7 +580,7 @@ mod test {
                 let pages = pages.clone();
                 move |t| {
                     let _key = DbgWaitKey::init(wait, t as _);
-                    let page_alloc = &Allocator::instance().local[t];
+                    let page_alloc = &Allocator::leafs()[t];
 
                     match page_alloc.put(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
@@ -595,14 +592,10 @@ mod test {
                 }
             });
 
-            let page_alloc = &Allocator::instance().local[0];
+            let page_alloc = &Allocator::leafs()[0];
             assert_eq!(page_alloc.pt2(0).get(0).pages(), 0);
 
-            Allocator::instance()
-                .meta()
-                .magic
-                .store(0, Ordering::SeqCst);
-            Allocator::uninit();
+            Allocator::destroy()
         }
     }
 
@@ -622,7 +615,7 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
-            let page_alloc = &Allocator::instance().local[0];
+            let page_alloc = &Allocator::leafs()[0];
             for page in &mut pages {
                 *page = page_alloc.get(0).unwrap();
             }
@@ -632,7 +625,7 @@ mod test {
                 let pages = pages.clone();
                 move |t| {
                     let _key = DbgWaitKey::init(wait, t as _);
-                    let page_alloc = &Allocator::instance().local[t];
+                    let page_alloc = &Allocator::leafs()[t];
 
                     match page_alloc.put(pages[t as usize]) {
                         Err(crate::Error::CAS) => {
@@ -644,16 +637,12 @@ mod test {
                 }
             });
 
-            let page_alloc = &Allocator::instance().local[0];
+            let page_alloc = &Allocator::leafs()[0];
             let pt2 = page_alloc.pt2(0);
             assert_eq!(pt2.get(0).pages(), Table::LEN - 2);
             assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), Table::LEN - 2);
 
-            Allocator::instance()
-                .meta()
-                .magic
-                .store(0, Ordering::SeqCst);
-            Allocator::uninit();
+            Allocator::destroy()
         }
     }
 
@@ -676,7 +665,7 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer).unwrap();
-            let page_alloc = &Allocator::instance().local[0];
+            let page_alloc = &Allocator::leafs()[0];
             for page in &mut pages[..Table::LEN - 1] {
                 *page = page_alloc.get(0).unwrap();
             }
@@ -685,14 +674,14 @@ mod test {
             let wait_clone = Arc::clone(&wait);
             let handle = std::thread::spawn(move || {
                 let _key = DbgWaitKey::init(wait_clone, 1);
-                let page_alloc = &Allocator::instance().local[1];
+                let page_alloc = &Allocator::leafs()[1];
 
                 page_alloc.get(0).unwrap();
             });
 
             {
                 let _key = DbgWaitKey::init(wait, 0);
-                let page_alloc = &Allocator::instance().local[0];
+                let page_alloc = &Allocator::leafs()[0];
 
                 match page_alloc.put(pages[0]) {
                     Err(crate::Error::CAS) => {
@@ -705,7 +694,7 @@ mod test {
 
             handle.join().unwrap();
 
-            let page_alloc = &Allocator::instance().local[0];
+            let page_alloc = &Allocator::leafs()[0];
             let pt2 = page_alloc.pt2(0);
             if pt2.get(0).pages() == Table::LEN - 1 {
                 assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), Table::LEN - 1);
@@ -717,11 +706,7 @@ mod test {
                 assert_eq!(count(page_alloc.pt1(pt2.get(1), Table::LEN)), 1);
             }
 
-            Allocator::instance()
-                .meta()
-                .magic
-                .store(0, Ordering::SeqCst);
-            Allocator::uninit();
+            Allocator::destroy()
         }
     }
 }

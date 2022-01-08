@@ -1,24 +1,32 @@
+use std::ops::Range;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use log::{error, info, warn};
 
-use super::{Alloc, Error, Meta, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
-use crate::leaf_alloc::LeafAllocator;
+use crate::leaf_alloc::{LeafAllocator, Leafs};
 use crate::table::{AtomicBuffer, Table};
 use crate::util::Page;
 
 const PTE3_FULL: usize = Table::span(2) - 4 * Table::span(1);
 
+/// Non-Volatile global metadata
+pub struct Meta {
+    magic: AtomicUsize,
+    pages: AtomicUsize,
+    active: AtomicUsize,
+}
+const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
+
 /// Volatile shared metadata
 #[repr(align(64))]
-pub struct AllocStack {
-    begin: usize,
-    pages: usize,
+pub struct StackAlloc {
+    memory: Range<*const Page>,
     meta: *mut Meta,
-    pub local: Vec<LeafAllocator>,
+    pub local: Vec<LeafAllocator<Self>>,
     entries: Entry3Buf,
 
     empty: Mutex<Vec<usize>>,
@@ -43,12 +51,27 @@ impl AtomicBuffer<Entry3> for Entry3Buf {
     }
 }
 
-const INITIALIZING: *mut AllocStack = usize::MAX as _;
-static mut SHARED: AtomicPtr<AllocStack> = AtomicPtr::new(null_mut());
+const INITIALIZING: *mut StackAlloc = usize::MAX as _;
+static mut SHARED: AtomicPtr<StackAlloc> = AtomicPtr::new(null_mut());
 
-impl Alloc for AllocStack {
+impl Leafs for StackAlloc {
+    fn leafs<'a>() -> &'a [LeafAllocator<Self>] {
+        &Self::instance().local
+    }
+}
+
+impl Alloc for StackAlloc {
     fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
-        warn!("initializing c={cores} {:?}", memory.as_ptr_range());
+        warn!(
+            "initializing c={cores} {:?} {}",
+            memory.as_ptr_range(),
+            memory.len()
+        );
+        if memory.len() < MIN_PAGES * cores {
+            error!("memory {} < {}", memory.len(), MIN_PAGES * cores);
+            return Err(Error::Memory);
+        }
+
         if unsafe {
             SHARED
                 .compare_exchange(null_mut(), INITIALIZING, Ordering::SeqCst, Ordering::SeqCst)
@@ -59,26 +82,23 @@ impl Alloc for AllocStack {
 
         let alloc = Self::new(cores, memory)?;
         let alloc = Box::leak(Box::new(alloc));
-        let meta = alloc.meta();
+        let meta = unsafe { &mut *alloc.meta };
 
         warn!("init");
-        if meta.pages.load(Ordering::SeqCst) == alloc.pages
+        if meta.pages.load(Ordering::SeqCst) == alloc.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
         {
-            warn!("Recover allocator state p={}", alloc.pages);
+            warn!("Recover allocator state p={}", alloc.pages());
             let deep = meta.active.load(Ordering::SeqCst) != 0;
-            if deep {
-                error!("Allocator unexpectedly terminated");
-            }
             let pages = alloc.recover(deep)?;
             warn!("Recovered pages {pages}");
         } else {
-            warn!("Setup allocator state p={}", alloc.pages);
+            warn!("Setup allocator state p={}", alloc.pages());
             alloc.local[0].clear();
             // Add all entries to the empty list
             alloc.empty.lock().unwrap().extend(0..alloc.entries.len());
 
-            meta.pages.store(alloc.pages, Ordering::SeqCst);
+            meta.pages.store(alloc.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
         }
 
@@ -114,26 +134,30 @@ impl Alloc for AllocStack {
         unsafe { &*ptr }
     }
 
-    fn begin(&self) -> usize {
-        self.begin
+    fn destroy() {
+        let ptr = unsafe { SHARED.load(Ordering::SeqCst) };
+        assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
+        let alloc = unsafe { &mut *ptr };
+        let meta = unsafe { &*alloc.meta };
+        meta.magic.store(0, Ordering::SeqCst);
+        Self::uninit();
     }
 
-    fn pages(&self) -> usize {
-        self.pages
-    }
-
-    fn meta<'a>(&self) -> &'a Meta {
-        unsafe { &*self.meta }
-    }
-
-    fn get(&self, core: usize, size: Size) -> Result<usize> {
+    fn get(&self, core: usize, size: Size) -> Result<u64> {
         match size {
             Size::L2 => self.get_giant(core),
             _ => self.get_small(core, size),
         }
+        .map(|p| unsafe { self.memory.start.add(p as _) } as u64)
     }
 
-    fn put(&self, core: usize, page: usize) -> Result<Size> {
+    fn put(&self, core: usize, addr: u64) -> Result<()> {
+        if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) {
+            error!("invalid addr");
+            return Err(Error::Memory);
+        }
+        let page = unsafe { (addr as *const Page).offset_from(self.memory.start) } as usize;
+
         let i = page / Table::span(2);
         let pte3 = self.entries.get(i);
         match pte3.size() {
@@ -144,7 +168,7 @@ impl Alloc for AllocStack {
 
     fn allocated_pages(&self) -> usize {
         let mut pages = 0;
-        for i in 0..Table::num_pts(2, self.pages) {
+        for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self.entries.get(i);
             // warn!("{i:>3}: {pte:?}");
             if pte.size() == Some(Size::L2) {
@@ -157,39 +181,29 @@ impl Alloc for AllocStack {
     }
 }
 
-impl AllocStack {
-    fn new(cores: usize, memory: &[Page]) -> Result<Self> {
-        if memory.len() < MIN_PAGES * cores {
-            error!("memory {} < {}", memory.len(), MIN_PAGES * cores);
-            return Err(Error::Memory);
-        }
-
+impl StackAlloc {
+    fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
         // Last frame is reserved for metadata
         let pages = (memory.len() - 1).min(MAX_PAGES);
-        let begin = memory.as_ptr() as usize;
-
-        let meta = (begin + pages * Page::SIZE) as *mut Meta;
-        let meta = unsafe { &mut *meta };
+        let (memory, rem) = memory.split_at_mut(pages);
+        let meta = rem[0].cast::<Meta>();
 
         // level 2 tables are stored at the end of the NVM
         let pages = pages - Table::num_pts(2, pages);
+        let (memory, _pt2) = memory.split_at_mut(pages);
 
         // Array with all pte3
         let pte3_num = Table::num_pts(2, pages);
-        warn!("alloc entries {pte3_num}");
+
         let entries = Entry3Buf::new(pte3_num);
-
-        warn!("alloc local {cores}");
-        let local = vec![LeafAllocator::new(begin, pages); cores];
-
-        warn!("alloc lists {pte3_num}");
         let empty = Mutex::new(Vec::with_capacity(pte3_num));
         let partial_l0 = Mutex::new(Vec::with_capacity(pte3_num));
         let partial_l1 = Mutex::new(Vec::with_capacity(pte3_num));
 
+        let local = vec![LeafAllocator::new(memory.as_ptr() as usize, pages); cores];
+
         Ok(Self {
-            begin,
-            pages,
+            memory: memory.as_ptr_range(),
             meta,
             local,
             entries,
@@ -199,9 +213,16 @@ impl AllocStack {
         })
     }
 
+    fn pages(&self) -> usize {
+        (self.memory.end as usize - self.memory.start as usize) / Page::SIZE
+    }
+
     fn recover(&self, deep: bool) -> Result<usize> {
+        if deep {
+            error!("Allocator unexpectedly terminated");
+        }
         let mut total = 0;
-        for i in 0..Table::num_pts(2, self.pages) {
+        for i in 0..Table::num_pts(2, self.pages()) {
             let page = i * Table::span(2);
             let (pages, size) = self.local[0].recover(page, deep)?;
             if size == Size::L2 {
@@ -235,7 +256,7 @@ impl AllocStack {
         {
             let mut partial = self.partial(size);
             if let Some(i) = partial.pop() {
-                let max = self.pages - i * Table::span(2);
+                let max = self.pages() - i * Table::span(2);
                 self.entries.update(i, |v| v.reserve(size, max)).unwrap();
                 warn!("reserved partial {i}");
                 return Ok(i * Table::span(2));
@@ -244,7 +265,7 @@ impl AllocStack {
         {
             let mut empty = self.empty.lock().unwrap();
             if let Some(i) = empty.pop() {
-                let max = self.pages - i * Table::span(2);
+                let max = self.pages() - i * Table::span(2);
                 self.entries.update(i, |v| v.reserve(size, max)).unwrap();
                 warn!("reserved empty {i}");
                 return Ok(i * Table::span(2));
@@ -258,7 +279,7 @@ impl AllocStack {
         {
             let mut partial = self.partial(size);
             if let Some(i) = partial.pop() {
-                let max = self.pages - i * Table::span(2);
+                let max = self.pages() - i * Table::span(2);
                 self.entries.update(i, |v| v.inc(size, max)).unwrap();
                 warn!("reserved partial {i}");
                 return Ok(i * Table::span(2));
@@ -267,7 +288,7 @@ impl AllocStack {
         {
             let mut empty = self.empty.lock().unwrap();
             if let Some(i) = empty.pop() {
-                let max = self.pages - i * Table::span(2);
+                let max = self.pages() - i * Table::span(2);
                 self.entries.update(i, |v| v.inc(size, max)).unwrap();
                 warn!("reserved empty {i}");
                 return Ok(i * Table::span(2));
@@ -289,7 +310,7 @@ impl AllocStack {
         let start_a = local.start(size);
         let start = start_a.load(Ordering::Relaxed);
         let i = start / Table::span(2);
-        let max = self.pages - Table::round(2, start);
+        let max = self.pages() - Table::round(2, start);
         let new = match self.entries.update(i, |v| v.inc(size, max)) {
             Ok(_) => start,
             Err(pte3) => {
@@ -325,7 +346,7 @@ impl AllocStack {
         }
     }
 
-    fn put_giant(&self, core: usize, page: usize, pte3: Entry3) -> Result<Size> {
+    fn put_giant(&self, core: usize, page: usize, pte3: Entry3) -> Result<()> {
         let i = page / Table::span(2);
         if page % Table::span(2) != 0 {
             error!("Invalid align {page:x}");
@@ -337,7 +358,7 @@ impl AllocStack {
             Ok(_) => {
                 // Add to empty list
                 self.empty.lock().unwrap().push(i);
-                Ok(Size::L2)
+                Ok(())
             }
             Err(_) => {
                 error!("CAS invalid i{i}");
@@ -346,7 +367,7 @@ impl AllocStack {
         }
     }
 
-    fn put_small(&self, core: usize, page: usize, pte3: Entry3) -> Result<Size> {
+    fn put_small(&self, core: usize, page: usize, pte3: Entry3) -> Result<()> {
         if pte3.pages() == 0 {
             error!("Not allocated {page}");
             return Err(Error::Address);
@@ -371,7 +392,7 @@ impl AllocStack {
                         self.empty.lock().unwrap().push(i);
                     }
                 }
-                Ok(size)
+                Ok(())
             }
             Err(_) => {
                 error!("Corruption l3 i{i} p=-{size:?}");

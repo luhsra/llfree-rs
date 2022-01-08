@@ -5,6 +5,6 @@ Cargo.lock
 # misc
 memfile
 .vscode
-/test
-perf.data*
-perf.out
+/test/
+/bench/*
+!/bench/bench.ipynb

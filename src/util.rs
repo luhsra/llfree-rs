@@ -18,6 +18,9 @@ impl Page {
             _data: [0; Page::SIZE],
         }
     }
+    pub fn cast<T>(&mut self) -> &mut T {
+        unsafe { std::mem::transmute(self) }
+    }
 }
 
 pub const fn align_up(v: usize, align: usize) -> usize {

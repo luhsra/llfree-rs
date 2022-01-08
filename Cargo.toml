@@ -12,11 +12,11 @@ log = "0.4"
 libc = "0.2"
 bitfield-struct = "0.1.1"
 num_cpus = "1.13"
+buddy_system_allocator = "0.8.0"
 env_logger = { version = "0.9", default-features = false, optional = true }
 
 [dev-dependencies]
 env_logger = { version = "0.9", default-features = false }
-criterion = { version = "0.3", default-features = false }
 
 [features]
 wait = []
@@ -31,11 +31,5 @@ logger = ["env_logger"]
 raw-cpuid = "10.2"
 
 [[example]]
-name = "alloc"
+name = "bench"
 required-features = ["logger", "thread"]
-
-[[bench]]
-name = "benchmarks"
-harness = false
-test = false
-required-features = ["logger", "log_error", "thread"]

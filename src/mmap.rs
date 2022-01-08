@@ -18,6 +18,8 @@ pub struct MMap<'a, T> {
 
 impl<'a, T> MMap<'a, T> {
     pub fn file(begin: usize, len: usize, file: File) -> Result<MMap<'a, T>, ()> {
+        assert!(len > 0);
+
         let fd = file.as_raw_fd();
         let addr = unsafe {
             libc::mmap(
@@ -41,6 +43,8 @@ impl<'a, T> MMap<'a, T> {
 
     #[cfg(target_os = "linux")]
     pub fn dax(begin: usize, len: usize, file: File) -> Result<MMap<'a, T>, ()> {
+        assert!(len > 0);
+
         let fd = file.as_raw_fd();
         let addr = unsafe {
             libc::mmap(
@@ -63,6 +67,12 @@ impl<'a, T> MMap<'a, T> {
     }
 
     pub fn anon(begin: usize, len: usize) -> Result<MMap<'a, T>, ()> {
+        if len == 0 {
+            return Ok(MMap {
+                slice: unsafe { std::slice::from_raw_parts_mut(begin as _, len) },
+            });
+        }
+
         let addr = unsafe {
             libc::mmap(
                 begin as _,
@@ -99,10 +109,12 @@ impl<'a, T> DerefMut for MMap<'a, T> {
 
 impl<'a, T> Drop for MMap<'a, T> {
     fn drop(&mut self) {
-        let ret = unsafe { libc::munmap(self.slice.as_ptr() as _, self.slice.len() as _) };
-        if ret != 0 {
-            unsafe { libc::perror(b"munmap failed\0" as *const _ as _) };
-            panic!();
+        if self.len() > 0 {
+            let ret = unsafe { libc::munmap(self.slice.as_ptr() as _, self.slice.len() as _) };
+            if ret != 0 {
+                unsafe { libc::perror(b"munmap failed\0" as *const _ as _) };
+                panic!();
+            }
         }
     }
 }

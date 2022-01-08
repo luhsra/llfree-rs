@@ -1,12 +1,15 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use log::error;
 
 use crate::table::Table;
 use crate::util::Page;
 
+pub mod buddy;
+pub mod local_lists;
+pub mod malloc;
 pub mod stack;
-pub mod tables;
+pub mod table;
 
 pub const MAGIC: usize = 0xdeadbeef;
 pub const MIN_PAGES: usize = 2 * Table::span(2);
@@ -38,37 +41,21 @@ pub enum Size {
     L2 = 2,
 }
 
-/// Non-Volatile global metadata
-pub struct Meta {
-    pub magic: AtomicUsize,
-    pages: AtomicUsize,
-    active: AtomicUsize,
-}
-const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
-
-enum Init {
-    None,
-    Initializing,
-    Ready,
-}
-
-pub type Allocator = stack::AllocStack;
+pub type Allocator = stack::StackAlloc;
 
 pub trait Alloc {
     /// Initialize the allocator.
     fn init(cores: usize, memory: &mut [Page]) -> Result<()>;
-    /// Uninitialize the allocator.
+    /// Uninitialize the allocator. The persistent data remains.
     fn uninit();
+    /// Clear the persistent memory pool.
+    fn destroy();
+
     /// Return the initialized allocator instance (or panic if it is not initialized)
     fn instance<'a>() -> &'a Self;
 
-    fn begin(&self) -> usize;
-    fn pages(&self) -> usize;
-    /// Return the metadata page, that contains size information and checksums
-    fn meta<'a>(&self) -> &'a Meta;
-
     /// Allocate a new page.
-    fn get(&self, core: usize, size: Size) -> Result<usize>;
+    fn get(&self, core: usize, size: Size) -> Result<u64>;
     /// Allocates a new page and writes the value after translation into `dst`.
     /// If `dst` has an other value than `expected` the operation is revoked and `Error::CAS` is returned.
     fn get_cas<F: FnOnce(u64) -> u64>(
@@ -80,7 +67,7 @@ pub trait Alloc {
         expected: u64,
     ) -> Result<()> {
         let page = self.get(core, size)?;
-        let new = translate(page as u64);
+        let new = translate(page);
         match dst.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => Ok(()),
             Err(_) => {
@@ -91,7 +78,7 @@ pub trait Alloc {
         }
     }
     /// Free the given page.
-    fn put(&self, core: usize, page: usize) -> Result<Size>;
+    fn put(&self, core: usize, addr: u64) -> Result<()>;
 
     /// Return the number of allocated pages.
     fn allocated_pages(&self) -> usize;
@@ -106,7 +93,7 @@ mod test {
 
     use log::{info, warn};
 
-    use super::{Alloc, Allocator};
+    use super::{Alloc, Allocator, Error};
     use crate::alloc::MIN_PAGES;
     use crate::mmap::MMap;
     use crate::table::Table;
@@ -125,6 +112,77 @@ mod test {
             return MMap::dax(begin, length, f);
         }
         MMap::anon(begin, length)
+    }
+
+    #[test]
+    fn simple() {
+        logging();
+        // 8GiB
+        const MEM_SIZE: usize = 8 << 30;
+        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+
+        info!("mmap {} bytes at {:?}", MEM_SIZE, mapping.as_ptr());
+
+        info!("init alloc");
+
+        Allocator::init(1, &mut mapping).unwrap();
+
+        warn!("start alloc...");
+        let small = Allocator::instance().get(0, Size::L0).unwrap();
+
+        assert_eq!(Allocator::instance().allocated_pages(), 1);
+
+        // Stress test
+        let mut pages = Vec::new();
+        loop {
+            match Allocator::instance().get(0, Size::L0) {
+                Ok(page) => pages.push(page),
+                Err(Error::Memory) => break,
+                Err(e) => panic!("{:?}", e),
+            }
+        }
+
+        warn!("allocated {}", pages.len());
+        warn!("check...");
+
+        assert_eq!(Allocator::instance().allocated_pages(), 1 + pages.len());
+        pages.sort_unstable();
+
+        // Check that the same page was not allocated twice
+        for i in 0..pages.len() - 1 {
+            let p1 = pages[i];
+            let p2 = pages[i + 1];
+            info!("addr {}={:x}", i, p1);
+            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
+            assert!(p1 != p2);
+        }
+
+        warn!("realloc...");
+
+        // Free some
+        for page in &pages[10..Table::LEN + 10] {
+            Allocator::instance().put(0, *page).unwrap();
+        }
+        assert_eq!(
+            Allocator::instance().allocated_pages(),
+            1 + pages.len() - Table::LEN
+        );
+        // Realloc
+        for page in &mut pages[10..Table::LEN + 10] {
+            *page = Allocator::instance().get(0, Size::L0).unwrap();
+        }
+
+        warn!("free...");
+
+        Allocator::instance().put(0, small).unwrap();
+        // Free all
+        for page in &pages {
+            Allocator::instance().put(0, *page).unwrap();
+        }
+
+        assert_eq!(Allocator::instance().allocated_pages(), 0);
+
+        Allocator::uninit();
     }
 
     #[test]
@@ -171,7 +229,7 @@ mod test {
             let p1 = pages[i];
             let p2 = pages[i + 1];
             info!("addr {}={:x}", i, p1);
-            assert!(p1 < mapping.len());
+            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
             assert!(p1 != p2);
         }
 
@@ -215,7 +273,7 @@ mod test {
         Allocator::init(THREADS, &mut mapping).unwrap();
 
         // Stress test
-        let mut pages = vec![0usize; ALLOC_PER_THREAD * THREADS];
+        let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
         let barrier = Arc::new(Barrier::new(THREADS));
         let pages_begin = pages.as_ptr() as usize;
         let timer = Instant::now();
@@ -225,8 +283,7 @@ mod test {
             barrier.wait();
 
             for i in 0..ALLOC_PER_THREAD {
-                let dst =
-                    unsafe { &mut *(pages_begin as *mut usize).add(t * ALLOC_PER_THREAD + i) };
+                let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
                 *dst = Allocator::instance().get(t, Size::L0).unwrap();
             }
         });
@@ -240,7 +297,7 @@ mod test {
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
-            assert!(p1 < PAGES && p2 < PAGES);
+            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
             assert!(p1 != p2);
         }
 
@@ -261,7 +318,7 @@ mod test {
         Allocator::init(THREADS, &mut mapping).unwrap();
 
         // Stress test
-        let mut pages = vec![0usize; ALLOC_PER_THREAD * THREADS];
+        let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
         let barrier = Arc::new(Barrier::new(THREADS));
         let pages_begin = pages.as_ptr() as usize;
         let timer = Instant::now();
@@ -271,8 +328,7 @@ mod test {
             barrier.wait();
 
             for i in 0..ALLOC_PER_THREAD {
-                let dst =
-                    unsafe { &mut *(pages_begin as *mut usize).add(t * ALLOC_PER_THREAD + i) };
+                let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
                 *dst = Allocator::instance().get(t, Size::L1).unwrap();
             }
         });
@@ -289,13 +345,14 @@ mod test {
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
-            assert!(p1 < PAGES && p2 < PAGES);
+            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
             assert!(p1 != p2);
         }
 
         Allocator::uninit();
     }
 
+    #[ignore]
     #[test]
     fn parallel_malloc() {
         logging();
@@ -333,6 +390,7 @@ mod test {
         }
     }
 
+    #[ignore]
     #[test]
     fn parallel_mmap() {
         logging();
