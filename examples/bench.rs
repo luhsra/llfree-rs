@@ -25,10 +25,8 @@ use nvalloc::{thread, util};
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 struct Args {
-    #[clap(long, default_value_t = 1)]
-    min_threads: usize,
-    #[clap(short = 't', long, default_value_t = 4)]
-    max_threads: usize,
+    #[clap(short, long, default_value = "1")]
+    threads: Vec<usize>,
     #[clap(short, long, default_value = "bench/bench.csv")]
     outfile: String,
     #[clap(long)]
@@ -43,8 +41,7 @@ struct Args {
 
 fn main() {
     let Args {
-        min_threads,
-        max_threads,
+        threads,
         outfile,
         dax,
         iterations,
@@ -54,8 +51,11 @@ fn main() {
 
     util::logging();
 
-    assert!(min_threads >= 1 && min_threads <= max_threads);
-    assert!(max_threads * cpu_stride <= num_cpus::get());
+    for &thread in &threads {
+        assert!(thread >= 1);
+        assert!(thread * cpu_stride <= num_cpus::get());
+    }
+    let max_threads = threads.iter().copied().max().unwrap();
 
     unsafe { nvalloc::thread::CPU_STRIDE = cpu_stride };
 
@@ -76,7 +76,7 @@ fn main() {
     let mem_pages = 2 * max_threads * MIN_PAGES;
     let mut mapping = mapping(0x1000_0000_0000, mem_pages, dax).unwrap();
 
-    for threads in min_threads..=max_threads {
+    for &threads in &threads {
         for i in 0..iterations {
             let mapping = &mut mapping[..2 * threads * MIN_PAGES];
 
@@ -124,7 +124,7 @@ fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<
 }
 
 fn bench_alloc<A: Alloc>(mapping: &mut [Page], size: Size, threads: usize) -> Perf {
-    warn!("\n\n>>> bench {size:?} {}\n", type_name::<A>());
+    warn!("\n\n>>> bench t={threads} {size:?} {}\n", type_name::<A>());
     // Allocate half the memory
     let allocs = mapping.len() / threads / 2 / Table::span(size as _);
 
@@ -160,7 +160,6 @@ fn bench_alloc<A: Alloc>(mapping: &mut [Page], size: Size, threads: usize) -> Pe
         let len = pages.len() as u64;
         get_avg /= len;
 
-        warn!("thread {t} allocated {len} [{get_min}, {get_avg}, {get_max}]",);
         barrier.wait();
 
         let mut put_min = u64::MAX;
@@ -176,7 +175,6 @@ fn bench_alloc<A: Alloc>(mapping: &mut [Page], size: Size, threads: usize) -> Pe
             put_avg += elapsed;
         }
         put_avg /= len;
-        warn!("thread {t} freed {len} [{put_min}, {put_avg}, {put_max}]",);
 
         let total = timer.elapsed().as_millis();
         warn!("time {total}ms");
