@@ -7,6 +7,7 @@ use std::io::Write;
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
+use clap::Parser;
 use log::warn;
 
 use nvalloc::alloc::buddy::BuddyAlloc;
@@ -20,12 +21,93 @@ use nvalloc::table::Table;
 use nvalloc::util::{Cycles, Page};
 use nvalloc::{thread, util};
 
-const MAX_THREADS: usize = 6;
+/// Benchmarking the allocators against each other.
+#[derive(Parser, Debug)]
+#[clap(about, version, author)]
+struct Args {
+    #[clap(long, default_value_t = 1)]
+    min_threads: usize,
+    #[clap(short = 't', long, default_value_t = 4)]
+    max_threads: usize,
+    #[clap(short, long, default_value = "bench/bench.csv")]
+    outfile: String,
+    #[clap(long)]
+    dax: Option<String>,
+    #[clap(short, long, default_value_t = 1)]
+    iterations: usize,
+    #[clap(short, long, default_value_t = 0)]
+    size: usize,
+    #[clap(long, default_value_t = 1)]
+    cpu_stride: usize,
+}
 
-fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
+fn main() {
+    let Args {
+        min_threads,
+        max_threads,
+        outfile,
+        dax,
+        iterations,
+        size,
+        cpu_stride,
+    } = Args::parse();
+
+    util::logging();
+
+    assert!(min_threads >= 1 && min_threads <= max_threads);
+    assert!(max_threads * cpu_stride <= num_cpus::get());
+
+    unsafe { nvalloc::thread::CPU_STRIDE = cpu_stride };
+
+    let mut outfile = File::create(outfile).unwrap();
+    writeln!(
+        outfile,
+        "alloc,threads,iteration,get_min,get_avg,get_max,put_min,put_avg,put_max,total"
+    )
+    .unwrap();
+
+    let size = match size {
+        0 => Size::L0,
+        1 => Size::L1,
+        2 => Size::L2,
+        _ => panic!("`size` has to be 0, 1 or 2"),
+    };
+
+    let mem_pages = 2 * max_threads * MIN_PAGES;
+    let mut mapping = mapping(0x1000_0000_0000, mem_pages, dax).unwrap();
+
+    for threads in min_threads..=max_threads {
+        for i in 0..iterations {
+            let mapping = &mut mapping[..2 * threads * MIN_PAGES];
+
+            let perf = bench_alloc::<TableAlloc>(mapping, Size::L0, threads);
+            writeln!(outfile, "TableAlloc,{threads},{i},{perf}").unwrap();
+
+            let perf = bench_alloc::<StackAlloc>(mapping, Size::L0, threads);
+            writeln!(outfile, "StackAlloc,{threads},{i},{perf}").unwrap();
+
+            if size == Size::L0 {
+                let perf = bench_alloc::<LocalListAlloc>(mapping, Size::L0, threads);
+                writeln!(outfile, "LocalListAlloc,{threads},{i},{perf}").unwrap();
+            }
+
+            if threads <= 1 && size == Size::L0 {
+                let perf = bench_alloc::<MallocAlloc>(mapping, Size::L0, threads);
+                writeln!(outfile, "MallocAlloc,{threads},{i},{perf}").unwrap();
+            }
+
+            if threads <= 1 && size == Size::L0 {
+                let perf = bench_alloc::<BuddyAlloc>(mapping, Size::L0, threads);
+                writeln!(outfile, "BuddyAlloc,{threads},{i},{perf}").unwrap();
+            }
+        }
+    }
+}
+
+fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<'a, Page>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {
-        if let Ok(file) = std::env::var("NVM_FILE") {
+        if let Some(file) = dax {
             warn!(
                 "MMap file {file} l={}G",
                 (length * std::mem::size_of::<Page>()) >> 30
@@ -39,39 +121,6 @@ fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
         }
     }
     MMap::anon(begin, length)
-}
-
-fn main() {
-    util::logging();
-
-    let mut outfile = File::create("bench/bench.csv").unwrap();
-    writeln!(outfile, "alloc,threads,get_min,get_avg,get_max,put_min,put_avg,put_max,total").unwrap();
-
-    let mem_pages = 2 * MAX_THREADS * MIN_PAGES;
-    let mut mapping = mapping(0x1000_0000_0000, mem_pages).unwrap();
-
-    for threads in 1..=6 {
-        let len = 2 * threads * MIN_PAGES;
-        let mapping = &mut mapping[..len];
-
-        let perf = bench_alloc::<TableAlloc>(mapping, Size::L0, threads);
-        writeln!(outfile, "TableAlloc,{threads},{perf}").unwrap();
-
-        let perf = bench_alloc::<StackAlloc>(mapping, Size::L0, threads);
-        writeln!(outfile, "StackAlloc,{threads},{perf}").unwrap();
-
-        let perf = bench_alloc::<LocalListAlloc>(mapping, Size::L0, threads);
-        writeln!(outfile, "LocalListAlloc,{threads},{perf}").unwrap();
-
-        if threads <= 1 {
-            let perf = bench_alloc::<MallocAlloc>(mapping, Size::L0, threads);
-            writeln!(outfile, "MallocAlloc,{threads},{perf}").unwrap();
-        }
-        if threads <= 1 {
-            let perf = bench_alloc::<BuddyAlloc>(mapping, Size::L0, threads);
-            writeln!(outfile, "BuddyAlloc,{threads},{perf}").unwrap();
-        }
-    }
 }
 
 fn bench_alloc<A: Alloc>(mapping: &mut [Page], size: Size, threads: usize) -> Perf {
@@ -144,7 +193,7 @@ fn bench_alloc<A: Alloc>(mapping: &mut [Page], size: Size, threads: usize) -> Pe
 
     assert_eq!(A::instance().allocated_pages(), 0);
 
-    A::uninit();
+    A::destroy();
 
     let avg = Perf::avg(perfs.into_iter()).unwrap();
     warn!("{avg:#?}");

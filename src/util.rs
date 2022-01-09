@@ -208,8 +208,9 @@ mod test {
     use super::AtomicStack;
     use crate::thread;
 
-    #[test]
     #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore]
     fn clwb() {
         let mut data = Box::new(43_u64);
         *data = 44;

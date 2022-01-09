@@ -147,6 +147,7 @@ mod test {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore]
     fn dax() {
         use crate::util::_mm_clwb;
         use core::arch::x86_64::_mm_sfence;

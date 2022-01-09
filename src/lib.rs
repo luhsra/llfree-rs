@@ -11,8 +11,8 @@ pub mod table;
 pub mod thread;
 pub mod util;
 
-#[cfg(test)]
-mod wait;
+#[cfg(feature = "wait")]
+pub mod wait;
 
 use std::ffi::c_void;
 use std::sync::atomic::AtomicU64;
