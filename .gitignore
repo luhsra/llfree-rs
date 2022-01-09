@@ -7,4 +7,4 @@ memfile
 .vscode
 /test/
 /bench/*
-!/bench/bench.ipynb
+!/bench/*.ipynb

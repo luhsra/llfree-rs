@@ -1,2 +1,2 @@
 [alias]
-perf = ["run", "--features=logger", "--features=thread", "--features=log_warn", "--release", "--example", "bench", "--"]
+perf = ["run", "--features=logger", "--features=thread", "--features=log_warn", "--release", "--example"]
