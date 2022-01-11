@@ -8,23 +8,69 @@ use crate::Size;
 
 #[bitfield(u64)]
 pub struct Entry {
-    pub pages: usize,
+    #[bits(20)]
+    pub full: usize,
+    #[bits(20)]
+    pub partial_l0: usize,
+    #[bits(20)]
+    pub partial_l1: usize,
+    #[bits(4)]
+    _p: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dec {
+    None,
+    Full,
+    FullPartialL0,
+    FullPartialL1,
+    PartialL0,
+    PartialL1,
 }
 
 impl Entry {
-    pub fn inc(self, size: Size, layer: usize, max: usize) -> Option<Self> {
-        let pages = self.pages() + Table::span(size as _);
-        if pages <= Table::span(layer) && pages < max {
-            Some(Entry::new().with_pages(pages))
+    pub fn reserve_partial(self, size: Size, max: usize) -> Option<Self> {
+        if self.full() < max {
+            match size {
+                Size::L0 if self.partial_l0() > 0 => Some(
+                    self.with_full(self.full() + 1)
+                        .with_partial_l0(self.partial_l0() - 1),
+                ),
+                Size::L1 if self.partial_l1() > 0 => Some(
+                    self.with_full(self.full() + 1)
+                        .with_partial_l1(self.partial_l1() - 1),
+                ),
+                _ => None,
+            }
         } else {
             None
         }
     }
-    pub fn dec(self, size: Size) -> Option<Self> {
-        if self.pages() >= Table::span(size as _) {
-            Some(Entry::new().with_pages(self.pages() - Table::span(size as _)))
+    pub fn inc_full(self, max: usize) -> Option<Self> {
+        if self.full() < max {
+            Some(self.with_full(self.full() + 1))
         } else {
             None
+        }
+    }
+    pub fn dec(self, dec: Dec) -> Option<Self> {
+        match dec {
+            Dec::Full if self.full() > 0 => Some(self.with_full(self.full() - 1)),
+            Dec::PartialL0 if self.partial_l0() > 0 => {
+                Some(self.with_partial_l0(self.partial_l0() - 1))
+            }
+            Dec::PartialL1 if self.partial_l1() > 0 => {
+                Some(self.with_partial_l1(self.partial_l1() - 1))
+            }
+            Dec::FullPartialL0 if self.full() > 0 => Some(
+                self.with_full(self.full() - 1)
+                    .with_partial_l0(self.partial_l0() + 1),
+            ),
+            Dec::FullPartialL1 if self.full() > 0 => Some(
+                self.with_full(self.full() - 1)
+                    .with_partial_l1(self.partial_l1() + 1),
+            ),
+            _ => None,
         }
     }
 }
@@ -32,7 +78,9 @@ impl Entry {
 impl fmt::Debug for Entry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry")
-            .field("pages", &self.pages())
+            .field("full", &self.full())
+            .field("partial_l0", &self.partial_l0())
+            .field("partial_l1", &self.partial_l1())
             .finish()
     }
 }
@@ -75,7 +123,7 @@ impl Entry3 {
         }
 
         let pages = self.pages() + Table::span(size as usize);
-        if pages <= Table::span(2) && pages < max {
+        if pages <= Table::span(2) && pages <= max {
             Some(
                 self.with_pages(pages)
                     .with_size_n(size as u8 + 1)
@@ -94,7 +142,7 @@ impl Entry3 {
         }
 
         let pages = self.pages() + Table::span(size as usize);
-        if pages <= Table::span(2) && pages < max {
+        if pages <= Table::span(2) && pages <= max {
             Some(
                 self.with_pages(pages)
                     .with_size_n(size as u8 + 1)
@@ -124,8 +172,37 @@ impl Entry3 {
         }
 
         let pages = self.pages() + Table::span(size as usize);
-        if pages <= Table::span(2) && pages < max {
+        if pages <= Table::span(2) && pages <= max {
             Some(self.with_reserved(true))
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    pub fn reserve_inc_partial(self, size: Size, max: usize) -> Option<Entry3> {
+        if self.reserved() || self.pages() == 0 || self.size() != Some(size) {
+            return None;
+        }
+
+        let pages = self.pages() + Table::span(size as _);
+        if pages <= Table::span(2) && pages <= max {
+            Some(self.with_reserved(true).with_pages(pages))
+        } else {
+            None
+        }
+    }
+    #[inline(always)]
+    pub fn reserve_inc_empty(self, size: Size, max: usize) -> Option<Entry3> {
+        if !self.reserved()
+            && self.size_n() != 3
+            && self.pages() == 0
+            && Table::span(size as usize) <= max
+        {
+            Some(
+                self.with_size_n(size as u8 + 1)
+                    .with_reserved(true)
+                    .with_pages(Table::span(size as _)),
+            )
         } else {
             None
         }

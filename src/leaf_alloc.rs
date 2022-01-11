@@ -44,8 +44,8 @@ impl<A: Leafs> Clone for LeafAllocator<A> {
             begin: self.begin,
             pages: self.pages,
             alloc_pt1: AtomicUsize::new(0),
-            start_l0: AtomicUsize::new(0),
-            start_l1: AtomicUsize::new(0),
+            start_l0: AtomicUsize::new(usize::MAX),
+            start_l1: AtomicUsize::new(usize::MAX),
             _phantom: PhantomData,
         }
     }
@@ -57,8 +57,8 @@ impl<A: Leafs> LeafAllocator<A> {
             begin,
             pages,
             alloc_pt1: AtomicUsize::new(0),
-            start_l0: AtomicUsize::new(0),
-            start_l1: AtomicUsize::new(0),
+            start_l0: AtomicUsize::new(usize::MAX),
+            start_l1: AtomicUsize::new(usize::MAX),
             _phantom: PhantomData,
         }
     }

@@ -3,7 +3,7 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use log::{error, info, warn};
+use log::{error, warn};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
@@ -26,7 +26,7 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 pub struct StackAlloc {
     memory: Range<*const Page>,
     meta: *mut Meta,
-    pub local: Vec<LeafAllocator<Self>>,
+    local: Vec<LeafAllocator<Self>>,
     entries: Entry3Buf,
 
     empty: Mutex<Vec<usize>>,
@@ -34,11 +34,14 @@ pub struct StackAlloc {
     partial_l0: Mutex<Vec<usize>>,
 }
 
-struct Entry3Buf(Vec<AtomicU64>);
+#[repr(align(64))]
+struct Aligned(AtomicU64);
+
+struct Entry3Buf(Vec<Aligned>);
 impl Entry3Buf {
     fn new(len: usize) -> Self {
         let mut entries = Vec::with_capacity(len);
-        entries.resize_with(len, || AtomicU64::new(0));
+        entries.resize_with(len, || Aligned(AtomicU64::new(0)));
         Self(entries)
     }
     fn len(&self) -> usize {
@@ -47,7 +50,7 @@ impl Entry3Buf {
 }
 impl AtomicBuffer<Entry3> for Entry3Buf {
     fn entry(&self, i: usize) -> &AtomicU64 {
-        &self.0[i]
+        &self.0[i].0
     }
 }
 
@@ -102,15 +105,6 @@ impl Alloc for StackAlloc {
             meta.magic.store(MAGIC, Ordering::SeqCst);
         }
 
-        // init all leaf_allocs
-        for (i, leaf) in alloc.local.iter().enumerate() {
-            let l0 = alloc.reserve(Size::L0)?;
-            leaf.start(Size::L0).store(l0, Ordering::Relaxed);
-            let l1 = alloc.reserve(Size::L1)?;
-            leaf.start(Size::L1).store(l1, Ordering::Relaxed);
-            info!("init {i} small={l0} huge={l1}");
-        }
-
         meta.active.store(1, Ordering::SeqCst);
         unsafe { SHARED.store(alloc, Ordering::SeqCst) };
         Ok(())
@@ -135,9 +129,7 @@ impl Alloc for StackAlloc {
     }
 
     fn destroy() {
-        let ptr = unsafe { SHARED.load(Ordering::SeqCst) };
-        assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
-        let alloc = unsafe { &mut *ptr };
+        let alloc = Self::instance();
         let meta = unsafe { &*alloc.meta };
         meta.magic.store(0, Ordering::SeqCst);
         Self::uninit();
@@ -170,7 +162,7 @@ impl Alloc for StackAlloc {
         let mut pages = 0;
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self.entries.get(i);
-            // warn!("{i:>3}: {pte:?}");
+            warn!("{i:>3}: {pte:?}");
             if pte.size() == Some(Size::L2) {
                 pages += Table::span(2);
             } else {
@@ -252,34 +244,11 @@ impl StackAlloc {
         .unwrap()
     }
 
-    fn reserve(&self, size: Size) -> Result<usize> {
-        {
-            let mut partial = self.partial(size);
-            if let Some(i) = partial.pop() {
-                let max = self.pages() - i * Table::span(2);
-                self.entries.update(i, |v| v.reserve(size, max)).unwrap();
-                warn!("reserved partial {i}");
-                return Ok(i * Table::span(2));
-            }
-        };
-        {
-            let mut empty = self.empty.lock().unwrap();
-            if let Some(i) = empty.pop() {
-                let max = self.pages() - i * Table::span(2);
-                self.entries.update(i, |v| v.reserve(size, max)).unwrap();
-                warn!("reserved empty {i}");
-                return Ok(i * Table::span(2));
-            }
-        };
-        error!("No memory");
-        Err(Error::Memory)
-    }
-
     fn reserve_inc(&self, size: Size) -> Result<usize> {
         {
             let mut partial = self.partial(size);
             if let Some(i) = partial.pop() {
-                let max = self.pages() - i * Table::span(2);
+                let max = self.pages() - i * Table::span(2) - 1;
                 self.entries.update(i, |v| v.inc(size, max)).unwrap();
                 warn!("reserved partial {i}");
                 return Ok(i * Table::span(2));
@@ -288,7 +257,7 @@ impl StackAlloc {
         {
             let mut empty = self.empty.lock().unwrap();
             if let Some(i) = empty.pop() {
-                let max = self.pages() - i * Table::span(2);
+                let max = self.pages() - i * Table::span(2) - 1;
                 self.entries.update(i, |v| v.inc(size, max)).unwrap();
                 warn!("reserved empty {i}");
                 return Ok(i * Table::span(2));
@@ -296,34 +265,31 @@ impl StackAlloc {
         };
         error!("No memory");
         Err(Error::Memory)
-    }
-
-    fn unreserve(&self, start: usize) {
-        let i = start / Table::span(2);
-        if self.entries.update(i, Entry3::unreserve).is_err() {
-            panic!("Unreserve failed")
-        }
     }
 
     fn get_small(&self, core: usize, size: Size) -> Result<usize> {
         let local = &self.local[core];
         let start_a = local.start(size);
-        let start = start_a.load(Ordering::Relaxed);
-        let i = start / Table::span(2);
-        let max = self.pages() - Table::round(2, start);
-        let new = match self.entries.update(i, |v| v.inc(size, max)) {
-            Ok(_) => start,
-            Err(pte3) => {
-                info!("Try reserve new {pte3:?}");
-                // reserve *and* increment next
-                let new = self.reserve_inc(size)?;
-                self.unreserve(start);
-                new
+        let mut start = start_a.load(Ordering::Relaxed);
+
+        if start == usize::MAX {
+            warn!("Try reserve first");
+            start = self.reserve_inc(size)?;
+        } else {
+            let i = start / Table::span(2);
+            let max = self.pages() - Table::round(2, start) - 1;
+            if self.entries.update(i, |v| v.inc(size, max)).is_err() {
+                warn!("Try reserve next");
+                start = self.reserve_inc(size)?;
+                if self.entries.update(i, Entry3::unreserve).is_err() {
+                    panic!("Unreserve failed")
+                }
             }
-        };
+        }
+
         let page = match size {
-            Size::L0 => local.get(new)?,
-            _ => local.get_huge(new)?,
+            Size::L0 => local.get(start)?,
+            _ => local.get_huge(start)?,
         };
         start_a.store(page, Ordering::Relaxed);
         Ok(page)

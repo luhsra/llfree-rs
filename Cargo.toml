@@ -34,3 +34,7 @@ raw-cpuid = "10.2"
 [[example]]
 name = "bench"
 required-features = ["logger", "thread"]
+
+[[example]]
+name = "detail"
+required-features = ["logger", "thread"]

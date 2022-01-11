@@ -37,6 +37,9 @@ struct Args {
     size: usize,
     #[clap(long, default_value_t = 1)]
     cpu_stride: usize,
+    /// Memory in GiB
+    #[clap(short, long, default_value_t = 16)]
+    memory: usize,
 }
 
 fn main() {
@@ -47,6 +50,7 @@ fn main() {
         iterations,
         size,
         cpu_stride,
+        memory,
     } = Args::parse();
 
     util::logging();
@@ -56,6 +60,8 @@ fn main() {
         assert!(thread * cpu_stride <= num_cpus::get());
     }
     let max_threads = threads.iter().copied().max().unwrap();
+    let thread_pages = (memory * Table::span(2)) / max_threads;
+    assert!(thread_pages > MIN_PAGES);
 
     unsafe { nvalloc::thread::CPU_STRIDE = cpu_stride };
 
@@ -73,12 +79,11 @@ fn main() {
         _ => panic!("`size` has to be 0, 1 or 2"),
     };
 
-    let mem_pages = 2 * max_threads * MIN_PAGES;
-    let mut mapping = mapping(0x1000_0000_0000, mem_pages, dax).unwrap();
+    let mut mapping = mapping(0x1000_0000_0000, thread_pages * max_threads, dax).unwrap();
 
-    for &threads in &threads {
+    for threads in threads {
         for i in 0..iterations {
-            let mapping = &mut mapping[..2 * threads * MIN_PAGES];
+            let mapping = &mut mapping[..thread_pages * threads];
 
             let perf = bench_alloc::<TableAlloc>(mapping, Size::L0, threads);
             writeln!(outfile, "TableAlloc,{threads},{i},{perf}").unwrap();

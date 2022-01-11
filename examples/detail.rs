@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
+use nvalloc::alloc::table::TableAlloc;
 use nvalloc::alloc::{stack::StackAlloc, Alloc, Size, MIN_PAGES};
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
@@ -30,7 +31,7 @@ struct Args {
     cpu_stride: usize,
 }
 
-type A = StackAlloc;
+type A = TableAlloc;
 
 fn main() {
     let Args {
@@ -63,7 +64,7 @@ fn main() {
     let allocs = mapping.len() / threads / 2 / Table::span(size as _);
     assert!(allocs % Table::LEN == 0);
 
-    let mut times = vec![(0.0, 0.0); 2 * Table::LEN];
+    let mut times = vec![Perf::default(); 2 * Table::LEN];
 
     for _ in 0..iterations {
         let timer = Instant::now();
@@ -78,30 +79,40 @@ fn main() {
             thread::pin(t);
             barrier.wait();
             let mut pages = Vec::new();
-            let mut times = vec![(0.0, 0.0); 2 * Table::LEN];
+            let mut times = vec![Perf::default(); 2 * Table::LEN];
 
+            let t_get = &mut times[0..Table::LEN];
             for i in 0..allocs {
                 let timer = Cycles::now();
                 pages.push(A::instance().get(t, size).unwrap());
                 let t = timer.elapsed() as f64;
-                times[i % Table::LEN].0 += t;
-                times[i % Table::LEN].1 += t * t;
+
+                let p = &mut t_get[i % Table::LEN];
+                p.avg += t;
+                p.std += t * t;
+                p.min = p.min.min(t);
+                p.max = p.max.max(t);
             }
 
             barrier.wait();
 
+            let t_put = &mut times[Table::LEN..];
             for (i, page) in pages.into_iter().enumerate() {
                 let timer = Cycles::now();
                 A::instance().put(t, page).unwrap();
                 let t = timer.elapsed() as f64;
-                times[Table::LEN + i % Table::LEN].0 += t;
-                times[Table::LEN + i % Table::LEN].1 += t * t;
+
+                let p = &mut t_put[i % Table::LEN];
+                p.avg += t;
+                p.std += t * t;
+                p.min = p.min.min(t);
+                p.max = p.max.max(t);
             }
 
             let n = (allocs / Table::LEN) as f64;
             for t in &mut times {
-                t.0 /= n;
-                t.1 /= n;
+                t.avg /= n;
+                t.std /= n;
             }
 
             let total = timer.elapsed().as_millis();
@@ -113,16 +124,13 @@ fn main() {
 
         A::destroy();
 
-        let mut t2_times = [(0.0, 0.0); 2 * Table::LEN];
         for t in t_times {
             for i in 0..2 * Table::LEN {
-                t2_times[i].0 += t[i].0;
-                t2_times[i].1 += t[i].1;
+                times[i].avg += t[i].avg / threads as f64;
+                times[i].std += t[i].std / threads as f64;
+                times[i].min = times[i].min.min(t[i].min);
+                times[i].max = times[i].max.max(t[i].max);
             }
-        }
-        for i in 0..2 * Table::LEN {
-            times[i].0 = t2_times[i].0 / threads as f64;
-            times[i].1 = t2_times[i].1 / threads as f64;
         }
     }
 
@@ -130,21 +138,48 @@ fn main() {
     let n = iterations as f64;
     warn!("n = {n}");
     for t in &mut times {
-        t.0 /= n;
-        t.1 = (t.1 / n - t.0 * t.0).sqrt();
+        t.avg /= n;
+        t.std = (t.std / n - t.avg * t.avg).sqrt();
     }
 
     let alloc = type_name::<A>();
     let alloc = &alloc[alloc.rfind(':').map(|i| i + 1).unwrap_or_default()..];
 
     let mut outfile = File::create(outfile).unwrap();
-    writeln!(outfile, "alloc,threads,op,num,avg,std").unwrap();
-    for (num, (avg, std)) in times.into_iter().enumerate() {
+    writeln!(outfile, "alloc,threads,op,num,avg,std,min,max").unwrap();
+    for (num, Perf { avg, std, min, max }) in times.into_iter().enumerate() {
         if num < 512 {
-            writeln!(outfile, "{alloc},{threads},get,{num},{avg},{std}").unwrap();
+            writeln!(
+                outfile,
+                "{alloc},{threads},get,{num},{avg},{std},{min},{max}"
+            )
+            .unwrap();
         } else {
             let num = num - 512;
-            writeln!(outfile, "{alloc},{threads},put,{num},{avg},{std}").unwrap();
+            writeln!(
+                outfile,
+                "{alloc},{threads},put,{num},{avg},{std},{min},{max}"
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Perf {
+    avg: f64,
+    std: f64,
+    min: f64,
+    max: f64,
+}
+
+impl Default for Perf {
+    fn default() -> Self {
+        Self {
+            avg: 0.0,
+            std: 0.0,
+            min: f64::INFINITY,
+            max: 0.0,
         }
     }
 }

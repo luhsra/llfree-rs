@@ -41,7 +41,7 @@ pub enum Size {
     L2 = 2,
 }
 
-pub type Allocator = stack::StackAlloc;
+pub type Allocator = table::TableAlloc;
 
 pub trait Alloc {
     /// Initialize the allocator.
@@ -160,15 +160,17 @@ mod test {
         warn!("realloc...");
 
         // Free some
-        for page in &pages[10..Table::LEN + 10] {
+        for page in &pages[..Table::span(2) - 10] {
             Allocator::instance().put(0, *page).unwrap();
         }
+
         assert_eq!(
             Allocator::instance().allocated_pages(),
-            1 + pages.len() - Table::LEN
+            1 + pages.len() - Table::span(2) + 10
         );
+
         // Realloc
-        for page in &mut pages[10..Table::LEN + 10] {
+        for page in &mut pages[..Table::span(2) - 10] {
             *page = Allocator::instance().get(0, Size::L0).unwrap();
         }
 
