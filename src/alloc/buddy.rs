@@ -10,6 +10,7 @@ use crate::{table::Table, util::Page};
 
 use super::{Alloc, Error, Result, Size};
 
+#[repr(align(64))]
 pub struct BuddyAlloc {
     memory: Range<*const Page>,
     inner: Mutex<buddy_system_allocator::Heap<36>>,

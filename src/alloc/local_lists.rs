@@ -7,6 +7,7 @@ use log::{error, warn};
 use super::{Alloc, Error, Result, Size, MIN_PAGES};
 use crate::util::Page;
 
+#[repr(align(64))]
 pub struct LocalListAlloc {
     memory: Range<*const Page>,
     local: Vec<Local>,
@@ -111,7 +112,7 @@ impl Alloc for LocalListAlloc {
     fn put(&self, core: usize, addr: u64) -> Result<()> {
         if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) {
             error!("invalid addr");
-            return Err(Error::Memory);
+            return Err(Error::Address);
         }
 
         let l = &self.local[core];
@@ -151,19 +152,20 @@ impl Node {
         Self(AtomicPtr::new(null_mut()))
     }
     fn set(&self, v: *mut Node) {
-        self.0.store(v, Ordering::SeqCst);
+        self.0.store(v, Ordering::Relaxed);
     }
     fn push(&self, v: &mut Node) {
-        v.0.store(self.0.load(Ordering::SeqCst), Ordering::SeqCst);
-        self.0.store(v, Ordering::SeqCst);
+        let next = self.0.load(Ordering::Relaxed);
+        v.0.store(next, Ordering::Relaxed);
+        self.0.store(v, Ordering::Relaxed);
     }
     fn pop(&self) -> Option<&mut Node> {
-        let next = self.0.load(Ordering::SeqCst);
-        if !next.is_null() {
-            let next = unsafe { &mut *next };
-            self.0
-                .store(next.0.load(Ordering::SeqCst), Ordering::SeqCst);
-            Some(next)
+        let curr = self.0.load(Ordering::Relaxed);
+        if !curr.is_null() {
+            let curr = unsafe { &mut *curr };
+            let next = curr.0.load(Ordering::Relaxed);
+            self.0.store(next, Ordering::Relaxed);
+            Some(curr)
         } else {
             None
         }

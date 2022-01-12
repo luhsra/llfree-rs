@@ -162,7 +162,7 @@ impl Alloc for StackAlloc {
         let mut pages = 0;
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self.entries.get(i);
-            warn!("{i:>3}: {pte:?}");
+            // warn!("{i:>3}: {pte:?}");
             if pte.size() == Some(Size::L2) {
                 pages += Table::span(2);
             } else {

@@ -119,38 +119,38 @@ pub fn logging() {
         })
         .try_init();
 
-    // panic::set_hook(Box::new(|info| {
-    //     if let Some(args) = info.message() {
-    //         log::logger().log(
-    //             &Record::builder()
-    //                 .args(*args)
-    //                 .level(Level::Error)
-    //                 .file(info.location().map(Location::file))
-    //                 .line(info.location().map(Location::line))
-    //                 .build(),
-    //         );
-    //     } else if let Some(&payload) = info.payload().downcast_ref::<&'static str>() {
-    //         log::logger().log(
-    //             &Record::builder()
-    //                 .args(format_args!("{}", payload))
-    //                 .level(Level::Error)
-    //                 .file(info.location().map(Location::file))
-    //                 .line(info.location().map(Location::line))
-    //                 .build(),
-    //         );
-    //     } else {
-    //         log::logger().log(
-    //             &Record::builder()
-    //                 .args(format_args!("panic!"))
-    //                 .level(Level::Error)
-    //                 .file(info.location().map(Location::file))
-    //                 .line(info.location().map(Location::line))
-    //                 .build(),
-    //         )
-    //     }
+    panic::set_hook(Box::new(|info| {
+        if let Some(args) = info.message() {
+            log::logger().log(
+                &Record::builder()
+                    .args(*args)
+                    .level(Level::Error)
+                    .file(info.location().map(Location::file))
+                    .line(info.location().map(Location::line))
+                    .build(),
+            );
+        } else if let Some(&payload) = info.payload().downcast_ref::<&'static str>() {
+            log::logger().log(
+                &Record::builder()
+                    .args(format_args!("{}", payload))
+                    .level(Level::Error)
+                    .file(info.location().map(Location::file))
+                    .line(info.location().map(Location::line))
+                    .build(),
+            );
+        } else {
+            log::logger().log(
+                &Record::builder()
+                    .args(format_args!("panic!"))
+                    .level(Level::Error)
+                    .file(info.location().map(Location::file))
+                    .line(info.location().map(Location::line))
+                    .build(),
+            )
+        }
 
-    //     log::logger().flush();
-    // }));
+        log::logger().flush();
+    }));
 }
 
 /// Executes CLWB (cache-line write back) for the given address.

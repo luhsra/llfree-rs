@@ -66,6 +66,11 @@ fn main() {
 
     let mut times = vec![Perf::default(); 2 * Table::LEN];
 
+    // Warmup
+    for page in &mut mapping[..] {
+        *page.cast::<usize>() = 1;
+    }
+
     for _ in 0..iterations {
         let timer = Instant::now();
         A::init(threads, &mut mapping).unwrap();

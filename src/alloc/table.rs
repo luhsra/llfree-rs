@@ -212,7 +212,7 @@ impl TableAlloc {
             let pt3 = self.pt3(start);
             for i in Table::range(layer, 0..self.pages()) {
                 let pte3 = pt3.get(i);
-                warn!("{i:>3}: {pte3:?}");
+                // warn!("{i:>3}: {pte3:?}");
                 match pte3.size() {
                     Some(Size::L2) => pages += Table::span(2),
                     Some(_) => pages += pte3.pages(),

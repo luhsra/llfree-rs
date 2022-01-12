@@ -81,6 +81,11 @@ fn main() {
 
     let mut mapping = mapping(0x1000_0000_0000, thread_pages * max_threads, dax).unwrap();
 
+    // Warmup
+    for page in &mut mapping[..] {
+        *page.cast::<usize>() = 1;
+    }
+
     for threads in threads {
         for i in 0..iterations {
             let mapping = &mut mapping[..thread_pages * threads];
