@@ -7,7 +7,7 @@ thread_local! {
 
 /// Useful if we only want to operate on a single numa node.
 /// Pin then only selects every n'th cpu.
-pub static mut CPU_STRIDE: usize = 1;
+pub static mut CPU_STRIDE: usize = 2;
 
 #[cfg(target_os = "linux")]
 pub fn pin(core: usize) {

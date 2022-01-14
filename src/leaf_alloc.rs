@@ -384,6 +384,7 @@ impl<A: Leafs> LeafAllocator<A> {
         self.pt2(page).set(0, Entry2::new());
     }
 
+    #[allow(dead_code)]
     pub fn dump(&self, start: usize) {
         let pt2 = self.pt2(start);
         for i2 in Table::range(2, start..self.pages) {

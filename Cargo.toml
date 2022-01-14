@@ -10,7 +10,7 @@ opt-level = 3
 [dependencies]
 log = "0.4"
 libc = "0.2"
-bitfield-struct = "0.1.1"
+bitfield-struct = "0.1.4"
 buddy_system_allocator = "0.8.0"
 env_logger = { version = "0.9", default-features = false, optional = true }
 

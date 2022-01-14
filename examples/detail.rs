@@ -6,8 +6,7 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::alloc::table::TableAlloc;
-use nvalloc::alloc::{stack::StackAlloc, Alloc, Size, MIN_PAGES};
+use nvalloc::alloc::{stack, Alloc, Size, MIN_PAGES};
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::thread;
@@ -27,11 +26,11 @@ struct Args {
     iterations: usize,
     #[clap(short, long, default_value_t = 0)]
     size: usize,
-    #[clap(long, default_value_t = 1)]
+    #[clap(long, default_value_t = 2)]
     cpu_stride: usize,
 }
 
-type A = TableAlloc;
+type A = stack::StackAlloc;
 
 fn main() {
     let Args {
