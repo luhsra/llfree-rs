@@ -1,2 +1,3 @@
 [alias]
 perf = ["run", "--features=logger", "--features=thread", "--features=log_warn", "--release", "--example"]
+perf-build = ["build", "--features=logger", "--features=thread", "--features=log_warn", "--release", "--example"]
