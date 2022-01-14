@@ -26,7 +26,7 @@ impl Alloc for MallocAlloc {
             memory.as_ptr_range(),
             memory.len()
         );
-        if memory.len() != 0 {
+        if !memory.is_empty() {
             warn!("This allocator uses its own memory range");
         }
 

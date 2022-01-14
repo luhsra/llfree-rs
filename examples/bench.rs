@@ -12,6 +12,7 @@ use log::warn;
 
 use nvalloc::alloc::buddy::BuddyAlloc;
 use nvalloc::alloc::local_lists::LocalListAlloc;
+use nvalloc::alloc::packed_stack::PackedStackAlloc;
 use nvalloc::alloc::stack::StackAlloc;
 use nvalloc::alloc::table::TableAlloc;
 use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
@@ -94,6 +95,9 @@ fn main() {
 
             let perf = bench_alloc::<StackAlloc>(mapping, Size::L0, threads);
             writeln!(outfile, "StackAlloc,{threads},{i},{perf}").unwrap();
+
+            let perf = bench_alloc::<PackedStackAlloc>(mapping, Size::L0, threads);
+            writeln!(outfile, "PackedStackAlloc,{threads},{i},{perf}").unwrap();
 
             if size == Size::L0 {
                 let perf = bench_alloc::<LocalListAlloc>(mapping, Size::L0, threads);

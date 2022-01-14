@@ -87,13 +87,13 @@ impl fmt::Debug for Entry {
 
 #[bitfield(u64)]
 pub struct Entry3 {
-    #[bits(44)]
+    #[bits(20)]
     pub pages: usize,
     #[bits(2)]
     pub size_n: u8,
     pub reserved: bool,
-    #[bits(17)]
-    pub _p: usize,
+    #[bits(41)]
+    pub idx: usize,
 }
 
 impl Entry3 {
@@ -134,6 +134,7 @@ impl Entry3 {
         }
     }
     /// Increments the pages counter and sets the size and reserved bits.
+    /// Requires the current entry to not be reserved.
     #[inline(always)]
     pub fn inc_reserve(self, size: Size, max: usize) -> Option<Entry3> {
         if self.reserved() || self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size))
@@ -165,6 +166,18 @@ impl Entry3 {
         }
     }
     #[inline(always)]
+    pub fn dec_idx(self, size: Size, idx: usize) -> Option<Entry3> {
+        if self.size_n() == 3 || self.size() != Some(size) || self.idx() != idx {
+            return None;
+        }
+
+        match self.pages().cmp(&Table::span(size as _)) {
+            Ordering::Less => None,
+            Ordering::Equal => Some(self.with_pages(0).with_size_n(0)),
+            Ordering::Greater => Some(self.with_pages(self.pages() - Table::span(size as usize))),
+        }
+    }
+    #[inline(always)]
     pub fn reserve(self, size: Size, max: usize) -> Option<Entry3> {
         if self.reserved() || self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size))
         {
@@ -174,6 +187,24 @@ impl Entry3 {
         let pages = self.pages() + Table::span(size as usize);
         if pages <= Table::span(2) && pages <= max {
             Some(self.with_reserved(true))
+        } else {
+            None
+        }
+    }
+    /// Sets the size and reserved bits and the page counter to it's max value.
+    #[inline(always)]
+    pub fn reserve_fill(self, size: Size, max: usize) -> Option<Entry3> {
+        if self.size_n() == 3 || (self.pages() != 0 && self.size() != Some(size)) {
+            return None;
+        }
+
+        let max = max.min(Table::span(2));
+        if self.pages() + Table::span(size as usize) <= max {
+            Some(
+                self.with_pages(max)
+                    .with_size_n(size as u8 + 1)
+                    .with_reserved(true),
+            )
         } else {
             None
         }
@@ -210,7 +241,17 @@ impl Entry3 {
     #[inline(always)]
     pub fn unreserve(self) -> Option<Entry3> {
         if self.size_n() != 3 && self.reserved() {
-            Some(self.with_reserved(false))
+            Some(self.with_reserved(false).with_idx(0))
+        } else {
+            None
+        }
+    }
+    /// Clear reserve flag and own free pages from `other`.
+    #[inline(always)]
+    pub fn unreserve_sub(self, other: Entry3, max: usize) -> Option<Entry3> {
+        if self.reserved() && self.size_n() != 3 && self.size_n() == other.size_n() {
+            let pages = other.pages() - (max.min(Table::span(2)) - self.pages());
+            Some(self.with_pages(pages).with_reserved(false).with_idx(0))
         } else {
             None
         }
@@ -223,6 +264,7 @@ impl fmt::Debug for Entry3 {
             .field("pages", &self.pages())
             .field("size", &self.size())
             .field("reserved", &self.reserved())
+            .field("idx", &self.idx())
             .finish()
     }
 }
@@ -309,7 +351,7 @@ impl From<Entry1> for u64 {
 
 #[cfg(test)]
 mod test {
-    use crate::table::{AtomicBuffer, Table};
+    use crate::table::Table;
 
     #[test]
     fn pt() {

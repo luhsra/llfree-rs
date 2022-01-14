@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use log::{error, info, warn};
 
 use crate::alloc::{Error, Result, Size};
-use crate::entry::{Entry1, Entry2};
-use crate::table::{AtomicBuffer, Table};
+use crate::entry::{Entry1, Entry2, Entry3};
+use crate::table::Table;
 use crate::Page;
+use crate::util::Atomic;
 
 const CAS_RETRIES: usize = 4;
 
@@ -34,7 +35,9 @@ pub struct LeafAllocator<A: Leafs> {
     pub pages: usize,
     alloc_pt1: AtomicUsize,
     start_l0: AtomicUsize,
+    pte_l0: Atomic<Entry3>,
     start_l1: AtomicUsize,
+    pte_l1: Atomic<Entry3>,
     _phantom: PhantomData<A>,
 }
 
@@ -45,7 +48,9 @@ impl<A: Leafs> Clone for LeafAllocator<A> {
             pages: self.pages,
             alloc_pt1: AtomicUsize::new(0),
             start_l0: AtomicUsize::new(usize::MAX),
+            pte_l0: Atomic::new(Entry3::new()),
             start_l1: AtomicUsize::new(usize::MAX),
+            pte_l1: Atomic::new(Entry3::new()),
             _phantom: PhantomData,
         }
     }
@@ -58,7 +63,9 @@ impl<A: Leafs> LeafAllocator<A> {
             pages,
             alloc_pt1: AtomicUsize::new(0),
             start_l0: AtomicUsize::new(usize::MAX),
+            pte_l0: Atomic::new(Entry3::new()),
             start_l1: AtomicUsize::new(usize::MAX),
+            pte_l1: Atomic::new(Entry3::new()),
             _phantom: PhantomData,
         }
     }
@@ -73,6 +80,15 @@ impl<A: Leafs> LeafAllocator<A> {
         for i in 0..Table::num_pts(1, self.pages) {
             let pt1 = unsafe { &*((self.begin + i * Table::m_span(1)) as *const Table<Entry1>) };
             pt1.clear();
+        }
+    }
+
+    #[inline]
+    pub fn pte(&self, size: Size) -> &Atomic<Entry3> {
+        if size == Size::L0 {
+            &self.pte_l0
+        } else {
+            &self.pte_l1
         }
     }
 
@@ -428,7 +444,7 @@ mod test {
     use super::Leafs;
     use crate::alloc::{stack::StackAlloc, Alloc};
     use crate::entry::Entry1;
-    use crate::table::{AtomicBuffer, Table};
+    use crate::table::Table;
     use crate::thread;
     use crate::util::{logging, Page};
     use crate::wait::{DbgWait, DbgWaitKey};

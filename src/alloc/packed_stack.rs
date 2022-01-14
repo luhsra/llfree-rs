@@ -23,30 +23,27 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
 /// Volatile shared metadata
 #[repr(align(64))]
-pub struct StackAlloc {
+pub struct PackedStackAlloc {
     memory: Range<*const Page>,
     meta: *mut Meta,
     local: Vec<LeafAllocator<Self>>,
-    entries: Vec<Aligned>,
+    entries: Vec<Atomic<Entry3>>,
 
     empty: Mutex<Vec<usize>>,
     partial_l1: Mutex<Vec<usize>>,
     partial_l0: Mutex<Vec<usize>>,
 }
 
-#[repr(align(64))]
-struct Aligned(Atomic<Entry3>);
+const INITIALIZING: *mut PackedStackAlloc = usize::MAX as _;
+static mut SHARED: AtomicPtr<PackedStackAlloc> = AtomicPtr::new(null_mut());
 
-const INITIALIZING: *mut StackAlloc = usize::MAX as _;
-static mut SHARED: AtomicPtr<StackAlloc> = AtomicPtr::new(null_mut());
-
-impl Leafs for StackAlloc {
+impl Leafs for PackedStackAlloc {
     fn leafs<'a>() -> &'a [LeafAllocator<Self>] {
         &Self::instance().local
     }
 }
 
-impl Alloc for StackAlloc {
+impl Alloc for PackedStackAlloc {
     fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
@@ -134,7 +131,7 @@ impl Alloc for StackAlloc {
         let page = unsafe { (addr as *const Page).offset_from(self.memory.start) } as usize;
 
         let i = page / Table::span(2);
-        let pte3 = self.entries[i].0.load();
+        let pte3 = self.entries[i].load();
         match pte3.size() {
             Some(Size::L2) => self.put_giant(core, page, pte3),
             _ => self.put_small(core, page, pte3),
@@ -143,20 +140,30 @@ impl Alloc for StackAlloc {
 
     fn allocated_pages(&self) -> usize {
         let mut pages = 0;
+        let mut sub = 0;
         for i in 0..Table::num_pts(2, self.pages()) {
-            let pte = self.entries[i].0.load();
-            // warn!("{i:>3}: {pte:?}");
+            let pte = self.entries[i].load();
+            warn!("{i:>3}: {pte:?}");
             if pte.size() == Some(Size::L2) {
                 pages += Table::span(2);
+            } else if pte.reserved() {
+                // Pages freed by other cores
+                let max = (self.pages() - i * Table::span(2) - 1).min(Table::span(2));
+                sub += max - pte.pages();
             } else {
                 pages += pte.pages();
             }
         }
-        pages
+        // Pages allocated in reserved subtrees
+        for local in &self.local {
+            pages += local.pte(Size::L0).load().pages();
+            pages += local.pte(Size::L1).load().pages();
+        }
+        pages - sub
     }
 }
 
-impl StackAlloc {
+impl PackedStackAlloc {
     fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
         // Last frame is reserved for metadata
         let pages = (memory.len() - 1).min(MAX_PAGES);
@@ -171,8 +178,7 @@ impl StackAlloc {
         let pte3_num = Table::num_pts(2, pages);
 
         let mut entries = Vec::with_capacity(pte3_num);
-        entries.resize_with(pte3_num, || Aligned(Atomic::new(Entry3::new())));
-
+        entries.resize_with(pte3_num, || Atomic::new(Entry3::new()));
         let empty = Mutex::new(Vec::with_capacity(pte3_num));
         let partial_l0 = Mutex::new(Vec::with_capacity(pte3_num));
         let partial_l1 = Mutex::new(Vec::with_capacity(pte3_num));
@@ -203,11 +209,9 @@ impl StackAlloc {
             let page = i * Table::span(2);
             let (pages, size) = self.local[0].recover(page, deep)?;
             if size == Size::L2 {
-                self.entries[i].0.store(Entry3::new_giant());
+                self.entries[i].store(Entry3::new_giant());
             } else {
-                self.entries[i]
-                    .0
-                    .store(Entry3::new_table(pages, size, false));
+                self.entries[i].store(Entry3::new_table(pages, size, false));
 
                 // Add to lists
                 if pages == 0 {
@@ -231,31 +235,23 @@ impl StackAlloc {
         .unwrap()
     }
 
-    fn reserve_inc(&self, size: Size) -> Result<usize> {
+    fn reserve_inc(&self, size: Size) -> Result<(usize, Entry3)> {
+        if let Some(i) = self
+            .partial(size)
+            .pop()
+            .or_else(|| self.empty.lock().unwrap().pop())
         {
-            let mut partial = self.partial(size);
-            if let Some(i) = partial.pop() {
-                let max = self.pages() - i * Table::span(2) - 1;
-                self.entries[i]
-                    .0
-                    .fetch_update(|v| v.inc(size, max))
-                    .unwrap();
-                warn!("reserved partial {i}");
-                return Ok(i * Table::span(2));
-            }
-        };
-        {
-            let mut empty = self.empty.lock().unwrap();
-            if let Some(i) = empty.pop() {
-                let max = self.pages() - i * Table::span(2) - 1;
-                self.entries[i]
-                    .0
-                    .fetch_update(|v| v.inc(size, max))
-                    .unwrap();
-                warn!("reserved empty {i}");
-                return Ok(i * Table::span(2));
-            }
-        };
+            let max = self.pages() - i * Table::span(2) - 1;
+            let pte = self.entries[i]
+                .fetch_update(|v| v.reserve_fill(size, max))
+                .unwrap();
+            let mut pte = pte.inc(size, max).unwrap();
+            pte.set_idx(i);
+
+            warn!("reserved {i}");
+            return Ok((i * Table::span(2), pte));
+        }
+
         error!("No memory");
         Err(Error::Memory)
     }
@@ -263,23 +259,36 @@ impl StackAlloc {
     fn get_small(&self, core: usize, size: Size) -> Result<usize> {
         let local = &self.local[core];
         let start_a = local.start(size);
-        let mut start = start_a.load(Ordering::Relaxed);
+        let pte_a = local.pte(size);
+        let mut start = start_a.load(Ordering::SeqCst);
 
         if start == usize::MAX {
             warn!("Try reserve first");
-            start = self.reserve_inc(size)?;
+            let (s, pte) = self.reserve_inc(size)?;
+            pte_a.store(pte);
+            start = s
         } else {
             let i = start / Table::span(2);
             let max = self.pages() - Table::round(2, start) - 1;
-            if self.entries[i]
-                .0
-                .fetch_update(|v| v.inc(size, max))
-                .is_err()
-            {
+
+            // Incremet or clear (atomic sync with put dec)
+            if pte_a.fetch_update(|v| v.inc(size, max)).is_err() {
                 warn!("Try reserve next");
-                start = self.reserve_inc(size)?;
-                if self.entries[i].0.fetch_update(Entry3::unreserve).is_err() {
-                    panic!("Unreserve failed")
+                let (s, new_pte) = self.reserve_inc(size)?;
+                start = s;
+                let pte = pte_a.swap(new_pte);
+
+                if let Ok(v) = self.entries[i].fetch_update(|v| v.unreserve_sub(pte, max)) {
+                    let pte = v.unreserve_sub(pte, max).unwrap();
+                    // Add to list if new counter is small enough
+                    if pte.pages() == 0 {
+                        self.empty.lock().unwrap().push(i);
+                    } else if pte.pages() < PTE3_FULL {
+                        self.partial(size).push(i);
+                    }
+                } else {
+                    error!("Unreserve failed");
+                    return Err(Error::Corruption);
                 }
             }
         }
@@ -288,24 +297,21 @@ impl StackAlloc {
             Size::L0 => local.get(start)?,
             _ => local.get_huge(start)?,
         };
-        start_a.store(page, Ordering::Relaxed);
+        start_a.store(page, Ordering::SeqCst);
         Ok(page)
     }
 
     fn get_giant(&self, core: usize) -> Result<usize> {
         if let Some(i) = self.empty.lock().unwrap().pop() {
-            match self.entries[i]
-                .0
+            if self.entries[i]
                 .compare_exchange(Entry3::new(), Entry3::new_giant())
+                .is_ok()
             {
-                Ok(_) => {
-                    self.local[core].persist(i * Table::span(2));
-                    Ok(i * Table::span(2))
-                }
-                Err(pte3) => {
-                    error!("Corruption i{i} {pte3:?}");
-                    Err(Error::Corruption)
-                }
+                self.local[core].persist(i * Table::span(2));
+                Ok(i * Table::span(2))
+            } else {
+                error!("CAS invalid i{i}");
+                Err(Error::Corruption)
             }
         } else {
             Err(Error::Memory)
@@ -320,16 +326,16 @@ impl StackAlloc {
         }
         self.local[core].clear_giant(page);
 
-        match self.entries[i].0.compare_exchange(pte3, Entry3::new()) {
-            Ok(_) => {
-                // Add to empty list
-                self.empty.lock().unwrap().push(i);
-                Ok(())
-            }
-            Err(_) => {
-                error!("CAS invalid i{i}");
-                Err(Error::Address)
-            }
+        if self.entries[i]
+            .compare_exchange(pte3, Entry3::new())
+            .is_ok()
+        {
+            // Add to empty list
+            self.empty.lock().unwrap().push(i);
+            Ok(())
+        } else {
+            error!("CAS invalid i{i}");
+            Err(Error::Address)
         }
     }
 
@@ -342,18 +348,27 @@ impl StackAlloc {
         let i = page / Table::span(2);
         let local = &self.local[core];
         let size = local.put(page)?;
-        if let Ok(pte3) = self.entries[i].0.fetch_update(|v| v.dec(size)) {
+
+        // Try decrement own pte first
+        if local.pte(size).fetch_update(|v| v.dec_idx(size, i)).is_ok() {
+            return Ok(());
+        }
+
+        // Subtree not owned by us
+        if let Ok(pte3) = self.entries[i].fetch_update(|v| v.dec(size)) {
+            // Add to free list if not reserved
             if !pte3.reserved() {
                 let new_pages = pte3.pages() - Table::span(size as _);
                 if pte3.pages() >= PTE3_FULL && new_pages < PTE3_FULL {
                     // Add back to partial
                     self.partial(size).push(i);
                 } else if new_pages == 0 {
-                    // Add back to empty
+                    // Add back to empty (and remove from partial)
                     let mut partial = self.partial(size);
                     if let Some(idx) = partial.iter().copied().position(|v| v == i) {
                         partial.swap_remove(idx);
                     }
+                    drop(partial);
                     self.empty.lock().unwrap().push(i);
                 }
             }

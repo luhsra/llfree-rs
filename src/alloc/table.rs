@@ -8,13 +8,13 @@ use log::{error, info, warn};
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Dec, Entry, Entry3};
 use crate::leaf_alloc::{LeafAllocator, Leafs};
-use crate::table::{AtomicBuffer, Table};
+use crate::table::Table;
 use crate::util::Page;
 
 const PTE3_FULL: usize = Table::span(2) - 4 * Table::span(1);
 
 /// Non-Volatile global metadata
-pub struct Meta {
+struct Meta {
     magic: AtomicUsize,
     pages: AtomicUsize,
     active: AtomicUsize,

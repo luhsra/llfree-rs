@@ -1,5 +1,6 @@
 use std::alloc::Layout;
 use std::arch::asm;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// Correctly sized and aligned page.
@@ -29,6 +30,44 @@ pub const fn align_up(v: usize, align: usize) -> usize {
 
 pub const fn align_down(v: usize, align: usize) -> usize {
     v & !(align - 1)
+}
+
+pub struct Atomic<T: From<u64> + Into<u64>>(AtomicU64, PhantomData<T>);
+
+impl<T: From<u64> + Into<u64>> Atomic<T> {
+    pub fn new(v: T) -> Self {
+        Self(AtomicU64::new(v.into()), PhantomData)
+    }
+    pub fn compare_exchange(&self, current: T, new: T) -> Result<T, T> {
+        match self.0.compare_exchange(
+            current.into(),
+            new.into(),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(v) => Ok(T::from(v)),
+            Err(v) => Err(T::from(v)),
+        }
+    }
+    pub fn fetch_update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
+        match self
+            .0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                f(T::from(v)).map(T::into)
+            }) {
+            Ok(v) => Ok(T::from(v)),
+            Err(v) => Err(T::from(v)),
+        }
+    }
+    pub fn load(&self) -> T {
+        T::from(self.0.load(Ordering::SeqCst))
+    }
+    pub fn store(&self, v: T) {
+        self.0.store(v.into(), Ordering::SeqCst)
+    }
+    pub fn swap(&self, v: T) -> T {
+        self.0.swap(v.into(), Ordering::SeqCst).into()
+    }
 }
 
 /// Simple atomic stack with atomic entries.

@@ -9,6 +9,7 @@ pub mod buddy;
 pub mod local_lists;
 pub mod malloc;
 pub mod stack;
+pub mod packed_stack;
 pub mod table;
 
 pub const MAGIC: usize = 0xdeadbeef;
@@ -41,7 +42,7 @@ pub enum Size {
     L2 = 2,
 }
 
-pub type Allocator = table::TableAlloc;
+pub type Allocator = packed_stack::PackedStackAlloc;
 
 pub trait Alloc {
     /// Initialize the allocator.
@@ -443,7 +444,7 @@ mod test {
     fn parallel_free() {
         logging();
 
-        const THREADS: usize = 8;
+        const THREADS: usize = 6;
         const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 2 * THREADS);
         const MEM_SIZE: usize = 2 * THREADS * Table::m_span(2);
 
