@@ -30,7 +30,7 @@ pub fn pin(core: usize) {
 pub fn pin(core: usize) {
     #![allow(non_camel_case_types)]
 
-    use std::{mem, os::raw::c_int, sync::atomic::Ordering};
+    use std::{mem, os::raw::{c_int, c_uint}, sync::atomic::Ordering};
 
     type kern_return_t = c_int;
     type thread_t = c_uint;

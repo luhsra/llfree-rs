@@ -79,6 +79,7 @@ impl Alloc for PackedStackAlloc {
             warn!("Setup allocator state p={}", alloc.pages());
             alloc.local[0].clear();
             // Add all entries to the empty list
+            // TODO: handle last partially cut off subtree!
             alloc.empty.lock().unwrap().extend(0..alloc.entries.len());
 
             meta.pages.store(alloc.pages(), Ordering::SeqCst);

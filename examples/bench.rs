@@ -61,7 +61,7 @@ fn main() {
     }
     let max_threads = threads.iter().copied().max().unwrap();
     let thread_pages = (memory * Table::span(2)) / max_threads;
-    assert!(thread_pages > MIN_PAGES);
+    assert!(thread_pages >= MIN_PAGES, "{} !> {}", thread_pages, MIN_PAGES);
 
     unsafe { nvalloc::thread::CPU_STRIDE = cpu_stride };
 

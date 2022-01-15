@@ -1,7 +1,7 @@
 use std::alloc::Layout;
-use std::arch::asm;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 /// Correctly sized and aligned page.
 #[derive(Clone)]
@@ -199,6 +199,8 @@ pub fn logging() {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub unsafe fn _mm_clwb(addr: *const ()) {
+    use std::arch::asm;
+
     asm!("clwb [rax]", in("rax") addr);
 }
 
@@ -209,28 +211,20 @@ pub unsafe fn _mm_clwb(addr: *const ()) {
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn time_stamp_counter() -> u64 {
+    use std::arch::asm;
+
     let mut lo: u32;
     let mut hi: u32;
     asm!("rdtsc", out("eax") lo, out("edx") hi);
     lo as u64 | (hi as u64) << 32
 }
 
-/// Reads the `CNTVCT_EL0` register and returns the current cycle count.
-///
-/// # Safety
-/// Directly executes an asm instruction.
-#[cfg(target_arch = "aarch64")]
-#[inline(always)]
-unsafe fn time_stamp_counter() -> u64 {
-    let mut val: u64;
-    asm!("mrs {}, cntvct_e10", out(reg) val);
-    val
-}
-
+#[cfg(target_arch = "x86_64")]
 #[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
 pub struct Cycles(u64);
 
+#[cfg(target_arch = "x86_64")]
 impl Cycles {
     pub fn now() -> Self {
         Self(unsafe { time_stamp_counter() })
@@ -240,11 +234,26 @@ impl Cycles {
     }
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+#[derive(Debug, Clone, Copy)]
+pub struct Cycles(Instant);
+
+#[cfg(not(target_arch = "x86_64"))]
+impl Cycles {
+    pub fn now() -> Self {
+        Self(Instant::now())
+    }
+    pub fn elapsed(self) -> u64 {
+        self.0.elapsed().as_nanos() as _
+    }
+}
+
+
 #[cfg(test)]
 mod test {
     use std::sync::{Arc, Barrier};
 
-    use super::AtomicStack;
+    use super::{AtomicStack, Cycles};
     use crate::thread;
 
     #[cfg(target_arch = "x86_64")]
@@ -291,5 +300,12 @@ mod test {
             sum,
             ((1..THREADS).sum::<usize>() + THREADS * (1..N).sum::<usize>()) as u64
         )
+    }
+
+    #[test]
+    fn cycles() {
+        let cycles = Cycles::now();
+        println!("waiting...");
+        println!("cycles {}", cycles.elapsed());
     }
 }
