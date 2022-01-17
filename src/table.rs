@@ -74,18 +74,16 @@ impl Table {
 
     /// Iterates over the table pages beginning with `start`.
     /// It wraps around the end and ends one before `start`.
-    pub fn iterate(layer: usize, start: usize, pages: usize) -> impl Iterator<Item = usize> {
-        assert!(layer >= 1 && start < pages);
+    pub fn iterate(layer: usize, start: usize) -> impl Iterator<Item = usize> {
+        debug_assert!(layer >= 1);
 
         let bits = Self::LEN_BITS * (layer - 1);
         let pt_start = Self::round(layer, start);
-        let max =
-            ((pages.saturating_sub(pt_start) + Self::span(layer - 1) - 1) >> bits).min(Self::LEN);
         let offset = (start >> bits) % Self::LEN;
         std::iter::once(start).chain(
-            (1..max)
+            (1..Table::LEN)
                 .into_iter()
-                .map(move |v| (((offset + v) % max) << bits) + pt_start),
+                .map(move |v| (((offset + v) % Table::LEN) << bits) + pt_start),
         )
     }
 }
@@ -117,7 +115,7 @@ impl<T: Sized + From<u64> + Into<u64>> Table<T> {
     }
 
     pub fn update<F: FnMut(T) -> Option<T>>(&self, i: usize, f: F) -> Result<T, T> {
-        self.entries[i].fetch_update(f)
+        self.entries[i].update(f)
     }
 }
 
@@ -199,43 +197,39 @@ mod test {
     #[test]
     fn iterate() {
         logging();
-        // 5 -> 5, 6, .., 499, 0, 1, 2, 3, 4,
-        let mut iter = Table::iterate(1, 5, 500).enumerate();
+        let mut iter = Table::iterate(1, 0).enumerate();
+        assert_eq!(iter.next(), Some((0, 0)));
+        assert_eq!(iter.last(), Some((511, 511)));
+
+        // 5 -> 5, 6, .., 511, 0, 1, 2, 3, 4,
+        let mut iter = Table::iterate(1, 5).enumerate();
         assert_eq!(iter.next(), Some((0, 5)));
         assert_eq!(iter.next(), Some((1, 6)));
-        assert_eq!(iter.last(), Some((499, 4)));
+        assert_eq!(iter.last(), Some((511, 4)));
 
         let mut iter =
-            Table::iterate(1, 5 + 2 * Table::span(1), 500 + 2 * Table::span(1)).enumerate();
+            Table::iterate(1, 5 + 2 * Table::span(1)).enumerate();
         assert_eq!(iter.next(), Some((0, 5 + 2 * Table::span(1))));
         assert_eq!(iter.next(), Some((1, 6 + 2 * Table::span(1))));
-        assert_eq!(iter.last(), Some((499, 4 + 2 * Table::span(1))));
+        assert_eq!(iter.last(), Some((511, 4 + 2 * Table::span(1))));
 
-        let mut iter = Table::iterate(2, 5 * Table::span(1), 500 * Table::span(1)).enumerate();
+        let mut iter = Table::iterate(2, 5 * Table::span(1)).enumerate();
         assert_eq!(iter.next(), Some((0, 5 * Table::span(1))));
-        assert_eq!(iter.last(), Some((499, 4 * Table::span(1))));
+        assert_eq!(iter.last(), Some((511, 4 * Table::span(1))));
 
-        let mut iter = Table::iterate(2, 0, 500 * Table::span(1)).enumerate();
-        assert_eq!(iter.next(), Some((0, 0)));
-        assert_eq!(iter.last(), Some((499, 499 * Table::span(1))));
-
-        let mut iter = Table::iterate(2, 500, 500 * Table::span(1)).enumerate();
-        assert_eq!(iter.next(), Some((0, 500)));
-        assert_eq!(iter.next(), Some((1, Table::span(1))));
-        assert_eq!(iter.last(), Some((499, 499 * Table::span(1))));
-
-        let mut iter = Table::iterate(2, 499 * Table::span(1), 500 * Table::span(1)).enumerate();
-        assert_eq!(iter.next(), Some((0, 499 * Table::span(1))));
-        assert_eq!(iter.last(), Some((499, 498 * Table::span(1))));
-
-        let mut iter = Table::iterate(2, 499 * Table::span(1), 1000 * Table::span(1)).enumerate();
-        assert_eq!(iter.next(), Some((0, 499 * Table::span(1))));
-        assert_eq!(iter.last(), Some((511, 498 * Table::span(1))));
-
-        let mut iter = Table::iterate(2, 0, 2 * Table::span(1) + 1).enumerate();
+        let mut iter = Table::iterate(2, 0).enumerate();
         assert_eq!(iter.next(), Some((0, 0)));
         assert_eq!(iter.next(), Some((1, 1 * Table::span(1))));
+        assert_eq!(iter.last(), Some((511, 511 * Table::span(1))));
+
+        let mut iter = Table::iterate(2, 500).enumerate();
+        assert_eq!(iter.next(), Some((0, 500)));
+        assert_eq!(iter.next(), Some((1, Table::span(1))));
         assert_eq!(iter.next(), Some((2, 2 * Table::span(1))));
-        assert_eq!(iter.next(), None);
+        assert_eq!(iter.last(), Some((511, 511 * Table::span(1))));
+
+        let mut iter = Table::iterate(2, 499 * Table::span(1)).enumerate();
+        assert_eq!(iter.next(), Some((0, 499 * Table::span(1))));
+        assert_eq!(iter.last(), Some((511, 498 * Table::span(1))));
     }
 }

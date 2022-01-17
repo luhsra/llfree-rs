@@ -42,7 +42,7 @@ pub enum Size {
     L2 = 2,
 }
 
-pub type Allocator = packed_stack::PackedStackAlloc;
+pub type Allocator = table::TableAlloc;
 
 pub trait Alloc {
     /// Initialize the allocator.
@@ -236,16 +236,20 @@ mod test {
             assert!(p1 != p2);
         }
 
-        warn!("realloc...");
+        warn!("free some...");
 
         // Free some
         for page in &pages[10..Table::LEN + 10] {
             Allocator::instance().put(0, *page).unwrap();
         }
 
+        warn!("free special...");
+
         Allocator::instance().put(0, small).unwrap();
         Allocator::instance().put(0, huge).unwrap();
         Allocator::instance().put(0, giant).unwrap();
+
+        warn!("realloc...");
 
         // Realloc
         for page in &mut pages[10..Table::LEN + 10] {

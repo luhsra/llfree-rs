@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use log::{error, info, warn};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
-use crate::entry::{Dec, Entry, Entry3};
+use crate::entry::{Change, Entry, Entry3};
 use crate::leaf_alloc::{LeafAllocator, Leafs};
 use crate::table::Table;
 use crate::util::Page;
 
-const PTE3_FULL: usize = Table::span(2) - 4 * Table::span(1);
+const PTE3_FULL: usize = 4 * Table::span(1);
 
 /// Non-Volatile global metadata
 struct Meta {
@@ -76,6 +76,9 @@ impl Alloc for TableAlloc {
         } else {
             warn!("Setup allocator state p={}", alloc.pages());
             alloc.local[0].clear();
+
+            alloc.setup_rec(Table::LAYERS, 0);
+
             meta.pages.store(alloc.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
         }
@@ -121,39 +124,7 @@ impl Alloc for TableAlloc {
                 }
             }
         } else {
-            let leaf = &self.local[core];
-            let start_a = leaf.start(size);
-            let mut start = start_a.load(Ordering::SeqCst);
-
-            if start == usize::MAX {
-                warn!("try reserve first");
-                start = self
-                    .reserve_rec_partial(Table::LAYERS, 0, size)
-                    .or_else(|_| self.reserve_rec_empty(Table::LAYERS, 0, size))?;
-            } else {
-                // Increment or reserve new if full
-                let pt = self.pt3(start);
-                let i = Table::idx(3, start);
-                let max = self.pages() - Table::round(2, start) - 1;
-                if pt.update(i, |v| v.inc(size, max)).is_err() {
-                    warn!("try reserve next");
-                    start = self
-                        .reserve_rec_partial(Table::LAYERS, start, size)
-                        .or_else(|_| self.reserve_rec_empty(Table::LAYERS, start, size))?;
-                    if pt.update(i, Entry3::unreserve).is_err() {
-                        panic!("Unreserve failed")
-                    }
-                }
-            }
-            assert!(start < self.pages());
-
-            let page = match size {
-                Size::L0 => leaf.get(start)?,
-                Size::L1 => leaf.get_huge(start)?,
-                Size::L2 => panic!(),
-            };
-            start_a.store(page, Ordering::SeqCst);
-            page
+            self.get_small(core, size)?
         };
 
         Ok(unsafe { self.memory.start.add(page as _) } as u64)
@@ -167,7 +138,7 @@ impl Alloc for TableAlloc {
         let page = unsafe { (addr as *const Page).offset_from(self.memory.start) } as usize;
 
         loop {
-            match self.put_rec(core, Table::LAYERS, page) {
+            match self.put_rec(core, page) {
                 Ok(_) => return Ok(()),
                 Err(Error::CAS) => warn!("CAS: retry free"),
                 Err(e) => return Err(e),
@@ -176,7 +147,13 @@ impl Alloc for TableAlloc {
     }
 
     fn allocated_pages(&self) -> usize {
-        self.allocated_pages_rec(Table::LAYERS, 0)
+        let mut pages = self.allocated_pages_rec(Table::LAYERS, 0);
+        // Pages allocated in reserved subtrees
+        for local in &self.local {
+            pages += local.pte(Size::L0).load().pages();
+            pages += local.pte(Size::L1).load().pages();
+        }
+        self.pages() - pages
     }
 }
 
@@ -210,21 +187,17 @@ impl TableAlloc {
         let mut pages = 0;
         if layer == 3 {
             let pt3 = self.pt3(start);
-            for i in Table::range(layer, 0..self.pages()) {
+            for i in Table::range(3, 0..self.pages()) {
                 let pte3 = pt3.get(i);
-                // warn!("{i:>3}: {pte3:?}");
-                match pte3.size() {
-                    Some(Size::L2) => pages += Table::span(2),
-                    Some(_) => pages += pte3.pages(),
-                    _ => {}
-                }
+                warn!(" - {i:>3}: {pte3:?}");
+                pages += pte3.pages();
             }
         } else {
             let pt = self.pt(layer, start);
             for i in Table::range(layer, 0..self.pages()) {
                 let pte = pt.get(i);
                 warn!("{i:>3}: {pte:?}");
-                if pte.full() > 0 || pte.partial_l0() > 0 || pte.partial_l1() > 0 {
+                if pte.empty() > 0 || pte.partial_l0() > 0 || pte.partial_l1() > 0 {
                     pages += self.allocated_pages_rec(layer - 1, Table::page(layer, start, i));
                 }
             }
@@ -262,15 +235,44 @@ impl TableAlloc {
         unsafe { &*(&self.tables[offset + i] as *const _ as *const Table<Entry3>) }
     }
 
+    fn setup_rec(&self, layer: usize, start: usize) {
+        for i in 0..Table::LEN {
+            let page = Table::page(layer, start, i);
+            if page > self.pages() {
+                break;
+            }
+
+            if layer == 3 {
+                let pt = self.pt3(page);
+                let max = (self.pages() - page).min(Table::span(2));
+                pt.set(i, Entry3::new().with_pages(max));
+            } else {
+                let pt = self.pt(layer, page);
+                let max = (self.pages() - page).min(Table::span(layer));
+                let empty = max / Table::span(2);
+
+                if max - empty * Table::span(2) > PTE3_FULL {
+                    pt.set(i, Entry::new().with_empty(empty).with_partial_l0(1));
+                } else {
+                    pt.set(i, Entry::new().with_empty(empty));
+                }
+                self.setup_rec(layer - 1, page);
+            }
+        }
+    }
+
     fn recover_rec(&self, layer: usize, start: usize, deep: bool) -> Result<(usize, usize, usize)> {
-        let mut full = 0;
+        let mut empty = 0;
         let mut partial_l0 = 0;
         let mut partial_l1 = 0;
         let pt = self.pt(layer, start);
-        for i in Table::range(layer, start..self.pages()) {
+        for i in 0..Table::LEN {
             let page = Table::page(layer, start, i);
+            if page > self.pages() {
+                break;
+            }
 
-            let (c_full, c_pl0, c_pl1) = if layer - 1 == 3 {
+            let (c_empty, c_pl0, c_pl1) = if layer - 1 == 3 {
                 self.recover_l3(page, deep)?
             } else {
                 self.recover_rec(layer - 1, page, deep)?
@@ -279,115 +281,164 @@ impl TableAlloc {
             pt.set(
                 i,
                 Entry::new()
-                    .with_full(c_full)
+                    .with_empty(c_empty)
                     .with_partial_l0(c_pl0)
                     .with_partial_l1(c_pl1),
             );
-            full += c_full;
+            empty += c_empty;
             partial_l0 += c_pl0;
             partial_l1 += c_pl1;
         }
 
-        Ok((full, partial_l0, partial_l1))
+        Ok((empty, partial_l0, partial_l1))
     }
 
     fn recover_l3(&self, start: usize, deep: bool) -> Result<(usize, usize, usize)> {
-        let mut full = 0;
+        let mut empty = 0;
         let mut partial_l0 = 0;
         let mut partial_l1 = 0;
         let pt = self.pt3(start);
 
-        for i in Table::range(3, start..self.pages()) {
+        for i in 0..Table::LEN {
             let page = Table::page(3, start, i);
+            if page > self.pages() {
+                break;
+            }
 
             let (pages, size) = self.local[0].recover(page, deep)?;
             if size == Size::L2 {
                 pt.set(i, Entry3::new_giant());
-                full += 1;
             } else if pages > 0 {
                 pt.set(i, Entry3::new_table(pages, size, false));
-                if pages < PTE3_FULL {
+                if pages == Table::span(2) {
+                    empty += 1;
+                } else if pages > PTE3_FULL {
                     if size == Size::L0 {
                         partial_l0 += 1;
                     } else {
                         partial_l1 += 1;
                     }
-                } else {
-                    full += 1;
                 }
             } else {
                 pt.set(i, Entry3::new());
             }
         }
-        Ok((full, partial_l0, partial_l1))
+        Ok((empty, partial_l0, partial_l1))
     }
 
-    fn reserve_rec_empty(&self, layer: usize, start: usize, size: Size) -> Result<usize> {
+    fn reserve_rec_empty(&self, layer: usize, start: usize, size: Size) -> Result<(usize, Entry3)> {
         if layer == 3 {
             return self.reserve_l3_empty(start, size);
         }
 
-        for page in Table::iterate(layer, start, self.pages()) {
+        for page in Table::iterate(layer, start) {
+            if page > self.pages() {
+                continue;
+            }
             let i = Table::idx(layer, page);
-
             let pt = self.pt(layer, start);
-            let max =
-                (self.pages() - Table::round(layer, page) + Table::span(2) - 1) / Table::span(2);
-            if pt.update(i, |v| v.inc_full(max)).is_ok() {
+            if pt.update(i, |v| v.dec_empty()).is_ok() {
                 if let Ok(result) = self.reserve_rec_empty(layer - 1, page, size) {
                     return Ok(result);
                 }
             }
         }
-        error!("Reserve failed!");
         Err(Error::Memory)
     }
 
-    fn reserve_l3_empty(&self, start: usize, size: Size) -> Result<usize> {
-        for page in Table::iterate(3, start, self.pages()) {
+    fn reserve_l3_empty(&self, start: usize, size: Size) -> Result<(usize, Entry3)> {
+        for page in Table::iterate(3, start) {
+            if page > self.pages() {
+                continue;
+            }
             let i = Table::idx(3, page);
-
             let pt = self.pt3(start);
-            let max = self.pages() - page - 1;
-            if pt.update(i, |v| v.reserve_inc_empty(size, max)).is_ok() {
-                return Ok(page);
+            if let Ok(pte) = pt.update(i, |v| v.reserve_empty(size)) {
+                return Ok((page, pte.dec(size).unwrap().with_idx(page / Table::span(2))));
             }
         }
         Err(Error::Memory)
     }
 
-    fn reserve_rec_partial(&self, layer: usize, start: usize, size: Size) -> Result<usize> {
+    fn reserve_rec_partial(
+        &self,
+        layer: usize,
+        start: usize,
+        size: Size,
+    ) -> Result<(usize, Entry3)> {
         if layer == 3 {
             return self.reserve_l3_partial(start, size);
         }
 
-        for page in Table::iterate(layer, start, self.pages()) {
-            let i = Table::idx(layer, page);
+        for page in Table::iterate(layer, start) {
+            if page > self.pages() {
+                continue;
+            }
 
+            let i = Table::idx(layer, page);
             let pt = self.pt(layer, start);
-            let max =
-                (self.pages() - Table::round(layer, page) + Table::span(2) - 1) / Table::span(2);
-            if pt.update(i, |v| v.reserve_partial(size, max)).is_ok() {
+            if pt.update(i, |v| v.reserve_partial(size)).is_ok() {
                 if let Ok(result) = self.reserve_rec_partial(layer - 1, page, size) {
                     return Ok(result);
                 }
             }
         }
-        error!("Reserve failed!");
         Err(Error::Memory)
     }
 
-    fn reserve_l3_partial(&self, start: usize, size: Size) -> Result<usize> {
-        for page in Table::iterate(3, start, self.pages()) {
-            let i = Table::idx(3, page);
+    fn reserve_l3_partial(&self, start: usize, size: Size) -> Result<(usize, Entry3)> {
+        for page in Table::iterate(3, start) {
+            if page > self.pages() {
+                continue;
+            }
 
+            let i = Table::idx(3, page);
             let pt = self.pt3(start);
-            let max = self.pages() - page - 1;
-            if pt.update(i, |v| v.reserve_inc_partial(size, max)).is_ok() {
-                return Ok(page);
+            if let Ok(pte) = pt.update(i, |v| v.reserve_partial(size)) {
+                return Ok((page, pte.dec(size).unwrap().with_idx(page / Table::span(2))));
             }
         }
         Err(Error::Memory)
+    }
+
+    fn update_parents(&self, page: usize, change: Change) -> Result<()> {
+        for layer in 4..=Table::LAYERS {
+            let pt = self.pt(layer, page);
+            let i = Table::idx(layer, page);
+            if let Err(pte) = pt.update(i, |v| v.inc(change)) {
+                error!("Update failed l{layer} i{i} {pte:?} {change:?}");
+                return Err(Error::Corruption);
+            }
+        }
+        Ok(())
+    }
+
+    fn unreserve(&self, page: usize, old: Entry3) -> Result<()> {
+        let pt = self.pt3(page);
+        let i = Table::idx(3, page);
+        let max = (self.pages() - Table::round(2, page)).min(Table::span(2));
+        match pt.update(i, |v| v.unreserve_add(old, max)) {
+            Err(pte) => {
+                error!("Unreserve failed {pte:?}");
+                Err(Error::Corruption)
+            }
+            Ok(pte) => {
+                // Update parents
+                let new_pages = old.pages() + pte.pages();
+                if new_pages == Table::span(2) {
+                    self.update_parents(page, Change::IncEmpty)
+                } else if new_pages > PTE3_FULL {
+                    let change = if old.size() == Some(Size::L1) {
+                        Change::IncPartialL0
+                    } else {
+                        Change::IncPartialL1
+                    };
+                    self.update_parents(page, change)
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 
     fn get_giant(&self, core: usize, layer: usize, start: usize) -> Result<usize> {
@@ -396,11 +447,13 @@ impl TableAlloc {
         }
 
         let pt = self.pt(layer, start);
-        for i in Table::range(layer, start..self.pages()) {
+        for i in 0..Table::LEN {
             let page = Table::page(layer, start, i);
+            if page > self.pages() {
+                break;
+            }
 
-            let max = (self.pages() - page) / Table::span(2);
-            if let Err(pte) = pt.update(i, |pte| pte.inc_full(max)) {
+            if let Err(pte) = pt.update(i, |pte| pte.dec_empty()) {
                 warn!("giant update failed {pte:?}");
                 continue;
             }
@@ -416,10 +469,17 @@ impl TableAlloc {
     fn get_giant_l3(&self, core: usize, start: usize) -> Result<usize> {
         let pt = self.pt3(start);
 
-        for i in Table::range(3, start..self.pages()) {
-            if pt.cas(i, Entry3::new(), Entry3::new_giant()).is_ok() {
+        for i in 0..Table::LEN {
+            if pt
+                .cas(
+                    i,
+                    Entry3::new().with_pages(Table::span(2)),
+                    Entry3::new_giant(),
+                )
+                .is_ok()
+            {
                 let page = Table::page(3, start, i);
-                info!("allocated l3 i{} p={} s={}", i, page, start);
+                info!("allocated l3 i{i} p={page} s={start}");
                 self.local[core].persist(page);
                 return Ok(page);
             }
@@ -428,82 +488,115 @@ impl TableAlloc {
         Err(Error::Memory)
     }
 
-    fn put_rec(&self, core: usize, layer: usize, page: usize) -> Result<Dec> {
-        if layer == 3 {
-            return self.put_l3(core, page);
-        }
+    fn get_small(&self, core: usize, size: Size) -> Result<usize> {
+        let leaf = &self.local[core];
+        let pte_a = leaf.pte(size);
+        let start_a = leaf.start(size);
+        let mut start = start_a.load(Ordering::SeqCst);
 
-        let pt = self.pt(layer, page);
-        let i = Table::idx(layer, page);
-        let pte = pt.get(i);
+        if start == usize::MAX {
+            warn!("try reserve first");
+            let (s, pte) = self
+                .reserve_rec_partial(Table::LAYERS, 0, size)
+                .or_else(|_| self.reserve_rec_empty(Table::LAYERS, 0, size))?;
+            warn!("reserved {}", s / Table::span(2));
+            start = s;
+            pte_a.store(pte);
+        } else {
+            // Increment or reserve new if full
+            if pte_a.update(|v| v.dec(size)).is_err() {
+                warn!("try reserve next");
+                let (s, pte) = self
+                    .reserve_rec_partial(Table::LAYERS, start, size)
+                    .or_else(|_| self.reserve_rec_empty(Table::LAYERS, start, size))?;
+                warn!("reserved {}", s / Table::span(2));
 
-        if pte.full() == 0 && pte.partial_l0() == 0 && pte.partial_l1() == 0 {
-            error!("No table found l{} {:?}", layer, pte);
-            return Err(Error::Address);
-        }
+                let old = pte_a.swap(pte);
+                self.unreserve(start, old)?;
 
-        let dec = self.put_rec(core, layer - 1, page)?;
-        if dec == Dec::None {
-            return Ok(dec);
-        }
-
-        match pt.update(i, |v| v.dec(dec)) {
-            Ok(_) => Ok(dec),
-            Err(pte) => {
-                error!("Corruption: l{layer} i{i} {pte:?} {dec:?}");
-                Err(Error::Corruption)
+                start = s;
             }
         }
+
+        let page = if size == Size::L0 {
+            leaf.get(start)?
+        } else {
+            leaf.get_huge(start)?
+        };
+        start_a.store(page, Ordering::SeqCst);
+        Ok(page)
     }
 
-    fn put_l3(&self, core: usize, page: usize) -> Result<Dec> {
-        let pt = self.pt3(page);
-        let i3 = Table::idx(3, page);
-        let pte3 = pt.get(i3);
+    fn put_rec(&self, core: usize, page: usize) -> Result<()> {
+        // Check parents
+        for layer in (4..=Table::LAYERS).rev() {
+            let pt = self.pt(layer, page);
+            let i = Table::idx(layer, page);
+            let pte = pt.get(i);
 
-        if pte3.size() == Some(Size::L2) {
-            warn!("free giant l3 i{}", i3);
-            self.put_giant(core, page)?;
-            return Ok(Dec::Full);
+            let max = (Table::num_pts(2, self.pages()) - i * Table::span(layer - 2))
+                .min(Table::span(layer - 2));
+            if pte.empty() == max {
+                error!("No table found l{layer} {pte:?}");
+                return Err(Error::Address);
+            }
         }
 
-        if pte3.pages() == 0 {
-            error!("Invalid address l3 i{}", i3);
+        let pt = self.pt3(page);
+        let i = Table::idx(3, page);
+        let pte = pt.get(i);
+
+        if pte.size() == Some(Size::L2) {
+            warn!("free giant l3 i{i}");
+            return self.put_giant(core, page);
+        }
+
+        let max = (self.pages() - Table::round(2, page)).min(Table::span(2));
+        if pte.size().is_none() || pte.pages() == max {
+            error!("Invalid address l3 i{i}");
             return Err(Error::Address);
         }
 
-        let size = self.local[core].put(page)?;
+        let leaf = &self.local[core];
 
-        match pt.update(i3, |v| v.dec(size)) {
-            Err(pte3) => {
-                error!("Corruption l3 i{} p={} - {:?}", i3, pte3.pages(), size);
+        let size = leaf.put(page)?;
+        let idx = page / Table::span(2);
+        if leaf.pte(size).update(|v| v.inc_idx(size, idx, max)).is_ok() {
+            return Ok(());
+        }
+
+        match pt.update(i, |v| v.inc(size, max)) {
+            Err(pte) => {
+                error!("Corruption l3 i{i} {size:?} {pte:?}");
                 Err(Error::Corruption)
             }
-            Ok(pte3) => {
-                if pte3.reserved() {
-                    Ok(Dec::None)
-                } else if pte3.pages() >= PTE3_FULL
-                    && pte3.pages() - Table::span(size as _) < PTE3_FULL
+            Ok(pte) => {
+                if pte.reserved() {
+                    Ok(())
+                } else if pte.pages() + Table::span(size as _) == Table::span(2) {
+                    let change = if size == Size::L0 {
+                        Change::DecPartialL0
+                    } else {
+                        Change::DecPartialL1
+                    };
+                    self.update_parents(page, change)
+                } else if pte.pages() < PTE3_FULL
+                    && pte.pages() + Table::span(size as _) >= PTE3_FULL
                 {
-                    if size == Size::L0 {
-                        Ok(Dec::FullPartialL0)
+                    let change = if size == Size::L0 {
+                        Change::IncPartialL0
                     } else {
-                        Ok(Dec::FullPartialL1)
-                    }
-                } else if pte3.pages() == Table::span(size as _) {
-                    if size == Size::L0 {
-                        Ok(Dec::PartialL0)
-                    } else {
-                        Ok(Dec::PartialL1)
-                    }
+                        Change::IncPartialL1
+                    };
+                    self.update_parents(page, change)
                 } else {
-                    Ok(Dec::None)
+                    Ok(())
                 }
             }
         }
     }
 
-    fn put_giant(&self, core: usize, page: usize) -> Result<Size> {
+    fn put_giant(&self, core: usize, page: usize) -> Result<()> {
         if (page % Table::span(Size::L2 as _)) != 0 {
             error!(
                 "Invalid alignment p={page:x} a={:x}",
@@ -519,8 +612,12 @@ impl TableAlloc {
         let i = Table::idx(3, page);
 
         info!("free l3 i{}", i);
-        match pt.cas(i, Entry3::new_giant(), Entry3::new()) {
-            Ok(_) => Ok(Size::L2),
+        match pt.cas(
+            i,
+            Entry3::new_giant(),
+            Entry3::new().with_pages(Table::span(2)),
+        ) {
+            Ok(_) => self.update_parents(page, Change::IncEmpty),
             _ => {
                 error!("Invalid {page}");
                 Err(Error::Address)

@@ -49,7 +49,7 @@ impl<T: From<u64> + Into<u64>> Atomic<T> {
             Err(v) => Err(T::from(v)),
         }
     }
-    pub fn fetch_update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
+    pub fn update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
         match self
             .0
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
@@ -121,10 +121,7 @@ impl AtomicStack {
 #[cfg(any(test, feature = "logger"))]
 pub fn logging() {
     use std::io::Write;
-    use std::panic::{self, Location};
     use std::thread::ThreadId;
-
-    use log::{Level, Record};
 
     #[cfg(any(test, feature = "thread"))]
     let core = {
@@ -157,39 +154,6 @@ pub fn logging() {
             )
         })
         .try_init();
-
-    panic::set_hook(Box::new(|info| {
-        if let Some(args) = info.message() {
-            log::logger().log(
-                &Record::builder()
-                    .args(*args)
-                    .level(Level::Error)
-                    .file(info.location().map(Location::file))
-                    .line(info.location().map(Location::line))
-                    .build(),
-            );
-        } else if let Some(&payload) = info.payload().downcast_ref::<&'static str>() {
-            log::logger().log(
-                &Record::builder()
-                    .args(format_args!("{}", payload))
-                    .level(Level::Error)
-                    .file(info.location().map(Location::file))
-                    .line(info.location().map(Location::line))
-                    .build(),
-            );
-        } else {
-            log::logger().log(
-                &Record::builder()
-                    .args(format_args!("panic!"))
-                    .level(Level::Error)
-                    .file(info.location().map(Location::file))
-                    .line(info.location().map(Location::line))
-                    .build(),
-            )
-        }
-
-        log::logger().flush();
-    }));
 }
 
 /// Executes CLWB (cache-line write back) for the given address.

@@ -6,8 +6,8 @@ use log::{error, info, warn};
 use crate::alloc::{Error, Result, Size};
 use crate::entry::{Entry1, Entry2, Entry3};
 use crate::table::Table;
-use crate::Page;
 use crate::util::Atomic;
+use crate::Page;
 
 const CAS_RETRIES: usize = 4;
 
@@ -74,12 +74,25 @@ impl<A: Leafs> LeafAllocator<A> {
         // Init pt2
         for i in 0..Table::num_pts(2, self.pages) {
             let pt2 = self.pt2(i * Table::span(2));
-            pt2.clear();
+            for j in 0..Table::LEN {
+                let page = i * Table::span(2) + j * Table::span(1);
+                let max = Table::span(1).min(self.pages.saturating_sub(page));
+                pt2.set(j, Entry2::new().with_pages(max));
+            }
         }
         // Init pt1
         for i in 0..Table::num_pts(1, self.pages) {
+            // Within first page of own area
             let pt1 = unsafe { &*((self.begin + i * Table::m_span(1)) as *const Table<Entry1>) };
-            pt1.clear();
+
+            for j in 0..Table::LEN {
+                let page = i * Table::span(1) + j;
+                if page < self.pages {
+                    pt1.set(j, Entry1::Empty);
+                } else {
+                    pt1.set(j, Entry1::Page);
+                }
+            }
         }
     }
 
@@ -120,29 +133,27 @@ impl<A: Leafs> LeafAllocator<A> {
         let mut size = Size::L0;
 
         let pt = self.pt2(start);
-        for i in Table::range(2, start..self.pages) {
+        for i in 0..Table::LEN {
+            if Table::page(2, start, i) > self.pages {
+                pt.set(i, Entry2::new());
+            }
+
             let pte = pt.get(i);
             if pte.giant() {
-                return Ok((Table::span(2), Size::L2));
+                return Ok((0, Size::L2));
             } else if pte.page() {
                 size = Size::L1;
-                pages += Table::span(1);
-            } else if deep && pte.pages() > 0 {
+            } else if deep && pte.pages() > 0 && size == Size::L0 {
                 let p = self.recover_l1(Table::page(1, start, i), pte)?;
                 if pte.pages() != p {
                     warn!(
-                        "Invalid PTE2 start=0x{:x} i{}: {} != %{}",
-                        start,
-                        i,
+                        "Invalid PTE2 start=0x{start:x} i{i}: {} != {p}",
                         pte.pages(),
-                        p
                     );
                     pt.set(i, pte.with_pages(p));
                 }
-                assert!(size == Size::L0 || pte.pages() == 0);
                 pages += p;
             } else {
-                assert!(size == Size::L0 || pte.pages() == 0);
                 pages += pte.pages();
             }
         }
@@ -153,8 +164,12 @@ impl<A: Leafs> LeafAllocator<A> {
     fn recover_l1(&self, start: usize, pte2: Entry2) -> Result<usize> {
         let pt = self.pt1(pte2, start);
         let mut pages = 0;
-        for i in Table::range(1, start..self.pages) {
-            if pt.get(i) == Entry1::Page {
+        for i in 0..Table::LEN {
+            if Table::page(1, start, i) > self.pages {
+                break;
+            }
+
+            if pt.get(i) == Entry1::Empty {
                 pages += 1;
             }
         }
@@ -170,14 +185,14 @@ impl<A: Leafs> LeafAllocator<A> {
         let pt2 = self.pt2(start);
 
         for _ in 0..CAS_RETRIES {
-            for newstart in Table::iterate(2, start, self.pages) {
+            for newstart in Table::iterate(2, start) {
                 let i2 = Table::idx(2, newstart);
 
                 wait!();
 
                 let pte2 = pt2.get(i2);
 
-                if pte2.page() || pte2.pages() as usize >= Table::LEN {
+                if pte2.page() || pte2.pages() == 0 {
                     continue;
                 }
 
@@ -186,9 +201,8 @@ impl<A: Leafs> LeafAllocator<A> {
 
                 wait!();
 
-                if let Ok(pte2) = pt2.update(i2, |v| v.inc(pte2.i1())) {
-                    assert!(pte2.pages() < Table::LEN);
-                    let page = if pte2.pages() == Table::LEN - 1 {
+                if let Ok(pte2) = pt2.update(i2, |v| v.dec(pte2.i1())) {
+                    let page = if pte2.pages() == 1 {
                         self.get_last(pte2, newstart)
                     } else {
                         self.get_table(pte2, newstart)
@@ -199,7 +213,7 @@ impl<A: Leafs> LeafAllocator<A> {
                 self.alloc_pt1.store(0, Ordering::SeqCst);
             }
         }
-        error!("exceeding retries {start}");
+        error!("exceeding retries {start} {}", self.pages - start);
         Err(Error::Corruption)
     }
 
@@ -208,7 +222,7 @@ impl<A: Leafs> LeafAllocator<A> {
         let pt1 = self.pt1(pte2, start);
 
         for _ in 0..CAS_RETRIES {
-            for page in Table::iterate(1, start, self.pages) {
+            for page in Table::iterate(1, start) {
                 let i = Table::idx(1, page);
                 if i == pte2.i1() {
                     continue;
@@ -265,7 +279,7 @@ impl<A: Leafs> LeafAllocator<A> {
     pub fn get_huge(&self, start: usize) -> Result<usize> {
         let pt = self.pt2(start);
         for _ in 0..CAS_RETRIES {
-            for page in Table::iterate(2, start, self.pages) {
+            for page in Table::iterate(2, start) {
                 let i = Table::idx(2, page);
                 if pt.update(i, Entry2::mark_huge).is_ok() {
                     info!("alloc l2 i={}: {}", i, page);
@@ -301,14 +315,14 @@ impl<A: Leafs> LeafAllocator<A> {
             let pt1 = unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) };
             pt1.clear();
 
-            match pt2.cas(i2, old, Entry2::new()) {
+            match pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
                 Ok(_) => Ok(Size::L1),
                 Err(_) => {
                     error!("Corruption l2 i{}", i2);
                     Err(Error::Corruption)
                 }
             }
-        } else if !old.giant() && old.pages() > 0 {
+        } else if !old.giant() && old.pages() < Table::LEN {
             self.put_small(old, page).map(|_| Size::L0)
         } else {
             Err(Error::Address)
@@ -320,7 +334,7 @@ impl<A: Leafs> LeafAllocator<A> {
         let pt2 = self.pt2(page);
         let i2 = Table::idx(2, page);
 
-        if pte2.pages() == Table::LEN {
+        if pte2.pages() == 0 {
             return self.put_full(pte2, page);
         }
 
@@ -337,8 +351,8 @@ impl<A: Leafs> LeafAllocator<A> {
 
         wait!();
 
-        if let Err(pte2) = pt2.update(i2, |pte| pte.dec(pte2.i1())) {
-            return if pte2.pages() == 0 {
+        if let Err(pte2) = pt2.update(i2, |pte| pte.inc(pte2.i1())) {
+            return if pte2.pages() == Table::LEN {
                 error!("Invalid Addr l1 i{} p={}", i1, page);
                 Err(Error::Address)
             } else {
@@ -375,11 +389,7 @@ impl<A: Leafs> LeafAllocator<A> {
             }
         }
 
-        match pt2.cas(
-            i2,
-            pte2,
-            Entry2::new_table(Table::LEN - 1, page % Table::LEN),
-        ) {
+        match pt2.cas(i2, pte2, Entry2::new_table(1, page % Table::LEN)) {
             Ok(_) => Ok(()),
             Err(pte) => {
                 warn!("CAS: create pt1 {:?}", pte);
@@ -389,22 +399,25 @@ impl<A: Leafs> LeafAllocator<A> {
     }
 
     pub fn clear_giant(&self, page: usize) {
-        for j in Table::range(2, page..self.pages) {
+        for i in 0..Table::LEN {
             // i1 is initially 0
             let pt1 = unsafe {
-                &*((self.begin + (page + j * Table::span(1)) * Page::SIZE) as *const Table<Entry1>)
+                &*((self.begin + (page + i * Table::span(1)) * Page::SIZE) as *const Table<Entry1>)
             };
-            pt1.clear();
+            pt1.clear(); // set all to 0 -> empty
         }
         // Clear the persist flag
-        self.pt2(page).set(0, Entry2::new());
+        self.pt2(page).set(0, Entry2::new_table(Table::LEN, 0));
     }
 
     #[allow(dead_code)]
     pub fn dump(&self, start: usize) {
         let pt2 = self.pt2(start);
-        for i2 in Table::range(2, start..self.pages) {
+        for i2 in 0..Table::LEN {
             let start = Table::page(2, start, i2);
+            if start > self.pages {
+                return;
+            }
 
             let pte2 = pt2.get(i2);
             info!(
@@ -417,7 +430,7 @@ impl<A: Leafs> LeafAllocator<A> {
             );
             if !pte2.giant() && !pte2.page() && pte2.pages() > 0 && pte2.pages() < Table::LEN {
                 let pt1 = self.pt1(pte2, start);
-                for i1 in Table::range(1, start..self.pages) {
+                for i1 in 0..Table::LEN {
                     let page = Table::page(1, start, i1);
                     let pte1 = pt1.get(i1);
                     info!(
@@ -454,7 +467,7 @@ mod test {
     fn count(pt: &Table<Entry1>) -> usize {
         let mut pages = 0;
         for i in 0..Table::LEN {
-            pages += (pt.get(i) == Entry1::Page) as usize;
+            pages += (pt.get(i) == Entry1::Empty) as usize;
         }
         pages
     }
@@ -490,8 +503,11 @@ mod test {
             });
 
             let page_alloc = &Allocator::leafs()[0];
-            assert_eq!(page_alloc.pt2(0).get(0).pages(), 3);
-            assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 3);
+            assert_eq!(page_alloc.pt2(0).get(0).pages(), Table::LEN - 3);
+            assert_eq!(
+                count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)),
+                Table::LEN - 3
+            );
 
             Allocator::destroy()
         }
@@ -525,8 +541,11 @@ mod test {
             });
 
             let page_alloc = &Allocator::leafs()[0];
-            assert_eq!(page_alloc.pt2(0).get(0).pages(), 2);
-            assert_eq!(count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)), 2);
+            assert_eq!(page_alloc.pt2(0).get(0).pages(), Table::LEN - 2);
+            assert_eq!(
+                count(page_alloc.pt1(page_alloc.pt2(0).get(0), 0)),
+                Table::LEN - 2
+            );
 
             Allocator::destroy()
         }
@@ -564,9 +583,12 @@ mod test {
 
             let page_alloc = &Allocator::leafs()[0];
             let pt2 = page_alloc.pt2(0);
-            assert_eq!(pt2.get(0).pages(), Table::LEN);
-            assert_eq!(pt2.get(1).pages(), 1);
-            assert_eq!(count(page_alloc.pt1(pt2.get(1), Table::LEN)), 1);
+            assert_eq!(pt2.get(0).pages(), 0);
+            assert_eq!(pt2.get(1).pages(), Table::LEN - 1);
+            assert_eq!(
+                count(page_alloc.pt1(pt2.get(1), Table::LEN)),
+                Table::LEN - 1
+            );
 
             Allocator::destroy()
         }
@@ -610,7 +632,7 @@ mod test {
             });
 
             let page_alloc = &Allocator::leafs()[0];
-            assert_eq!(page_alloc.pt2(0).get(0).pages(), 0);
+            assert_eq!(page_alloc.pt2(0).get(0).pages(), Table::LEN);
 
             Allocator::destroy()
         }
@@ -656,8 +678,8 @@ mod test {
 
             let page_alloc = &Allocator::leafs()[0];
             let pt2 = page_alloc.pt2(0);
-            assert_eq!(pt2.get(0).pages(), Table::LEN - 2);
-            assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), Table::LEN - 2);
+            assert_eq!(pt2.get(0).pages(), 2);
+            assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), 2);
 
             Allocator::destroy()
         }
@@ -713,14 +735,17 @@ mod test {
 
             let page_alloc = &Allocator::leafs()[0];
             let pt2 = page_alloc.pt2(0);
-            if pt2.get(0).pages() == Table::LEN - 1 {
-                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), Table::LEN - 1);
+            if pt2.get(0).pages() == 1 {
+                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), 1);
             } else {
                 // Table entry skipped
-                assert_eq!(pt2.get(0).pages(), Table::LEN - 2);
-                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), Table::LEN - 2);
-                assert_eq!(pt2.get(1).pages(), 1);
-                assert_eq!(count(page_alloc.pt1(pt2.get(1), Table::LEN)), 1);
+                assert_eq!(pt2.get(0).pages(), 2);
+                assert_eq!(count(page_alloc.pt1(pt2.get(0), 0)), 2);
+                assert_eq!(pt2.get(1).pages(), Table::LEN - 1);
+                assert_eq!(
+                    count(page_alloc.pt1(pt2.get(1), Table::LEN)),
+                    Table::LEN - 1
+                );
             }
 
             Allocator::destroy()

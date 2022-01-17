@@ -11,7 +11,7 @@ use crate::leaf_alloc::{LeafAllocator, Leafs};
 use crate::table::Table;
 use crate::util::{Atomic, Page};
 
-const PTE3_FULL: usize = Table::span(2) - 4 * Table::span(1);
+const PTE3_FULL: usize = 4 * Table::span(1);
 
 /// Non-Volatile global metadata
 struct Meta {
@@ -77,10 +77,7 @@ impl Alloc for PackedStackAlloc {
             warn!("Recovered pages {pages}");
         } else {
             warn!("Setup allocator state p={}", alloc.pages());
-            alloc.local[0].clear();
-            // Add all entries to the empty list
-            // TODO: handle last partially cut off subtree!
-            alloc.empty.lock().unwrap().extend(0..alloc.entries.len());
+            alloc.setup();
 
             meta.pages.store(alloc.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
@@ -134,33 +131,24 @@ impl Alloc for PackedStackAlloc {
         let i = page / Table::span(2);
         let pte3 = self.entries[i].load();
         match pte3.size() {
-            Some(Size::L2) => self.put_giant(core, page, pte3),
+            Some(Size::L2) => self.put_giant(core, page),
             _ => self.put_small(core, page, pte3),
         }
     }
 
     fn allocated_pages(&self) -> usize {
-        let mut pages = 0;
-        let mut sub = 0;
+        let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self.entries[i].load();
             warn!("{i:>3}: {pte:?}");
-            if pte.size() == Some(Size::L2) {
-                pages += Table::span(2);
-            } else if pte.reserved() {
-                // Pages freed by other cores
-                let max = (self.pages() - i * Table::span(2) - 1).min(Table::span(2));
-                sub += max - pte.pages();
-            } else {
-                pages += pte.pages();
-            }
+            pages -= pte.pages();
         }
         // Pages allocated in reserved subtrees
         for local in &self.local {
-            pages += local.pte(Size::L0).load().pages();
-            pages += local.pte(Size::L1).load().pages();
+            pages -= local.pte(Size::L0).load().pages();
+            pages -= local.pte(Size::L1).load().pages();
         }
-        pages - sub
+        pages
     }
 }
 
@@ -177,9 +165,9 @@ impl PackedStackAlloc {
 
         // Array with all pte3
         let pte3_num = Table::num_pts(2, pages);
-
         let mut entries = Vec::with_capacity(pte3_num);
         entries.resize_with(pte3_num, || Atomic::new(Entry3::new()));
+
         let empty = Mutex::new(Vec::with_capacity(pte3_num));
         let partial_l0 = Mutex::new(Vec::with_capacity(pte3_num));
         let partial_l1 = Mutex::new(Vec::with_capacity(pte3_num));
@@ -201,6 +189,29 @@ impl PackedStackAlloc {
         (self.memory.end as usize - self.memory.start as usize) / Page::SIZE
     }
 
+    fn setup(&mut self) {
+        self.local[0].clear();
+
+        // Add all entries to the empty list
+        let mut empty = self.empty.lock().unwrap();
+
+        let pte3_num = Table::num_pts(2, self.pages());
+        for i in 0..pte3_num - 1 {
+            empty.push(i);
+            self.entries[i] = Atomic::new(Entry3::new().with_pages(Table::span(2)));
+        }
+
+        // The last one may be cut off
+        let max = (self.pages() - (pte3_num - 1) * Table::span(2)).min(Table::span(2));
+        self.entries[pte3_num - 1] = Atomic::new(Entry3::new().with_pages(max));
+
+        if max == Table::span(2) {
+            empty.push(pte3_num - 1);
+        } else if max > PTE3_FULL {
+            self.partial_l0.lock().unwrap().push(pte3_num - 1);
+        }
+    }
+
     fn recover(&self, deep: bool) -> Result<usize> {
         if deep {
             error!("Allocator unexpectedly terminated");
@@ -215,9 +226,9 @@ impl PackedStackAlloc {
                 self.entries[i].store(Entry3::new_table(pages, size, false));
 
                 // Add to lists
-                if pages == 0 {
+                if pages == Table::span(2) {
                     self.empty.lock().unwrap().push(i);
-                } else if pages < PTE3_FULL {
+                } else if pages > PTE3_FULL {
                     self.partial(size).push(i);
                 }
             }
@@ -236,18 +247,14 @@ impl PackedStackAlloc {
         .unwrap()
     }
 
-    fn reserve_inc(&self, size: Size) -> Result<(usize, Entry3)> {
+    fn reserve_dec(&self, size: Size) -> Result<(usize, Entry3)> {
         if let Some(i) = self
             .partial(size)
             .pop()
             .or_else(|| self.empty.lock().unwrap().pop())
         {
-            let max = self.pages() - i * Table::span(2) - 1;
-            let pte = self.entries[i]
-                .fetch_update(|v| v.reserve_fill(size, max))
-                .unwrap();
-            let mut pte = pte.inc(size, max).unwrap();
-            pte.set_idx(i);
+            let pte = self.entries[i].update(|v| v.reserve_take(size)).unwrap();
+            let pte = pte.dec(size).unwrap().with_idx(i);
 
             warn!("reserved {i}");
             return Ok((i * Table::span(2), pte));
@@ -265,26 +272,26 @@ impl PackedStackAlloc {
 
         if start == usize::MAX {
             warn!("Try reserve first");
-            let (s, pte) = self.reserve_inc(size)?;
+            let (s, pte) = self.reserve_dec(size)?;
             pte_a.store(pte);
             start = s
         } else {
             let i = start / Table::span(2);
-            let max = self.pages() - Table::round(2, start) - 1;
+            let max = (self.pages() - Table::round(2, start)).min(Table::span(2));
 
             // Incremet or clear (atomic sync with put dec)
-            if pte_a.fetch_update(|v| v.inc(size, max)).is_err() {
+            if pte_a.update(|v| v.dec(size)).is_err() {
                 warn!("Try reserve next");
-                let (s, new_pte) = self.reserve_inc(size)?;
+                let (s, new_pte) = self.reserve_dec(size)?;
                 start = s;
                 let pte = pte_a.swap(new_pte);
 
-                if let Ok(v) = self.entries[i].fetch_update(|v| v.unreserve_sub(pte, max)) {
-                    let pte = v.unreserve_sub(pte, max).unwrap();
+                if let Ok(v) = self.entries[i].update(|v| v.unreserve_add(pte, max)) {
+                    let pte = v.unreserve_add(pte, max).unwrap();
                     // Add to list if new counter is small enough
-                    if pte.pages() == 0 {
+                    if pte.pages() == max {
                         self.empty.lock().unwrap().push(i);
-                    } else if pte.pages() < PTE3_FULL {
+                    } else if pte.pages() > PTE3_FULL {
                         self.partial(size).push(i);
                     }
                 } else {
@@ -305,7 +312,10 @@ impl PackedStackAlloc {
     fn get_giant(&self, core: usize) -> Result<usize> {
         if let Some(i) = self.empty.lock().unwrap().pop() {
             if self.entries[i]
-                .compare_exchange(Entry3::new(), Entry3::new_giant())
+                .compare_exchange(
+                    Entry3::new().with_pages(Table::span(2)),
+                    Entry3::new_giant(),
+                )
                 .is_ok()
             {
                 self.local[core].persist(i * Table::span(2));
@@ -319,7 +329,7 @@ impl PackedStackAlloc {
         }
     }
 
-    fn put_giant(&self, core: usize, page: usize, pte3: Entry3) -> Result<()> {
+    fn put_giant(&self, core: usize, page: usize) -> Result<()> {
         let i = page / Table::span(2);
         if page % Table::span(2) != 0 {
             error!("Invalid align {page:x}");
@@ -328,7 +338,10 @@ impl PackedStackAlloc {
         self.local[core].clear_giant(page);
 
         if self.entries[i]
-            .compare_exchange(pte3, Entry3::new())
+            .compare_exchange(
+                Entry3::new_giant(),
+                Entry3::new().with_pages(Table::span(2)),
+            )
             .is_ok()
         {
             // Add to empty list
@@ -341,7 +354,11 @@ impl PackedStackAlloc {
     }
 
     fn put_small(&self, core: usize, page: usize, pte3: Entry3) -> Result<()> {
-        if pte3.pages() == 0 {
+        let max = self
+            .pages()
+            .saturating_sub(Table::round(2, page))
+            .min(Table::span(2));
+        if pte3.pages() == max {
             error!("Not allocated {page}");
             return Err(Error::Address);
         }
@@ -351,19 +368,19 @@ impl PackedStackAlloc {
         let size = local.put(page)?;
 
         // Try decrement own pte first
-        if local.pte(size).fetch_update(|v| v.dec_idx(size, i)).is_ok() {
+        if local.pte(size).update(|v| v.inc_idx(size, i, max)).is_ok() {
             return Ok(());
         }
 
         // Subtree not owned by us
-        if let Ok(pte3) = self.entries[i].fetch_update(|v| v.dec(size)) {
+        if let Ok(pte3) = self.entries[i].update(|v| v.inc(size, max)) {
             // Add to free list if not reserved
             if !pte3.reserved() {
-                let new_pages = pte3.pages() - Table::span(size as _);
-                if pte3.pages() >= PTE3_FULL && new_pages < PTE3_FULL {
+                let new_pages = pte3.pages() + Table::span(size as _);
+                if pte3.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
                     // Add back to partial
                     self.partial(size).push(i);
-                } else if new_pages == 0 {
+                } else if new_pages == Table::span(2) {
                     // Add back to empty (and remove from partial)
                     let mut partial = self.partial(size);
                     if let Some(idx) = partial.iter().copied().position(|v| v == i) {
