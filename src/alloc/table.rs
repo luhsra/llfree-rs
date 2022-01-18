@@ -189,14 +189,14 @@ impl TableAlloc {
             let pt3 = self.pt3(start);
             for i in Table::range(3, 0..self.pages()) {
                 let pte3 = pt3.get(i);
-                warn!(" - {i:>3}: {pte3:?}");
+                // warn!(" - {i:>3}: {pte3:?}");
                 pages += pte3.pages();
             }
         } else {
             let pt = self.pt(layer, start);
             for i in Table::range(layer, 0..self.pages()) {
                 let pte = pt.get(i);
-                warn!("{i:>3}: {pte:?}");
+                // warn!("{i:>3}: {pte:?}");
                 if pte.empty() > 0 || pte.partial_l0() > 0 || pte.partial_l1() > 0 {
                     pages += self.allocated_pages_rec(layer - 1, Table::page(layer, start, i));
                 }

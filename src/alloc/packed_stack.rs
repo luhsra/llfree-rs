@@ -140,7 +140,7 @@ impl Alloc for PackedStackAlloc {
         let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self.entries[i].load();
-            warn!("{i:>3}: {pte:?}");
+            // warn!("{i:>3}: {pte:?}");
             pages -= pte.pages();
         }
         // Pages allocated in reserved subtrees

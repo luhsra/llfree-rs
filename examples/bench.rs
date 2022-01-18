@@ -25,6 +25,8 @@ use nvalloc::{thread, util};
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 struct Args {
+    #[clap(short, long)]
+    realloc: bool,
     #[clap(short, long, default_value = "1")]
     threads: Vec<usize>,
     #[clap(short, long, default_value = "bench/bench.csv")]
@@ -44,6 +46,7 @@ struct Args {
 
 fn main() {
     let Args {
+        realloc,
         threads,
         outfile,
         dax,
@@ -61,7 +64,12 @@ fn main() {
     }
     let max_threads = threads.iter().copied().max().unwrap();
     let thread_pages = (memory * Table::span(2)) / max_threads;
-    assert!(thread_pages >= MIN_PAGES, "{} !> {}", thread_pages, MIN_PAGES);
+    assert!(
+        thread_pages >= MIN_PAGES,
+        "{} !=> {}",
+        thread_pages,
+        MIN_PAGES
+    );
 
     unsafe { nvalloc::thread::CPU_STRIDE = cpu_stride };
 
@@ -78,6 +86,8 @@ fn main() {
         2 => Size::L2,
         _ => panic!("`size` has to be 0, 1 or 2"),
     };
+    let allocs = thread_pages / 2 / Table::span(size as _);
+    warn!("Allocs: {allocs} of size {size:?}");
 
     let mut mapping = mapping(0x1000_0000_0000, thread_pages * max_threads, dax).unwrap();
 
@@ -90,23 +100,18 @@ fn main() {
         for i in 0..iterations {
             let mapping = &mut mapping[..thread_pages * threads];
 
-            let perf = bench_alloc::<TableAlloc>(mapping, Size::L0, threads);
+            let perf = bench_alloc::<TableAlloc>(mapping, Size::L0, threads, realloc);
             writeln!(outfile, "TableAlloc,{threads},{i},{perf}").unwrap();
 
-            let perf = bench_alloc::<StackAlloc>(mapping, Size::L0, threads);
+            let perf = bench_alloc::<StackAlloc>(mapping, Size::L0, threads, realloc);
             writeln!(outfile, "StackAlloc,{threads},{i},{perf}").unwrap();
 
-            let perf = bench_alloc::<PackedStackAlloc>(mapping, Size::L0, threads);
+            let perf = bench_alloc::<PackedStackAlloc>(mapping, Size::L0, threads, realloc);
             writeln!(outfile, "PackedStackAlloc,{threads},{i},{perf}").unwrap();
 
             if size == Size::L0 {
-                let perf = bench_alloc::<LocalListAlloc>(mapping, Size::L0, threads);
+                let perf = bench_alloc::<LocalListAlloc>(mapping, Size::L0, threads, realloc);
                 writeln!(outfile, "LocalListAlloc,{threads},{i},{perf}").unwrap();
-            }
-
-            if threads <= 1 && size == Size::L0 {
-                let perf = bench_alloc::<BuddyAlloc>(mapping, Size::L0, threads);
-                writeln!(outfile, "BuddyAlloc,{threads},{i},{perf}").unwrap();
             }
         }
     }
@@ -131,7 +136,7 @@ fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<
     MMap::anon(begin, length)
 }
 
-fn bench_alloc<A: Alloc>(mapping: &mut [Page], size: Size, threads: usize) -> Perf {
+fn bench_alloc<A: Alloc>(mapping: &mut [Page], size: Size, threads: usize, realloc: bool) -> Perf {
     warn!("\n\n>>> bench t={threads} {size:?} {}\n", type_name::<A>());
     // Allocate half the memory
     let allocs = mapping.len() / threads / 2 / Table::span(size as _);
@@ -141,41 +146,79 @@ fn bench_alloc<A: Alloc>(mapping: &mut [Page], size: Size, threads: usize) -> Pe
     warn!("init time {}ms", timer.elapsed().as_millis());
 
     let barrier = Arc::new(Barrier::new(threads));
-    let perfs = thread::parallel(threads as _, move |t| {
-        thread::pin(t);
-        barrier.wait();
 
-        let mut pages = Vec::with_capacity(allocs);
+    let perfs = if realloc {
+        thread::parallel(threads as _, move |t| {
+            thread::pin(t);
 
-        let timer = Instant::now();
-        let cycles = Cycles::now();
-        for _ in 0..allocs {
-            pages.push(A::instance().get(t, size).unwrap());
-        }
-        let get = cycles.elapsed() / allocs as u64;
+            for _ in 0..allocs {
+                A::instance().get(t, size).unwrap();
+            }
 
-        barrier.wait();
+            barrier.wait();
+            let timer = Instant::now();
+            let cycles = Cycles::now();
 
-        let cycles = Cycles::now();
-        for page in pages {
-            A::instance().put(t, page).unwrap();
-        }
-        let put = cycles.elapsed() / allocs as u64;
+            for _ in 0..allocs {
+                let page = A::instance().get(t, size).unwrap();
+                A::instance().put(t, page).unwrap();
+            }
 
-        let total = timer.elapsed().as_millis();
-        warn!("time {total}ms");
-        Perf {
-            get_min: get,
-            get_avg: get,
-            get_max: get,
-            put_min: put,
-            put_avg: put,
-            put_max: put,
-            total,
-        }
-    });
+            let realloc = cycles.elapsed() / allocs as u64;
+            let total = timer.elapsed().as_millis();
 
-    assert_eq!(A::instance().allocated_pages(), 0);
+            warn!("time {total}ms");
+            Perf {
+                get_min: realloc,
+                get_avg: realloc,
+                get_max: realloc,
+                put_min: realloc,
+                put_avg: realloc,
+                put_max: realloc,
+                total,
+            }
+        })
+    } else {
+        thread::parallel(threads as _, move |t| {
+            thread::pin(t);
+            barrier.wait();
+
+            let mut pages = Vec::with_capacity(allocs);
+
+            let timer = Instant::now();
+            let cycles = Cycles::now();
+            for _ in 0..allocs {
+                pages.push(A::instance().get(t, size).unwrap());
+            }
+            let get = cycles.elapsed() / allocs as u64;
+
+            barrier.wait();
+
+            let cycles = Cycles::now();
+            for page in pages {
+                A::instance().put(t, page).unwrap();
+            }
+            let put = cycles.elapsed() / allocs as u64;
+
+            let total = timer.elapsed().as_millis();
+            warn!("time {total}ms");
+            Perf {
+                get_min: get,
+                get_avg: get,
+                get_max: get,
+                put_min: put,
+                put_avg: put,
+                put_max: put,
+                total,
+            }
+        })
+    };
+
+    if realloc {
+        assert_eq!(A::instance().allocated_pages(), threads * allocs);
+    } else {
+        assert_eq!(A::instance().allocated_pages(), 0);
+    }
 
     A::destroy();
 

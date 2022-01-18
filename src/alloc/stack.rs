@@ -143,7 +143,7 @@ impl Alloc for StackAlloc {
         let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self.entries[i].0.load();
-            warn!("{i:>3}: {pte:?}");
+            // warn!("{i:>3}: {pte:?}");
             pages -= pte.pages();
         }
         pages
