@@ -1,6 +1,8 @@
 use std::alloc::Layout;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+#[allow(unused_imports)]
 use std::time::Instant;
 
 /// Correctly sized and aligned page.
