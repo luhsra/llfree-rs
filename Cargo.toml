@@ -38,3 +38,7 @@ required-features = ["logger", "thread"]
 [[example]]
 name = "detail"
 required-features = ["logger", "thread"]
+
+[[example]]
+name = "cpu"
+required-features = ["thread"]
