@@ -5,11 +5,12 @@ use log::error;
 use crate::table::Table;
 use crate::util::Page;
 
+pub mod atomic_stack;
 pub mod buddy;
 pub mod local_lists;
 pub mod malloc;
-pub mod stack;
 pub mod packed_stack;
+pub mod stack;
 pub mod table;
 
 pub const MAGIC: usize = 0xdeadbeef;
@@ -42,7 +43,7 @@ pub enum Size {
     L2 = 2,
 }
 
-pub type Allocator = table::TableAlloc;
+pub type Allocator = stack::StackAlloc;
 
 pub trait Alloc {
     /// Initialize the allocator.
@@ -104,7 +105,7 @@ mod test {
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
         #[cfg(target_os = "linux")]
         if let Ok(file) = std::env::var("NVM_FILE") {
-            warn!("MMap file {} l={}G", file, (length * Page::SIZE) >> 30);
+            warn!("MMap file {file} l={}G", (length * Page::SIZE) >> 30);
             let f = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -122,7 +123,7 @@ mod test {
         const MEM_SIZE: usize = 8 << 30;
         let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
-        info!("mmap {} bytes at {:?}", MEM_SIZE, mapping.as_ptr());
+        info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
         info!("init alloc");
 
@@ -153,7 +154,7 @@ mod test {
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
-            info!("addr {}={:x}", i, p1);
+            info!("addr {i}={p1:x}");
             assert!(mapping.as_ptr_range().contains(&(p1 as _)));
             assert!(p1 != p2);
         }
@@ -195,13 +196,14 @@ mod test {
         const MEM_SIZE: usize = 8 << 30;
         let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
-        info!("mmap {} bytes at {:?}", MEM_SIZE, mapping.as_ptr());
+        info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
         info!("init alloc");
 
         Allocator::init(1, &mut mapping).unwrap();
+        assert_eq!(Allocator::instance().allocated_pages(), 0);
 
-        warn!("start alloc...");
+        warn!("start alloc");
         let small = Allocator::instance().get(0, Size::L0).unwrap();
         let huge = Allocator::instance().get(0, Size::L1).unwrap();
         let giant = Allocator::instance().get(0, Size::L2).unwrap();
@@ -212,13 +214,15 @@ mod test {
         );
         assert!(small != huge && small != giant && huge != giant);
 
+        warn!("start stress test");
+
         // Stress test
         let mut pages = vec![0; Table::LEN * Table::LEN];
         for page in &mut pages {
             *page = Allocator::instance().get(0, Size::L0).unwrap();
         }
 
-        warn!("check...");
+        warn!("check");
 
         assert_eq!(
             Allocator::instance().allocated_pages(),
@@ -231,7 +235,7 @@ mod test {
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
-            info!("addr {}={:x}", i, p1);
+            info!("addr {i}={p1:x}");
             assert!(mapping.as_ptr_range().contains(&(p1 as _)));
             assert!(p1 != p2);
         }

@@ -40,6 +40,7 @@ impl Leafs for TableAlloc {
 }
 
 impl Alloc for TableAlloc {
+    #[cold]
     fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
@@ -88,6 +89,7 @@ impl Alloc for TableAlloc {
         Ok(())
     }
 
+    #[cold]
     fn uninit() {
         let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
@@ -100,17 +102,18 @@ impl Alloc for TableAlloc {
         unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
     }
 
-    fn instance<'a>() -> &'a Self {
-        let ptr = unsafe { SHARED.load(Ordering::SeqCst) };
-        assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
-        unsafe { &*ptr }
-    }
-
+    #[cold]
     fn destroy() {
         let alloc = Self::instance();
         let meta = unsafe { &*alloc.meta };
         meta.magic.store(0, Ordering::SeqCst);
         Self::uninit();
+    }
+
+    fn instance<'a>() -> &'a Self {
+        let ptr = unsafe { SHARED.load(Ordering::SeqCst) };
+        assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
+        unsafe { &*ptr }
     }
 
     fn get(&self, core: usize, size: Size) -> Result<u64> {
@@ -146,6 +149,7 @@ impl Alloc for TableAlloc {
         }
     }
 
+    #[cold]
     fn allocated_pages(&self) -> usize {
         let mut pages = self.allocated_pages_rec(Table::LAYERS, 0);
         // Pages allocated in reserved subtrees
@@ -158,6 +162,7 @@ impl Alloc for TableAlloc {
 }
 
 impl TableAlloc {
+    #[cold]
     fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
         // Last frame is reserved for metadata
         let mut pages = (memory.len() - 1).min(MAX_PAGES);
@@ -235,6 +240,7 @@ impl TableAlloc {
         unsafe { &*(&self.tables[offset + i] as *const _ as *const Table<Entry3>) }
     }
 
+    #[cold]
     fn setup_rec(&self, layer: usize, start: usize) {
         for i in 0..Table::LEN {
             let page = Table::page(layer, start, i);
@@ -261,6 +267,7 @@ impl TableAlloc {
         }
     }
 
+    #[cold]
     fn recover_rec(&self, layer: usize, start: usize, deep: bool) -> Result<(usize, usize, usize)> {
         let mut empty = 0;
         let mut partial_l0 = 0;
@@ -326,6 +333,7 @@ impl TableAlloc {
         Ok((empty, partial_l0, partial_l1))
     }
 
+    #[cold]
     fn reserve_rec_empty(&self, layer: usize, start: usize, size: Size) -> Result<(usize, Entry3)> {
         if layer == 3 {
             return self.reserve_l3_empty(start, size);
@@ -360,6 +368,7 @@ impl TableAlloc {
         Err(Error::Memory)
     }
 
+    #[cold]
     fn reserve_rec_partial(
         &self,
         layer: usize,
@@ -401,11 +410,12 @@ impl TableAlloc {
         Err(Error::Memory)
     }
 
+    #[cold]
     fn update_parents(&self, page: usize, change: Change) -> Result<()> {
         for layer in 4..=Table::LAYERS {
             let pt = self.pt(layer, page);
             let i = Table::idx(layer, page);
-            if let Err(pte) = pt.update(i, |v| v.inc(change)) {
+            if let Err(pte) = pt.update(i, |v| v.change(change)) {
                 error!("Update failed l{layer} i{i} {pte:?} {change:?}");
                 return Err(Error::Corruption);
             }
@@ -413,6 +423,7 @@ impl TableAlloc {
         Ok(())
     }
 
+    #[cold]
     fn unreserve(&self, page: usize, old: Entry3) -> Result<()> {
         let pt = self.pt3(page);
         let i = Table::idx(3, page);

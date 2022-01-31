@@ -15,7 +15,6 @@ buddy_system_allocator = "0.8.0"
 env_logger = { version = "0.9", default-features = false, optional = true }
 
 [dev-dependencies]
-num_cpus = "1.13"
 env_logger = { version = "0.9", default-features = false }
 clap = { version = "3.0.5", default-features = false, features = ["std", "derive"] }
 

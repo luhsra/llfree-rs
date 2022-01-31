@@ -1,7 +1,6 @@
 use std::ops::Range;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard};
 
 use log::{error, warn};
 
@@ -9,7 +8,7 @@ use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
 use crate::leaf_alloc::{LeafAllocator, Leafs};
 use crate::table::Table;
-use crate::util::{Atomic, Page};
+use crate::util::{Atomic, Page, AStack};
 
 const PTE3_FULL: usize = 4 * Table::span(1);
 
@@ -23,27 +22,27 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
 /// Volatile shared metadata
 #[repr(align(64))]
-pub struct PStackAlloc {
+pub struct AStackAlloc {
     memory: Range<*const Page>,
     meta: *mut Meta,
     local: Vec<LeafAllocator<Self>>,
     entries: Vec<Atomic<Entry3>>,
 
-    empty: Mutex<Vec<usize>>,
-    partial_l1: Mutex<Vec<usize>>,
-    partial_l0: Mutex<Vec<usize>>,
+    empty: AStack<Entry3>,
+    partial_l1: AStack<Entry3>,
+    partial_l0: AStack<Entry3>,
 }
 
-const INITIALIZING: *mut PStackAlloc = usize::MAX as _;
-static mut SHARED: AtomicPtr<PStackAlloc> = AtomicPtr::new(null_mut());
+const INITIALIZING: *mut AStackAlloc = usize::MAX as _;
+static mut SHARED: AtomicPtr<AStackAlloc> = AtomicPtr::new(null_mut());
 
-impl Leafs for PStackAlloc {
+impl Leafs for AStackAlloc {
     fn leafs<'a>() -> &'a [LeafAllocator<Self>] {
         &Self::instance().local
     }
 }
 
-impl Alloc for PStackAlloc {
+impl Alloc for AStackAlloc {
     #[cold]
     fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
         warn!(
@@ -156,7 +155,7 @@ impl Alloc for PStackAlloc {
     }
 }
 
-impl PStackAlloc {
+impl AStackAlloc {
     #[cold]
     fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
         // Last frame is reserved for metadata
@@ -173,10 +172,6 @@ impl PStackAlloc {
         let mut entries = Vec::with_capacity(pte3_num);
         entries.resize_with(pte3_num, || Atomic::new(Entry3::new()));
 
-        let empty = Mutex::new(Vec::with_capacity(pte3_num));
-        let partial_l0 = Mutex::new(Vec::with_capacity(pte3_num));
-        let partial_l1 = Mutex::new(Vec::with_capacity(pte3_num));
-
         let local = vec![LeafAllocator::new(memory.as_ptr() as usize, pages); cores];
 
         Ok(Self {
@@ -184,9 +179,9 @@ impl PStackAlloc {
             meta,
             local,
             entries,
-            empty,
-            partial_l1,
-            partial_l0,
+            empty: AStack::new(),
+            partial_l1: AStack::new(),
+            partial_l0: AStack::new(),
         })
     }
 
@@ -199,12 +194,10 @@ impl PStackAlloc {
         self.local[0].clear();
 
         // Add all entries to the empty list
-        let mut empty = self.empty.lock().unwrap();
-
         let pte3_num = Table::num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
-            empty.push(i);
             self.entries[i] = Atomic::new(Entry3::new().with_pages(Table::span(2)));
+            self.empty.push(&self.entries, i);
         }
 
         // The last one may be cut off
@@ -212,9 +205,9 @@ impl PStackAlloc {
         self.entries[pte3_num - 1] = Atomic::new(Entry3::new().with_pages(max));
 
         if max == Table::span(2) {
-            empty.push(pte3_num - 1);
+            self.empty.push(&self.entries, pte3_num - 1);
         } else if max > PTE3_FULL {
-            self.partial_l0.lock().unwrap().push(pte3_num - 1);
+            self.partial_l0.push(&self.entries, pte3_num - 1);
         }
     }
 
@@ -234,9 +227,9 @@ impl PStackAlloc {
 
                 // Add to lists
                 if pages == Table::span(2) {
-                    self.empty.lock().unwrap().push(i);
+                    self.empty.push(&self.entries, i);
                 } else if pages > PTE3_FULL {
-                    self.partial(size).push(i);
+                    self.partial(size).push(&self.entries, i);
                 }
             }
             total += pages;
@@ -244,26 +237,31 @@ impl PStackAlloc {
         Ok(total)
     }
 
-    fn partial<'a, 'b: 'a>(&'b self, size: Size) -> MutexGuard<'a, Vec<usize>> {
+    fn partial(&self, size: Size) -> &AStack<Entry3> {
         if size == Size::L0 {
             &self.partial_l0
         } else {
             &self.partial_l1
         }
-        .lock()
-        .unwrap()
     }
 
     fn reserve_dec(&self, size: Size) -> Result<(usize, Entry3)> {
-        if let Some(i) = self
-            .partial(size)
-            .pop()
-            .or_else(|| self.empty.lock().unwrap().pop())
-        {
+        while let Some(i) = self.partial(size).pop(&self.entries) {
+            // Skip empty entries
+            if self.entries[i].load().pages() < Table::span(2) {
+                warn!("reserve partial {i}");
+                let pte = self.entries[i].update(|v| v.reserve_take(size)).unwrap();
+                let pte = pte.dec(size).unwrap().with_idx(i);
+                return Ok((i * Table::span(2), pte));
+            } else {
+                self.empty.push(&self.entries, i);
+            }
+        }
+
+        if let Some(i) = self.empty.pop(&self.entries) {
+            warn!("reserve empty {i}");
             let pte = self.entries[i].update(|v| v.reserve_take(size)).unwrap();
             let pte = pte.dec(size).unwrap().with_idx(i);
-
-            warn!("reserved {i}");
             return Ok((i * Table::span(2), pte));
         }
 
@@ -283,9 +281,9 @@ impl PStackAlloc {
             let pte = v.unreserve_add(pte, max).unwrap();
             // Add to list if new counter is small enough
             if pte.pages() == max {
-                self.empty.lock().unwrap().push(i);
+                self.empty.push(&self.entries, i);
             } else if pte.pages() > PTE3_FULL {
-                self.partial(size).push(i);
+                self.partial(size).push(&self.entries, i);
             }
         } else {
             error!("Unreserve failed");
@@ -321,12 +319,15 @@ impl PStackAlloc {
     }
 
     fn get_giant(&self, core: usize) -> Result<usize> {
-        if let Some(i) = self.empty.lock().unwrap().pop() {
+        if let Some(i) = self.empty.pop(&self.entries) {
             if self.entries[i]
-                .compare_exchange(
-                    Entry3::new().with_pages(Table::span(2)),
-                    Entry3::new_giant(),
-                )
+                .update(|v| {
+                    if v.pages() == Table::span(2) {
+                        Some(Entry3::new_giant())
+                    } else {
+                        None
+                    }
+                })
                 .is_ok()
             {
                 self.local[core].persist(i * Table::span(2));
@@ -356,7 +357,7 @@ impl PStackAlloc {
             .is_ok()
         {
             // Add to empty list
-            self.empty.lock().unwrap().push(i);
+            self.empty.push(&self.entries, i);
             Ok(())
         } else {
             error!("CAS invalid i{i}");
@@ -390,15 +391,7 @@ impl PStackAlloc {
                 let new_pages = pte3.pages() + Table::span(size as _);
                 if pte3.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
                     // Add back to partial
-                    self.partial(size).push(i);
-                } else if new_pages == Table::span(2) {
-                    // Add back to empty (and remove from partial)
-                    let mut partial = self.partial(size);
-                    if let Some(idx) = partial.iter().copied().position(|v| v == i) {
-                        partial.swap_remove(idx);
-                    }
-                    drop(partial);
-                    self.empty.lock().unwrap().push(i);
+                    self.partial(size).push(&self.entries, i);
                 }
             }
             Ok(())

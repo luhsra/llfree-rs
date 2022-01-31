@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::alloc::{stack, Alloc, Size, MIN_PAGES};
+use nvalloc::alloc::{atomic_stack, Alloc, Size, MIN_PAGES};
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::thread;
@@ -18,7 +18,7 @@ use nvalloc::util::{logging, Cycles, Page};
 struct Args {
     #[clap(short, long, default_value_t = 1)]
     threads: usize,
-    #[clap(short, long, default_value = "bench/detail.csv")]
+    #[clap(short, long, default_value = "bench/out/detail.csv")]
     outfile: String,
     #[clap(long)]
     dax: Option<String>,
@@ -26,11 +26,11 @@ struct Args {
     iterations: usize,
     #[clap(short, long, default_value_t = 0)]
     size: usize,
-    #[clap(long, default_value_t = 2)]
+    #[clap(long, default_value_t = 1)]
     cpu_stride: usize,
 }
 
-type A = stack::StackAlloc;
+type A = atomic_stack::AStackAlloc;
 
 fn main() {
     let Args {
@@ -45,9 +45,9 @@ fn main() {
     logging();
 
     assert!(threads >= 1);
-    assert!(threads * cpu_stride <= num_cpus::get());
+    assert!(threads * cpu_stride <= std::thread::available_parallelism().unwrap().get());
 
-    unsafe { nvalloc::thread::CPU_STRIDE = cpu_stride };
+    unsafe { thread::CPU_STRIDE = cpu_stride };
 
     let size = match size {
         0 => Size::L0,
@@ -148,6 +148,7 @@ fn main() {
 
     let alloc = type_name::<A>();
     let alloc = &alloc[alloc.rfind(':').map(|i| i + 1).unwrap_or_default()..];
+    let alloc = alloc.strip_suffix("Alloc").unwrap_or(alloc);
 
     let mut outfile = File::create(outfile).unwrap();
     writeln!(outfile, "alloc,threads,op,num,avg,std,min,max").unwrap();

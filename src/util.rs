@@ -1,9 +1,15 @@
 use std::alloc::Layout;
+use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::ops::Index;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[allow(unused_imports)]
 use std::time::Instant;
+
+use log::error;
+
+use crate::entry::Entry3;
 
 /// Correctly sized and aligned page.
 #[derive(Clone)]
@@ -37,9 +43,11 @@ pub const fn align_down(v: usize, align: usize) -> usize {
 pub struct Atomic<T: From<u64> + Into<u64>>(AtomicU64, PhantomData<T>);
 
 impl<T: From<u64> + Into<u64>> Atomic<T> {
+    #[inline]
     pub fn new(v: T) -> Self {
         Self(AtomicU64::new(v.into()), PhantomData)
     }
+    #[inline]
     pub fn compare_exchange(&self, current: T, new: T) -> Result<T, T> {
         match self.0.compare_exchange(
             current.into(),
@@ -47,76 +55,32 @@ impl<T: From<u64> + Into<u64>> Atomic<T> {
             Ordering::SeqCst,
             Ordering::SeqCst,
         ) {
-            Ok(v) => Ok(T::from(v)),
-            Err(v) => Err(T::from(v)),
+            Ok(v) => Ok(v.into()),
+            Err(v) => Err(v.into()),
         }
     }
+    #[inline]
     pub fn update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
         match self
             .0
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                f(T::from(v)).map(T::into)
+                f(v.into()).map(T::into)
             }) {
-            Ok(v) => Ok(T::from(v)),
-            Err(v) => Err(T::from(v)),
+            Ok(v) => Ok(v.into()),
+            Err(v) => Err(v.into()),
         }
     }
+    #[inline]
     pub fn load(&self) -> T {
-        T::from(self.0.load(Ordering::SeqCst))
+        self.0.load(Ordering::SeqCst).into()
     }
+    #[inline]
     pub fn store(&self, v: T) {
         self.0.store(v.into(), Ordering::SeqCst)
     }
+    #[inline]
     pub fn swap(&self, v: T) -> T {
         self.0.swap(v.into(), Ordering::SeqCst).into()
-    }
-}
-
-/// Simple atomic stack with atomic entries.
-pub struct AtomicStack {
-    data: Vec<AtomicU64>,
-    i: AtomicUsize,
-}
-
-unsafe impl Send for AtomicStack {}
-unsafe impl Sync for AtomicStack {}
-
-impl AtomicStack {
-    pub fn new(capacity: usize) -> Self {
-        let mut data = Vec::with_capacity(capacity);
-        data.resize_with(capacity, || AtomicU64::new(0));
-        Self {
-            data,
-            i: AtomicUsize::new(0),
-        }
-    }
-    pub fn push(&self, v: u64) -> Result<(), ()> {
-        let i = self.i.fetch_add(1, Ordering::SeqCst);
-        if i < self.data.len() {
-            self.data[i].store(v, Ordering::SeqCst);
-            Ok(())
-        } else {
-            self.i.fetch_sub(1, Ordering::SeqCst);
-            Err(())
-        }
-    }
-    pub fn pop(&self) -> Result<u64, ()> {
-        let mut i = self.i.load(Ordering::SeqCst);
-        loop {
-            if i == 0 {
-                return Err(());
-            }
-            let val = self.data[i - 1].load(Ordering::SeqCst);
-
-            // Check if index is still the same
-            match self
-                .i
-                .compare_exchange(i, i - 1, Ordering::SeqCst, Ordering::SeqCst)
-            {
-                Ok(_) => return Ok(val),
-                Err(j) => i = j,
-            }
-        }
     }
 }
 
@@ -214,13 +178,129 @@ impl Cycles {
     }
 }
 
+/// Node of an atomic stack
+pub trait ANode: Copy + From<u64> + Into<u64> {
+    fn next(&self) -> Option<usize>;
+    fn set_next(&mut self, next: Option<usize>);
+}
+
+impl ANode for Entry3 {
+    fn next(&self) -> Option<usize> {
+        match self.idx() {
+            Entry3::IDX_MAX => None,
+            v => Some(v),
+        }
+    }
+
+    fn set_next(&mut self, next: Option<usize>) {
+        self.set_idx(next.unwrap_or(Entry3::IDX_MAX));
+    }
+}
+
+
+/// Simple atomic stack with atomic entries.
+pub struct AStack<T: ANode> {
+    start: Atomic<u64>,
+    _phantom: PhantomData<T>,
+}
+
+unsafe impl<T: ANode> Send for AStack<T> {}
+unsafe impl<T: ANode> Sync for AStack<T> {}
+
+impl<T: ANode> AStack<T> {
+    pub fn new() -> Self {
+        Self {
+            start: Atomic::new(u64::MAX),
+            _phantom: PhantomData,
+        }
+    }
+    pub fn push<B>(&self, buf: &B, idx: usize)
+    where
+        B: Index<usize, Output = Atomic<T>>,
+    {
+        let mut start = self.start.load();
+        let elem = &buf[idx];
+        let mut v = elem.load();
+        loop {
+            v.set_next(if start < u64::MAX {
+                Some(start as _)
+            } else {
+                None
+            });
+            elem.store(v);
+            match self.start.compare_exchange(start, idx as _) {
+                Ok(_) => return,
+                Err(s) => start = s,
+            }
+        }
+    }
+    pub fn pop<B>(&self, buf: &B) -> Option<usize>
+    where
+        B: Index<usize, Output = Atomic<T>>,
+    {
+        let mut start = self.start.load();
+        loop {
+            if start == u64::MAX {
+                return None;
+            }
+            let next = buf[start as usize]
+                .load()
+                .next()
+                .map(|s| s as u64)
+                .unwrap_or(u64::MAX);
+            match self.start.compare_exchange(start, next) {
+                Ok(_) => return Some(start as usize),
+                Err(s) => start = s,
+            }
+        }
+    }
+}
+#[allow(dead_code)]
+pub struct AArrayDebug<'a, T, B>(pub &'a AStack<T>, pub &'a B)
+where
+    T: ANode + Debug,
+    B: Index<usize, Output = Atomic<T>>;
+
+impl<'a, T, B> Debug for AArrayDebug<'a, T, B>
+where
+    T: ANode + Debug,
+    B: Index<usize, Output = Atomic<T>>,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut dbg = f.debug_list();
+
+        match self.0.start.load() {
+            u64::MAX => {}
+            i => {
+                let mut i = i as usize;
+                let mut ended = false;
+                for _ in 0..1000 {
+                    let elem = self.1[i].load();
+                    dbg.entry(&elem);
+                    if let Some(next) = elem.next() {
+                        i = next;
+                    } else {
+                        ended = true;
+                        break;
+                    }
+                }
+                if !ended {
+                    error!("Circular List!");
+                }
+            }
+        }
+
+        dbg.finish()
+    }
+}
 
 #[cfg(test)]
 mod test {
+    use std::mem::MaybeUninit;
     use std::sync::{Arc, Barrier};
 
-    use super::{AtomicStack, Cycles};
-    use crate::thread;
+    use super::{AArrayDebug, ANode, AStack, Cycles};
+    use crate::{thread::parallel, util::Atomic};
 
     #[cfg(target_arch = "x86_64")]
     #[test]
@@ -232,46 +312,55 @@ mod test {
     }
 
     #[test]
-    fn atomic_stack() {
-        let stack = AtomicStack::new(10);
-        stack.push(10).unwrap();
-        stack.push(1).unwrap();
-        assert_eq!(stack.pop(), Ok(1));
-        assert_eq!(stack.pop(), Ok(10));
-        assert_eq!(stack.pop(), Err(()));
-
-        const THREADS: usize = 4;
-        const N: usize = 10;
-        let shared = Arc::new(AtomicStack::new(THREADS * 4));
-        let clone = shared.clone();
-        let barrier = Arc::new(Barrier::new(THREADS));
-        thread::parallel(THREADS, move |t| {
-            shared.push(t as u64).unwrap();
-            barrier.wait();
-            for i in 0..N {
-                let v = shared.pop().unwrap();
-                shared.push(v + i as u64).unwrap();
-            }
-        });
-
-        let mut count = 0;
-        let mut sum = 0;
-        while let Ok(v) = clone.pop() {
-            count += 1;
-            sum += v;
-            println!("{v}")
-        }
-        assert_eq!(count, 4);
-        assert_eq!(
-            sum,
-            ((1..THREADS).sum::<usize>() + THREADS * (1..N).sum::<usize>()) as u64
-        )
-    }
-
-    #[test]
     fn cycles() {
         let cycles = Cycles::now();
         println!("waiting...");
         println!("cycles {}", cycles.elapsed());
+    }
+
+    static mut DATA: [Atomic<u64>; 16] = unsafe { MaybeUninit::zeroed().assume_init() };
+
+    #[test]
+    fn atomic_stack() {
+        impl ANode for u64 {
+            fn next(&self) -> Option<usize> {
+                if *self == u64::MAX {
+                    None
+                } else {
+                    Some(*self as _)
+                }
+            }
+            fn set_next(&mut self, next: Option<usize>) {
+                *self = next.map(|v| v as u64).unwrap_or(u64::MAX);
+            }
+        }
+
+        let stack = AStack::new();
+        stack.push(unsafe { &DATA }, 0);
+        stack.push(unsafe { &DATA }, 1);
+
+        println!("{:?}", AArrayDebug(&stack, unsafe { &DATA }));
+
+        assert_eq!(stack.pop(unsafe { &DATA }), Some(1));
+        assert_eq!(stack.pop(unsafe { &DATA }), Some(0));
+        assert_eq!(stack.pop(unsafe { &DATA }), None);
+
+        // Stress test
+        let barrier = Arc::new(Barrier::new(4));
+        let stack = Arc::new(stack);
+        let copy = stack.clone();
+
+        parallel(4, move |t| {
+            for _ in 0..100 {
+                barrier.wait();
+                for i in 0..4 {
+                    stack.push(unsafe { &DATA }, t * 4 + i);
+                }
+                for _ in 0..4 {
+                    stack.pop(unsafe { &DATA }).unwrap();
+                }
+            }
+        });
+        assert_eq!(copy.pop(unsafe { &DATA }), None);
     }
 }

@@ -17,6 +17,7 @@ const INITIALIZING: *mut LocalListAlloc = usize::MAX as _;
 static mut SHARED: AtomicPtr<LocalListAlloc> = AtomicPtr::new(null_mut());
 
 impl Alloc for LocalListAlloc {
+    #[cold]
     fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
@@ -67,6 +68,7 @@ impl Alloc for LocalListAlloc {
         Ok(())
     }
 
+    #[cold]
     fn uninit() {
         let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
@@ -77,14 +79,15 @@ impl Alloc for LocalListAlloc {
         unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
     }
 
+    #[cold]
+    fn destroy() {
+        Self::uninit();
+    }
+
     fn instance<'a>() -> &'a Self {
         let ptr = unsafe { SHARED.load(Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
         unsafe { &*ptr }
-    }
-
-    fn destroy() {
-        Self::uninit();
     }
 
     fn get(&self, core: usize, size: Size) -> Result<u64> {
@@ -121,6 +124,7 @@ impl Alloc for LocalListAlloc {
         Ok(())
     }
 
+    #[cold]
     fn allocated_pages(&self) -> usize {
         let mut pages = 0;
         for l in &self.local {

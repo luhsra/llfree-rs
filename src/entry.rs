@@ -29,6 +29,7 @@ pub enum Change {
 }
 
 impl Entry {
+    #[inline]
     pub fn reserve_partial(self, size: Size) -> Option<Self> {
         match size {
             Size::L0 if self.partial_l0() > 0 => Some(self.with_partial_l0(self.partial_l0() - 1)),
@@ -36,6 +37,7 @@ impl Entry {
             _ => None,
         }
     }
+    #[inline]
     pub fn dec_empty(self) -> Option<Self> {
         if self.empty() > 0 {
             Some(self.with_empty(self.empty() - 1))
@@ -43,7 +45,8 @@ impl Entry {
             None
         }
     }
-    pub fn inc(self, dec: Change) -> Option<Self> {
+    #[inline]
+    pub fn change(self, dec: Change) -> Option<Self> {
         match dec {
             Change::IncEmpty => Some(self.with_empty(self.empty() + 1)),
             Change::IncPartialL0 => Some(self.with_partial_l0(self.partial_l0() + 1)),
@@ -84,26 +87,30 @@ pub struct Entry3 {
 }
 
 impl Entry3 {
-    #[inline(always)]
+    pub const IDX_MAX: usize = (1 << 41) - 1;
+
+    #[inline]
     pub fn new_giant() -> Entry3 {
         Entry3::new().with_size_n(3)
     }
-    #[inline(always)]
+    #[inline]
     pub fn new_table(pages: usize, size: Size, reserved: bool) -> Entry3 {
         Entry3::new()
             .with_pages(pages)
             .with_size_n(size as u8 + 1)
             .with_reserved(reserved)
     }
+    #[inline]
     pub fn size(self) -> Option<Size> {
-        let s = self.size_n();
-        match s {
-            1..=3 => Some(unsafe { std::mem::transmute(s - 1) }),
+        match self.size_n() {
+            1 => Some(Size::L0),
+            2 => Some(Size::L1),
+            3 => Some(Size::L2),
             _ => None,
         }
     }
     /// Decrements the free pages counter and sets the size and reserved bits.
-    #[inline(always)]
+    #[inline]
     pub fn dec(self, size: Size) -> Option<Entry3> {
         if self.size_n() != 3
             && (self.size() == None || self.size() == Some(size))
@@ -119,7 +126,7 @@ impl Entry3 {
         }
     }
     /// Increments the free pages counter and clears the size flag if empty.
-    #[inline(always)]
+    #[inline]
     pub fn inc(self, size: Size, max: usize) -> Option<Entry3> {
         if self.size_n() == 3 || self.size() != Some(size) {
             return None;
@@ -133,7 +140,7 @@ impl Entry3 {
     }
     /// Increments the free pages counter and clears the size flag if empty.
     /// Additionally checks for `idx` to match.
-    #[inline(always)]
+    #[inline]
     pub fn inc_idx(self, size: Size, idx: usize, max: usize) -> Option<Entry3> {
         if self.size_n() == 3 || self.size() != Some(size) || self.idx() != idx {
             return None;
@@ -147,7 +154,7 @@ impl Entry3 {
         }
     }
     /// Sets the size and reserved bits and the page counter to it's max value.
-    #[inline(always)]
+    #[inline]
     pub fn reserve_take(self, size: Size) -> Option<Entry3> {
         if self.size_n() != 3
             && (self.size() == None || self.size() == Some(size))
@@ -162,7 +169,7 @@ impl Entry3 {
             None
         }
     }
-    #[inline(always)]
+    #[inline]
     pub fn reserve_partial(self, size: Size) -> Option<Entry3> {
         if !self.reserved()
             && self.pages() >= Table::span(size as _)
@@ -178,7 +185,7 @@ impl Entry3 {
             None
         }
     }
-    #[inline(always)]
+    #[inline]
     pub fn reserve_empty(self, size: Size) -> Option<Entry3> {
         if !self.reserved()
             && self.pages() >= Table::span(size as _)
@@ -194,7 +201,7 @@ impl Entry3 {
             None
         }
     }
-    #[inline(always)]
+    #[inline]
     pub fn unreserve(self) -> Option<Entry3> {
         if self.size_n() != 3 && self.reserved() {
             Some(self.with_reserved(false).with_idx(0))
@@ -203,7 +210,7 @@ impl Entry3 {
         }
     }
     /// Clear reserve flag and own free pages from `other`.
-    #[inline(always)]
+    #[inline]
     pub fn unreserve_add(self, other: Entry3, max: usize) -> Option<Entry3> {
         let pages = self.pages() + other.pages();
         if self.reserved() && self.size_n() != 3 && self.size_n() == other.size_n() && pages <= max
@@ -239,11 +246,11 @@ pub struct Entry2 {
 }
 
 impl Entry2 {
-    #[inline(always)]
+    #[inline]
     pub fn new_table(pages: usize, i1: usize) -> Self {
         Self::new().with_pages(pages).with_i1(i1)
     }
-    #[inline(always)]
+    #[inline]
     pub fn mark_huge(self) -> Option<Self> {
         if !self.giant() && !self.page() && self.pages() == Table::span(Size::L1 as _) {
             Some(Entry2::new().with_pages(0).with_i1(0).with_page(true))
@@ -251,7 +258,7 @@ impl Entry2 {
             None
         }
     }
-    #[inline(always)]
+    #[inline]
     pub fn dec(self, i1: usize) -> Option<Self> {
         if !self.page() && !self.giant() && self.i1() == i1 && self.pages() > 0 {
             Some(self.with_pages(self.pages() - 1))
@@ -259,7 +266,7 @@ impl Entry2 {
             None
         }
     }
-    #[inline(always)]
+    #[inline]
     pub fn inc(self, i1: usize) -> Option<Self> {
         if !self.giant()
             && !self.page()
@@ -295,8 +302,10 @@ pub enum Entry1 {
 
 impl From<u64> for Entry1 {
     fn from(v: u64) -> Self {
-        assert!(v <= Self::Page as u64);
-        unsafe { std::mem::transmute(v) }
+        match v {
+            0 => Entry1::Empty,
+            _ => Entry1::Page,
+        }
     }
 }
 

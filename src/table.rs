@@ -27,35 +27,36 @@ impl Table {
     pub const LAYERS: usize = 4;
 
     /// Area in bytes that a page table covers
-    #[inline(always)]
+    #[inline]
     pub const fn m_span(layer: usize) -> usize {
         Self::span(layer) << Page::SIZE_BITS
     }
 
     /// Area in pages that a page table covers
-    #[inline(always)]
+    #[inline]
     pub const fn span(layer: usize) -> usize {
         1 << (Self::LEN_BITS * layer)
     }
 
     /// Returns pt index that contains the `page`
-    #[inline(always)]
+    #[inline]
     pub const fn idx(layer: usize, page: usize) -> usize {
         (page >> (Self::LEN_BITS * (layer - 1))) & (Self::LEN - 1)
     }
 
     /// Returns the starting page of the corresponding page table
-    #[inline(always)]
+    #[inline]
     pub const fn round(layer: usize, page: usize) -> usize {
         page & !((1 << (Self::LEN_BITS * layer)) - 1)
     }
 
     /// Returns the page at the given index `i`
-    #[inline(always)]
+    #[inline]
     pub const fn page(layer: usize, start: usize, i: usize) -> usize {
         Self::round(layer, start) + i * Self::span(layer - 1)
     }
 
+    #[inline]
     pub const fn num_pts(layer: usize, pages: usize) -> usize {
         (pages + Self::span(layer) - 1) / Self::span(layer)
     }
@@ -95,25 +96,24 @@ impl<T: Sized + From<u64> + Into<u64>> Table<T> {
             phantom: PhantomData,
         }
     }
-
     pub fn clear(&self) {
         for i in 0..Table::LEN {
             self.entries[i].store(T::from(0));
         }
     }
-
+    #[inline]
     pub fn get(&self, i: usize) -> T {
         self.entries[i].load()
     }
-
+    #[inline]
     pub fn set(&self, i: usize, e: T) {
         self.entries[i].store(e);
     }
-
+    #[inline]
     pub fn cas(&self, i: usize, expected: T, new: T) -> Result<T, T> {
         self.entries[i].compare_exchange(expected, new)
     }
-
+    #[inline]
     pub fn update<F: FnMut(T) -> Option<T>>(&self, i: usize, f: F) -> Result<T, T> {
         self.entries[i].update(f)
     }
@@ -207,8 +207,7 @@ mod test {
         assert_eq!(iter.next(), Some((1, 6)));
         assert_eq!(iter.last(), Some((511, 4)));
 
-        let mut iter =
-            Table::iterate(1, 5 + 2 * Table::span(1)).enumerate();
+        let mut iter = Table::iterate(1, 5 + 2 * Table::span(1)).enumerate();
         assert_eq!(iter.next(), Some((0, 5 + 2 * Table::span(1))));
         assert_eq!(iter.next(), Some((1, 6 + 2 * Table::span(1))));
         assert_eq!(iter.last(), Some((511, 4 + 2 * Table::span(1))));

@@ -10,9 +10,9 @@ use std::time::Instant;
 use clap::Parser;
 use log::warn;
 
-use nvalloc::alloc::buddy::BuddyAlloc;
+use nvalloc::alloc::atomic_stack::AStackAlloc;
 use nvalloc::alloc::local_lists::LocalListAlloc;
-use nvalloc::alloc::packed_stack::PackedStackAlloc;
+use nvalloc::alloc::packed_stack::PStackAlloc;
 use nvalloc::alloc::stack::StackAlloc;
 use nvalloc::alloc::table::TableAlloc;
 use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
@@ -29,7 +29,7 @@ struct Args {
     realloc: bool,
     #[clap(short, long, default_value = "1")]
     threads: Vec<usize>,
-    #[clap(short, long, default_value = "bench/bench.csv")]
+    #[clap(short, long, default_value = "bench/out/bench.csv")]
     outfile: String,
     #[clap(long)]
     dax: Option<String>,
@@ -37,7 +37,7 @@ struct Args {
     iterations: usize,
     #[clap(short, long, default_value_t = 0)]
     size: usize,
-    #[clap(long, default_value_t = 2)]
+    #[clap(long, default_value_t = 1)]
     cpu_stride: usize,
     /// Memory in GiB
     #[clap(short, long, default_value_t = 16)]
@@ -60,7 +60,7 @@ fn main() {
 
     for &thread in &threads {
         assert!(thread >= 1);
-        assert!(thread * cpu_stride <= num_cpus::get());
+        assert!(thread * cpu_stride <= std::thread::available_parallelism().unwrap().get());
     }
     let max_threads = threads.iter().copied().max().unwrap();
     let thread_pages = (memory * Table::span(2)) / max_threads;
@@ -100,18 +100,21 @@ fn main() {
         for i in 0..iterations {
             let mapping = &mut mapping[..thread_pages * threads];
 
-            let perf = bench_alloc::<TableAlloc>(mapping, Size::L0, threads, realloc);
-            writeln!(outfile, "TableAlloc,{threads},{i},{perf}").unwrap();
+            let perf = bench_alloc::<TableAlloc>(mapping, size, threads, realloc);
+            writeln!(outfile, "Table,{threads},{i},{perf}").unwrap();
 
-            let perf = bench_alloc::<StackAlloc>(mapping, Size::L0, threads, realloc);
-            writeln!(outfile, "StackAlloc,{threads},{i},{perf}").unwrap();
+            let perf = bench_alloc::<StackAlloc>(mapping, size, threads, realloc);
+            writeln!(outfile, "Stack,{threads},{i},{perf}").unwrap();
 
-            let perf = bench_alloc::<PackedStackAlloc>(mapping, Size::L0, threads, realloc);
-            writeln!(outfile, "PackedStackAlloc,{threads},{i},{perf}").unwrap();
+            let perf = bench_alloc::<PStackAlloc>(mapping, size, threads, realloc);
+            writeln!(outfile, "PStack,{threads},{i},{perf}").unwrap();
+
+            let perf = bench_alloc::<AStackAlloc>(mapping, size, threads, realloc);
+            writeln!(outfile, "AStack,{threads},{i},{perf}").unwrap();
 
             if size == Size::L0 {
                 let perf = bench_alloc::<LocalListAlloc>(mapping, Size::L0, threads, realloc);
-                writeln!(outfile, "LocalListAlloc,{threads},{i},{perf}").unwrap();
+                writeln!(outfile, "LocalList,{threads},{i},{perf}").unwrap();
             }
         }
     }
@@ -215,7 +218,10 @@ fn bench_alloc<A: Alloc>(mapping: &mut [Page], size: Size, threads: usize, reall
     };
 
     if realloc {
-        assert_eq!(A::instance().allocated_pages(), threads * allocs);
+        assert_eq!(
+            A::instance().allocated_pages(),
+            threads * allocs * Table::span(size as _)
+        );
     } else {
         assert_eq!(A::instance().allocated_pages(), 0);
     }

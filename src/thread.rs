@@ -7,7 +7,7 @@ thread_local! {
 
 /// Useful if we only want to operate on a single numa node.
 /// Pin then only selects every n'th cpu.
-pub static mut CPU_STRIDE: usize = 2;
+pub static mut CPU_STRIDE: usize = 1;
 
 #[cfg(target_os = "linux")]
 pub fn pin(core: usize) {
@@ -30,7 +30,11 @@ pub fn pin(core: usize) {
 pub fn pin(core: usize) {
     #![allow(non_camel_case_types)]
 
-    use std::{mem, os::raw::{c_int, c_uint}, sync::atomic::Ordering};
+    use std::{
+        mem,
+        os::raw::{c_int, c_uint},
+        sync::atomic::Ordering,
+    };
 
     type kern_return_t = c_int;
     type thread_t = c_uint;
@@ -93,11 +97,23 @@ pub fn parallel<T: Send + 'static, F: FnOnce(usize) -> T + Clone + Send + 'stati
 
 #[cfg(test)]
 mod test {
+    use std::sync::atomic::Ordering;
+
     #[test]
     fn pinning() {
+        let cores = std::thread::available_parallelism().unwrap().get();
+
+        println!("max cores: {cores}");
+
         super::pin(0);
-        println!("Pinned to 0");
-        super::pin(num_cpus::get_physical() - 1);
-        println!("Pinned to {}", num_cpus::get_physical() - 1);
+        println!(
+            "Pinned to {}",
+            super::PINNED.with(|v| v.load(Ordering::SeqCst))
+        );
+        super::pin((cores - 1) / unsafe { super::CPU_STRIDE });
+        println!(
+            "Pinned to {}",
+            super::PINNED.with(|v| v.load(Ordering::SeqCst))
+        );
     }
 }

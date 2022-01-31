@@ -2,6 +2,7 @@
 //!
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
 #![feature(panic_info_message)]
+#![feature(const_maybe_uninit_zeroed)]
 
 pub mod alloc;
 pub mod entry;

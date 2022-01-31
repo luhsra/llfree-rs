@@ -37,7 +37,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         println!("CPU cores");
-        for i in 0..num_cpus::get() {
+        for i in 0..std::thread::available_parallelism().unwrap().get() {
             thread::pin(i);
             let (cpu, numa) = getcpu();
             println!("{i:>4} on C={cpu} N={numa}");
