@@ -12,6 +12,7 @@ use log::warn;
 
 use nvalloc::alloc::atomic_stack::AStackAlloc;
 use nvalloc::alloc::local_lists::LocalListAlloc;
+use nvalloc::alloc::locked_lists::LockedListAlloc;
 use nvalloc::alloc::packed_stack::PStackAlloc;
 use nvalloc::alloc::stack::StackAlloc;
 use nvalloc::alloc::table::TableAlloc;
@@ -115,6 +116,9 @@ fn main() {
             if size == Size::L0 {
                 let perf = bench_alloc::<LocalListAlloc>(mapping, Size::L0, threads, realloc);
                 writeln!(outfile, "LocalList,{threads},{i},{perf}").unwrap();
+
+                let perf = bench_alloc::<LockedListAlloc>(mapping, Size::L0, threads, realloc);
+                writeln!(outfile, "LockedList,{threads},{i},{perf}").unwrap();
             }
         }
     }

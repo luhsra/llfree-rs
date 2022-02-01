@@ -8,6 +8,7 @@ use crate::util::Page;
 pub mod atomic_stack;
 pub mod buddy;
 pub mod local_lists;
+pub mod locked_lists;
 pub mod malloc;
 pub mod packed_stack;
 pub mod stack;
@@ -43,7 +44,7 @@ pub enum Size {
     L2 = 2,
 }
 
-pub type Allocator = stack::StackAlloc;
+pub type Allocator = locked_lists::LockedListAlloc;
 
 pub trait Alloc {
     /// Initialize the allocator.
