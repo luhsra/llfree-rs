@@ -90,7 +90,7 @@ fn main() {
     let allocs = thread_pages / 2 / Table::span(size as _);
     warn!("Allocs: {allocs} of size {size:?}");
 
-    let mut mapping = mapping(0x1000_0000_0000, thread_pages * max_threads, dax).unwrap();
+    let mut mapping = mapping(0x1000_0000_0000, memory * Table::span(2), dax).unwrap();
 
     // Warmup
     for page in &mut mapping[..] {
@@ -129,8 +129,9 @@ fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<
     if length > 0 {
         if let Some(file) = dax {
             warn!(
-                "MMap file {file} l={}G",
-                (length * std::mem::size_of::<Page>()) >> 30
+                "MMap file {file} l={}G ({:x})",
+                (length * std::mem::size_of::<Page>()) >> 30,
+                length * std::mem::size_of::<Page>()
             );
             let f = std::fs::OpenOptions::new()
                 .read(true)
