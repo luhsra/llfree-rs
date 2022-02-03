@@ -117,8 +117,10 @@ fn main() {
                 let perf = bench_alloc::<LocalListAlloc>(mapping, Size::L0, threads, realloc);
                 writeln!(outfile, "LocalList,{threads},{i},{perf}").unwrap();
 
-                let perf = bench_alloc::<LockedListAlloc>(mapping, Size::L0, threads, realloc);
-                writeln!(outfile, "LockedList,{threads},{i},{perf}").unwrap();
+                if threads <= 24 {
+                    let perf = bench_alloc::<LockedListAlloc>(mapping, Size::L0, threads, realloc);
+                    writeln!(outfile, "LockedList,{threads},{i},{perf}").unwrap();
+                }
             }
         }
     }
