@@ -17,7 +17,7 @@ MODULE_AUTHOR("Lars Wrenger");
 #endif
 
 #ifndef CPU_STRIDE
-#define CPU_STRIDE 2
+#define CPU_STRIDE 1
 #endif
 
 #ifndef THREADS_MAX
@@ -30,8 +30,8 @@ MODULE_AUTHOR("Lars Wrenger");
 #define ITERATIONS 4
 #endif
 
-static const u64 threads[] = {1,  2,  4,  6,  8,  12, 16, 20,
-                              24, 28, 32, 36, 40, 44, 48};
+static const u64 threads[] = {1,  2,  4,  6,  8,  12, 16, 20, 24, 28, 32,
+                              36, 40, 44, 48, 56, 64, 72, 80, 88, 96};
 #define THREADS_LEN (sizeof(threads) / sizeof(*threads))
 
 static struct task_struct *tasks[THREADS_MAX];
