@@ -27,7 +27,7 @@ fn main() {
         metadata(&filename).unwrap().len() as usize
     };
 
-    info!("open file {}", filename);
+    info!("open file {filename}");
 
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -35,10 +35,15 @@ fn main() {
         .open(&filename)
         .unwrap();
 
-    info!("map file s={}", size);
+    info!("map file s={size}");
 
-    let mut mapping = MMap::file(0x1000_0000_0000_u64 as _, size, file).unwrap();
-    info!("mapping {:?} len={}", mapping.as_ptr_range(), mapping.len());
+    let mut mapping = MMap::<u64>::file(0x1000_0000_0000_u64 as _, size, file).unwrap();
+    info!(
+        "mapping {:?} size={} len={}",
+        mapping.as_ptr_range(),
+        mapping.as_ptr_range().end as usize - mapping.as_ptr_range().start as usize,
+        mapping.len()
+    );
 
     info!("check read/write");
 
