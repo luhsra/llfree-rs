@@ -37,7 +37,7 @@ fn main() {
 
     info!("map file s={size}");
 
-    let mut mapping = MMap::<u64>::file(0x1000_0000_0000_u64 as _, size, file).unwrap();
+    let mut mapping = MMap::<u8>::file(0x1000_0000_0000_u64 as _, size, file).unwrap();
     info!(
         "mapping {:?} size={} len={}",
         mapping.as_ptr_range(),
