@@ -38,6 +38,7 @@ fn main() {
     info!("map file s={}", size);
 
     let mut mapping = MMap::file(0x1000_0000_0000_u64 as _, size, file).unwrap();
+    info!("mapping {:?} len={}", mapping.as_ptr_range(), mapping.len());
 
     info!("check read/write");
 
