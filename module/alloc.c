@@ -63,7 +63,7 @@ static ssize_t out_show(struct kobject *kobj, struct kobj_attribute *attr,
     ssize_t len = sprintf(buf, "alloc,threads,iteration,allocs,get_min,get_avg,"
                                "get_max,put_min,put_avg,put_max,init,total\n");
 
-    for (i = 0; threads[i] <= THREADS_MAX; i++) {
+    for (i = 0; threads[i] <= THREADS_MAX && i < THREADS_LEN; i++) {
         for (iter = 0; iter < ITERATIONS; iter++) {
             p = &perf[i * ITERATIONS + iter];
             len += sprintf(
@@ -190,7 +190,7 @@ static int alloc_init_module(void) {
         kobject_put(output);
     }
 
-    for (i = 0; threads[i] <= THREADS_MAX; i++) {
+    for (i = 0; threads[i] <= THREADS_MAX && i < THREADS_LEN; i++) {
         for (iter = 0; iter < ITERATIONS; iter++) {
             printk(KERN_INFO MOD "Start threads %llu\n", threads[i]);
             for (t = 0; t < threads[i]; t++) {
