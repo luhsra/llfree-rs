@@ -455,14 +455,14 @@ mod test {
     use log::warn;
 
     use super::Leafs;
-    use crate::alloc::{stack::StackAlloc, Alloc};
+    use crate::alloc::{array_aligned::ArrayAlignedAlloc, Alloc};
     use crate::entry::Entry1;
     use crate::table::Table;
     use crate::thread;
     use crate::util::{logging, Page};
     use crate::wait::{DbgWait, DbgWaitKey};
 
-    type Allocator = StackAlloc;
+    type Allocator = ArrayAlignedAlloc;
 
     fn count(pt: &Table<Entry1>) -> usize {
         let mut pages = 0;

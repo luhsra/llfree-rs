@@ -5,6 +5,7 @@
 #include <linux/kthread.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/timekeeping.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Kernel Alloc Test");
@@ -22,7 +23,7 @@ MODULE_AUTHOR("Lars Wrenger");
 
 #ifndef THREADS_MAX
 #define THREADS_MAX 6UL
-#elif THREADS_MAX > 48
+#elif THREADS_MAX > 96
 #error "THREADS_MAX cannot be larger then 48"
 #endif
 
@@ -30,7 +31,7 @@ MODULE_AUTHOR("Lars Wrenger");
 #define ITERATIONS 4
 #endif
 
-static const u64 threads[] = {1,  2,  4,  6,  8,  12, 16, 20, 24, 28, 32,
+static const u64 threads[] = {1,  2,  4,  6,  8, 10, 12, 16, 20, 24, 28, 32,
                               36, 40, 44, 48, 56, 64, 72, 80, 88, 96};
 #define THREADS_LEN (sizeof(threads) / sizeof(*threads))
 
@@ -59,17 +60,17 @@ static ssize_t out_show(struct kobject *kobj, struct kobj_attribute *attr,
                         char *buf) {
     ssize_t i, iter;
     struct perf *p;
-    ssize_t len = sprintf(buf, "alloc,threads,iteration,get_min,get_avg,"
-                               "get_max,put_min,put_avg,put_max,total\n");
+    ssize_t len = sprintf(buf, "alloc,threads,iteration,allocs,get_min,get_avg,"
+                               "get_max,put_min,put_avg,put_max,init,total\n");
 
     for (i = 0; threads[i] <= THREADS_MAX; i++) {
         for (iter = 0; iter < ITERATIONS; iter++) {
             p = &perf[i * ITERATIONS + iter];
             len += sprintf(
                 buf + len,
-                "KernelAlloc,%llu,%lu,%llu,%llu,%llu,%llu,%llu,%llu,0\n",
-                threads[i], iter, p->get_min, p->get_avg, p->get_max,
-                p->put_min, p->put_avg, p->put_max);
+                "KernelAlloc,%llu,%lu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,0,0\n",
+                threads[i], iter, (u64)NUM_ALLOCS, p->get_min, p->get_avg,
+                p->get_max, p->put_min, p->put_avg, p->put_max);
         }
     }
     return len;
@@ -116,14 +117,14 @@ static int worker(void *data) {
     // Start allocations
     wait_for_completion(&start_barrier);
 
-    timer = cycles();
+    timer = ktime_get_ns();
     for (j = 0; j < NUM_ALLOCS; j++) {
         pages[j] = alloc_page(GFP_USER);
         if (pages == NULL) {
             printk(KERN_ERR MOD "alloc_page failed");
         }
     }
-    timer = (cycles() - timer) / NUM_ALLOCS;
+    timer = (ktime_get_ns() - timer) / NUM_ALLOCS;
     atomic64_set(&thread_perf[tid].get, timer);
     printk(KERN_INFO MOD "Alloc %llu\n", timer);
 
@@ -132,11 +133,11 @@ static int worker(void *data) {
     // Start frees
     wait_for_completion(&mid_barrier);
 
-    timer = cycles();
+    timer = ktime_get_ns();
     for (j = 0; j < NUM_ALLOCS; j++) {
         __free_page(pages[j]);
     }
-    timer = (cycles() - timer) / NUM_ALLOCS;
+    timer = (ktime_get_ns() - timer) / NUM_ALLOCS;
     atomic64_set(&thread_perf[tid].put, timer);
     printk(KERN_INFO MOD "Free %llu\n", timer);
 
@@ -150,7 +151,7 @@ static int worker(void *data) {
     // Start reallocs
     wait_for_completion(&mid_barrier);
 
-    timer = cycles();
+    timer = ktime_get_ns();
     for (j = 0; j < NUM_ALLOCS; j++) {
         page = alloc_page(GFP_USER);
         if (page == NULL) {
@@ -158,7 +159,7 @@ static int worker(void *data) {
         }
         __free_page(page);
     }
-    timer = (cycles() - timer) / NUM_ALLOCS;
+    timer = (ktime_get_ns() - timer) / NUM_ALLOCS;
     atomic64_set(&thread_perf[tid].get, timer);
     atomic64_set(&thread_perf[tid].put, timer);
     printk(KERN_INFO MOD "Realloc %llu\n", timer);

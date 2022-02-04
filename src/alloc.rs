@@ -5,13 +5,13 @@ use log::error;
 use crate::table::Table;
 use crate::util::Page;
 
-pub mod atomic_stack;
+pub mod array_aligned;
+pub mod array_atomic;
+pub mod array_packed;
 pub mod buddy;
-pub mod local_lists;
-pub mod locked_lists;
+pub mod list_local;
+pub mod list_locked;
 pub mod malloc;
-pub mod packed_stack;
-pub mod stack;
 pub mod table;
 
 pub const MAGIC: usize = 0xdeadbeef;
@@ -44,14 +44,17 @@ pub enum Size {
     L2 = 2,
 }
 
-pub type Allocator = locked_lists::LockedListAlloc;
+pub type Allocator = list_locked::ListLockedAlloc;
 
 pub trait Alloc {
     /// Initialize the allocator.
+    #[cold]
     fn init(cores: usize, memory: &mut [Page]) -> Result<()>;
     /// Uninitialize the allocator. The persistent data remains.
+    #[cold]
     fn uninit();
     /// Clear the persistent memory pool.
+    #[cold]
     fn destroy();
 
     /// Return the initialized allocator instance (or panic if it is not initialized)
@@ -84,6 +87,7 @@ pub trait Alloc {
     fn put(&self, core: usize, addr: u64) -> Result<()>;
 
     /// Return the number of allocated pages.
+    #[cold]
     fn allocated_pages(&self) -> usize;
 }
 

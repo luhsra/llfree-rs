@@ -6,11 +6,11 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::alloc::{atomic_stack, Alloc, Size, MIN_PAGES};
+use nvalloc::alloc::{array_atomic, Alloc, Size, MIN_PAGES};
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::thread;
-use nvalloc::util::{logging, Cycles, Page};
+use nvalloc::util::{logging, Page};
 
 /// Benchmarking an allocator in more detail.
 #[derive(Parser, Debug)]
@@ -30,7 +30,7 @@ struct Args {
     cpu_stride: usize,
 }
 
-type A = atomic_stack::AStackAlloc;
+type A = array_atomic::ArrayAtomicAlloc;
 
 fn main() {
     let Args {
@@ -77,19 +77,19 @@ fn main() {
 
         let barrier = Arc::new(Barrier::new(threads));
 
-        let timer = Instant::now();
         let barrier = barrier.clone();
         let t_times = thread::parallel(threads as _, move |t| {
             thread::pin(t);
             barrier.wait();
+            let timer = Instant::now();
             let mut pages = Vec::new();
             let mut times = vec![Perf::default(); 2 * Table::LEN];
 
             let t_get = &mut times[0..Table::LEN];
             for i in 0..allocs {
-                let timer = Cycles::now();
+                let timer = Instant::now();
                 pages.push(A::instance().get(t, size).unwrap());
-                let t = timer.elapsed() as f64;
+                let t = timer.elapsed().as_nanos() as f64;
 
                 let p = &mut t_get[i % Table::LEN];
                 p.avg += t;
@@ -102,9 +102,9 @@ fn main() {
 
             let t_put = &mut times[Table::LEN..];
             for (i, page) in pages.into_iter().enumerate() {
-                let timer = Cycles::now();
+                let timer = Instant::now();
                 A::instance().put(t, page).unwrap();
-                let t = timer.elapsed() as f64;
+                let t = timer.elapsed().as_nanos() as f64;
 
                 let p = &mut t_put[i % Table::LEN];
                 p.avg += t;
@@ -119,8 +119,7 @@ fn main() {
                 t.std /= n;
             }
 
-            let total = timer.elapsed().as_millis();
-            warn!("time {total}ms");
+            warn!("time {}ms", timer.elapsed().as_millis());
             times
         });
 
@@ -147,7 +146,7 @@ fn main() {
     }
 
     let alloc = type_name::<A>();
-    let alloc = &alloc[alloc.rfind(':').map(|i| i + 1).unwrap_or_default()..];
+    let alloc = alloc.rsplit_once(':').map(|s| s.1).unwrap_or(alloc);
     let alloc = alloc.strip_suffix("Alloc").unwrap_or(alloc);
 
     let mut outfile = File::create(outfile).unwrap();

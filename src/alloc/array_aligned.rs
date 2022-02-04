@@ -22,7 +22,7 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
 /// Volatile shared metadata
 #[repr(align(64))]
-pub struct StackAlloc {
+pub struct ArrayAlignedAlloc {
     memory: Range<*const Page>,
     meta: *mut Meta,
     local: Vec<LeafAllocator<Self>>,
@@ -36,16 +36,16 @@ pub struct StackAlloc {
 #[repr(align(64))]
 struct Aligned(Atomic<Entry3>);
 
-const INITIALIZING: *mut StackAlloc = usize::MAX as _;
-static mut SHARED: AtomicPtr<StackAlloc> = AtomicPtr::new(null_mut());
+const INITIALIZING: *mut ArrayAlignedAlloc = usize::MAX as _;
+static mut SHARED: AtomicPtr<ArrayAlignedAlloc> = AtomicPtr::new(null_mut());
 
-impl Leafs for StackAlloc {
+impl Leafs for ArrayAlignedAlloc {
     fn leafs<'a>() -> &'a [LeafAllocator<Self>] {
         &Self::instance().local
     }
 }
 
-impl Index<usize> for StackAlloc {
+impl Index<usize> for ArrayAlignedAlloc {
     type Output = Atomic<Entry3>;
 
     #[inline]
@@ -54,8 +54,7 @@ impl Index<usize> for StackAlloc {
     }
 }
 
-impl Alloc for StackAlloc {
-    #[cold]
+impl Alloc for ArrayAlignedAlloc {
     fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
@@ -100,7 +99,6 @@ impl Alloc for StackAlloc {
         Ok(())
     }
 
-    #[cold]
     fn uninit() {
         let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
@@ -113,7 +111,6 @@ impl Alloc for StackAlloc {
         unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
     }
 
-    #[cold]
     fn destroy() {
         let alloc = Self::instance();
         let meta = unsafe { &*alloc.meta };
@@ -150,7 +147,6 @@ impl Alloc for StackAlloc {
         }
     }
 
-    #[cold]
     fn allocated_pages(&self) -> usize {
         let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {
@@ -162,7 +158,7 @@ impl Alloc for StackAlloc {
     }
 }
 
-impl StackAlloc {
+impl ArrayAlignedAlloc {
     #[cold]
     fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
         // Last frame is reserved for metadata

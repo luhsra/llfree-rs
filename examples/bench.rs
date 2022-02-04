@@ -10,16 +10,16 @@ use std::time::Instant;
 use clap::Parser;
 use log::warn;
 
-use nvalloc::alloc::atomic_stack::AStackAlloc;
-use nvalloc::alloc::local_lists::LocalListAlloc;
-use nvalloc::alloc::locked_lists::LockedListAlloc;
-use nvalloc::alloc::packed_stack::PStackAlloc;
-use nvalloc::alloc::stack::StackAlloc;
+use nvalloc::alloc::array_aligned::ArrayAlignedAlloc;
+use nvalloc::alloc::array_atomic::ArrayAtomicAlloc;
+use nvalloc::alloc::array_packed::ArrayPackedAlloc;
+use nvalloc::alloc::list_local::ListLocalAlloc;
+use nvalloc::alloc::list_locked::ListLockedAlloc;
 use nvalloc::alloc::table::TableAlloc;
 use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
-use nvalloc::util::{Cycles, Page};
+use nvalloc::util::Page;
 use nvalloc::{thread, util};
 
 /// Benchmarking the allocators against each other.
@@ -75,11 +75,7 @@ fn main() {
     unsafe { nvalloc::thread::CPU_STRIDE = cpu_stride };
 
     let mut outfile = File::create(outfile).unwrap();
-    writeln!(
-        outfile,
-        "alloc,threads,iteration,get_min,get_avg,get_max,put_min,put_avg,put_max,total"
-    )
-    .unwrap();
+    writeln!(outfile, "alloc,threads,iteration,allocs,{}", Perf::header()).unwrap();
 
     let size = match size {
         0 => Size::L0,
@@ -101,25 +97,23 @@ fn main() {
         for i in 0..iterations {
             let mapping = &mut mapping[..thread_pages * threads];
 
-            let perf = bench_alloc::<TableAlloc>(mapping, size, threads, realloc);
-            writeln!(outfile, "Table,{threads},{i},{perf}").unwrap();
-
-            let perf = bench_alloc::<StackAlloc>(mapping, size, threads, realloc);
-            writeln!(outfile, "Stack,{threads},{i},{perf}").unwrap();
-
-            let perf = bench_alloc::<PStackAlloc>(mapping, size, threads, realloc);
-            writeln!(outfile, "PStack,{threads},{i},{perf}").unwrap();
-
-            let perf = bench_alloc::<AStackAlloc>(mapping, size, threads, realloc);
-            writeln!(outfile, "AStack,{threads},{i},{perf}").unwrap();
+            bench_alloc::<TableAlloc>(mapping, size, threads, realloc, i, &mut outfile);
+            bench_alloc::<ArrayAlignedAlloc>(mapping, size, threads, realloc, i, &mut outfile);
+            bench_alloc::<ArrayPackedAlloc>(mapping, size, threads, realloc, i, &mut outfile);
+            bench_alloc::<ArrayAtomicAlloc>(mapping, size, threads, realloc, i, &mut outfile);
 
             if size == Size::L0 {
-                let perf = bench_alloc::<LocalListAlloc>(mapping, Size::L0, threads, realloc);
-                writeln!(outfile, "LocalList,{threads},{i},{perf}").unwrap();
+                bench_alloc::<ListLocalAlloc>(mapping, Size::L0, threads, realloc, i, &mut outfile);
 
                 if threads <= 24 {
-                    let perf = bench_alloc::<LockedListAlloc>(mapping, Size::L0, threads, realloc);
-                    writeln!(outfile, "LockedList,{threads},{i},{perf}").unwrap();
+                    bench_alloc::<ListLockedAlloc>(
+                        mapping,
+                        Size::L0,
+                        threads,
+                        realloc,
+                        i,
+                        &mut outfile,
+                    );
                 }
             }
         }
@@ -146,120 +140,132 @@ fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<
     MMap::anon(begin, length)
 }
 
-fn bench_alloc<A: Alloc>(mapping: &mut [Page], size: Size, threads: usize, realloc: bool) -> Perf {
-    warn!("\n\n>>> bench t={threads} {size:?} {}\n", type_name::<A>());
+fn bench_alloc<A: Alloc>(
+    mapping: &mut [Page],
+    size: Size,
+    threads: usize,
+    realloc: bool,
+    i: usize,
+    out: &mut dyn Write,
+) {
+    let name = type_name::<A>();
+    let name = name.rsplit_once(':').map(|s| s.1).unwrap_or(name);
+    let name = name.strip_suffix("Alloc").unwrap_or(name);
+
+    warn!("\n\n>>> bench t={threads} {size:?} {name}\n");
+
     // Allocate half the memory
     let allocs = mapping.len() / threads / 2 / Table::span(size as _);
 
     let timer = Instant::now();
     A::init(threads, mapping).unwrap();
-    warn!("init time {}ms", timer.elapsed().as_millis());
+    let init = timer.elapsed().as_millis();
+    warn!("init time {init}ms");
 
     let barrier = Arc::new(Barrier::new(threads));
 
-    let perfs = if realloc {
-        thread::parallel(threads as _, move |t| {
-            thread::pin(t);
-
-            for _ in 0..allocs {
-                A::instance().get(t, size).unwrap();
-            }
-
-            barrier.wait();
-            let timer = Instant::now();
-            let cycles = Cycles::now();
-
-            for _ in 0..allocs {
-                let page = A::instance().get(t, size).unwrap();
-                A::instance().put(t, page).unwrap();
-            }
-
-            let realloc = cycles.elapsed() / allocs as u64;
-            let total = timer.elapsed().as_millis();
-
-            warn!("time {total}ms");
-            Perf {
-                get_min: realloc,
-                get_avg: realloc,
-                get_max: realloc,
-                put_min: realloc,
-                put_avg: realloc,
-                put_max: realloc,
-                total,
-            }
-        })
-    } else {
-        thread::parallel(threads as _, move |t| {
-            thread::pin(t);
-            barrier.wait();
-
-            let mut pages = Vec::with_capacity(allocs);
-
-            let timer = Instant::now();
-            let cycles = Cycles::now();
-            for _ in 0..allocs {
-                pages.push(A::instance().get(t, size).unwrap());
-            }
-            let get = cycles.elapsed() / allocs as u64;
-
-            barrier.wait();
-
-            let cycles = Cycles::now();
-            for page in pages {
-                A::instance().put(t, page).unwrap();
-            }
-            let put = cycles.elapsed() / allocs as u64;
-
-            let total = timer.elapsed().as_millis();
-            warn!("time {total}ms");
-            Perf {
-                get_min: get,
-                get_avg: get,
-                get_max: get,
-                put_min: put,
-                put_avg: put,
-                put_max: put,
-                total,
-            }
-        })
-    };
-
-    if realloc {
+    let mut perf = if realloc {
+        let perfs = thread::parallel(threads as _, move |t| {
+            reallocate::<A>(t, allocs, size, barrier)
+        });
         assert_eq!(
             A::instance().allocated_pages(),
             threads * allocs * Table::span(size as _)
         );
+        Perf::avg(perfs.into_iter()).unwrap()
     } else {
+        let perfs = thread::parallel(threads as _, move |t| {
+            bulk_alloc::<A>(t, allocs, size, barrier)
+        });
         assert_eq!(A::instance().allocated_pages(), 0);
-    }
+        Perf::avg(perfs.into_iter()).unwrap()
+    };
 
     A::destroy();
 
-    let avg = Perf::avg(perfs.into_iter()).unwrap();
-    warn!("{avg:#?}");
-    avg
+    perf.init = init;
+    warn!("{perf:#?}");
+    writeln!(out, "{name},{threads},{i},{allocs},{perf}").unwrap();
+}
+
+fn reallocate<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
+    thread::pin(t);
+    for _ in 0..allocs {
+        A::instance().get(t, size).unwrap();
+    }
+
+    barrier.wait();
+    let timer = Instant::now();
+    for _ in 0..allocs {
+        let page = A::instance().get(t, size).unwrap();
+        A::instance().put(t, page).unwrap();
+    }
+
+    let realloc = timer.elapsed().as_nanos() / allocs as u128;
+    Perf {
+        get_min: realloc,
+        get_avg: realloc,
+        get_max: realloc,
+        put_min: realloc,
+        put_avg: realloc,
+        put_max: realloc,
+        init: 0,
+        total: timer.elapsed().as_millis(),
+    }
+}
+
+fn bulk_alloc<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
+    thread::pin(t);
+
+    barrier.wait();
+    let mut pages = Vec::with_capacity(allocs);
+    let t1 = Instant::now();
+    for _ in 0..allocs {
+        pages.push(A::instance().get(t, size).unwrap());
+    }
+    let get = t1.elapsed().as_nanos() / allocs as u128;
+
+    barrier.wait();
+    let t2 = Instant::now();
+    for page in pages {
+        A::instance().put(t, page).unwrap();
+    }
+    let put = t2.elapsed().as_nanos() / allocs as u128;
+
+    Perf {
+        get_min: get,
+        get_avg: get,
+        get_max: get,
+        put_min: put,
+        put_avg: put,
+        put_max: put,
+        init: 0,
+        total: t1.elapsed().as_millis(),
+    }
 }
 
 #[derive(Debug)]
 struct Perf {
-    get_min: u64,
-    get_avg: u64,
-    get_max: u64,
-    put_min: u64,
-    put_avg: u64,
-    put_max: u64,
+    get_min: u128,
+    get_avg: u128,
+    get_max: u128,
+    put_min: u128,
+    put_avg: u128,
+    put_max: u128,
+    init: u128,
     total: u128,
 }
 
 impl Default for Perf {
     fn default() -> Self {
         Self {
-            get_min: u64::MAX,
+            get_min: u128::MAX,
             get_avg: 0,
             get_max: 0,
-            put_min: u64::MAX,
+            put_min: u128::MAX,
             put_avg: 0,
             put_max: 0,
+            init: 0,
             total: 0,
         }
     }
@@ -276,17 +282,22 @@ impl Perf {
             res.put_min = res.put_min.min(p.put_min);
             res.put_avg += p.put_avg;
             res.put_max = res.put_max.max(p.put_max);
+            res.init += p.init;
             res.total += p.total;
             counter += 1;
         }
         if counter > 0 {
             res.get_avg /= counter;
             res.put_avg /= counter;
+            res.init /= counter as u128;
             res.total /= counter as u128;
             Some(res)
         } else {
             None
         }
+    }
+    fn header() -> &'static str {
+        "get_min,get_avg,get_max,put_min,put_avg,put_max,init,total"
     }
 }
 
@@ -294,13 +305,14 @@ impl fmt::Display for Perf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{}",
             self.get_min,
             self.get_avg,
             self.get_max,
             self.put_min,
             self.put_avg,
             self.put_max,
+            self.init,
             self.total
         )
     }

@@ -40,7 +40,6 @@ impl Leafs for TableAlloc {
 }
 
 impl Alloc for TableAlloc {
-    #[cold]
     fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
@@ -89,7 +88,6 @@ impl Alloc for TableAlloc {
         Ok(())
     }
 
-    #[cold]
     fn uninit() {
         let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
@@ -102,7 +100,6 @@ impl Alloc for TableAlloc {
         unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
     }
 
-    #[cold]
     fn destroy() {
         let alloc = Self::instance();
         let meta = unsafe { &*alloc.meta };
@@ -149,7 +146,6 @@ impl Alloc for TableAlloc {
         }
     }
 
-    #[cold]
     fn allocated_pages(&self) -> usize {
         let mut pages = self.allocated_pages_rec(Table::LAYERS, 0);
         // Pages allocated in reserved subtrees

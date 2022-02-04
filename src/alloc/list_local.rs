@@ -3,23 +3,20 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use log::{error, warn};
-use spin::mutex::TicketMutex;
 
 use super::{Alloc, Error, Result, Size, MIN_PAGES};
 use crate::util::Page;
 
 #[repr(align(64))]
-pub struct LockedListAlloc {
+pub struct ListLocalAlloc {
     memory: Range<*const Page>,
-    next: TicketMutex<Node>,
-    counter: AtomicUsize,
+    local: Vec<Local>,
 }
 
-const INITIALIZING: *mut LockedListAlloc = usize::MAX as _;
-static mut SHARED: AtomicPtr<LockedListAlloc> = AtomicPtr::new(null_mut());
+const INITIALIZING: *mut ListLocalAlloc = usize::MAX as _;
+static mut SHARED: AtomicPtr<ListLocalAlloc> = AtomicPtr::new(null_mut());
 
-impl Alloc for LockedListAlloc {
-    #[cold]
+impl Alloc for ListLocalAlloc {
     fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
@@ -42,18 +39,27 @@ impl Alloc for LockedListAlloc {
         let begin = memory.as_ptr() as usize;
         let pages = memory.len();
 
-        // build free lists
-        for i in 1..pages {
-            memory[i - 1]
+        // build core local free lists
+        let mut local = Vec::with_capacity(cores);
+        let p_core = pages / cores;
+        for core in 0..cores {
+            let l = Local::new();
+            // build linked list
+            for i in core * p_core + 1..(core + 1) * p_core {
+                memory[i - 1]
+                    .cast::<Node>()
+                    .set((begin + i * Page::SIZE) as *mut _);
+            }
+            memory[(core + 1) * p_core - 1]
                 .cast::<Node>()
-                .set((begin + i * Page::SIZE) as *mut _);
+                .set(null_mut());
+            l.next.set((begin + core * p_core * Page::SIZE) as *mut _);
+            local.push(l);
         }
-        memory[pages - 1].cast::<Node>().set(null_mut());
 
-        let alloc = Box::new(LockedListAlloc {
+        let alloc = Box::new(ListLocalAlloc {
             memory: memory.as_ptr_range(),
-            next: TicketMutex::new(Node(AtomicPtr::new(begin as _))),
-            counter: AtomicUsize::new(0),
+            local,
         });
         let alloc = Box::leak(alloc);
 
@@ -61,7 +67,6 @@ impl Alloc for LockedListAlloc {
         Ok(())
     }
 
-    #[cold]
     fn uninit() {
         let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
@@ -83,14 +88,15 @@ impl Alloc for LockedListAlloc {
         unsafe { &*ptr }
     }
 
-    fn get(&self, _core: usize, size: Size) -> Result<u64> {
+    fn get(&self, core: usize, size: Size) -> Result<u64> {
         if size != Size::L0 {
             error!("{size:?} not supported");
             return Err(Error::Memory);
         }
 
-        if let Some(node) = self.next.lock().pop() {
-            self.counter.fetch_add(1, Ordering::Relaxed);
+        let l = &self.local[core];
+        if let Some(node) = l.next.pop() {
+            l.counter.fetch_add(1, Ordering::Relaxed);
             let addr = node as *mut _ as u64;
             debug_assert!(
                 addr % Page::SIZE as u64 == 0 && self.memory.contains(&(addr as _)),
@@ -104,26 +110,48 @@ impl Alloc for LockedListAlloc {
         }
     }
 
-    fn put(&self, _core: usize, addr: u64) -> Result<()> {
+    fn put(&self, core: usize, addr: u64) -> Result<()> {
         if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) {
             error!("invalid addr");
             return Err(Error::Address);
         }
 
-        self.next.lock().push(unsafe { &mut *(addr as *mut Node) });
-        self.counter.fetch_sub(1, Ordering::Relaxed);
+        let l = &self.local[core];
+        l.next.push(unsafe { &mut *(addr as *mut Node) });
+        l.counter.fetch_sub(1, Ordering::Relaxed);
         Ok(())
     }
 
-    #[cold]
     fn allocated_pages(&self) -> usize {
-        self.counter.load(Ordering::SeqCst)
+        let mut pages = 0;
+        for l in &self.local {
+            pages += l.counter.load(Ordering::Relaxed);
+        }
+        pages
+    }
+}
+
+#[repr(align(64))]
+struct Local {
+    next: Node,
+    counter: AtomicUsize,
+}
+
+impl Local {
+    fn new() -> Self {
+        Self {
+            next: Node::new(),
+            counter: AtomicUsize::new(0),
+        }
     }
 }
 
 struct Node(AtomicPtr<Node>);
 
 impl Node {
+    fn new() -> Self {
+        Self(AtomicPtr::new(null_mut()))
+    }
     fn set(&self, v: *mut Node) {
         self.0.store(v, Ordering::Relaxed);
     }
