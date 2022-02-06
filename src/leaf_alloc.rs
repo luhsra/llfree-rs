@@ -302,7 +302,7 @@ impl<A: Leafs> LeafAllocator<A> {
 
         wait!();
 
-        let old = pt2.get(i2);
+        let mut old = pt2.get(i2);
         // warn!("{} i{i2}: {old:?}", page / Table::span(2));
 
         if old.page() {
@@ -323,14 +323,19 @@ impl<A: Leafs> LeafAllocator<A> {
                 }
             }
         } else if !old.giant() && old.pages() < Table::LEN {
-            self.put_small(old, page).map(|_| Size::L0)
+            loop {
+                match self.put_small(old, page).map(|_| Size::L0) {
+                    Err(Error::CAS) => old = pt2.get(i2),
+                    e => return e,
+                }
+            }
         } else {
             Err(Error::Address)
         }
     }
 
     fn put_small(&self, pte2: Entry2, page: usize) -> Result<()> {
-        info!("free leaf page {}", page);
+        info!("free leaf page {page}");
         let pt2 = self.pt2(page);
         let i2 = Table::idx(2, page);
 
@@ -374,25 +379,26 @@ impl<A: Leafs> LeafAllocator<A> {
     fn put_full(&self, pte2: Entry2, page: usize) -> Result<()> {
         let pt2 = self.pt2(page);
         let i2 = Table::idx(2, page);
+        let i1 = Table::idx(1, page);
 
         wait!();
 
         // The freed page becomes the new pt
         let pt1 = unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) };
-        info!("free: init last pt1 {}", page);
+        info!("free: init last pt1 {page} (i{i1})");
 
         for j in 0..Table::LEN {
-            if j == page % Table::LEN {
+            if j == i1 {
                 pt1.set(j, Entry1::Empty);
             } else {
                 pt1.set(j, Entry1::Page);
             }
         }
 
-        match pt2.cas(i2, pte2, Entry2::new_table(1, page % Table::LEN)) {
+        match pt2.cas(i2, pte2, Entry2::new_table(1, i1)) {
             Ok(_) => Ok(()),
             Err(pte) => {
-                warn!("CAS: create pt1 {:?}", pte);
+                warn!("CAS: create pt1 {pte:?}");
                 Err(Error::CAS)
             }
         }
@@ -487,7 +493,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer).unwrap();
+            Allocator::init(2, &mut buffer, true).unwrap();
             Allocator::leafs()[0].get(0).unwrap();
 
             let wait = DbgWait::setup(2, order);
@@ -528,7 +534,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer).unwrap();
+            Allocator::init(2, &mut buffer, true).unwrap();
 
             let wait = DbgWait::setup(2, order);
 
@@ -566,7 +572,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer).unwrap();
+            Allocator::init(2, &mut buffer, true).unwrap();
             let page_alloc = &Allocator::leafs()[0];
             for _ in 0..Table::LEN - 1 {
                 page_alloc.get(0).unwrap();
@@ -609,7 +615,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer).unwrap();
+            Allocator::init(2, &mut buffer, true).unwrap();
             let page_alloc = &Allocator::leafs()[0];
             pages[0] = page_alloc.get(0).unwrap();
             pages[1] = page_alloc.get(0).unwrap();
@@ -621,13 +627,7 @@ mod test {
                     let _key = DbgWaitKey::init(wait, t as _);
                     let page_alloc = &Allocator::leafs()[t];
 
-                    match page_alloc.put(pages[t as usize]) {
-                        Err(crate::Error::CAS) => {
-                            page_alloc.put(pages[t as usize]).unwrap();
-                        }
-                        Err(e) => panic!("{:?}", e),
-                        Ok(_) => {}
-                    }
+                    page_alloc.put(pages[t as usize]).unwrap();
                 }
             });
 
@@ -643,9 +643,9 @@ mod test {
         logging();
 
         let orders = [
-            vec![0, 0, 1, 1, 1, 1],       // first 0, then 1
-            vec![0, 1, 0, 1, 1, 1, 1, 1], // 1 fails cas
-            vec![0, 1, 1, 0, 0, 0, 0, 0], // 0 fails cas
+            vec![0, 0, 1, 1, 1, 1],    // first 0, then 1
+            vec![0, 1, 0, 1, 1, 1, 1], // 1 fails cas
+            vec![0, 1, 1, 0, 0, 0, 0], // 0 fails cas
         ];
 
         let mut pages = [0; Table::LEN];
@@ -653,7 +653,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer).unwrap();
+            Allocator::init(2, &mut buffer, true).unwrap();
             let page_alloc = &Allocator::leafs()[0];
             for page in &mut pages {
                 *page = page_alloc.get(0).unwrap();
@@ -666,13 +666,7 @@ mod test {
                     let _key = DbgWaitKey::init(wait, t as _);
                     let page_alloc = &Allocator::leafs()[t];
 
-                    match page_alloc.put(pages[t as usize]) {
-                        Err(crate::Error::CAS) => {
-                            page_alloc.put(pages[t as usize]).unwrap();
-                        }
-                        Err(e) => panic!("{:?}", e),
-                        Ok(_) => {}
-                    }
+                    page_alloc.put(pages[t as usize]).unwrap();
                 }
             });
 
@@ -692,8 +686,8 @@ mod test {
         let orders = [
             vec![0, 0, 0, 0, 1, 1, 1],    // free then alloc
             vec![1, 1, 1, 0, 0],          // alloc last then free last
-            vec![0, 1, 1, 1, 0, 0, 0, 0], // 1 skips table
-            vec![0, 1, 0, 1, 0, 1, 0, 0], // 1 skips table
+            vec![0, 1, 1, 1, 0, 0, 0], // 1 skips table
+            vec![0, 1, 0, 1, 0, 1, 0], // 1 skips table
             vec![0, 0, 1, 0, 1, 0, 1, 1],
             vec![0, 0, 0, 1, 1, 0, 1, 1], // nothing found & retry
         ];
@@ -703,7 +697,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer).unwrap();
+            Allocator::init(2, &mut buffer, true).unwrap();
             let page_alloc = &Allocator::leafs()[0];
             for page in &mut pages[..Table::LEN - 1] {
                 *page = page_alloc.get(0).unwrap();
@@ -722,13 +716,7 @@ mod test {
                 let _key = DbgWaitKey::init(wait, 0);
                 let page_alloc = &Allocator::leafs()[0];
 
-                match page_alloc.put(pages[0]) {
-                    Err(crate::Error::CAS) => {
-                        page_alloc.put(pages[0]).unwrap();
-                    }
-                    Err(e) => panic!("{:?}", e),
-                    Ok(_) => {}
-                }
+                page_alloc.put(pages[0]).unwrap();
             }
 
             handle.join().unwrap();

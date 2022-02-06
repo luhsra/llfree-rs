@@ -86,7 +86,7 @@ pub fn wait() -> Result<()> {
                 }
             }
 
-            error!("Sync overflow ordering {}", data.wait.order.len());
+            error!("Sync overflow t{} {}", data.id, data.wait.order.len());
             Err(Error::OverflowOrdering)
         } else {
             Ok(())

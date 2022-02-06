@@ -10,7 +10,7 @@ use crate::leaf_alloc::{LeafAllocator, Leafs};
 use crate::table::Table;
 use crate::util::{AStack, Atomic, Page};
 
-const PTE3_FULL: usize = 4 * Table::span(1);
+const PTE3_FULL: usize = 8 * Table::span(1);
 
 /// Non-Volatile global metadata
 struct Meta {
@@ -332,6 +332,7 @@ impl ArrayAtomicAlloc {
                 Err(Error::Corruption)
             }
         } else {
+            error!("No memory");
             Err(Error::Memory)
         }
     }
@@ -360,13 +361,13 @@ impl ArrayAtomicAlloc {
         }
     }
 
-    fn put_small(&self, core: usize, page: usize, pte3: Entry3) -> Result<()> {
+    fn put_small(&self, core: usize, page: usize, pte: Entry3) -> Result<()> {
         let max = self
             .pages()
             .saturating_sub(Table::round(2, page))
             .min(Table::span(2));
-        if pte3.pages() == max {
-            error!("Not allocated {page} (i{}) {pte3:?}", page / Table::span(2));
+        if pte.pages() == max {
+            error!("Not allocated {page} (i{})", page / Table::span(2));
             return Err(Error::Address);
         }
 
@@ -381,18 +382,18 @@ impl ArrayAtomicAlloc {
         }
 
         // Subtree not owned by us
-        if let Ok(pte3) = self.entries[i].update(|v| v.inc(size, max)) {
-            if !pte3.reserved() {
-                let new_pages = pte3.pages() + Table::span(size as _);
-                if pte3.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
+        if let Ok(pte) = self.entries[i].update(|v| v.inc(size, max)) {
+            if !pte.reserved() {
+                let new_pages = pte.pages() + Table::span(size as _);
+                if pte.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
                     // Try to reserve it for bulk frees
-                    if let Ok(pte3) = self.entries[i].update(|v| v.reserve_take(size)) {
-                        let pte3 = pte3.with_idx(i);
+                    if let Ok(pte) = self.entries[i].update(|v| v.reserve_take(size)) {
+                        let pte = pte.with_idx(i);
                         warn!("put reserve {i}");
-                        self.swap_reserved(size, pte3, pte_a)?;
+                        self.swap_reserved(size, pte, pte_a)?;
                         local.start(size).store(page, Ordering::SeqCst);
                     } else {
-                        // Add to partially free list if not reserved
+                        // Add to partially free list
                         self.partial(size).push(&self.entries, i);
                     }
                 }

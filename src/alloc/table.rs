@@ -352,6 +352,7 @@ impl TableAlloc {
                 }
             }
         }
+        error!("No memory l{layer}");
         Err(Error::Memory)
     }
 
@@ -366,6 +367,7 @@ impl TableAlloc {
                 return Ok((page, pte.dec(size).unwrap().with_idx(page / Table::span(2))));
             }
         }
+        error!("No memory l3");
         Err(Error::Memory)
     }
 

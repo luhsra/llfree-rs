@@ -180,20 +180,20 @@ impl Cycles {
 
 /// Node of an atomic stack
 pub trait ANode: Copy + From<u64> + Into<u64> {
-    fn next(&self) -> Option<usize>;
-    fn set_next(&mut self, next: Option<usize>);
+    fn next(self) -> Option<usize>;
+    fn with_next(self, next: Option<usize>) -> Self;
 }
 
 impl ANode for Entry3 {
-    fn next(&self) -> Option<usize> {
+    fn next(self) -> Option<usize> {
         match self.idx() {
             Entry3::IDX_MAX => None,
             v => Some(v),
         }
     }
 
-    fn set_next(&mut self, next: Option<usize>) {
-        self.set_idx(next.unwrap_or(Entry3::IDX_MAX));
+    fn with_next(self, next: Option<usize>) -> Self {
+        self.with_idx(next.unwrap_or(Entry3::IDX_MAX))
     }
 }
 
@@ -219,10 +219,13 @@ impl<T: ANode> AStack<T> {
     {
         let mut start = self.start.load();
         let elem = &buf[idx];
-        let mut v = elem.load();
         loop {
-            v.set_next((start < u64::MAX).then(|| start as _));
-            elem.store(v);
+            if elem
+                .update(|v| Some(v.with_next((start < u64::MAX).then(|| start as _))))
+                .is_err()
+            {
+                panic!();
+            }
             match self.start.compare_exchange(start, idx as _) {
                 Ok(_) => return,
                 Err(s) => start = s,
@@ -318,11 +321,11 @@ mod test {
     #[test]
     fn atomic_stack() {
         impl ANode for u64 {
-            fn next(&self) -> Option<usize> {
-                (*self != u64::MAX).then(|| *self as _)
+            fn next(self) -> Option<usize> {
+                (self != u64::MAX).then(|| self as _)
             }
-            fn set_next(&mut self, next: Option<usize>) {
-                *self = next.map(|v| v as u64).unwrap_or(u64::MAX);
+            fn with_next(self, next: Option<usize>) -> Self {
+                next.map(|v| v as u64).unwrap_or(u64::MAX)
             }
         }
 

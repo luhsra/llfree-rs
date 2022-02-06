@@ -11,7 +11,7 @@ use crate::leaf_alloc::{LeafAllocator, Leafs};
 use crate::table::Table;
 use crate::util::{Atomic, Page};
 
-const PTE3_FULL: usize = 4 * Table::span(1);
+const PTE3_FULL: usize = 8 * Table::span(1);
 
 /// Non-Volatile global metadata
 struct Meta {
@@ -174,10 +174,6 @@ impl ArrayPackedAlloc {
         let mut entries = Vec::with_capacity(pte3_num);
         entries.resize_with(pte3_num, || Atomic::new(Entry3::new()));
 
-        let empty = Mutex::new(Vec::with_capacity(pte3_num));
-        let partial_l0 = Mutex::new(Vec::with_capacity(pte3_num));
-        let partial_l1 = Mutex::new(Vec::with_capacity(pte3_num));
-
         let local = vec![LeafAllocator::new(memory.as_ptr() as usize, pages); cores];
 
         Ok(Self {
@@ -185,9 +181,9 @@ impl ArrayPackedAlloc {
             meta,
             local,
             entries,
-            empty,
-            partial_l1,
-            partial_l0,
+            empty: Mutex::new(Vec::with_capacity(pte3_num)),
+            partial_l1: Mutex::new(Vec::with_capacity(pte3_num)),
+            partial_l0: Mutex::new(Vec::with_capacity(pte3_num)),
         })
     }
 
@@ -256,15 +252,22 @@ impl ArrayPackedAlloc {
     }
 
     fn reserve_dec(&self, size: Size) -> Result<(usize, Entry3)> {
-        if let Some(i) = self
-            .partial(size)
-            .pop()
-            .or_else(|| self.empty.lock().unwrap().pop())
-        {
+        while let Some(i) = self.partial(size).pop() {
+            // Skip empty entries
+            if self.entries[i].load().pages() < Table::span(2) {
+                warn!("reserve partial {i}");
+                let pte = self.entries[i].update(|v| v.reserve_take(size)).unwrap();
+                let pte = pte.dec(size).unwrap().with_idx(i);
+                return Ok((i * Table::span(2), pte));
+            } else {
+                self.empty.lock().unwrap().push(i);
+            }
+        }
+
+        if let Some(i) = self.empty.lock().unwrap().pop() {
+            warn!("reserve empty {i}");
             let pte = self.entries[i].update(|v| v.reserve_take(size)).unwrap();
             let pte = pte.dec(size).unwrap().with_idx(i);
-
-            warn!("reserved {i}");
             return Ok((i * Table::span(2), pte));
         }
 
@@ -337,6 +340,7 @@ impl ArrayPackedAlloc {
                 Err(Error::Corruption)
             }
         } else {
+            error!("No memory");
             Err(Error::Memory)
         }
     }
@@ -365,13 +369,13 @@ impl ArrayPackedAlloc {
         }
     }
 
-    fn put_small(&self, core: usize, page: usize, pte3: Entry3) -> Result<()> {
+    fn put_small(&self, core: usize, page: usize, pte: Entry3) -> Result<()> {
         let max = self
             .pages()
             .saturating_sub(Table::round(2, page))
             .min(Table::span(2));
-        if pte3.pages() == max {
-            error!("Not allocated {page}");
+        if pte.pages() == max {
+            error!("Not allocated {page} (i{})", page / Table::span(2));
             return Err(Error::Address);
         }
 
@@ -387,28 +391,19 @@ impl ArrayPackedAlloc {
 
         // Subtree not owned by us
         if let Ok(pte) = self.entries[i].update(|v| v.inc(size, max)) {
-            // Add to free list if not reserved
             if !pte.reserved() {
                 let new_pages = pte.pages() + Table::span(size as _);
                 if pte.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
                     // Try to reserve it for bulk frees
-                    if let Ok(pte3) = self.entries[i].update(|v| v.reserve_take(size)) {
-                        let pte3 = pte3.with_idx(i);
+                    if let Ok(pte) = self.entries[i].update(|v| v.reserve_take(size)) {
+                        let pte = pte.with_idx(i);
                         warn!("put reserve {i}");
-                        self.swap_reserved(size, pte3, pte_a)?;
+                        self.swap_reserved(size, pte, pte_a)?;
                         local.start(size).store(page, Ordering::SeqCst);
                     } else {
-                        // Add to partially free list if not reserved
+                        // Add to partially free list
                         self.partial(size).push(i);
                     }
-                } else if new_pages == Table::span(2) {
-                    // Add back to empty (and remove from partial)
-                    let mut partial = self.partial(size);
-                    if let Some(idx) = partial.iter().copied().position(|v| v == i) {
-                        partial.swap_remove(idx);
-                    }
-                    drop(partial);
-                    self.empty.lock().unwrap().push(i);
                 }
             }
             Ok(())

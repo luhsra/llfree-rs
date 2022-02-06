@@ -99,7 +99,7 @@ mod test {
     use std::time::Instant;
 
     use log::{info, warn};
-    use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
+    use nanorand::{Rng, WyRand};
 
     use super::{Alloc, Allocator, Error};
     use crate::alloc::MIN_PAGES;
@@ -233,18 +233,15 @@ mod test {
         }
 
         warn!("free half...");
-        let mut rng = SmallRng::seed_from_u64(100);
-        pages.shuffle(&mut rng);
+        let mut rng = WyRand::new_seed(100);
+        rng.shuffle(&mut pages);
 
         let half_len = (pages.len() + 1) / 2;
         for page in &pages[half_len..] {
             Allocator::instance().put(0, *page).unwrap();
         }
 
-        assert_eq!(
-            Allocator::instance().allocated_pages(),
-            half_len
-        );
+        assert_eq!(Allocator::instance().allocated_pages(), half_len);
 
         warn!("realloc...");
         // Realloc
@@ -553,8 +550,8 @@ mod test {
                 *page = Allocator::instance().get(t, Size::L0).unwrap();
             }
 
-            let mut rng = SmallRng::seed_from_u64(t as _);
-            pages.shuffle(&mut rng);
+            let mut rng = WyRand::new_seed(t as _);
+            rng.shuffle(&mut pages);
 
             for page in pages {
                 Allocator::instance().put(t, page).unwrap();

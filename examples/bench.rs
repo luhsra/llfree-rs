@@ -7,8 +7,9 @@ use std::io::Write;
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
-use clap::Parser;
+use clap::{ArgEnum, Parser};
 use log::warn;
+use nanorand::{Rng, WyRand};
 
 use nvalloc::alloc::array_aligned::ArrayAlignedAlloc;
 use nvalloc::alloc::array_atomic::ArrayAtomicAlloc;
@@ -26,8 +27,8 @@ use nvalloc::{thread, util};
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 struct Args {
-    #[clap(short, long)]
-    realloc: bool,
+    #[clap(arg_enum)]
+    benchmark: Benchmark,
     #[clap(short, long, default_value = "1")]
     threads: Vec<usize>,
     #[clap(short, long, default_value = "bench/out/bench.csv")]
@@ -44,10 +45,29 @@ struct Args {
     #[clap(short, long, default_value_t = 16)]
     memory: usize,
 }
+#[derive(Debug, Clone, Copy, ArgEnum)]
+enum Benchmark {
+    /// Allocate half the memory at once and free it afterwards
+    Bulk,
+    /// Initially allocate half the memory and then repeatedly allocate and free the same page
+    Repeat,
+    /// Initially allocate half the memory and then repeatedly free an random page
+    /// and replace it with a newly allocated one
+    Rand,
+}
+impl Benchmark {
+    fn expected_allocs(&self, size: Size, threads: usize, allocs: usize) -> usize {
+        match self {
+            Benchmark::Bulk => 0,
+            Benchmark::Repeat => Table::span(size as _) * threads * allocs,
+            Benchmark::Rand => Table::span(size as _) * threads * allocs,
+        }
+    }
+}
 
 fn main() {
     let Args {
-        realloc,
+        benchmark,
         threads,
         outfile,
         dax,
@@ -94,27 +114,42 @@ fn main() {
     }
 
     for threads in threads {
+        let mapping = &mut mapping[..thread_pages * threads];
         for i in 0..iterations {
-            let mapping = &mut mapping[..thread_pages * threads];
+            bench_alloc::<ArrayAlignedAlloc>(mapping, size, threads, benchmark, i, &mut outfile);
+        }
+        for i in 0..iterations {
+            bench_alloc::<ArrayPackedAlloc>(mapping, size, threads, benchmark, i, &mut outfile);
+        }
+        for i in 0..iterations {
+            bench_alloc::<ArrayAtomicAlloc>(mapping, size, threads, benchmark, i, &mut outfile);
+        }
+        for i in 0..iterations {
+            bench_alloc::<TableAlloc>(mapping, size, threads, benchmark, i, &mut outfile);
+        }
 
-            bench_alloc::<TableAlloc>(mapping, size, threads, realloc, i, &mut outfile);
-            bench_alloc::<ArrayAlignedAlloc>(mapping, size, threads, realloc, i, &mut outfile);
-            bench_alloc::<ArrayPackedAlloc>(mapping, size, threads, realloc, i, &mut outfile);
-            bench_alloc::<ArrayAtomicAlloc>(mapping, size, threads, realloc, i, &mut outfile);
-
-            if size == Size::L0 {
-                bench_alloc::<ListLocalAlloc>(mapping, Size::L0, threads, realloc, i, &mut outfile);
-
-                if threads <= 24 {
-                    bench_alloc::<ListLockedAlloc>(
-                        mapping,
-                        Size::L0,
-                        threads,
-                        realloc,
-                        i,
-                        &mut outfile,
-                    );
-                }
+        if size == Size::L0 {
+            for i in 0..iterations {
+                bench_alloc::<ListLocalAlloc>(
+                    mapping,
+                    Size::L0,
+                    threads,
+                    benchmark,
+                    i,
+                    &mut outfile,
+                );
+            }
+        }
+        if size == Size::L0 && threads <= 12 {
+            for i in 0..iterations {
+                bench_alloc::<ListLockedAlloc>(
+                    mapping,
+                    Size::L0,
+                    threads,
+                    benchmark,
+                    i,
+                    &mut outfile,
+                );
             }
         }
     }
@@ -144,7 +179,7 @@ fn bench_alloc<A: Alloc>(
     mapping: &mut [Page],
     size: Size,
     threads: usize,
-    realloc: bool,
+    benchmark: Benchmark,
     i: usize,
     out: &mut dyn Write,
 ) {
@@ -164,54 +199,27 @@ fn bench_alloc<A: Alloc>(
 
     let barrier = Arc::new(Barrier::new(threads));
 
-    let mut perf = if realloc {
-        let perfs = thread::parallel(threads as _, move |t| {
-            reallocate::<A>(t, allocs, size, barrier)
-        });
-        assert_eq!(
-            A::instance().allocated_pages(),
-            threads * allocs * Table::span(size as _)
-        );
-        Perf::avg(perfs.into_iter()).unwrap()
-    } else {
-        let perfs = thread::parallel(threads as _, move |t| {
+    let mut perf = Perf::avg(match benchmark {
+        Benchmark::Bulk => thread::parallel(threads as _, move |t| {
             bulk_alloc::<A>(t, allocs, size, barrier)
-        });
-        assert_eq!(A::instance().allocated_pages(), 0);
-        Perf::avg(perfs.into_iter()).unwrap()
-    };
+        }),
+        Benchmark::Repeat => thread::parallel(threads as _, move |t| {
+            reallocate::<A>(t, allocs, size, barrier)
+        }),
+        Benchmark::Rand => {
+            thread::parallel(threads as _, move |t| random::<A>(t, allocs, size, barrier))
+        }
+    });
+    assert_eq!(
+        A::instance().allocated_pages(),
+        benchmark.expected_allocs(size, threads, allocs)
+    );
 
     A::destroy();
 
     perf.init = init;
     warn!("{perf:#?}");
     writeln!(out, "{name},{threads},{i},{allocs},{perf}").unwrap();
-}
-
-fn reallocate<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
-    thread::pin(t);
-    for _ in 0..allocs {
-        A::instance().get(t, size).unwrap();
-    }
-
-    barrier.wait();
-    let timer = Instant::now();
-    for _ in 0..allocs {
-        let page = A::instance().get(t, size).unwrap();
-        A::instance().put(t, page).unwrap();
-    }
-
-    let realloc = timer.elapsed().as_nanos() / allocs as u128;
-    Perf {
-        get_min: realloc,
-        get_avg: realloc,
-        get_max: realloc,
-        put_min: realloc,
-        put_avg: realloc,
-        put_max: realloc,
-        init: 0,
-        total: timer.elapsed().as_millis(),
-    }
 }
 
 fn bulk_alloc<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
@@ -244,6 +252,63 @@ fn bulk_alloc<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrie
     }
 }
 
+fn reallocate<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
+    thread::pin(t);
+    for _ in 0..allocs {
+        A::instance().get(t, size).unwrap();
+    }
+
+    barrier.wait();
+    let timer = Instant::now();
+    for _ in 0..allocs {
+        let page = A::instance().get(t, size).unwrap();
+        A::instance().put(t, page).unwrap();
+    }
+
+    let realloc = timer.elapsed().as_nanos() / allocs as u128;
+    Perf {
+        get_min: realloc,
+        get_avg: realloc,
+        get_max: realloc,
+        put_min: realloc,
+        put_avg: realloc,
+        put_max: realloc,
+        init: 0,
+        total: timer.elapsed().as_millis(),
+    }
+}
+
+fn random<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
+    thread::pin(t);
+    let mut pages = Vec::with_capacity(allocs);
+    for _ in 0..allocs {
+        pages.push(A::instance().get(t, size).unwrap());
+    }
+
+    let mut rng = WyRand::new_seed(t as _);
+
+    barrier.wait();
+    let timer = Instant::now();
+
+    for _ in 0..allocs {
+        let i = rng.generate_range(0..pages.len());
+        A::instance().put(t, pages[i]).unwrap();
+        pages[i] = A::instance().get(t, size).unwrap();
+    }
+
+    let rand = timer.elapsed().as_nanos() / allocs as u128;
+    Perf {
+        get_min: rand,
+        get_avg: rand,
+        get_max: rand,
+        put_min: rand,
+        put_avg: rand,
+        put_max: rand,
+        init: 0,
+        total: timer.elapsed().as_millis(),
+    }
+}
+
 #[derive(Debug)]
 struct Perf {
     get_min: u128,
@@ -272,7 +337,7 @@ impl Default for Perf {
 }
 
 impl Perf {
-    fn avg(iter: impl Iterator<Item = Perf>) -> Option<Perf> {
+    fn avg(iter: impl IntoIterator<Item = Perf>) -> Perf {
         let mut res = Perf::default();
         let mut counter = 0;
         for p in iter {
@@ -286,15 +351,12 @@ impl Perf {
             res.total += p.total;
             counter += 1;
         }
-        if counter > 0 {
-            res.get_avg /= counter;
-            res.put_avg /= counter;
-            res.init /= counter as u128;
-            res.total /= counter as u128;
-            Some(res)
-        } else {
-            None
-        }
+        assert!(counter > 0);
+        res.get_avg /= counter;
+        res.put_avg /= counter;
+        res.init /= counter as u128;
+        res.total /= counter as u128;
+        res
     }
     fn header() -> &'static str {
         "get_min,get_avg,get_max,put_min,put_avg,put_max,init,total"

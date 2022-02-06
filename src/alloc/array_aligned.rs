@@ -10,7 +10,7 @@ use crate::leaf_alloc::{LeafAllocator, Leafs};
 use crate::table::Table;
 use crate::util::{AStack, Atomic, Page};
 
-const PTE3_FULL: usize = 4 * Table::span(1);
+const PTE3_FULL: usize = 8 * Table::span(1);
 
 /// Non-Volatile global metadata
 struct Meta {
@@ -316,6 +316,7 @@ impl ArrayAlignedAlloc {
                 }
             }
         } else {
+            error!("No memory");
             Err(Error::Memory)
         }
     }
