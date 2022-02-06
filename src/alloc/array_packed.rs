@@ -267,27 +267,24 @@ impl ArrayPackedAlloc {
         Err(Error::Memory)
     }
 
-    fn reserve_next(&self, start: usize, size: Size, pte_a: &Atomic<Entry3>) -> Result<usize> {
-        warn!("Try reserve next");
-        let i = start / Table::span(2);
-        let max = (self.pages() - Table::round(2, start)).min(Table::span(2));
-        let (s, new_pte) = self.reserve_dec(size)?;
-        let start = s;
+    fn swap_reserved(&self, size: Size, new_pte: Entry3, pte_a: &Atomic<Entry3>) -> Result<()> {
         let pte = pte_a.swap(new_pte);
+        let i = pte.idx();
+        let max = (self.pages() - i * Table::span(2)).min(Table::span(2));
 
         if let Ok(v) = self.entries[i].update(|v| v.unreserve_add(pte, max)) {
-            let pte = v.unreserve_add(pte, max).unwrap();
             // Add to list if new counter is small enough
-            if pte.pages() == max {
+            let new_pages = v.pages() + pte.pages();
+            if new_pages == max {
                 self.empty.lock().unwrap().push(i);
-            } else if pte.pages() > PTE3_FULL {
+            } else if new_pages > PTE3_FULL {
                 self.partial(size).push(i);
             }
+            Ok(())
         } else {
-            error!("Unreserve failed");
+            error!("Unreserve failed i{i}");
             return Err(Error::Corruption);
         }
-        Ok(start)
     }
 
     fn get_small(&self, core: usize, size: Size) -> Result<usize> {
@@ -304,7 +301,10 @@ impl ArrayPackedAlloc {
         } else {
             // Incremet or clear (atomic sync with put dec)
             if pte_a.update(|v| v.dec(size)).is_err() {
-                start = self.reserve_next(start, size, pte_a)?;
+                warn!("Try reserve next");
+                let (s, new_pte) = self.reserve_dec(size)?;
+                self.swap_reserved(size, new_pte, pte_a)?;
+                start = s;
             }
         }
 
@@ -375,18 +375,27 @@ impl ArrayPackedAlloc {
         let size = local.put(page)?;
 
         // Try decrement own pte first
-        if local.pte(size).update(|v| v.inc_idx(size, i, max)).is_ok() {
+        let pte_a = local.pte(size);
+        if pte_a.update(|v| v.inc_idx(size, i, max)).is_ok() {
             return Ok(());
         }
 
         // Subtree not owned by us
-        if let Ok(pte3) = self.entries[i].update(|v| v.inc(size, max)) {
+        if let Ok(pte) = self.entries[i].update(|v| v.inc(size, max)) {
             // Add to free list if not reserved
-            if !pte3.reserved() {
-                let new_pages = pte3.pages() + Table::span(size as _);
-                if pte3.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
-                    // Add back to partial
-                    self.partial(size).push(i);
+            if !pte.reserved() {
+                let new_pages = pte.pages() + Table::span(size as _);
+                if pte.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
+                    // Try to reserve it for bulk frees
+                    if let Ok(pte3) = self.entries[i].update(|v| v.reserve_take(size)) {
+                        let pte3 = pte3.with_idx(i);
+                        warn!("put reserve {i}");
+                        self.swap_reserved(size, pte3, pte_a)?;
+                        local.start(size).store(page, Ordering::SeqCst);
+                    } else {
+                        // Add to partially free list if not reserved
+                        self.partial(size).push(i);
+                    }
                 } else if new_pages == Table::span(2) {
                     // Add back to empty (and remove from partial)
                     let mut partial = self.partial(size);

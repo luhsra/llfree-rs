@@ -197,7 +197,6 @@ impl ANode for Entry3 {
     }
 }
 
-
 /// Simple atomic stack with atomic entries.
 pub struct AStack<T: ANode> {
     start: Atomic<u64>,
@@ -222,11 +221,7 @@ impl<T: ANode> AStack<T> {
         let elem = &buf[idx];
         let mut v = elem.load();
         loop {
-            v.set_next(if start < u64::MAX {
-                Some(start as _)
-            } else {
-                None
-            });
+            v.set_next((start < u64::MAX).then(|| start as _));
             elem.store(v);
             match self.start.compare_exchange(start, idx as _) {
                 Ok(_) => return,
@@ -324,11 +319,7 @@ mod test {
     fn atomic_stack() {
         impl ANode for u64 {
             fn next(&self) -> Option<usize> {
-                if *self == u64::MAX {
-                    None
-                } else {
-                    Some(*self as _)
-                }
+                (*self != u64::MAX).then(|| *self as _)
             }
             fn set_next(&mut self, next: Option<usize>) {
                 *self = next.map(|v| v as u64).unwrap_or(u64::MAX);

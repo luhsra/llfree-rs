@@ -9,7 +9,7 @@ use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
 use crate::leaf_alloc::{LeafAllocator, Leafs};
 use crate::table::Table;
-use crate::util::Page;
+use crate::util::{Atomic, Page};
 
 const PTE3_FULL: usize = 4 * Table::span(1);
 
@@ -420,31 +420,26 @@ impl TableAlloc {
     }
 
     #[cold]
-    fn unreserve(&self, page: usize, old: Entry3) -> Result<()> {
-        let pt = self.pt3(page);
-        let i = Table::idx(3, page);
-        let max = (self.pages() - Table::round(2, page)).min(Table::span(2));
-        match pt.update(i, |v| v.unreserve_add(old, max)) {
-            Err(pte) => {
-                error!("Unreserve failed {pte:?}");
-                Err(Error::Corruption)
+    fn swap_reserved(&self, new_pte: Entry3, pte_a: &Atomic<Entry3>) -> Result<()> {
+        let old = pte_a.swap(new_pte);
+        let start = old.idx() * Table::span(2);
+        let i = Table::idx(3, start);
+        let pt = self.pt3(start);
+        let max = (self.pages() - start).min(Table::span(2));
+
+        if let Ok(pte) = pt.update(i, |v| v.unreserve_add(old, max)) {
+            // Update parents
+            let new_pages = old.pages() + pte.pages();
+            if new_pages == Table::span(2) {
+                self.update_parents(start, Change::IncEmpty)
+            } else if new_pages > PTE3_FULL {
+                self.update_parents(start, Change::p_inc(old.size().unwrap()))
+            } else {
+                Ok(())
             }
-            Ok(pte) => {
-                // Update parents
-                let new_pages = old.pages() + pte.pages();
-                if new_pages == Table::span(2) {
-                    self.update_parents(page, Change::IncEmpty)
-                } else if new_pages > PTE3_FULL {
-                    let change = if old.size() == Some(Size::L1) {
-                        Change::IncPartialL0
-                    } else {
-                        Change::IncPartialL1
-                    };
-                    self.update_parents(page, change)
-                } else {
-                    Ok(())
-                }
-            }
+        } else {
+            error!("Unreserve failed {i}");
+            Err(Error::Corruption)
         }
     }
 
@@ -518,9 +513,7 @@ impl TableAlloc {
                     .or_else(|_| self.reserve_rec_empty(Table::LAYERS, start, size))?;
                 warn!("reserved {}", s / Table::span(2));
 
-                let old = pte_a.swap(pte);
-                self.unreserve(start, old)?;
-
+                self.swap_reserved(pte, pte_a)?;
                 start = s;
             }
         }
@@ -568,38 +561,33 @@ impl TableAlloc {
 
         let size = leaf.put(page)?;
         let idx = page / Table::span(2);
-        if leaf.pte(size).update(|v| v.inc_idx(size, idx, max)).is_ok() {
+        let pte_a = leaf.pte(size);
+        if pte_a.update(|v| v.inc_idx(size, idx, max)).is_ok() {
             return Ok(());
         }
 
-        match pt.update(i, |v| v.inc(size, max)) {
-            Err(pte) => {
-                error!("Corruption l3 i{i} {size:?} {pte:?}");
-                Err(Error::Corruption)
-            }
-            Ok(pte) => {
-                if pte.reserved() {
+        if let Ok(pte) = pt.update(i, |v| v.inc(size, max)) {
+            let new_pages = pte.pages() + Table::span(size as _);
+            if pte.reserved() {
+                Ok(())
+            } else if new_pages == Table::span(2) {
+                self.update_parents(page, Change::p_dec(size))
+            } else if pte.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
+                // reserve for bulk put
+                if let Ok(pte) = pt.update(i, |v| v.reserve_take(size)) {
+                    warn!("put reserve {i}");
+                    self.swap_reserved(pte.with_idx(i), pte_a)?;
+                    leaf.start(size).store(page, Ordering::SeqCst);
                     Ok(())
-                } else if pte.pages() + Table::span(size as _) == Table::span(2) {
-                    let change = if size == Size::L0 {
-                        Change::DecPartialL0
-                    } else {
-                        Change::DecPartialL1
-                    };
-                    self.update_parents(page, change)
-                } else if pte.pages() < PTE3_FULL
-                    && pte.pages() + Table::span(size as _) >= PTE3_FULL
-                {
-                    let change = if size == Size::L0 {
-                        Change::IncPartialL0
-                    } else {
-                        Change::IncPartialL1
-                    };
-                    self.update_parents(page, change)
                 } else {
-                    Ok(())
+                    self.update_parents(page, Change::p_inc(size))
                 }
+            } else {
+                Ok(())
             }
+        } else {
+            error!("Corruption l3 i{i} {size:?}");
+            Err(Error::Corruption)
         }
     }
 
@@ -618,7 +606,7 @@ impl TableAlloc {
         let pt = self.pt3(page);
         let i = Table::idx(3, page);
 
-        info!("free l3 i{}", i);
+        info!("free l3 i{i}");
         match pt.cas(
             i,
             Entry3::new_giant(),

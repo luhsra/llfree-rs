@@ -44,7 +44,7 @@ pub enum Size {
     L2 = 2,
 }
 
-pub type Allocator = list_locked::ListLockedAlloc;
+pub type Allocator = table::TableAlloc;
 
 pub trait Alloc {
     /// Initialize the allocator.
@@ -99,6 +99,7 @@ mod test {
     use std::time::Instant;
 
     use log::{info, warn};
+    use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 
     use super::{Alloc, Allocator, Error};
     use crate::alloc::MIN_PAGES;
@@ -149,7 +150,7 @@ mod test {
             }
         }
 
-        warn!("allocated {}", pages.len());
+        warn!("allocated {}", 1 + pages.len());
         warn!("check...");
 
         assert_eq!(Allocator::instance().allocated_pages(), 1 + pages.len());
@@ -189,6 +190,80 @@ mod test {
             Allocator::instance().put(0, *page).unwrap();
         }
 
+        assert_eq!(Allocator::instance().allocated_pages(), 0);
+
+        Allocator::uninit();
+    }
+
+    #[test]
+    fn rand() {
+        logging();
+        // 8GiB
+        const MEM_SIZE: usize = 8 << 30;
+        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+
+        info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
+
+        info!("init alloc");
+
+        Allocator::init(1, &mut mapping).unwrap();
+
+        warn!("start alloc...");
+        let mut pages = Vec::new();
+        loop {
+            match Allocator::instance().get(0, Size::L0) {
+                Ok(page) => pages.push(page),
+                Err(Error::Memory) => break,
+                Err(e) => panic!("{:?}", e),
+            }
+        }
+        warn!("allocated {}", pages.len());
+
+        warn!("check...");
+        assert_eq!(Allocator::instance().allocated_pages(), pages.len());
+        pages.sort_unstable();
+
+        // Check that the same page was not allocated twice
+        for i in 0..pages.len() - 1 {
+            let p1 = pages[i];
+            let p2 = pages[i + 1];
+            info!("addr {i}={p1:x}");
+            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
+            assert!(p1 != p2);
+        }
+
+        warn!("free half...");
+        let mut rng = SmallRng::seed_from_u64(100);
+        pages.shuffle(&mut rng);
+
+        let half_len = (pages.len() + 1) / 2;
+        for page in &pages[half_len..] {
+            Allocator::instance().put(0, *page).unwrap();
+        }
+
+        assert_eq!(
+            Allocator::instance().allocated_pages(),
+            half_len
+        );
+
+        warn!("realloc...");
+        // Realloc
+        let mut i = half_len;
+        for page in &mut pages[half_len..] {
+            match Allocator::instance().get(0, Size::L0) {
+                Ok(p) => *page = p,
+                Err(Error::Memory) => break,
+                Err(e) => panic!("{:?}", e),
+            }
+            i += 1;
+        }
+        assert!(Allocator::instance().get(0, Size::L0).is_err());
+        warn!("realloc {i}, lost {}", pages.len() - i);
+
+        warn!("free...");
+        for page in &pages[..i] {
+            Allocator::instance().put(0, *page).unwrap();
+        }
         assert_eq!(Allocator::instance().allocated_pages(), 0);
 
         Allocator::uninit();
@@ -477,6 +552,9 @@ mod test {
             for page in &mut pages {
                 *page = Allocator::instance().get(t, Size::L0).unwrap();
             }
+
+            let mut rng = SmallRng::seed_from_u64(t as _);
+            pages.shuffle(&mut rng);
 
             for page in pages {
                 Allocator::instance().put(t, page).unwrap();

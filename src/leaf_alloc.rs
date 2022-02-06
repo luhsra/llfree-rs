@@ -213,7 +213,7 @@ impl<A: Leafs> LeafAllocator<A> {
                 self.alloc_pt1.store(0, Ordering::SeqCst);
             }
         }
-        error!("exceeding retries {start} {}", self.pages - start);
+        error!("exceeding retries {start} {}", start / Table::span(2));
         Err(Error::Corruption)
     }
 

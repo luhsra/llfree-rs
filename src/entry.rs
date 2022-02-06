@@ -2,6 +2,7 @@ use core::fmt;
 use std::cmp::Ordering;
 
 use bitfield_struct::bitfield;
+use log::error;
 
 use crate::table::Table;
 use crate::Size;
@@ -27,6 +28,22 @@ pub enum Change {
     DecPartialL0,
     DecPartialL1,
 }
+impl Change {
+    #[inline]
+    pub fn p_inc(size: Size) -> Change {
+        match size {
+            Size::L0 => Change::IncPartialL0,
+            _ => Change::IncPartialL1,
+        }
+    }
+    #[inline]
+    pub fn p_dec(size: Size) -> Change {
+        match size {
+            Size::L0 => Change::DecPartialL0,
+            _ => Change::DecPartialL1,
+        }
+    }
+}
 
 impl Entry {
     #[inline]
@@ -39,11 +56,7 @@ impl Entry {
     }
     #[inline]
     pub fn dec_empty(self) -> Option<Self> {
-        if self.empty() > 0 {
-            Some(self.with_empty(self.empty() - 1))
-        } else {
-            None
-        }
+        (self.empty() > 0).then(|| self.with_empty(self.empty() - 1))
     }
     #[inline]
     pub fn change(self, dec: Change) -> Option<Self> {
@@ -213,10 +226,19 @@ impl Entry3 {
     #[inline]
     pub fn unreserve_add(self, other: Entry3, max: usize) -> Option<Entry3> {
         let pages = self.pages() + other.pages();
-        if self.reserved() && self.size_n() != 3 && self.size_n() == other.size_n() && pages <= max
+        if self.reserved()
+            && self.size_n() != 3
+            && (self.size_n() == other.size_n() || other.size_n() == 0)
+            && pages <= max
         {
-            Some(self.with_pages(pages).with_reserved(false).with_idx(0))
+            Some(
+                self.with_pages(pages)
+                    .with_size_n(other.size_n())
+                    .with_reserved(false)
+                    .with_idx(0),
+            )
         } else {
+            error!("{self:?} + {other:?}, {pages} <= {max}");
             None
         }
     }

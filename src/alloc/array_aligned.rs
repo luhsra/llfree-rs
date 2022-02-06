@@ -300,13 +300,7 @@ impl ArrayAlignedAlloc {
 
     fn get_giant(&self, core: usize) -> Result<usize> {
         if let Some(i) = self.empty.pop(self) {
-            match self[i].update(|v| {
-                if v.pages() == Table::span(2) {
-                    Some(Entry3::new_giant())
-                } else {
-                    None
-                }
-            }) {
+            match self[i].update(|v| (v.pages() == Table::span(2)).then(Entry3::new_giant)) {
                 Ok(_) => {
                     self.local[core].persist(i * Table::span(2));
                     Ok(i * Table::span(2))
