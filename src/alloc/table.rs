@@ -420,7 +420,7 @@ impl TableAlloc {
     }
 
     #[cold]
-    fn swap_reserved(&self, new_pte: Entry3, pte_a: &Atomic<Entry3>) -> Result<()> {
+    fn swap_reserved(&self, size: Size, new_pte: Entry3, pte_a: &Atomic<Entry3>) -> Result<()> {
         let old = pte_a.swap(new_pte);
         let start = old.idx() * Table::span(2);
         let i = Table::idx(3, start);
@@ -433,7 +433,7 @@ impl TableAlloc {
             if new_pages == Table::span(2) {
                 self.update_parents(start, Change::IncEmpty)
             } else if new_pages > PTE3_FULL {
-                self.update_parents(start, Change::p_inc(old.size().unwrap()))
+                self.update_parents(start, Change::p_inc(size))
             } else {
                 Ok(())
             }
@@ -513,7 +513,7 @@ impl TableAlloc {
                     .or_else(|_| self.reserve_rec_empty(Table::LAYERS, start, size))?;
                 warn!("reserved {}", s / Table::span(2));
 
-                self.swap_reserved(pte, pte_a)?;
+                self.swap_reserved(size, pte, pte_a)?;
                 start = s;
             }
         }
@@ -576,7 +576,7 @@ impl TableAlloc {
                 // reserve for bulk put
                 if let Ok(pte) = pt.update(i, |v| v.reserve_take(size)) {
                     warn!("put reserve {i}");
-                    self.swap_reserved(pte.with_idx(i), pte_a)?;
+                    self.swap_reserved(size, pte.with_idx(i), pte_a)?;
                     leaf.start(size).store(page, Ordering::SeqCst);
                     Ok(())
                 } else {
