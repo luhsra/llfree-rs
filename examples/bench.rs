@@ -158,7 +158,7 @@ fn bench_alloc<A: Alloc>(
     let allocs = mapping.len() / threads / 2 / Table::span(size as _);
 
     let timer = Instant::now();
-    A::init(threads, mapping).unwrap();
+    A::init(threads, mapping, true).unwrap();
     let init = timer.elapsed().as_millis();
     warn!("init time {init}ms");
 

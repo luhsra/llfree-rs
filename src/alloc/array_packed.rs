@@ -44,7 +44,7 @@ impl Leafs for ArrayPackedAlloc {
 }
 
 impl Alloc for ArrayPackedAlloc {
-    fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
+    fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -68,7 +68,8 @@ impl Alloc for ArrayPackedAlloc {
         let meta = unsafe { &mut *alloc.meta };
 
         warn!("init");
-        if meta.pages.load(Ordering::SeqCst) == alloc.pages()
+        if !overwrite
+            && meta.pages.load(Ordering::SeqCst) == alloc.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
         {
             warn!("Recover allocator state p={}", alloc.pages());

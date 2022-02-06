@@ -22,9 +22,9 @@ use alloc::{Alloc, Allocator, Error, Size};
 use util::Page;
 
 #[no_mangle]
-pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64) -> i64 {
+pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwrite: u32) -> i64 {
     let memory = unsafe { std::slice::from_raw_parts_mut(addr as *mut Page, pages as _) };
-    match Allocator::init(cores as _, memory) {
+    match Allocator::init(cores as _, memory, overwrite != 0) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
     }
@@ -108,7 +108,7 @@ mod test {
         info!("init alloc");
 
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
-        Allocator::init(THREADS, &mut mapping[..]).unwrap();
+        Allocator::init(THREADS, &mut mapping[..], true).unwrap();
 
         parallel(THREADS, |t| {
             let pages = [DEFAULT; Table::LEN];

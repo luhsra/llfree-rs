@@ -49,7 +49,7 @@ pub type Allocator = table::TableAlloc;
 pub trait Alloc {
     /// Initialize the allocator.
     #[cold]
-    fn init(cores: usize, memory: &mut [Page]) -> Result<()>;
+    fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()>;
     /// Uninitialize the allocator. The persistent data remains.
     #[cold]
     fn uninit();
@@ -133,7 +133,7 @@ mod test {
 
         info!("init alloc");
 
-        Allocator::init(1, &mut mapping).unwrap();
+        Allocator::init(1, &mut mapping, true).unwrap();
 
         warn!("start alloc...");
         let small = Allocator::instance().get(0, Size::L0).unwrap();
@@ -206,7 +206,7 @@ mod test {
 
         info!("init alloc");
 
-        Allocator::init(1, &mut mapping).unwrap();
+        Allocator::init(1, &mut mapping, true).unwrap();
 
         warn!("start alloc...");
         let mut pages = Vec::new();
@@ -280,7 +280,7 @@ mod test {
 
         info!("init alloc");
 
-        Allocator::init(1, &mut mapping).unwrap();
+        Allocator::init(1, &mut mapping, true).unwrap();
         assert_eq!(Allocator::instance().allocated_pages(), 0);
 
         warn!("start alloc");
@@ -361,7 +361,7 @@ mod test {
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
 
         info!("init alloc");
-        Allocator::init(THREADS, &mut mapping).unwrap();
+        Allocator::init(THREADS, &mut mapping, true).unwrap();
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -406,7 +406,7 @@ mod test {
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
 
         info!("init alloc");
-        Allocator::init(THREADS, &mut mapping).unwrap();
+        Allocator::init(THREADS, &mut mapping, true).unwrap();
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -538,7 +538,7 @@ mod test {
 
         let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
-        Allocator::init(THREADS, &mut mapping).unwrap();
+        Allocator::init(THREADS, &mut mapping, true).unwrap();
 
         // Stress test
         let barrier = Arc::new(Barrier::new(THREADS));
@@ -573,7 +573,7 @@ mod test {
 
         let mut mapping = mapping(0x1000_0000_0000, 4 * Table::span(2)).unwrap();
 
-        Allocator::init(THREADS, &mut mapping).unwrap();
+        Allocator::init(THREADS, &mut mapping, true).unwrap();
 
         let barrier = Arc::new(Barrier::new(THREADS));
 
@@ -621,7 +621,7 @@ mod test {
         thread::pin(0);
 
         {
-            Allocator::init(1, &mut mapping).unwrap();
+            Allocator::init(1, &mut mapping, true).unwrap();
 
             for _ in 0..Table::LEN + 2 {
                 Allocator::instance().get(0, Size::L0).unwrap();
@@ -637,7 +637,7 @@ mod test {
             Allocator::uninit();
         }
 
-        Allocator::init(1, &mut mapping).unwrap();
+        Allocator::init(1, &mut mapping, false).unwrap();
 
         assert_eq!(
             Allocator::instance().allocated_pages(),

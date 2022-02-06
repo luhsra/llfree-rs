@@ -24,7 +24,7 @@ const INITIALIZING: *mut ListLockedAlloc = usize::MAX as _;
 static mut SHARED: AtomicPtr<ListLockedAlloc> = AtomicPtr::new(null_mut());
 
 impl Alloc for ListLockedAlloc {
-    fn init(cores: usize, memory: &mut [Page]) -> Result<()> {
+    fn init(cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
