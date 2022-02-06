@@ -44,6 +44,7 @@ impl Leafs for ArrayPackedAlloc {
 }
 
 impl Alloc for ArrayPackedAlloc {
+    #[cold]
     fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
@@ -89,6 +90,7 @@ impl Alloc for ArrayPackedAlloc {
         Ok(())
     }
 
+    #[cold]
     fn uninit() {
         let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
@@ -101,6 +103,7 @@ impl Alloc for ArrayPackedAlloc {
         unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
     }
 
+    #[cold]
     fn destroy() {
         let alloc = Self::instance();
         let meta = unsafe { &*alloc.meta };
@@ -137,6 +140,7 @@ impl Alloc for ArrayPackedAlloc {
         }
     }
 
+    #[cold]
     fn allocated_pages(&self) -> usize {
         let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {

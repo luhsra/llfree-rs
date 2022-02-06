@@ -20,6 +20,7 @@ const INITIALIZING: *mut BuddyAlloc = usize::MAX as _;
 static mut SHARED: AtomicPtr<BuddyAlloc> = AtomicPtr::new(null_mut());
 
 impl Alloc for BuddyAlloc {
+    #[cold]
     fn init(cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
@@ -49,6 +50,7 @@ impl Alloc for BuddyAlloc {
         Ok(())
     }
 
+    #[cold]
     fn uninit() {
         let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
@@ -59,14 +61,15 @@ impl Alloc for BuddyAlloc {
         unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
     }
 
+    #[cold]
+    fn destroy() {
+        Self::uninit();
+    }
+
     fn instance<'a>() -> &'a Self {
         let ptr = unsafe { SHARED.load(Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
         unsafe { &*ptr }
-    }
-
-    fn destroy() {
-        Self::uninit();
     }
 
     fn get(&self, _core: usize, size: Size) -> Result<u64> {
@@ -96,6 +99,7 @@ impl Alloc for BuddyAlloc {
         Ok(())
     }
 
+    #[cold]
     fn allocated_pages(&self) -> usize {
         self.inner.lock().unwrap().stats_alloc_actual() / Page::SIZE
     }

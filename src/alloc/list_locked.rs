@@ -24,6 +24,7 @@ const INITIALIZING: *mut ListLockedAlloc = usize::MAX as _;
 static mut SHARED: AtomicPtr<ListLockedAlloc> = AtomicPtr::new(null_mut());
 
 impl Alloc for ListLockedAlloc {
+    #[cold]
     fn init(cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
@@ -70,6 +71,7 @@ impl Alloc for ListLockedAlloc {
         Ok(())
     }
 
+    #[cold]
     fn uninit() {
         let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
@@ -80,6 +82,7 @@ impl Alloc for ListLockedAlloc {
         unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
     }
 
+    #[cold]
     fn destroy() {
         Self::uninit();
     }
@@ -122,6 +125,7 @@ impl Alloc for ListLockedAlloc {
         Ok(())
     }
 
+    #[cold]
     fn allocated_pages(&self) -> usize {
         self.local
             .iter()

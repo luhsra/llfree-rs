@@ -20,6 +20,7 @@ const INITIALIZING: *mut MallocAlloc = usize::MAX as _;
 static mut SHARED: AtomicPtr<MallocAlloc> = AtomicPtr::new(null_mut());
 
 impl Alloc for MallocAlloc {
+    #[cold]
     fn init(cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
@@ -50,6 +51,7 @@ impl Alloc for MallocAlloc {
         Ok(())
     }
 
+    #[cold]
     fn uninit() {
         let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
         assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
@@ -60,6 +62,7 @@ impl Alloc for MallocAlloc {
         unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
     }
 
+    #[cold]
     fn destroy() {
         Self::uninit();
     }
@@ -95,6 +98,7 @@ impl Alloc for MallocAlloc {
         Ok(())
     }
 
+    #[cold]
     fn allocated_pages(&self) -> usize {
         self.local
             .iter()
