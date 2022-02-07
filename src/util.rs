@@ -303,6 +303,8 @@ mod test {
     use std::mem::MaybeUninit;
     use std::sync::{Arc, Barrier};
 
+    use nanorand::{WyRand, Rng};
+
     use super::{AArrayDebug, ANode, AStack, Cycles};
     use crate::{thread::parallel, util::Atomic};
 
@@ -362,5 +364,18 @@ mod test {
             }
         });
         assert_eq!(copy.pop(unsafe { &DATA }), None);
+    }
+
+    #[test]
+    fn nanorand() {
+        let mut rng = WyRand::new_seed(42);
+        let val: usize = rng.generate_range(0..1000);
+        println!("rand: {val}");
+        let val: usize = rng.generate_range(0..1000);
+        println!("rand: {val}");
+        let val: usize = rng.generate_range(0..1000);
+        println!("rand: {val}");
+        let val: usize = rng.generate_range(0..1000);
+        println!("rand: {val}");
     }
 }

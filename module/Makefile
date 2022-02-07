@@ -1,14 +1,14 @@
 LINUX_BUILD_DIR ?= /lib/modules/$(shell uname -r)/build
 
-obj-m += alloc.o
+obj-m += allocs.o
+allocs-objs += alloc.o nanorand.o
 
 NUM_ALLOCS ?= '(2 * 512 * 512)'
 CPU_STRIDE ?= 1
 THREADS_MAX ?= 6
 ITERATIONS ?= 4
-EXTRA_CFLAGS = -DNUM_ALLOCS=$(NUM_ALLOCS) -DCPU_STRIDE=$(CPU_STRIDE) -DTHREADS_MAX=$(THREADS_MAX) -DITERATIONS=$(ITERATIONS)
-
-EXTRA_CFLAGS += $(if $(REALLOC),-DREALLOC,)
+BENCH ?= 0 # 0: bulk, 1: repeat, 2: rand
+EXTRA_CFLAGS = -DNUM_ALLOCS=$(NUM_ALLOCS) -DCPU_STRIDE=$(CPU_STRIDE) -DTHREADS_MAX=$(THREADS_MAX) -DITERATIONS=$(ITERATIONS) -DBENCH=$(BENCH)
 
 all:
 	make -C $(LINUX_BUILD_DIR) M=$(PWD) modules

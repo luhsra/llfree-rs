@@ -7,6 +7,8 @@
 #include <linux/slab.h>
 #include <linux/timekeeping.h>
 
+#include "nanorand.h"
+
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Kernel Alloc Test");
 MODULE_AUTHOR("Lars Wrenger");
@@ -31,8 +33,12 @@ MODULE_AUTHOR("Lars Wrenger");
 #define ITERATIONS 4
 #endif
 
-static const u64 threads[] = {1,  2,  4,  6,  8, 10, 12, 16, 20, 24, 28, 32,
-                              36, 40, 44, 48, 56, 64, 72, 80, 88, 96};
+#ifndef BENCH
+#define BENCH 0
+#endif
+
+static const u64 threads[] = {1,  2,  4,  6,  8,  10, 12, 16, 20, 24, 28,
+                              32, 36, 40, 44, 48, 56, 64, 72, 80, 88, 96};
 #define THREADS_LEN (sizeof(threads) / sizeof(*threads))
 
 static struct task_struct *tasks[THREADS_MAX];
@@ -88,27 +94,22 @@ static struct attribute_group attr_group = {
 };
 static struct kobject *output;
 
-static u64 cycles(void) {
+__maybe_unused static u64 cycles(void) {
     u32 lo, hi;
     asm volatile("rdtsc" : "=eax"(lo), "=edx"(hi) :);
     return ((u64)lo) | ((u64)hi) << 32;
 };
 
-static int worker(void *data) {
+/// Alloc a number of pages at once and free them afterwards
+__maybe_unused static void bulk(u64 tid) {
     u64 j;
-    u64 tid = (u64)data;
     u64 timer;
-
-#ifndef REALLOC
-
     struct page **pages =
         kmalloc_array(NUM_ALLOCS, sizeof(struct page *), GFP_KERNEL);
 
-    printk(KERN_INFO MOD "Worker %llu\n", tid);
-
     if (pages == NULL) {
         printk(KERN_ERR MOD "kmalloc failed");
-        return -1;
+        return;
     }
 
     // complete initialization
@@ -140,8 +141,12 @@ static int worker(void *data) {
     timer = (ktime_get_ns() - timer) / NUM_ALLOCS;
     atomic64_set(&thread_perf[tid].put, timer);
     printk(KERN_INFO MOD "Free %llu\n", timer);
+}
 
-#else // REALLOC
+/// Alloc and free the same page
+__maybe_unused static void repeat(u64 tid) {
+    u64 j;
+    u64 timer;
 
     struct page *page;
 
@@ -163,8 +168,67 @@ static int worker(void *data) {
     atomic64_set(&thread_perf[tid].get, timer);
     atomic64_set(&thread_perf[tid].put, timer);
     printk(KERN_INFO MOD "Realloc %llu\n", timer);
+}
 
-#endif // REALLOC
+/// Random free and realloc
+__maybe_unused static void rand(u64 tid) {
+    u64 i, j;
+    u64 timer;
+    struct nanorand rng = nanorand_new(tid);
+
+    struct page **pages =
+        kmalloc_array(NUM_ALLOCS, sizeof(struct page *), GFP_KERNEL);
+    if (pages == NULL) {
+        printk(KERN_ERR MOD "kmalloc failed");
+        return;
+    }
+
+    for (j = 0; j < NUM_ALLOCS; j++) {
+        pages[j] = alloc_page(GFP_USER);
+        if (pages == NULL) {
+            printk(KERN_ERR MOD "alloc_page failed");
+        }
+    }
+
+    // complete initialization
+    complete(&barriers[tid]);
+
+    // Start reallocs
+    wait_for_completion(&mid_barrier);
+
+    timer = ktime_get_ns();
+    for (j = 0; j < NUM_ALLOCS; j++) {
+        i = nanorand_random_range(&rng, 0, NUM_ALLOCS);
+
+        __free_page(pages[i]);
+        pages[i] = alloc_page(GFP_USER);
+        if (pages[i] == NULL) {
+            printk(KERN_ERR MOD "alloc_page failed");
+        }
+    }
+    timer = (ktime_get_ns() - timer) / NUM_ALLOCS;
+    atomic64_set(&thread_perf[tid].get, timer);
+    atomic64_set(&thread_perf[tid].put, timer);
+
+    for (j = 0; j < NUM_ALLOCS; j++) {
+        __free_page(pages[j]);
+    }
+
+    printk(KERN_INFO MOD "Realloc %llu\n", timer);
+}
+
+static int worker(void *data) {
+    u64 tid = (u64)data;
+
+    printk(KERN_INFO MOD "Worker %llu\n", tid);
+
+#if BENCH == 0
+    bulk(tid);
+#elif BENCH == 1
+    repeat(tid);
+#else
+    rand(tid);
+#endif
 
     complete(&barriers[tid]);
 
@@ -219,8 +283,8 @@ static int alloc_init_module(void) {
             p->put_avg = 0;
             p->put_max = 0;
 
-#ifndef REALLOC
-            // Alloc
+            // bulk alloc has two phases (alloc and free)
+#if BENCH == 0
             complete_all(&start_barrier);
 
             printk(KERN_INFO MOD "Waiting for workers...\n");
@@ -229,9 +293,8 @@ static int alloc_init_module(void) {
                 wait_for_completion(&barriers[t]);
                 reinit_completion(&barriers[t]);
             }
-#endif // REALLOC
-
-            // Free
+#endif
+            // second phase
             complete_all(&mid_barrier);
 
             for (t = 0; t < threads[i]; t++) {
