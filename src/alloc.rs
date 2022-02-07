@@ -199,7 +199,7 @@ mod test {
     fn rand() {
         logging();
         // 8GiB
-        const MEM_SIZE: usize = 8 << 30;
+        const MEM_SIZE: usize = 4 << 30;
         let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
@@ -209,21 +209,17 @@ mod test {
         Allocator::init(1, &mut mapping, true).unwrap();
 
         warn!("start alloc...");
-        let mut pages = Vec::new();
-        loop {
-            match Allocator::instance().get(0, Size::L0) {
-                Ok(page) => pages.push(page),
-                Err(Error::Memory) => break,
-                Err(e) => panic!("{:?}", e),
-            }
+        const ALLOCS: usize = MEM_SIZE / Page::SIZE / 4 * 3;
+        let mut pages = Vec::with_capacity(ALLOCS);
+        for _ in 0..ALLOCS {
+            pages.push(Allocator::instance().get(0, Size::L0).unwrap());
         }
         warn!("allocated {}", pages.len());
 
         warn!("check...");
         assert_eq!(Allocator::instance().allocated_pages(), pages.len());
-        pages.sort_unstable();
-
         // Check that the same page was not allocated twice
+        pages.sort_unstable();
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
@@ -232,33 +228,31 @@ mod test {
             assert!(p1 != p2);
         }
 
-        warn!("free half...");
+        warn!("reallocate rand...");
         let mut rng = WyRand::new_seed(100);
         rng.shuffle(&mut pages);
 
-        let half_len = (pages.len() + 1) / 2;
-        for page in &pages[half_len..] {
-            Allocator::instance().put(0, *page).unwrap();
+        for _ in 0..2 * pages.len() {
+            let i = rng.generate_range(0..pages.len());
+            Allocator::instance().put(0, pages[i]).unwrap();
+            pages[i] = Allocator::instance().get(0, Size::L0).unwrap();
         }
 
-        assert_eq!(Allocator::instance().allocated_pages(), half_len);
-
-        warn!("realloc...");
-        // Realloc
-        let mut i = half_len;
-        for page in &mut pages[half_len..] {
-            match Allocator::instance().get(0, Size::L0) {
-                Ok(p) => *page = p,
-                Err(Error::Memory) => break,
-                Err(e) => panic!("{:?}", e),
-            }
-            i += 1;
+        warn!("check...");
+        assert_eq!(Allocator::instance().allocated_pages(), pages.len());
+        // Check that the same page was not allocated twice
+        pages.sort_unstable();
+        for i in 0..pages.len() - 1 {
+            let p1 = pages[i];
+            let p2 = pages[i + 1];
+            info!("addr {i}={p1:x}");
+            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
+            assert!(p1 != p2);
         }
-        assert!(Allocator::instance().get(0, Size::L0).is_err());
-        warn!("realloc {i}, lost {}", pages.len() - i);
 
         warn!("free...");
-        for page in &pages[..i] {
+        rng.shuffle(&mut pages);
+        for page in &pages {
             Allocator::instance().put(0, *page).unwrap();
         }
         assert_eq!(Allocator::instance().allocated_pages(), 0);

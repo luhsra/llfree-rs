@@ -67,12 +67,12 @@ fn main() {
 
     // Warmup
     for page in &mut mapping[..] {
-        *page.cast::<usize>() = 1;
+        *page.cast_mut::<usize>() = 1;
     }
 
     for _ in 0..iterations {
         let timer = Instant::now();
-        A::init(threads, &mut mapping).unwrap();
+        A::init(threads, &mut mapping, true).unwrap();
         warn!("init time {}ms", timer.elapsed().as_millis());
 
         let barrier = Arc::new(Barrier::new(threads));

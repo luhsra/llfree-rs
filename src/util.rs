@@ -1,5 +1,6 @@
 use std::alloc::Layout;
 use std::fmt::Debug;
+use std::mem::size_of;
 use std::marker::PhantomData;
 use std::ops::Index;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,7 +28,12 @@ impl Page {
             _data: [0; Page::SIZE],
         }
     }
-    pub fn cast<T>(&mut self) -> &mut T {
+    pub fn cast<T>(&self) -> &T {
+        debug_assert!(size_of::<T>() <= size_of::<Self>());
+        unsafe { std::mem::transmute(self) }
+    }
+    pub fn cast_mut<T>(&mut self) -> &mut T {
+        debug_assert!(size_of::<T>() <= size_of::<Self>());
         unsafe { std::mem::transmute(self) }
     }
 }

@@ -135,7 +135,8 @@ impl Alloc for ArrayAtomicAlloc {
         let pte3 = self.entries[i].load();
         match pte3.size() {
             Some(Size::L2) => self.put_giant(core, page),
-            _ => self.put_small(core, page, pte3),
+            Some(_) => self.put_small(core, page, pte3),
+            None => Err(Error::Memory),
         }
     }
 
@@ -144,7 +145,7 @@ impl Alloc for ArrayAtomicAlloc {
         let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self.entries[i].load();
-            // warn!("{i:>3}: {pte:?}");
+            warn!("{i:>3}: {pte:?}");
             pages -= pte.pages();
         }
         // Pages allocated in reserved subtrees
@@ -162,7 +163,7 @@ impl ArrayAtomicAlloc {
         // Last frame is reserved for metadata
         let pages = (memory.len() - 1).min(MAX_PAGES);
         let (memory, rem) = memory.split_at_mut(pages);
-        let meta = rem[0].cast::<Meta>();
+        let meta = rem[0].cast_mut::<Meta>();
 
         // level 2 tables are stored at the end of the NVM
         let pages = pages - Table::num_pts(2, pages);
@@ -286,7 +287,7 @@ impl ArrayAtomicAlloc {
             Ok(())
         } else {
             error!("Unreserve failed i{i}");
-            return Err(Error::Corruption);
+            Err(Error::Corruption)
         }
     }
 

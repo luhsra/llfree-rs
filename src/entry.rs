@@ -47,7 +47,7 @@ impl Change {
 
 impl Entry {
     #[inline]
-    pub fn reserve_partial(self, size: Size) -> Option<Self> {
+    pub fn dec_partial(self, size: Size) -> Option<Self> {
         match size {
             Size::L0 if self.partial_l0() > 0 => Some(self.with_partial_l0(self.partial_l0() - 1)),
             Size::L1 if self.partial_l1() > 0 => Some(self.with_partial_l1(self.partial_l1() - 1)),
@@ -183,9 +183,9 @@ impl Entry3 {
         }
     }
     #[inline]
-    pub fn reserve_partial(self, size: Size) -> Option<Entry3> {
+    pub fn reserve_partial(self, size: Size, min: usize) -> Option<Entry3> {
         if !self.reserved()
-            && self.pages() >= Table::span(size as _)
+            && self.pages() > min
             && self.pages() < Table::span(2)
             && (self.size() == None || self.size() == Some(size))
         {

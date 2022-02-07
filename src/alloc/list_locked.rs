@@ -50,10 +50,10 @@ impl Alloc for ListLockedAlloc {
         // build free lists
         for i in 1..pages {
             memory[i - 1]
-                .cast::<Node>()
+                .cast_mut::<Node>()
                 .set((begin + i * Page::SIZE) as *mut _);
         }
-        memory[pages - 1].cast::<Node>().set(null_mut());
+        memory[pages - 1].cast_mut::<Node>().set(null_mut());
 
         let mut local = Vec::with_capacity(cores);
         local.resize_with(cores, || LocalCounter {

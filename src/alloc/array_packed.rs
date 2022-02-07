@@ -136,7 +136,8 @@ impl Alloc for ArrayPackedAlloc {
         let pte3 = self.entries[i].load();
         match pte3.size() {
             Some(Size::L2) => self.put_giant(core, page),
-            _ => self.put_small(core, page, pte3),
+            Some(_) => self.put_small(core, page, pte3),
+            None => Err(Error::Memory),
         }
     }
 
@@ -163,7 +164,7 @@ impl ArrayPackedAlloc {
         // Last frame is reserved for metadata
         let pages = (memory.len() - 1).min(MAX_PAGES);
         let (memory, rem) = memory.split_at_mut(pages);
-        let meta = rem[0].cast::<Meta>();
+        let meta = rem[0].cast_mut::<Meta>();
 
         // level 2 tables are stored at the end of the NVM
         let pages = pages - Table::num_pts(2, pages);
@@ -291,7 +292,7 @@ impl ArrayPackedAlloc {
             Ok(())
         } else {
             error!("Unreserve failed i{i}");
-            return Err(Error::Corruption);
+            Err(Error::Corruption)
         }
     }
 

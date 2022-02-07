@@ -110,7 +110,7 @@ fn main() {
 
     // Warmup
     for page in &mut mapping[..] {
-        *page.cast::<usize>() = 1;
+        *page.cast_mut::<usize>() = 1;
     }
 
     for threads in threads {

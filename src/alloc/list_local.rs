@@ -48,11 +48,11 @@ impl Alloc for ListLocalAlloc {
             // build linked list
             for i in core * p_core + 1..(core + 1) * p_core {
                 memory[i - 1]
-                    .cast::<Node>()
+                    .cast_mut::<Node>()
                     .set((begin + i * Page::SIZE) as *mut _);
             }
             memory[(core + 1) * p_core - 1]
-                .cast::<Node>()
+                .cast_mut::<Node>()
                 .set(null_mut());
             l.next.set((begin + core * p_core * Page::SIZE) as *mut _);
             local.push(l);
