@@ -61,24 +61,41 @@ struct perf {
     u64 put_max;
 };
 static struct perf perf[ITERATIONS * THREADS_LEN];
+static u64 out_index = 0;
 
+/// Outputs the measured data.
+/// Note: `buf` is PAGE_SIZE large!
 static ssize_t out_show(struct kobject *kobj, struct kobj_attribute *attr,
                         char *buf) {
     ssize_t i, iter;
     struct perf *p;
-    ssize_t len = sprintf(buf, "alloc,threads,iteration,allocs,get_min,get_avg,"
-                               "get_max,put_min,put_avg,put_max,init,total\n");
+    ssize_t len = 0;
 
-    for (i = 0; threads[i] <= THREADS_MAX && i < THREADS_LEN; i++) {
-        for (iter = 0; iter < ITERATIONS; iter++) {
-            p = &perf[i * ITERATIONS + iter];
-            len += sprintf(
-                buf + len,
-                "KernelAlloc,%llu,%lu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,0,0\n",
-                threads[i], iter, (u64)NUM_ALLOCS, p->get_min, p->get_avg,
-                p->get_max, p->put_min, p->put_avg, p->put_max);
+    if (out_index == 0) {
+        len += sprintf(buf, "alloc,threads,iteration,allocs,get_min,get_avg,"
+                            "get_max,put_min,put_avg,put_max,init,total\n");
+    }
+
+    for (i = out_index; threads[i] <= THREADS_MAX && i < THREADS_LEN; i++) {
+        // The output buffer has only the size of a PAGE.
+        // If our output is larger we have to output it in multiple steps.
+        if (len < PAGE_SIZE - ITERATIONS * 128) {
+            for (iter = 0; iter < ITERATIONS; iter++) {
+                p = &perf[i * ITERATIONS + iter];
+
+                len += sprintf(buf + len,
+                               "KernelAlloc,%llu,%lu,%llu,%llu,%llu,%llu,%llu,%"
+                               "llu,%llu,0,0\n",
+                               threads[i], iter, (u64)NUM_ALLOCS, p->get_min,
+                               p->get_avg, p->get_max, p->put_min, p->put_avg,
+                               p->put_max);
+            }
+        } else {
+            out_index = i;
+            return len;
         }
     }
+    out_index = 0;
     return len;
 }
 
