@@ -263,7 +263,7 @@ impl<A: Leafs> LeafAllocator<A> {
         for (i, leaf) in A::leafs().iter().enumerate() {
             if leaf as *const _ != self as *const _ {
                 while leaf.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
-                    warn!("Waiting for cpu {} on {}", i, unsafe {
+                    warn!("Waiting for cpu {i} on {}", unsafe {
                         (self as *const Self).offset_from(&A::leafs()[0] as *const _)
                     });
                     wait!();
@@ -308,7 +308,7 @@ impl<A: Leafs> LeafAllocator<A> {
         if old.page() {
             // Free huge page
             if page % Table::span(Size::L1 as _) != 0 {
-                error!("Invalid address {}", page);
+                error!("Invalid address {page}");
                 return Err(Error::Address);
             }
 
@@ -318,7 +318,7 @@ impl<A: Leafs> LeafAllocator<A> {
             match pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
                 Ok(_) => Ok(Size::L1),
                 Err(_) => {
-                    error!("Corruption l2 i{}", i2);
+                    error!("Corruption l2 i{i2}");
                     Err(Error::Corruption)
                 }
             }
@@ -406,12 +406,13 @@ impl<A: Leafs> LeafAllocator<A> {
     }
 
     pub fn clear_giant(&self, page: usize) {
+        // Clear all layer 1 page tables in this area
         for i in 0..Table::LEN {
             // i1 is initially 0
             let pt1 = unsafe {
                 &*((self.begin + (page + i * Table::span(1)) * Page::SIZE) as *const Table<Entry1>)
             };
-            pt1.clear(); // set all to 0 -> empty
+            pt1.clear();
         }
         // Clear the persist flag
         self.pt2(page).set(0, Entry2::new_table(Table::LEN, 0));
