@@ -261,6 +261,78 @@ mod test {
     }
 
     #[test]
+    fn multirand() {
+        const THREADS: usize = 4;
+        const MEM_SIZE: usize = (24 << 30) / Page::SIZE;
+        const ALLOCS: usize = ((MEM_SIZE / THREADS) / 4) * 3;
+
+        logging();
+        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE).unwrap();
+        let range = mapping.as_ptr_range();
+        info!("mmap {MEM_SIZE} bytes at {range:?}");
+        let range = range.start as u64..range.end as u64;
+
+        info!("init alloc");
+
+        Allocator::init(THREADS, &mut mapping, true).unwrap();
+
+        let barrier = Arc::new(Barrier::new(THREADS));
+        thread::parallel(THREADS, move |t| {
+            thread::pin(t);
+
+            barrier.wait();
+            warn!("start alloc...");
+            let mut pages = Vec::with_capacity(ALLOCS);
+            for _ in 0..ALLOCS {
+                pages.push(Allocator::instance().get(t, Size::L0).unwrap());
+            }
+            warn!("allocated {}", pages.len());
+
+            warn!("check...");
+            // Check that the same page was not allocated twice
+            pages.sort_unstable();
+            for i in 0..pages.len() - 1 {
+                let p1 = pages[i];
+                let p2 = pages[i + 1];
+                assert!(range.contains(&p1), "{} not in {:?}", p1, range);
+                assert!(p1 != p2, "{}", p1);
+            }
+
+            barrier.wait();
+            warn!("reallocate rand...");
+            let mut rng = WyRand::new_seed(t as _);
+            rng.shuffle(&mut pages);
+
+            for _ in 0..2 * pages.len() {
+                let i = rng.generate_range(0..pages.len());
+                Allocator::instance().put(t, pages[i]).unwrap();
+                pages[i] = Allocator::instance().get(t, Size::L0).unwrap();
+            }
+
+            warn!("check...");
+            // Check that the same page was not allocated twice
+            pages.sort_unstable();
+            for i in 0..pages.len() - 1 {
+                let p1 = pages[i];
+                let p2 = pages[i + 1];
+                assert!(range.contains(&p1), "{} not in {:?}", p1, range);
+                assert!(p1 != p2, "{}", p1);
+            }
+
+            warn!("free...");
+            rng.shuffle(&mut pages);
+            for page in &pages {
+                Allocator::instance().put(t, *page).unwrap();
+            }
+
+        });
+
+        assert_eq!(Allocator::instance().allocated_pages(), 0);
+
+        Allocator::uninit();
+    }
+
+    #[test]
     fn init() {
         logging();
         // 8GiB

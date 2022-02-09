@@ -58,10 +58,10 @@ fn main() {
     let mem_pages = 2 * threads * MIN_PAGES;
     let mut mapping = mapping(0x1000_0000_0000, mem_pages, dax).unwrap();
 
-    warn!("\n\n>>> bench t={threads} {size:?} {}\n");
     // Allocate half the memory
     let allocs = mapping.len() / threads / 2 / Table::span(size as _);
     assert!(allocs % Table::LEN == 0);
+    warn!("\n\n>>> bench t={threads} {size:?} {allocs}\n");
 
     let mut times = vec![Perf::default(); 2 * Table::LEN];
 

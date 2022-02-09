@@ -213,7 +213,7 @@ impl<A: Leafs> LeafAllocator<A> {
                 self.alloc_pt1.store(0, Ordering::SeqCst);
             }
         }
-        error!("exceeding retries {start} {}", start / Table::span(2));
+        error!("Exceeding retries {start} {}", start / Table::span(2));
         Err(Error::Corruption)
     }
 
@@ -231,20 +231,23 @@ impl<A: Leafs> LeafAllocator<A> {
                 #[cfg(feature = "wait")]
                 if pt1.get(i) != Entry1::Empty {
                     continue;
+                } else {
+                    wait!();
                 }
 
-                wait!();
-
                 if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
-                    info!("alloc l1 i={}: {}", i, page);
                     return Ok(page);
                 }
             }
 
-            warn!("nothing found retry...");
+            warn!("Nothing found, retry");
             wait!();
         }
-        error!("exceeding retries");
+        error!(
+            "Exceeding retries {}-{}: {pte2:?}",
+            start / Table::span(2),
+            Table::idx(2, start)
+        );
         Err(Error::Corruption)
     }
 
@@ -282,12 +285,11 @@ impl<A: Leafs> LeafAllocator<A> {
             for page in Table::iterate(2, start) {
                 let i = Table::idx(2, page);
                 if pt.update(i, Entry2::mark_huge).is_ok() {
-                    info!("alloc l2 i={}: {}", i, page);
                     return Ok(page);
                 }
             }
         }
-        error!("exceeding retries");
+        error!("Exceeding retries {}", start / Table::span(2));
         Err(Error::Corruption)
     }
 
@@ -303,8 +305,6 @@ impl<A: Leafs> LeafAllocator<A> {
         wait!();
 
         let mut old = pt2.get(i2);
-        // warn!("{} i{i2}: {old:?}", page / Table::span(2));
-
         if old.page() {
             // Free huge page
             if page % Table::span(Size::L1 as _) != 0 {
@@ -323,19 +323,20 @@ impl<A: Leafs> LeafAllocator<A> {
                 }
             }
         } else if !old.giant() && old.pages() < Table::LEN {
-            loop {
+            for _ in 0..CAS_RETRIES {
                 match self.put_small(old, page).map(|_| Size::L0) {
                     Err(Error::CAS) => old = pt2.get(i2),
                     e => return e,
                 }
             }
+            error!("Exceeding retries {page:x}");
+            Err(Error::Corruption)
         } else {
             Err(Error::Address)
         }
     }
 
     fn put_small(&self, pte2: Entry2, page: usize) -> Result<()> {
-        info!("free leaf page {page}");
         let pt2 = self.pt2(page);
         let i2 = Table::idx(2, page);
 
@@ -350,7 +351,7 @@ impl<A: Leafs> LeafAllocator<A> {
         let pte1 = pt1.get(i1);
 
         if pte1 != Entry1::Page {
-            error!("Invalid Addr l1 i{} p={}", i1, page);
+            error!("Invalid Addr l1 i{i1} p={page}");
             return Err(Error::Address);
         }
 
@@ -358,7 +359,7 @@ impl<A: Leafs> LeafAllocator<A> {
 
         if let Err(pte2) = pt2.update(i2, |pte| pte.inc(pte2.i1())) {
             return if pte2.pages() == Table::LEN {
-                error!("Invalid Addr l1 i{} p={}", i1, page);
+                error!("Invalid Addr l1 i{i1} p={page}");
                 Err(Error::Address)
             } else {
                 Err(Error::CAS)
@@ -368,7 +369,7 @@ impl<A: Leafs> LeafAllocator<A> {
         wait!();
 
         if pt1.cas(i1, Entry1::Page, Entry1::Empty).is_err() {
-            error!("Corruption l1 i{}", i1);
+            error!("Corruption l1 i{i1}");
             return Err(Error::Corruption);
         }
 
@@ -684,8 +685,8 @@ mod test {
         logging();
 
         let orders = [
-            vec![0, 0, 0, 0, 1, 1, 1],    // free then alloc
-            vec![1, 1, 1, 0, 0],          // alloc last then free last
+            vec![0, 0, 0, 0, 1, 1, 1], // free then alloc
+            vec![1, 1, 1, 0, 0],       // alloc last then free last
             vec![0, 1, 1, 1, 0, 0, 0], // 1 skips table
             vec![0, 1, 0, 1, 0, 1, 0], // 1 skips table
             vec![0, 0, 1, 0, 1, 0, 1, 1],
