@@ -8,7 +8,6 @@ use crate::util::Page;
 pub mod array_aligned;
 pub mod array_atomic;
 pub mod array_packed;
-pub mod buddy;
 pub mod list_local;
 pub mod list_locked;
 pub mod malloc;
@@ -99,16 +98,15 @@ mod test {
     use std::time::Instant;
 
     use log::{info, warn};
-    use nanorand::{Rng, WyRand};
 
     use super::{Alloc, Allocator, Error};
     use crate::alloc::MIN_PAGES;
     use crate::mmap::MMap;
     use crate::table::Table;
-    use crate::util::{logging, Page};
+    use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<'a, Page>, ()> {
+    fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
         if let Ok(file) = std::env::var("NVM_FILE") {
             warn!("MMap file {file} l={}G", (length * Page::SIZE) >> 30);
@@ -229,11 +227,11 @@ mod test {
         }
 
         warn!("reallocate rand...");
-        let mut rng = WyRand::new_seed(100);
+        let mut rng = WyRand::new(100);
         rng.shuffle(&mut pages);
 
         for _ in 0..2 * pages.len() {
-            let i = rng.generate_range(0..pages.len());
+            let i = rng.range(0..pages.len() as _) as usize;
             Allocator::instance().put(0, pages[i]).unwrap();
             pages[i] = Allocator::instance().get(0, Size::L0).unwrap();
         }
@@ -300,11 +298,11 @@ mod test {
 
             barrier.wait();
             warn!("reallocate rand...");
-            let mut rng = WyRand::new_seed(t as _);
+            let mut rng = WyRand::new(t as _);
             rng.shuffle(&mut pages);
 
             for _ in 0..2 * pages.len() {
-                let i = rng.generate_range(0..pages.len());
+                let i = rng.range(0..pages.len() as _) as usize;
                 Allocator::instance().put(t, pages[i]).unwrap();
                 pages[i] = Allocator::instance().get(t, Size::L0).unwrap();
             }
@@ -616,7 +614,7 @@ mod test {
                 *page = Allocator::instance().get(t, Size::L0).unwrap();
             }
 
-            let mut rng = WyRand::new_seed(t as _);
+            let mut rng = WyRand::new(t as _);
             rng.shuffle(&mut pages);
 
             for page in pages {

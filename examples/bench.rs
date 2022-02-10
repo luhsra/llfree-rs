@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use clap::{ArgEnum, Parser};
 use log::warn;
-use nanorand::{Rng, WyRand};
 
 use nvalloc::alloc::array_aligned::ArrayAlignedAlloc;
 use nvalloc::alloc::array_atomic::ArrayAtomicAlloc;
@@ -20,7 +19,7 @@ use nvalloc::alloc::table::TableAlloc;
 use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
-use nvalloc::util::Page;
+use nvalloc::util::{Page, WyRand};
 use nvalloc::{thread, util};
 
 /// Benchmarking the allocators against each other.
@@ -155,7 +154,7 @@ fn main() {
     }
 }
 
-fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<'a, Page>, ()> {
+fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {
         if let Some(file) = dax {
@@ -285,13 +284,13 @@ fn random<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) 
         pages.push(A::instance().get(t, size).unwrap());
     }
 
-    let mut rng = WyRand::new_seed(t as _);
+    let mut rng = WyRand::new(t as _);
 
     barrier.wait();
     let timer = Instant::now();
 
     for _ in 0..allocs {
-        let i = rng.generate_range(0..pages.len());
+        let i = rng.range(0..pages.len() as _) as usize;
         A::instance().put(t, pages[i]).unwrap();
         pages[i] = A::instance().get(t, size).unwrap();
     }

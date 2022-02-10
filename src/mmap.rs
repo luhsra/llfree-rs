@@ -12,12 +12,12 @@ pub fn perror(s: &str) {
 }
 
 /// Chunk of mapped memory.
-pub struct MMap<'a, T> {
-    slice: &'a mut [T],
+pub struct MMap<T: 'static> {
+    slice: &'static mut [T],
 }
 
-impl<'a, T> MMap<'a, T> {
-    pub fn file(begin: usize, len: usize, file: File) -> Result<MMap<'a, T>, ()> {
+impl<T> MMap<T> {
+    pub fn file(begin: usize, len: usize, file: File) -> Result<MMap<T>, ()> {
         assert!(len > 0);
 
         let fd = file.as_raw_fd();
@@ -42,7 +42,7 @@ impl<'a, T> MMap<'a, T> {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn dax(begin: usize, len: usize, file: File) -> Result<MMap<'a, T>, ()> {
+    pub fn dax(begin: usize, len: usize, file: File) -> Result<MMap<T>, ()> {
         assert!(len > 0);
 
         let fd = file.as_raw_fd();
@@ -66,7 +66,7 @@ impl<'a, T> MMap<'a, T> {
         }
     }
 
-    pub fn anon(begin: usize, len: usize) -> Result<MMap<'a, T>, ()> {
+    pub fn anon(begin: usize, len: usize) -> Result<MMap<T>, ()> {
         if len == 0 {
             return Ok(MMap {
                 slice: unsafe { std::slice::from_raw_parts_mut(begin as _, len) },
@@ -94,20 +94,20 @@ impl<'a, T> MMap<'a, T> {
     }
 }
 
-impl<'a, T> Deref for MMap<'a, T> {
+impl<T> Deref for MMap<T> {
     type Target = [T];
     fn deref(&self) -> &Self::Target {
         self.slice
     }
 }
 
-impl<'a, T> DerefMut for MMap<'a, T> {
+impl<T> DerefMut for MMap<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.slice
     }
 }
 
-impl<'a, T> Drop for MMap<'a, T> {
+impl<T> Drop for MMap<T> {
     fn drop(&mut self) {
         if self.len() > 0 {
             let ret = unsafe { libc::munmap(self.slice.as_ptr() as _, self.slice.len() as _) };

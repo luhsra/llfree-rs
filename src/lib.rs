@@ -101,7 +101,7 @@ mod test {
 
         const THREADS: usize = 8;
 
-        let mut mapping: MMap<'_, Page> = MMap::anon(0x1000_0000_0000_u64 as _, 20 << 18).unwrap();
+        let mut mapping: MMap<Page> = MMap::anon(0x1000_0000_0000_u64 as _, 20 << 18).unwrap();
 
         info!("mmap {} bytes", mapping.len());
 

@@ -1,14 +1,10 @@
+use log::error;
 use std::alloc::Layout;
 use std::fmt::Debug;
-use std::mem::size_of;
 use std::marker::PhantomData;
-use std::ops::Index;
+use std::mem::size_of;
+use std::ops::{Index, Range};
 use std::sync::atomic::{AtomicU64, Ordering};
-
-#[allow(unused_imports)]
-use std::time::Instant;
-
-use log::error;
 
 use crate::entry::Entry3;
 
@@ -90,18 +86,20 @@ impl<T: From<u64> + Into<u64>> Atomic<T> {
     }
 }
 
+#[cfg(all(feature = "thread", any(test, feature = "logger")))]
+fn core() -> usize {
+    use crate::thread::PINNED;
+    PINNED.with(|p| p.load(Ordering::SeqCst))
+}
+#[cfg(all(not(feature = "thread"), any(test, feature = "logger")))]
+fn core() -> usize {
+    0
+}
+
 #[cfg(any(test, feature = "logger"))]
 pub fn logging() {
     use std::io::Write;
     use std::thread::ThreadId;
-
-    #[cfg(any(test, feature = "thread"))]
-    let core = {
-        use crate::thread::PINNED;
-        PINNED.with(|p| p.load(Ordering::SeqCst))
-    };
-    #[cfg(not(any(test, feature = "thread")))]
-    let core = 0usize;
 
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format(move |buf, record| {
@@ -119,7 +117,7 @@ pub fn logging() {
                 color,
                 record.level(),
                 unsafe { std::mem::transmute::<ThreadId, u64>(std::thread::current().id()) },
-                core,
+                core(),
                 record.file().unwrap_or_default(),
                 record.line().unwrap_or_default(),
                 record.args()
@@ -172,12 +170,12 @@ impl Cycles {
 
 #[cfg(not(target_arch = "x86_64"))]
 #[derive(Debug, Clone, Copy)]
-pub struct Cycles(Instant);
+pub struct Cycles(std::time::Instant);
 
 #[cfg(not(target_arch = "x86_64"))]
 impl Cycles {
     pub fn now() -> Self {
-        Self(Instant::now())
+        Self(std::time::Instant::now())
     }
     pub fn elapsed(self) -> u64 {
         self.0.elapsed().as_nanos() as _
@@ -298,14 +296,38 @@ where
     }
 }
 
+pub struct WyRand {
+    pub seed: u64,
+}
+
+impl WyRand {
+    pub fn new(seed: u64) -> Self {
+        Self { seed }
+    }
+    pub fn gen(&mut self) -> u64 {
+        self.seed = self.seed.wrapping_add(0xa0761d6478bd642f);
+        let t: u128 = (self.seed as u128).wrapping_mul((self.seed ^ 0xe7037ed1a0b428db) as u128);
+        (t.wrapping_shr(64) ^ t) as u64
+    }
+    pub fn range(&mut self, range: Range<u64>) -> u64 {
+        let mut val = self.gen();
+        val %= range.end - range.start;
+        val + range.start
+    }
+    pub fn shuffle<T>(&mut self, target: &mut [T]) {
+        for i in 0..target.len() {
+            target.swap(i, self.range(0..target.len() as u64) as usize);
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::mem::MaybeUninit;
     use std::sync::{Arc, Barrier};
 
-    use nanorand::{WyRand, Rng};
-
-    use super::{AArrayDebug, ANode, AStack, Cycles};
+    use super::{AArrayDebug, ANode, AStack, Cycles, WyRand};
+    use crate::thread;
     use crate::{thread::parallel, util::Atomic};
 
     #[cfg(target_arch = "x86_64")]
@@ -354,6 +376,8 @@ mod test {
 
         parallel(4, move |t| {
             for _ in 0..100 {
+                thread::pin(t);
+
                 barrier.wait();
                 for i in 0..4 {
                     stack.push(unsafe { &DATA }, t * 4 + i);
@@ -367,15 +391,25 @@ mod test {
     }
 
     #[test]
-    fn nanorand() {
-        let mut rng = WyRand::new_seed(42);
-        let val: usize = rng.generate_range(0..1000);
-        println!("rand: {val}");
-        let val: usize = rng.generate_range(0..1000);
-        println!("rand: {val}");
-        let val: usize = rng.generate_range(0..1000);
-        println!("rand: {val}");
-        let val: usize = rng.generate_range(0..1000);
-        println!("rand: {val}");
+    fn wy_rand() {
+        let mut rng = WyRand::new(0);
+        let mut buckets = [0usize; 512];
+        for _ in 0..512 * buckets.len() {
+            buckets[rng.range(0..buckets.len() as _) as usize] += 1;
+        }
+        let mut min = usize::MAX;
+        let mut max = 0;
+        let mut avg = 0.0;
+        let mut std = 0.0;
+        for v in buckets {
+            min = min.min(v);
+            max = max.max(v);
+            avg += v as f64;
+            std += (v * v) as f64;
+        }
+        avg /= buckets.len() as f64;
+        std /= buckets.len() as f64;
+        std = (std - (avg * avg)).sqrt();
+        println!("avg={avg:.2}, std={std:.2}, min={min}, max={max}");
     }
 }
