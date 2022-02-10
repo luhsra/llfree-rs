@@ -12,7 +12,7 @@ use log::warn;
 
 use nvalloc::alloc::array_aligned::ArrayAlignedAlloc;
 use nvalloc::alloc::array_atomic::ArrayAtomicAlloc;
-use nvalloc::alloc::array_packed::ArrayPackedAlloc;
+use nvalloc::alloc::array_locked::ArrayLockedAlloc;
 use nvalloc::alloc::list_local::ListLocalAlloc;
 use nvalloc::alloc::list_locked::ListLockedAlloc;
 use nvalloc::alloc::table::TableAlloc;
@@ -118,7 +118,7 @@ fn main() {
             bench_alloc::<ArrayAlignedAlloc>(mapping, size, threads, benchmark, i, &mut outfile);
         }
         for i in 0..iterations {
-            bench_alloc::<ArrayPackedAlloc>(mapping, size, threads, benchmark, i, &mut outfile);
+            bench_alloc::<ArrayLockedAlloc>(mapping, size, threads, benchmark, i, &mut outfile);
         }
         for i in 0..iterations {
             bench_alloc::<ArrayAtomicAlloc>(mapping, size, threads, benchmark, i, &mut outfile);

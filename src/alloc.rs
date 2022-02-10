@@ -7,7 +7,7 @@ use crate::util::Page;
 
 pub mod array_aligned;
 pub mod array_atomic;
-pub mod array_packed;
+pub mod array_locked;
 pub mod list_local;
 pub mod list_locked;
 pub mod malloc;

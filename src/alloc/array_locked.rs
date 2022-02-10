@@ -1,9 +1,9 @@
 use std::ops::Range;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard};
 
 use log::{error, warn};
+use spin::{Mutex, MutexGuard};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
@@ -23,7 +23,7 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
 /// Volatile shared metadata
 #[repr(align(64))]
-pub struct ArrayPackedAlloc {
+pub struct ArrayLockedAlloc {
     memory: Range<*const Page>,
     meta: *mut Meta,
     local: Vec<LeafAllocator<Self>>,
@@ -34,16 +34,16 @@ pub struct ArrayPackedAlloc {
     partial_l0: Mutex<Vec<usize>>,
 }
 
-const INITIALIZING: *mut ArrayPackedAlloc = usize::MAX as _;
-static mut SHARED: AtomicPtr<ArrayPackedAlloc> = AtomicPtr::new(null_mut());
+const INITIALIZING: *mut ArrayLockedAlloc = usize::MAX as _;
+static mut SHARED: AtomicPtr<ArrayLockedAlloc> = AtomicPtr::new(null_mut());
 
-impl Leafs for ArrayPackedAlloc {
+impl Leafs for ArrayLockedAlloc {
     fn leafs<'a>() -> &'a [LeafAllocator<Self>] {
         &Self::instance().local
     }
 }
 
-impl Alloc for ArrayPackedAlloc {
+impl Alloc for ArrayLockedAlloc {
     #[cold]
     fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
         warn!(
@@ -158,7 +158,7 @@ impl Alloc for ArrayPackedAlloc {
     }
 }
 
-impl ArrayPackedAlloc {
+impl ArrayLockedAlloc {
     #[cold]
     fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
         // Last frame is reserved for metadata
@@ -197,7 +197,7 @@ impl ArrayPackedAlloc {
         self.local[0].clear();
 
         // Add all entries to the empty list
-        let mut empty = self.empty.lock().unwrap();
+        let mut empty = self.empty.lock();
 
         let pte3_num = Table::num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
@@ -212,7 +212,7 @@ impl ArrayPackedAlloc {
         if max == Table::span(2) {
             empty.push(pte3_num - 1);
         } else if max > PTE3_FULL {
-            self.partial_l0.lock().unwrap().push(pte3_num - 1);
+            self.partial_l0.lock().push(pte3_num - 1);
         }
     }
 
@@ -232,7 +232,7 @@ impl ArrayPackedAlloc {
 
                 // Add to lists
                 if pages == Table::span(2) {
-                    self.empty.lock().unwrap().push(i);
+                    self.empty.lock().push(i);
                 } else if pages > PTE3_FULL {
                     self.partial(size).push(i);
                 }
@@ -249,7 +249,6 @@ impl ArrayPackedAlloc {
             &self.partial_l1
         }
         .lock()
-        .unwrap()
     }
 
     fn reserve_dec(&self, size: Size) -> Result<(usize, Entry3)> {
@@ -261,11 +260,11 @@ impl ArrayPackedAlloc {
                 let pte = pte.dec(size).unwrap().with_idx(i);
                 return Ok((i * Table::span(2), pte));
             } else {
-                self.empty.lock().unwrap().push(i);
+                self.empty.lock().push(i);
             }
         }
 
-        if let Some(i) = self.empty.lock().unwrap().pop() {
+        if let Some(i) = self.empty.lock().pop() {
             warn!("reserve empty {i}");
             let pte = self.entries[i].update(|v| v.reserve_take(size)).unwrap();
             let pte = pte.dec(size).unwrap().with_idx(i);
@@ -285,7 +284,7 @@ impl ArrayPackedAlloc {
             // Add to list if new counter is small enough
             let new_pages = v.pages() + pte.pages();
             if new_pages == max {
-                self.empty.lock().unwrap().push(i);
+                self.empty.lock().push(i);
             } else if new_pages > PTE3_FULL {
                 self.partial(size).push(i);
             }
@@ -326,7 +325,7 @@ impl ArrayPackedAlloc {
     }
 
     fn get_giant(&self, core: usize) -> Result<usize> {
-        if let Some(i) = self.empty.lock().unwrap().pop() {
+        if let Some(i) = self.empty.lock().pop() {
             if self.entries[i]
                 .compare_exchange(
                     Entry3::new().with_pages(Table::span(2)),
@@ -362,7 +361,7 @@ impl ArrayPackedAlloc {
             .is_ok()
         {
             // Add to empty list
-            self.empty.lock().unwrap().push(i);
+            self.empty.lock().push(i);
             Ok(())
         } else {
             error!("CAS invalid i{i}");
