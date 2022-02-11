@@ -41,7 +41,7 @@ impl Alloc for ListLockedAlloc {
                 .compare_exchange(null_mut(), INITIALIZING, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
         } {
-            return Err(Error::Uninitialized);
+            return Err(Error::Initialization);
         }
 
         let begin = memory.as_ptr() as usize;
@@ -102,11 +102,7 @@ impl Alloc for ListLockedAlloc {
         if let Some(node) = self.next.lock().pop() {
             self.local[core].counter.fetch_add(1, Ordering::Relaxed);
             let addr = node as *mut _ as u64;
-            debug_assert!(
-                addr % Page::SIZE as u64 == 0 && self.memory.contains(&(addr as _)),
-                "{:x}",
-                addr
-            );
+            debug_assert!(addr % Page::SIZE as u64 == 0 && self.memory.contains(&(addr as _)),);
             Ok(addr)
         } else {
             error!("No memory");

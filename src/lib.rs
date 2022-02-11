@@ -1,8 +1,7 @@
 //! # Persistent non-volatile memory allocator
 //!
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
-#![feature(panic_info_message)]
-#![feature(const_maybe_uninit_zeroed)]
+#![feature(const_fn_trait_bound)]
 
 pub mod alloc;
 pub mod entry;
@@ -21,6 +20,10 @@ use std::sync::atomic::AtomicU64;
 use alloc::{Alloc, Allocator, Error, Size};
 use util::Page;
 
+// C bindings
+
+/// Initialize the allocator for the given memory range.
+/// If `overwrite` is nonzero no existing allocator state is recovered.
 #[no_mangle]
 pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwrite: u32) -> i64 {
     let memory = unsafe { std::slice::from_raw_parts_mut(addr as *mut Page, pages as _) };
@@ -30,11 +33,13 @@ pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwr
     }
 }
 
+/// Shut down the allocator normally.
 #[no_mangle]
 pub extern "C" fn nvalloc_uninit() {
     Allocator::uninit();
 }
 
+/// Allocate a page of the given `size` on the given cpu `core`.
 #[no_mangle]
 pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
     let size = match size {
@@ -51,6 +56,8 @@ pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
     }
 }
 
+/// Allocate and atomically insert the page into the given `dst`.
+/// Returns an error if the allocation or the CAS operation fail.
 #[no_mangle]
 pub extern "C" fn nvalloc_get_cas(
     core: u32,
@@ -75,6 +82,7 @@ pub extern "C" fn nvalloc_get_cas(
     }
 }
 
+/// Frees the given page.
 #[no_mangle]
 pub extern "C" fn nvalloc_put(core: u32, addr: u64) -> i64 {
     match Allocator::instance().put(core as _, addr) {

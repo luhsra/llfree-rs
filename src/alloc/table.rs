@@ -57,7 +57,7 @@ impl Alloc for TableAlloc {
                 .compare_exchange(null_mut(), INITIALIZING, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
         } {
-            return Err(Error::Uninitialized);
+            return Err(Error::Initialization);
         }
 
         let alloc = Self::new(cores, memory)?;
@@ -414,7 +414,7 @@ impl TableAlloc {
         let pt = self.pt3(start);
         let max = (self.pages() - start).min(Table::span(2));
 
-        if let Ok(pte) = pt.update(i, |v| v.unreserve_add(old, max)) {
+        if let Ok(pte) = pt.update(i, |v| v.unreserve_add(size, old, max)) {
             // Update parents
             let new_pages = old.pages() + pte.pages();
             if new_pages == Table::span(2) {
@@ -546,7 +546,7 @@ impl TableAlloc {
                 self.update_parents(page, Change::p_dec(size))
             } else if pte.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
                 // reserve for bulk put
-                if let Ok(pte) = pt.update(i, |v| v.reserve_take(size)) {
+                if let Ok(pte) = pt.update(i, |v| v.reserve(size)) {
                     warn!("put reserve {i}");
                     self.swap_reserved(size, pte.with_idx(i), pte_a)?;
                     leaf.start(size).store(page, Ordering::SeqCst);

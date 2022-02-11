@@ -25,8 +25,8 @@ pub enum Error {
     CAS = 2,
     /// Invalid address
     Address = 3,
-    /// Allocator not initialized
-    Uninitialized = 4,
+    /// Allocator not initialized or initialization failed
+    Initialization = 4,
     /// Corrupted allocator state
     Corruption = 5,
 }

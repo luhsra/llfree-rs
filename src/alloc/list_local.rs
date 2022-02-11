@@ -34,7 +34,7 @@ impl Alloc for ListLocalAlloc {
                 .compare_exchange(null_mut(), INITIALIZING, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
         } {
-            return Err(Error::Uninitialized);
+            return Err(Error::Initialization);
         }
 
         let begin = memory.as_ptr() as usize;
@@ -96,15 +96,11 @@ impl Alloc for ListLocalAlloc {
             return Err(Error::Memory);
         }
 
-        let l = &self.local[core];
-        if let Some(node) = l.next.pop() {
-            l.counter.fetch_add(1, Ordering::Relaxed);
+        let local = &self.local[core];
+        if let Some(node) = local.next.pop() {
+            local.counter.fetch_add(1, Ordering::Relaxed);
             let addr = node as *mut _ as u64;
-            debug_assert!(
-                addr % Page::SIZE as u64 == 0 && self.memory.contains(&(addr as _)),
-                "{:x}",
-                addr
-            );
+            debug_assert!(addr % Page::SIZE as u64 == 0 && self.memory.contains(&(addr as _)));
             Ok(addr)
         } else {
             error!("No memory");
@@ -118,17 +114,17 @@ impl Alloc for ListLocalAlloc {
             return Err(Error::Address);
         }
 
-        let l = &self.local[core];
-        l.next.push(unsafe { &mut *(addr as *mut Node) });
-        l.counter.fetch_sub(1, Ordering::Relaxed);
+        let local = &self.local[core];
+        local.next.push(unsafe { &mut *(addr as *mut Node) });
+        local.counter.fetch_sub(1, Ordering::Relaxed);
         Ok(())
     }
 
     #[cold]
     fn allocated_pages(&self) -> usize {
         let mut pages = 0;
-        for l in &self.local {
-            pages += l.counter.load(Ordering::Relaxed);
+        for local in &self.local {
+            pages += local.counter.load(Ordering::Relaxed);
         }
         pages
     }

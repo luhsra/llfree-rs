@@ -72,7 +72,7 @@ impl Alloc for ArrayAlignedAlloc {
                 .compare_exchange(null_mut(), INITIALIZING, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
         } {
-            return Err(Error::Uninitialized);
+            return Err(Error::Initialization);
         }
 
         let alloc = Self::new(cores, memory)?;

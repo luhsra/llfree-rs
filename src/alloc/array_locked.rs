@@ -61,7 +61,7 @@ impl Alloc for ArrayLockedAlloc {
                 .compare_exchange(null_mut(), INITIALIZING, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
         } {
-            return Err(Error::Uninitialized);
+            return Err(Error::Initialization);
         }
 
         let alloc = Self::new(cores, memory)?;
@@ -253,22 +253,27 @@ impl ArrayLockedAlloc {
 
     fn reserve_dec(&self, size: Size) -> Result<(usize, Entry3)> {
         while let Some(i) = self.partial(size).pop() {
-            // Skip empty entries
-            if self.entries[i].load().pages() < Table::span(2) {
-                warn!("reserve partial {i}");
-                let pte = self.entries[i].update(|v| v.reserve_take(size)).unwrap();
-                let pte = pte.dec(size).unwrap().with_idx(i);
-                return Ok((i * Table::span(2), pte));
-            } else {
-                self.empty.lock().push(i);
+            warn!("reserve partial {i}");
+            match self.entries[i].update(|v| v.reserve_partial(size, PTE3_FULL)) {
+                Ok(pte) => {
+                    let pte = pte.dec(size).unwrap().with_idx(i);
+                    return Ok((i * Table::span(2), pte));
+                }
+                Err(pte) => {
+                    // Skip empty entries
+                    if !pte.reserved() && pte.pages() == Table::span(2) {
+                        self.empty.lock().push(i);
+                    }
+                }
             }
         }
 
-        if let Some(i) = self.empty.lock().pop() {
+        while let Some(i) = self.empty.lock().pop() {
             warn!("reserve empty {i}");
-            let pte = self.entries[i].update(|v| v.reserve_take(size)).unwrap();
-            let pte = pte.dec(size).unwrap().with_idx(i);
-            return Ok((i * Table::span(2), pte));
+            if let Ok(pte) = self.entries[i].update(|v| v.reserve_empty(size)) {
+                let pte = pte.dec(size).unwrap().with_idx(i);
+                return Ok((i * Table::span(2), pte));
+            }
         }
 
         error!("No memory");
@@ -280,7 +285,7 @@ impl ArrayLockedAlloc {
         let i = pte.idx();
         let max = (self.pages() - i * Table::span(2)).min(Table::span(2));
 
-        if let Ok(v) = self.entries[i].update(|v| v.unreserve_add(pte, max)) {
+        if let Ok(v) = self.entries[i].update(|v| v.unreserve_add(size, pte, max)) {
             // Add to list if new counter is small enough
             let new_pages = v.pages() + pte.pages();
             if new_pages == max {
@@ -395,7 +400,7 @@ impl ArrayLockedAlloc {
                 let new_pages = pte.pages() + Table::span(size as _);
                 if pte.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
                     // Try to reserve it for bulk frees
-                    if let Ok(pte) = self.entries[i].update(|v| v.reserve_take(size)) {
+                    if let Ok(pte) = self.entries[i].update(|v| v.reserve(size)) {
                         let pte = pte.with_idx(i);
                         warn!("put reserve {i}");
                         self.swap_reserved(size, pte, pte_a)?;

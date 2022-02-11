@@ -46,6 +46,10 @@ pub struct Atomic<T: From<u64> + Into<u64>>(AtomicU64, PhantomData<T>);
 
 impl<T: From<u64> + Into<u64>> Atomic<T> {
     #[inline]
+    pub const fn zero() -> Self {
+        Self(AtomicU64::new(0), PhantomData)
+    }
+    #[inline]
     pub fn new(v: T) -> Self {
         Self(AtomicU64::new(v.into()), PhantomData)
     }
@@ -323,7 +327,7 @@ impl WyRand {
 
 #[cfg(test)]
 mod test {
-    use std::mem::MaybeUninit;
+    use std::mem::transmute;
     use std::sync::{Arc, Barrier};
 
     use super::{AArrayDebug, ANode, AStack, Cycles, WyRand};
@@ -346,7 +350,8 @@ mod test {
         println!("cycles {}", cycles.elapsed());
     }
 
-    static mut DATA: [Atomic<u64>; 16] = unsafe { MaybeUninit::zeroed().assume_init() };
+    const DATA_V: Atomic<u64> = Atomic::<u64>::zero();
+    static mut DATA: [Atomic<u64>; 16] = [DATA_V; 16];
 
     #[test]
     fn atomic_stack() {

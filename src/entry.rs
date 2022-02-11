@@ -168,8 +168,8 @@ impl Entry3 {
     }
     /// Sets the size and reserved bits and the page counter to it's max value.
     #[inline]
-    pub fn reserve_take(self, size: Size) -> Option<Entry3> {
-        if self.size_n() != 3
+    pub fn reserve(self, size: Size) -> Option<Entry3> {
+        if !self.reserved()
             && (self.size() == None || self.size() == Some(size))
             && self.pages() >= Table::span(size as _)
         {
@@ -187,7 +187,7 @@ impl Entry3 {
         if !self.reserved()
             && self.pages() > min
             && self.pages() < Table::span(2)
-            && (self.size() == None || self.size() == Some(size))
+            && self.size() == Some(size)
         {
             Some(
                 self.with_size_n(size as u8 + 1)
@@ -200,11 +200,7 @@ impl Entry3 {
     }
     #[inline]
     pub fn reserve_empty(self, size: Size) -> Option<Entry3> {
-        if !self.reserved()
-            && self.pages() >= Table::span(size as _)
-            && self.pages() == Table::span(2)
-            && self.size_n() != 3
-        {
+        if !self.reserved() && self.pages() == Table::span(2) && self.size_n() != 3 {
             Some(
                 self.with_size_n(size as u8 + 1)
                     .with_reserved(true)
@@ -222,18 +218,19 @@ impl Entry3 {
             None
         }
     }
-    /// Clear reserve flag and own free pages from `other`.
+    /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
+    /// `self` is the entry in the global array / table.
     #[inline]
-    pub fn unreserve_add(self, other: Entry3, max: usize) -> Option<Entry3> {
+    pub fn unreserve_add(self, size: Size, other: Entry3, max: usize) -> Option<Entry3> {
         let pages = self.pages() + other.pages();
         if self.reserved()
-            && self.size_n() != 3
-            && (self.size_n() == other.size_n() || other.size_n() == 0)
             && pages <= max
+            && (self.size() == None || self.size() == Some(size))
+            && (other.size() == None || other.size() == Some(size))
         {
             Some(
                 self.with_pages(pages)
-                    .with_size_n(other.size_n())
+                    .with_size_n(if pages != max { size as u8 + 1 } else { 0 })
                     .with_reserved(false)
                     .with_idx(0),
             )

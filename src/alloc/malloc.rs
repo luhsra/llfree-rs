@@ -36,7 +36,7 @@ impl Alloc for MallocAlloc {
                 .compare_exchange(null_mut(), INITIALIZING, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
         } {
-            return Err(Error::Uninitialized);
+            return Err(Error::Initialization);
         }
 
         let mut local = Vec::with_capacity(cores);
