@@ -95,19 +95,19 @@ impl<A: Leafs> LeafAllocator<A> {
     }
 
     #[inline]
-    pub fn pte(&self, size: Size) -> &Atomic<Entry3> {
-        if size == Size::L0 {
-            &self.pte_l0
-        } else {
+    pub fn pte(&self, huge: bool) -> &Atomic<Entry3> {
+        if huge {
             &self.pte_l1
+        } else {
+            &self.pte_l0
         }
     }
 
-    pub fn start(&self, size: Size) -> &AtomicUsize {
-        if size == Size::L0 {
-            &self.start_l0
-        } else {
+    pub fn start(&self, huge: bool) -> &AtomicUsize {
+        if huge {
             &self.start_l1
+        } else {
+            &self.start_l0
         }
     }
 
@@ -291,8 +291,8 @@ impl<A: Leafs> LeafAllocator<A> {
         self.pt2(page).set(0, Entry2::new().with_giant(true));
     }
 
-    /// Free single page
-    pub fn put(&self, page: usize) -> Result<Size> {
+    /// Free single page and returns if the page was huge
+    pub fn put(&self, page: usize) -> Result<bool> {
         let pt2 = self.pt2(page);
         let i2 = Table::idx(2, page);
 
@@ -310,7 +310,7 @@ impl<A: Leafs> LeafAllocator<A> {
             pt1.clear();
 
             match pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
-                Ok(_) => Ok(Size::L1),
+                Ok(_) => Ok(true),
                 Err(_) => {
                     error!("Corruption l2 i{i2}");
                     Err(Error::Corruption)
@@ -318,9 +318,10 @@ impl<A: Leafs> LeafAllocator<A> {
             }
         } else if !old.giant() && old.pages() < Table::LEN {
             for _ in 0..CAS_RETRIES {
-                match self.put_small(old, page).map(|_| Size::L0) {
+                match self.put_small(old, page) {
                     Err(Error::CAS) => old = pt2.get(i2),
-                    e => return e,
+                    Err(e) => return Err(e),
+                    Ok(_) => return Ok(false),
                 }
             }
             error!("Exceeding retries {} {old:?}", page / Table::span(2));

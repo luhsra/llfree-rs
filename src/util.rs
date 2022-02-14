@@ -327,7 +327,6 @@ impl WyRand {
 
 #[cfg(test)]
 mod test {
-    use std::mem::transmute;
     use std::sync::{Arc, Barrier};
 
     use super::{AArrayDebug, ANode, AStack, Cycles, WyRand};

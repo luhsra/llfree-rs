@@ -230,7 +230,7 @@ mod test {
         let mut rng = WyRand::new(100);
         rng.shuffle(&mut pages);
 
-        for _ in 0..2 * pages.len() {
+        for _ in 0..pages.len() {
             let i = rng.range(0..pages.len() as _) as usize;
             Allocator::instance().put(0, pages[i]).unwrap();
             pages[i] = Allocator::instance().get(0, Size::L0).unwrap();
@@ -261,7 +261,7 @@ mod test {
     #[test]
     fn multirand() {
         const THREADS: usize = 4;
-        const MEM_SIZE: usize = (24 << 30) / Page::SIZE;
+        const MEM_SIZE: usize = (8 << 30) / Page::SIZE;
         const ALLOCS: usize = ((MEM_SIZE / THREADS) / 4) * 3;
 
         logging();
@@ -301,7 +301,7 @@ mod test {
             let mut rng = WyRand::new(t as _);
             rng.shuffle(&mut pages);
 
-            for _ in 0..2 * pages.len() {
+            for _ in 0..pages.len() {
                 let i = rng.range(0..pages.len() as _) as usize;
                 Allocator::instance().put(t, pages[i]).unwrap();
                 pages[i] = Allocator::instance().get(t, Size::L0).unwrap();

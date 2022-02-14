@@ -120,7 +120,7 @@ impl Alloc for ArrayLockedAlloc {
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         match size {
             Size::L2 => self.get_giant(core),
-            _ => self.get_small(core, size),
+            _ => self.get_small(core, size == Size::L1),
         }
         .map(|p| unsafe { self.memory.start.add(p as _) } as u64)
     }
@@ -133,11 +133,11 @@ impl Alloc for ArrayLockedAlloc {
         let page = unsafe { (addr as *const Page).offset_from(self.memory.start) } as usize;
 
         let i = page / Table::span(2);
-        let pte3 = self.entries[i].load();
-        match pte3.size() {
-            Some(Size::L2) => self.put_giant(core, page),
-            Some(_) => self.put_small(core, page, pte3),
-            None => Err(Error::Memory),
+        let pte = self.entries[i].load();
+        if pte.giant() {
+            self.put_giant(core, page)
+        } else {
+            self.put_small(core, page, pte)
         }
     }
 
@@ -151,8 +151,8 @@ impl Alloc for ArrayLockedAlloc {
         }
         // Pages allocated in reserved subtrees
         for local in &self.local {
-            pages -= local.pte(Size::L0).load().pages();
-            pages -= local.pte(Size::L1).load().pages();
+            pages -= local.pte(false).load().pages();
+            pages -= local.pte(true).load().pages();
         }
         pages
     }
@@ -234,7 +234,7 @@ impl ArrayLockedAlloc {
                 if pages == Table::span(2) {
                     self.empty.lock().push(i);
                 } else if pages > PTE3_FULL {
-                    self.partial(size).push(i);
+                    self.partial(size == Size::L1).push(i);
                 }
             }
             total += pages;
@@ -242,21 +242,21 @@ impl ArrayLockedAlloc {
         Ok(total)
     }
 
-    fn partial<'a, 'b: 'a>(&'b self, size: Size) -> MutexGuard<'a, Vec<usize>> {
-        if size == Size::L0 {
-            &self.partial_l0
-        } else {
+    fn partial<'a, 'b: 'a>(&'b self, huge: bool) -> MutexGuard<'a, Vec<usize>> {
+        if huge {
             &self.partial_l1
+        } else {
+            &self.partial_l0
         }
         .lock()
     }
 
-    fn reserve_dec(&self, size: Size) -> Result<(usize, Entry3)> {
-        while let Some(i) = self.partial(size).pop() {
+    fn reserve_dec(&self, huge: bool) -> Result<(usize, Entry3)> {
+        while let Some(i) = self.partial(huge).pop() {
             warn!("reserve partial {i}");
-            match self.entries[i].update(|v| v.reserve_partial(size, PTE3_FULL)) {
+            match self.entries[i].update(|v| v.reserve_partial(huge, PTE3_FULL)) {
                 Ok(pte) => {
-                    let pte = pte.dec(size).unwrap().with_idx(i);
+                    let pte = pte.dec(huge).unwrap().with_idx(i);
                     return Ok((i * Table::span(2), pte));
                 }
                 Err(pte) => {
@@ -270,8 +270,8 @@ impl ArrayLockedAlloc {
 
         while let Some(i) = self.empty.lock().pop() {
             warn!("reserve empty {i}");
-            if let Ok(pte) = self.entries[i].update(|v| v.reserve_empty(size)) {
-                let pte = pte.dec(size).unwrap().with_idx(i);
+            if let Ok(pte) = self.entries[i].update(|v| v.reserve_empty(huge)) {
+                let pte = pte.dec(huge).unwrap().with_idx(i);
                 return Ok((i * Table::span(2), pte));
             }
         }
@@ -280,18 +280,18 @@ impl ArrayLockedAlloc {
         Err(Error::Memory)
     }
 
-    fn swap_reserved(&self, size: Size, new_pte: Entry3, pte_a: &Atomic<Entry3>) -> Result<()> {
+    fn swap_reserved(&self, huge: bool, new_pte: Entry3, pte_a: &Atomic<Entry3>) -> Result<()> {
         let pte = pte_a.swap(new_pte);
         let i = pte.idx();
         let max = (self.pages() - i * Table::span(2)).min(Table::span(2));
 
-        if let Ok(v) = self.entries[i].update(|v| v.unreserve_add(size, pte, max)) {
+        if let Ok(v) = self.entries[i].update(|v| v.unreserve_add(huge, pte, max)) {
             // Add to list if new counter is small enough
             let new_pages = v.pages() + pte.pages();
             if new_pages == max {
                 self.empty.lock().push(i);
             } else if new_pages > PTE3_FULL {
-                self.partial(size).push(i);
+                self.partial(huge).push(i);
             }
             Ok(())
         } else {
@@ -300,30 +300,31 @@ impl ArrayLockedAlloc {
         }
     }
 
-    fn get_small(&self, core: usize, size: Size) -> Result<usize> {
+    fn get_small(&self, core: usize, huge: bool) -> Result<usize> {
         let local = &self.local[core];
-        let start_a = local.start(size);
-        let pte_a = local.pte(size);
+        let start_a = local.start(huge);
+        let pte_a = local.pte(huge);
         let mut start = start_a.load(Ordering::SeqCst);
 
         if start == usize::MAX {
             warn!("Try reserve first");
-            let (s, pte) = self.reserve_dec(size)?;
+            let (s, pte) = self.reserve_dec(huge)?;
             pte_a.store(pte);
             start = s
         } else {
             // Incremet or clear (atomic sync with put dec)
-            if pte_a.update(|v| v.dec(size)).is_err() {
+            if pte_a.update(|v| v.dec(huge)).is_err() {
                 warn!("Try reserve next");
-                let (s, new_pte) = self.reserve_dec(size)?;
-                self.swap_reserved(size, new_pte, pte_a)?;
+                let (s, new_pte) = self.reserve_dec(huge)?;
+                self.swap_reserved(huge, new_pte, pte_a)?;
                 start = s;
             }
         }
 
-        let page = match size {
-            Size::L0 => local.get(start)?,
-            _ => local.get_huge(start)?,
+        let page = if huge {
+            local.get_huge(start)?
+        } else {
+            local.get(start)?
         };
         start_a.store(page, Ordering::SeqCst);
         Ok(page)

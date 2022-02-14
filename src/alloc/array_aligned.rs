@@ -131,7 +131,7 @@ impl Alloc for ArrayAlignedAlloc {
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         match size {
             Size::L2 => self.get_giant(core),
-            _ => self.get_small(core, size),
+            _ => self.get_small(core, size == Size::L1),
         }
         .map(|p| unsafe { self.memory.start.add(p as _) } as u64)
     }
@@ -145,10 +145,10 @@ impl Alloc for ArrayAlignedAlloc {
 
         let i = page / Table::span(2);
         let pte3 = self[i].load();
-        match pte3.size() {
-            Some(Size::L2) => self.put_giant(core, page),
-            Some(_) => self.put_small(core, page, pte3),
-            None => Err(Error::Memory),
+        if pte3.giant() {
+            self.put_giant(core, page)
+        } else {
+            self.put_small(core, page, pte3)
         }
     }
 
@@ -240,7 +240,7 @@ impl ArrayAlignedAlloc {
                 if pages == Table::span(2) {
                     self.empty.push(self, i);
                 } else if pages > PTE3_FULL {
-                    self.partial(size).push(self, i);
+                    self.partial(size == Size::L1).push(self, i);
                 }
             }
             total += pages;
@@ -248,20 +248,20 @@ impl ArrayAlignedAlloc {
         Ok(total)
     }
 
-    fn partial(&self, size: Size) -> &AStack<Entry3> {
-        if size == Size::L0 {
-            &self.partial_l0
-        } else {
+    fn partial(&self, huge: bool) -> &AStack<Entry3> {
+        if huge {
             &self.partial_l1
+        } else {
+            &self.partial_l0
         }
     }
 
-    fn reserve_dec(&self, size: Size) -> Result<usize> {
-        while let Some(i) = self.partial(size).pop(self) {
+    fn reserve_dec(&self, huge: bool) -> Result<usize> {
+        while let Some(i) = self.partial(huge).pop(self) {
             // Skip empty entries
             if self[i].load().pages() < Table::span(2) {
                 warn!("reserve partial {i}");
-                self[i].update(|v| v.dec(size)).unwrap();
+                self[i].update(|v| v.dec(huge)).unwrap();
                 return Ok(i * Table::span(2));
             } else {
                 self.empty.push(self, i);
@@ -270,7 +270,7 @@ impl ArrayAlignedAlloc {
 
         if let Some(i) = self.empty.pop(self) {
             warn!("reserve empty {i}");
-            self[i].update(|v| v.dec(size)).unwrap();
+            self[i].update(|v| v.dec(huge)).unwrap();
             Ok(i * Table::span(2))
         } else {
             error!("No memory");
@@ -278,27 +278,28 @@ impl ArrayAlignedAlloc {
         }
     }
 
-    fn get_small(&self, core: usize, size: Size) -> Result<usize> {
+    fn get_small(&self, core: usize, huge: bool) -> Result<usize> {
         let local = &self.local[core];
-        let start_a = local.start(size);
+        let start_a = local.start(huge);
         let mut start = start_a.load(Ordering::Relaxed);
 
         if start == usize::MAX {
             warn!("Try reserve first");
-            start = self.reserve_dec(size)?;
+            start = self.reserve_dec(huge)?;
         } else {
             let i = start / Table::span(2);
-            if self[i].update(|v| v.dec(size)).is_err() {
-                start = self.reserve_dec(size)?;
+            if self[i].update(|v| v.dec(huge)).is_err() {
+                start = self.reserve_dec(huge)?;
                 if self[i].update(Entry3::unreserve).is_err() {
                     panic!("Unreserve failed")
                 }
             }
         }
 
-        let page = match size {
-            Size::L0 => local.get(start)?,
-            _ => local.get_huge(start)?,
+        let page = if huge {
+            local.get_huge(start)?
+        } else {
+            local.get(start)?
         };
         start_a.store(page, Ordering::Relaxed);
         Ok(page)
