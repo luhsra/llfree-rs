@@ -9,10 +9,13 @@ use crate::Size;
 
 #[bitfield(u64)]
 pub struct Entry {
+    /// Number of subtrees where no page is allocated.
     #[bits(20)]
     pub empty: usize,
+    /// Number of subtrees where at least one l0 page is allocated.
     #[bits(20)]
     pub partial_l0: usize,
+    /// Number of subtrees where at least one l1 page is allocated.
     #[bits(20)]
     pub partial_l1: usize,
     #[bits(4)]
@@ -109,11 +112,12 @@ pub struct Entry3 {
 
 impl Entry3 {
     pub const IDX_MAX: usize = (1 << 41) - 1;
-
+    /// Creates a new entry where this is allocated as a single giant page.
     #[inline]
     pub fn new_giant() -> Entry3 {
         Entry3::new().with_giant(true)
     }
+    /// Creates a new entry referring to a layer 2 page table.
     #[inline]
     pub fn new_table(pages: usize, size: Size, reserved: bool) -> Entry3 {
         Entry3::new()
@@ -121,7 +125,7 @@ impl Entry3 {
             .with_huge(size == Size::L1)
             .with_reserved(reserved)
     }
-    /// Decrements the free pages counter and sets the size and reserved bits.
+    /// Decrements the free pages counter.
     #[inline]
     pub fn dec(self, huge: bool) -> Option<Entry3> {
         let sub = Table::span(huge as _);
@@ -138,7 +142,7 @@ impl Entry3 {
             None
         }
     }
-    /// Increments the free pages counter and clears the size flag if empty.
+    /// Increments the free pages counter.
     #[inline]
     pub fn inc(self, huge: bool, max: usize) -> Option<Entry3> {
         if self.giant() || self.huge() != huge {
@@ -151,8 +155,7 @@ impl Entry3 {
             Ordering::Less => Some(self.with_pages(pages)),
         }
     }
-    /// Increments the free pages counter and clears the size flag if empty.
-    /// Additionally checks for `idx` to match.
+    /// Increments the free pages counter and checks for `idx` to match.
     #[inline]
     pub fn inc_idx(self, huge: bool, idx: usize, max: usize) -> Option<Entry3> {
         if self.giant() || self.huge() != huge || self.idx() != idx {
@@ -165,7 +168,7 @@ impl Entry3 {
             Ordering::Less => Some(self.with_pages(pages)),
         }
     }
-    /// Sets the size and reserved bits and the page counter to it's max value.
+    /// Reserves this entry.
     #[inline]
     pub fn reserve(self, huge: bool) -> Option<Entry3> {
         if !self.giant()
@@ -178,6 +181,7 @@ impl Entry3 {
             None
         }
     }
+    /// Reserves this entry if it is partially filled.
     #[inline]
     pub fn reserve_partial(self, huge: bool, min: usize) -> Option<Entry3> {
         if !self.giant()
@@ -191,6 +195,7 @@ impl Entry3 {
             None
         }
     }
+    /// Reserves this entry if it is completely empty.
     #[inline]
     pub fn reserve_empty(self, huge: bool) -> Option<Entry3> {
         if !self.giant() && !self.reserved() && self.pages() == Table::span(2) {
@@ -199,6 +204,7 @@ impl Entry3 {
             None
         }
     }
+    /// Clears the reserve flag of this entry.
     #[inline]
     pub fn unreserve(self) -> Option<Entry3> {
         if !self.giant() && self.reserved() {
@@ -245,17 +251,22 @@ impl fmt::Debug for Entry3 {
 
 #[bitfield(u64)]
 pub struct Entry2 {
+    /// Number of free pages.
     #[bits(10)]
     pub pages: usize,
+    /// Index of the layer one page table.
     #[bits(9)]
     pub i1: usize,
-    pub giant: bool,
     #[bits(43)]
     _p: u64,
+    /// If the whole page table area is allocated as giant page.
+    pub giant: bool,
+    /// If this is allocated as large page.
     pub page: bool,
 }
 
 impl Entry2 {
+    /// Creates a new entry referencing a layer one page table.
     #[inline]
     pub fn new_table(pages: usize, i1: usize) -> Self {
         Self::new().with_pages(pages).with_i1(i1)
@@ -268,6 +279,7 @@ impl Entry2 {
             None
         }
     }
+    /// Decrement the free pages counter.
     #[inline]
     pub fn dec(self, i1: usize) -> Option<Self> {
         if !self.page() && !self.giant() && self.i1() == i1 && self.pages() > 0 {
@@ -276,6 +288,7 @@ impl Entry2 {
             None
         }
     }
+    /// Increments the free pages counter.
     #[inline]
     pub fn inc(self, i1: usize) -> Option<Self> {
         if !self.giant()
