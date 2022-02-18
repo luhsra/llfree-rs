@@ -134,7 +134,7 @@ impl Alloc for ArrayLockedAlloc {
 
         let i = page / Table::span(2);
         let pte = self.entries[i].load();
-        if pte.giant() {
+        if pte.page() {
             self.put_giant(core, page)
         } else {
             self.put_small(core, page, pte)
@@ -147,12 +147,12 @@ impl Alloc for ArrayLockedAlloc {
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self.entries[i].load();
             // warn!("{i:>3}: {pte:?}");
-            pages -= pte.pages();
+            pages -= pte.free();
         }
         // Pages allocated in reserved subtrees
         for local in &self.local {
-            pages -= local.pte(false).load().pages();
-            pages -= local.pte(true).load().pages();
+            pages -= local.pte(false).load().free();
+            pages -= local.pte(true).load().free();
         }
         pages
     }
@@ -202,12 +202,12 @@ impl ArrayLockedAlloc {
         let pte3_num = Table::num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
             empty.push(i);
-            self.entries[i] = Atomic::new(Entry3::new().with_pages(Table::span(2)));
+            self.entries[i] = Atomic::new(Entry3::new().with_free(Table::span(2)));
         }
 
         // The last one may be cut off
         let max = (self.pages() - (pte3_num - 1) * Table::span(2)).min(Table::span(2));
-        self.entries[pte3_num - 1] = Atomic::new(Entry3::new().with_pages(max));
+        self.entries[pte3_num - 1] = Atomic::new(Entry3::new().with_free(max));
 
         if max == Table::span(2) {
             empty.push(pte3_num - 1);
@@ -261,7 +261,7 @@ impl ArrayLockedAlloc {
                 }
                 Err(pte) => {
                     // Skip empty entries
-                    if !pte.reserved() && pte.pages() == Table::span(2) {
+                    if !pte.reserved() && pte.free() == Table::span(2) {
                         self.empty.lock().push(i);
                     }
                 }
@@ -287,7 +287,7 @@ impl ArrayLockedAlloc {
 
         if let Ok(v) = self.entries[i].update(|v| v.unreserve_add(huge, pte, max)) {
             // Add to list if new counter is small enough
-            let new_pages = v.pages() + pte.pages();
+            let new_pages = v.free() + pte.free();
             if new_pages == max {
                 self.empty.lock().push(i);
             } else if new_pages > PTE3_FULL {
@@ -334,7 +334,7 @@ impl ArrayLockedAlloc {
         if let Some(i) = self.empty.lock().pop() {
             if self.entries[i]
                 .compare_exchange(
-                    Entry3::new().with_pages(Table::span(2)),
+                    Entry3::new().with_free(Table::span(2)),
                     Entry3::new_giant(),
                 )
                 .is_ok()
@@ -362,7 +362,7 @@ impl ArrayLockedAlloc {
         if self.entries[i]
             .compare_exchange(
                 Entry3::new_giant(),
-                Entry3::new().with_pages(Table::span(2)),
+                Entry3::new().with_free(Table::span(2)),
             )
             .is_ok()
         {
@@ -380,7 +380,7 @@ impl ArrayLockedAlloc {
             .pages()
             .saturating_sub(Table::round(2, page))
             .min(Table::span(2));
-        if pte.pages() == max {
+        if pte.free() == max {
             error!("Not allocated {page} (i{})", page / Table::span(2));
             return Err(Error::Address);
         }
@@ -398,8 +398,8 @@ impl ArrayLockedAlloc {
         // Subtree not owned by us
         if let Ok(pte) = self.entries[i].update(|v| v.inc(size, max)) {
             if !pte.reserved() {
-                let new_pages = pte.pages() + Table::span(size as _);
-                if pte.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
+                let new_pages = pte.free() + Table::span(size as _);
+                if pte.free() <= PTE3_FULL && new_pages > PTE3_FULL {
                     // Try to reserve it for bulk frees
                     if let Ok(pte) = self.entries[i].update(|v| v.reserve(size)) {
                         let pte = pte.with_idx(i);

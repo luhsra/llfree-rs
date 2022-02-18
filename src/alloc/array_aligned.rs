@@ -145,7 +145,7 @@ impl Alloc for ArrayAlignedAlloc {
 
         let i = page / Table::span(2);
         let pte3 = self[i].load();
-        if pte3.giant() {
+        if pte3.page() {
             self.put_giant(core, page)
         } else {
             self.put_small(core, page, pte3)
@@ -158,7 +158,7 @@ impl Alloc for ArrayAlignedAlloc {
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self[i].load();
             // warn!("{i:>3}: {pte:?}");
-            pages -= pte.pages();
+            pages -= pte.free();
         }
         pages
     }
@@ -205,13 +205,13 @@ impl ArrayAlignedAlloc {
         // Add all entries to the empty list
         let pte3_num = Table::num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
-            self.entries[i] = Aligned(Atomic::new(Entry3::new().with_pages(Table::span(2))));
+            self[i].store(Entry3::new().with_free(Table::span(2)));
             self.empty.push(self, i);
         }
 
         // The last one may be cut off
         let max = (self.pages() - (pte3_num - 1) * Table::span(2)).min(Table::span(2));
-        self.entries[pte3_num - 1] = Aligned(Atomic::new(Entry3::new().with_pages(max)));
+        self[pte3_num - 1].store(Entry3::new().with_free(max));
 
         if max == Table::span(2) {
             self.empty.push(self, pte3_num - 1);
@@ -232,9 +232,7 @@ impl ArrayAlignedAlloc {
             if size == Size::L2 {
                 self[i].store(Entry3::new_giant());
             } else {
-                self.entries[i]
-                    .0
-                    .store(Entry3::new_table(pages, size, false));
+                self[i].store(Entry3::new_table(pages, size, false));
 
                 // Add to lists
                 if pages == Table::span(2) {
@@ -259,7 +257,7 @@ impl ArrayAlignedAlloc {
     fn reserve_dec(&self, huge: bool) -> Result<usize> {
         while let Some(i) = self.partial(huge).pop(self) {
             // Skip empty entries
-            if self[i].load().pages() < Table::span(2) {
+            if self[i].load().free() < Table::span(2) {
                 warn!("reserve partial {i}");
                 self[i].update(|v| v.dec(huge)).unwrap();
                 return Ok(i * Table::span(2));
@@ -307,7 +305,7 @@ impl ArrayAlignedAlloc {
 
     fn get_giant(&self, core: usize) -> Result<usize> {
         if let Some(i) = self.empty.pop(self) {
-            match self[i].update(|v| (v.pages() == Table::span(2)).then(Entry3::new_giant)) {
+            match self[i].update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant)) {
                 Ok(_) => {
                     self.local[core].persist(i * Table::span(2));
                     Ok(i * Table::span(2))
@@ -333,7 +331,7 @@ impl ArrayAlignedAlloc {
 
         match self[i].compare_exchange(
             Entry3::new_giant(),
-            Entry3::new().with_pages(Table::span(2)),
+            Entry3::new().with_free(Table::span(2)),
         ) {
             Ok(_) => {
                 // Add to empty list
@@ -352,7 +350,7 @@ impl ArrayAlignedAlloc {
             .pages()
             .saturating_sub(Table::round(2, page))
             .min(Table::span(2));
-        if pte3.pages() == max {
+        if pte3.free() == max {
             error!("Not allocated {page}");
             return Err(Error::Address);
         }
@@ -362,8 +360,8 @@ impl ArrayAlignedAlloc {
         let size = local.put(page)?;
         if let Ok(pte3) = self[i].update(|v| v.inc(size, max)) {
             if !pte3.reserved() {
-                let new_pages = pte3.pages() + Table::span(size as _);
-                if pte3.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
+                let new_pages = pte3.free() + Table::span(size as _);
+                if pte3.free() <= PTE3_FULL && new_pages > PTE3_FULL {
                     // Add back to partial
                     self.partial(size).push(self, i);
                 }

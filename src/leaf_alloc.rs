@@ -75,7 +75,7 @@ impl<A: Leafs> LeafAllocator<A> {
             for j in 0..Table::LEN {
                 let page = i * Table::span(2) + j * Table::span(1);
                 let max = Table::span(1).min(self.pages.saturating_sub(page));
-                pt2.set(j, Entry2::new().with_pages(max));
+                pt2.set(j, Entry2::new().with_free(max));
             }
         }
         // Init pt1
@@ -141,18 +141,18 @@ impl<A: Leafs> LeafAllocator<A> {
                 return Ok((0, Size::L2));
             } else if pte.page() {
                 size = Size::L1;
-            } else if deep && pte.pages() > 0 && size == Size::L0 {
+            } else if deep && pte.free() > 0 && size == Size::L0 {
                 let p = self.recover_l1(Table::page(1, start, i), pte)?;
-                if pte.pages() != p {
+                if pte.free() != p {
                     warn!(
                         "Invalid PTE2 start=0x{start:x} i{i}: {} != {p}",
-                        pte.pages(),
+                        pte.free(),
                     );
-                    pt.set(i, pte.with_pages(p));
+                    pt.set(i, pte.with_free(p));
                 }
                 pages += p;
             } else {
-                pages += pte.pages();
+                pages += pte.free();
             }
         }
 
@@ -190,7 +190,7 @@ impl<A: Leafs> LeafAllocator<A> {
 
                 let pte2 = pt2.get(i2);
 
-                if pte2.page() || pte2.pages() == 0 {
+                if pte2.page() || pte2.free() == 0 {
                     continue;
                 }
 
@@ -200,7 +200,7 @@ impl<A: Leafs> LeafAllocator<A> {
                 wait!();
 
                 if let Ok(pte2) = pt2.update(i2, |v| v.dec(pte2.i1())) {
-                    let page = if pte2.pages() == 1 {
+                    let page = if pte2.free() == 1 {
                         self.get_last(pte2, newstart)
                     } else {
                         self.get_table(pte2, newstart)
@@ -316,7 +316,7 @@ impl<A: Leafs> LeafAllocator<A> {
                     Err(Error::Corruption)
                 }
             }
-        } else if !old.giant() && old.pages() < Table::LEN {
+        } else if !old.giant() && old.free() < Table::LEN {
             for _ in 0..CAS_RETRIES {
                 match self.put_small(old, page) {
                     Err(Error::CAS) => old = pt2.get(i2),
@@ -335,7 +335,7 @@ impl<A: Leafs> LeafAllocator<A> {
         let pt2 = self.pt2(page);
         let i2 = Table::idx(2, page);
 
-        if pte2.pages() == 0 {
+        if pte2.free() == 0 {
             return self.put_full(pte2, page);
         }
 
@@ -353,7 +353,7 @@ impl<A: Leafs> LeafAllocator<A> {
         wait!();
 
         if let Err(pte2) = pt2.update(i2, |pte| pte.inc(pte2.i1())) {
-            return if pte2.pages() == Table::LEN {
+            return if pte2.free() == Table::LEN {
                 error!("Invalid Addr l1 i{i1} p={page}");
                 Err(Error::Address)
             } else {
@@ -431,7 +431,7 @@ impl<A: Leafs> LeafAllocator<A> {
                 start * Page::SIZE,
                 pte2
             );
-            if !pte2.giant() && !pte2.page() && pte2.pages() > 0 && pte2.pages() < Table::LEN {
+            if !pte2.giant() && !pte2.page() && pte2.free() > 0 && pte2.free() < Table::LEN {
                 let pt1 = self.pt1(pte2, start);
                 for i1 in 0..Table::LEN {
                     let page = Table::page(1, start, i1);
@@ -506,7 +506,7 @@ mod test {
             });
 
             let local = &Allocator::leafs()[0];
-            assert_eq!(local.pt2(0).get(0).pages(), Table::LEN - 3);
+            assert_eq!(local.pt2(0).get(0).free(), Table::LEN - 3);
             assert_eq!(count(local.pt1(local.pt2(0).get(0), 0)), Table::LEN - 3);
 
             Allocator::destroy()
@@ -541,7 +541,7 @@ mod test {
             });
 
             let local = &Allocator::leafs()[0];
-            assert_eq!(local.pt2(0).get(0).pages(), Table::LEN - 2);
+            assert_eq!(local.pt2(0).get(0).free(), Table::LEN - 2);
             assert_eq!(count(local.pt1(local.pt2(0).get(0), 0)), Table::LEN - 2);
 
             Allocator::destroy()
@@ -580,8 +580,8 @@ mod test {
 
             let local = &Allocator::leafs()[0];
             let pt2 = local.pt2(0);
-            assert_eq!(pt2.get(0).pages(), 0);
-            assert_eq!(pt2.get(1).pages(), Table::LEN - 1);
+            assert_eq!(pt2.get(0).free(), 0);
+            assert_eq!(pt2.get(1).free(), Table::LEN - 1);
             assert_eq!(count(local.pt1(pt2.get(1), Table::LEN)), Table::LEN - 1);
 
             Allocator::destroy()
@@ -620,7 +620,7 @@ mod test {
             });
 
             let local = &Allocator::leafs()[0];
-            assert_eq!(local.pt2(0).get(0).pages(), Table::LEN);
+            assert_eq!(local.pt2(0).get(0).free(), Table::LEN);
 
             Allocator::destroy()
         }
@@ -660,7 +660,7 @@ mod test {
 
             let local = &Allocator::leafs()[0];
             let pt2 = local.pt2(0);
-            assert_eq!(pt2.get(0).pages(), 2);
+            assert_eq!(pt2.get(0).free(), 2);
             assert_eq!(count(local.pt1(pt2.get(0), 0)), 2);
 
             Allocator::destroy()
@@ -711,13 +711,13 @@ mod test {
 
             let local = &Allocator::leafs()[0];
             let pt2 = local.pt2(0);
-            if pt2.get(0).pages() == 1 {
+            if pt2.get(0).free() == 1 {
                 assert_eq!(count(local.pt1(pt2.get(0), 0)), 1);
             } else {
                 // Table entry skipped
-                assert_eq!(pt2.get(0).pages(), 2);
+                assert_eq!(pt2.get(0).free(), 2);
                 assert_eq!(count(local.pt1(pt2.get(0), 0)), 2);
-                assert_eq!(pt2.get(1).pages(), Table::LEN - 1);
+                assert_eq!(pt2.get(1).free(), Table::LEN - 1);
                 assert_eq!(count(local.pt1(pt2.get(1), Table::LEN)), Table::LEN - 1);
             }
 
@@ -755,10 +755,10 @@ mod test {
 
             let local = &Allocator::leafs()[0];
             let pt2 = local.pt2(0);
-            assert_eq!(pt2.get(0).pages(), Table::LEN);
-            assert_eq!(pt2.get(1).pages(), Table::LEN);
-            assert_eq!(pt2.get(0).pages(), count(local.pt1(pt2.get(0), 0)));
-            assert_eq!(pt2.get(1).pages(), count(local.pt1(pt2.get(1), Table::LEN)));
+            assert_eq!(pt2.get(0).free(), Table::LEN);
+            assert_eq!(pt2.get(1).free(), Table::LEN);
+            assert_eq!(pt2.get(0).free(), count(local.pt1(pt2.get(0), 0)));
+            assert_eq!(pt2.get(1).free(), count(local.pt1(pt2.get(1), Table::LEN)));
 
             Allocator::destroy()
         }
@@ -796,9 +796,9 @@ mod test {
 
             let local = &Allocator::leafs()[0];
             let pt2 = local.pt2(0);
-            assert_eq!(pt2.get(0).pages() + pt2.get(1).pages(), 3 + Table::LEN);
-            assert_eq!(pt2.get(0).pages(), count(local.pt1(pt2.get(0), 0)));
-            assert_eq!(pt2.get(1).pages(), count(local.pt1(pt2.get(1), Table::LEN)));
+            assert_eq!(pt2.get(0).free() + pt2.get(1).free(), 3 + Table::LEN);
+            assert_eq!(pt2.get(0).free(), count(local.pt1(pt2.get(0), 0)));
+            assert_eq!(pt2.get(1).free(), count(local.pt1(pt2.get(1), Table::LEN)));
 
             Allocator::destroy()
         }

@@ -144,10 +144,10 @@ impl Alloc for TableAlloc {
         for (_t, local) in self.local.iter().enumerate() {
             let pte = local.pte(false).load();
             // warn!("L {t:>2}: L0 {pte:?}");
-            pages += pte.pages();
+            pages += pte.free();
             let pte = local.pte(true).load();
             // warn!("L {t:>2}: L1 {pte:?}");
-            pages += pte.pages();
+            pages += pte.free();
         }
         self.pages() - pages
     }
@@ -187,7 +187,7 @@ impl TableAlloc {
             for i in Table::range(3, 0..self.pages()) {
                 let pte3 = pt3.get(i);
                 // warn!(" - {i:>3}: {pte3:?}");
-                pages += pte3.pages();
+                pages += pte3.free();
             }
         } else {
             let pt = self.pt(layer, start);
@@ -243,7 +243,7 @@ impl TableAlloc {
             if layer == 3 {
                 let pt = self.pt3(page);
                 let max = (self.pages() - page).min(Table::span(2));
-                pt.set(i, Entry3::new().with_pages(max));
+                pt.set(i, Entry3::new().with_free(max));
             } else {
                 let pt = self.pt(layer, page);
                 let max = (self.pages() - page).min(Table::span(layer));
@@ -416,7 +416,7 @@ impl TableAlloc {
 
         if let Ok(pte) = pt.update(i, |v| v.unreserve_add(huge, old, max)) {
             // Update parents
-            let new_pages = old.pages() + pte.pages();
+            let new_pages = old.free() + pte.free();
             if new_pages == Table::span(2) {
                 self.update_parents(start, Change::IncEmpty)
             } else if new_pages > PTE3_FULL {
@@ -462,7 +462,7 @@ impl TableAlloc {
             if pt
                 .cas(
                     i,
-                    Entry3::new().with_pages(Table::span(2)),
+                    Entry3::new().with_free(Table::span(2)),
                     Entry3::new_giant(),
                 )
                 .is_ok()
@@ -518,13 +518,13 @@ impl TableAlloc {
         let i = Table::idx(3, page);
         let pte = pt.get(i);
 
-        if pte.giant() {
+        if pte.page() {
             warn!("free giant l3 i{i}");
             return self.put_giant(core, page);
         }
 
         let max = (self.pages() - Table::round(2, page)).min(Table::span(2));
-        if pte.pages() == max {
+        if pte.free() == max {
             error!("Invalid address l3 i{i}");
             return Err(Error::Address);
         }
@@ -539,12 +539,12 @@ impl TableAlloc {
         }
 
         if let Ok(pte) = pt.update(i, |v| v.inc(size, max)) {
-            let new_pages = pte.pages() + Table::span(size as _);
+            let new_pages = pte.free() + Table::span(size as _);
             if pte.reserved() {
                 Ok(())
             } else if new_pages == Table::span(2) {
                 self.update_parents(page, Change::p_dec(size))
-            } else if pte.pages() <= PTE3_FULL && new_pages > PTE3_FULL {
+            } else if pte.free() <= PTE3_FULL && new_pages > PTE3_FULL {
                 // reserve for bulk put
                 if let Ok(pte) = pt.update(i, |v| v.reserve(size)) {
                     warn!("put reserve {i}");
@@ -582,7 +582,7 @@ impl TableAlloc {
         match pt.cas(
             i,
             Entry3::new_giant(),
-            Entry3::new().with_pages(Table::span(2)),
+            Entry3::new().with_free(Table::span(2)),
         ) {
             Ok(_) => self.update_parents(page, Change::IncEmpty),
             _ => {
