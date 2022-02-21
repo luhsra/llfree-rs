@@ -18,7 +18,7 @@ struct StopData {
 }
 
 thread_local! {
-    /// Per thread wait data.
+    /// Per thread stop data.
     static DATA: RefCell<Option<StopData>> = RefCell::new(None);
 }
 
@@ -158,7 +158,7 @@ pub struct StopRand {
 }
 
 impl StopRand {
-    /// Initializes the order and number of threads. Has to be called before the init calls.
+    /// Initializes the rng and number of threads.
     pub fn new(threads: usize, seed: u64) -> Arc<Self> {
         Arc::new(Self {
             threads,

@@ -1,4 +1,4 @@
-use std::ops::{Index, Range};
+use std::ops::Index;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
@@ -6,7 +6,7 @@ use log::{error, warn};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
-use crate::lower_alloc::{LowerAlloc, LowerAccess};
+use crate::lower_alloc::LowerAlloc;
 use crate::table::Table;
 use crate::util::{AStack, Atomic, Page};
 
@@ -23,9 +23,8 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// Volatile shared metadata
 #[repr(align(64))]
 pub struct ArrayAlignedAlloc {
-    memory: Range<*const Page>,
     meta: *mut Meta,
-    local: Vec<LowerAlloc<Self>>,
+    lower: LowerAlloc,
     entries: Vec<Aligned>,
 
     empty: AStack<Entry3>,
@@ -38,12 +37,6 @@ struct Aligned(Atomic<Entry3>);
 
 const INITIALIZING: *mut ArrayAlignedAlloc = usize::MAX as _;
 static mut SHARED: AtomicPtr<ArrayAlignedAlloc> = AtomicPtr::new(null_mut());
-
-impl LowerAccess for ArrayAlignedAlloc {
-    fn lower_allocs<'a>() -> &'a [LowerAlloc<Self>] {
-        &Self::instance().local
-    }
-}
 
 impl Index<usize> for ArrayAlignedAlloc {
     type Output = Atomic<Entry3>;
@@ -130,25 +123,25 @@ impl Alloc for ArrayAlignedAlloc {
 
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         match size {
-            Size::L2 => self.get_giant(core),
+            Size::L2 => self.get_giant(),
             _ => self.get_small(core, size == Size::L1),
         }
-        .map(|p| unsafe { self.memory.start.add(p as _) } as u64)
+        .map(|p| unsafe { self.lower.memory().start.add(p as _) } as u64)
     }
 
-    fn put(&self, core: usize, addr: u64) -> Result<()> {
-        if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) {
+    fn put(&self, _core: usize, addr: u64) -> Result<()> {
+        if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
             error!("invalid addr");
             return Err(Error::Memory);
         }
-        let page = unsafe { (addr as *const Page).offset_from(self.memory.start) } as usize;
+        let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
 
         let i = page / Table::span(2);
         let pte3 = self[i].load();
         if pte3.page() {
-            self.put_giant(core, page)
+            self.put_giant(page)
         } else {
-            self.put_small(core, page, pte3)
+            self.put_small(page, pte3)
         }
     }
 
@@ -168,25 +161,20 @@ impl ArrayAlignedAlloc {
     #[cold]
     fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
         // Last frame is reserved for metadata
-        let pages = (memory.len() - 1).min(MAX_PAGES);
-        let (memory, rem) = memory.split_at_mut(pages);
+        let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
         let meta = rem[0].cast_mut::<Meta>();
 
-        // level 2 tables are stored at the end of the NVM
-        let pages = pages - Table::num_pts(2, pages);
-        let (memory, _pt2) = memory.split_at_mut(pages);
+        // Create lower allocator
+        let lower = LowerAlloc::new(cores, memory);
 
         // Array with all pte3
-        let pte3_num = Table::num_pts(2, pages);
+        let pte3_num = Table::num_pts(2, lower.pages);
         let mut entries = Vec::with_capacity(pte3_num);
         entries.resize_with(pte3_num, || Aligned(Atomic::new(Entry3::new())));
 
-        let local = vec![LowerAlloc::new(memory.as_ptr() as usize, pages); cores];
-
         Ok(Self {
-            memory: memory.as_ptr_range(),
             meta,
-            local,
+            lower,
             entries,
             empty: AStack::new(),
             partial_l1: AStack::new(),
@@ -195,12 +183,12 @@ impl ArrayAlignedAlloc {
     }
 
     fn pages(&self) -> usize {
-        (self.memory.end as usize - self.memory.start as usize) / Page::SIZE
+        self.lower.pages
     }
 
     #[cold]
     fn setup(&mut self) {
-        self.local[0].clear();
+        self.lower.clear();
 
         // Add all entries to the empty list
         let pte3_num = Table::num_pts(2, self.pages());
@@ -228,7 +216,7 @@ impl ArrayAlignedAlloc {
         let mut total = 0;
         for i in 0..Table::num_pts(2, self.pages()) {
             let page = i * Table::span(2);
-            let (pages, size) = self.local[0].recover(page, deep)?;
+            let (pages, size) = self.lower.recover(page, deep)?;
             if size == Size::L2 {
                 self[i].store(Entry3::new_giant());
             } else {
@@ -277,8 +265,7 @@ impl ArrayAlignedAlloc {
     }
 
     fn get_small(&self, core: usize, huge: bool) -> Result<usize> {
-        let local = &self.local[core];
-        let start_a = local.start(huge);
+        let start_a = self.lower[core].start(huge);
         let mut start = start_a.load(Ordering::Relaxed);
 
         if start == usize::MAX {
@@ -295,19 +282,19 @@ impl ArrayAlignedAlloc {
         }
 
         let page = if huge {
-            local.get_huge(start)?
+            self.lower.get_huge(start)?
         } else {
-            local.get(start)?
+            self.lower.get(core, start)?
         };
         start_a.store(page, Ordering::Relaxed);
         Ok(page)
     }
 
-    fn get_giant(&self, core: usize) -> Result<usize> {
+    fn get_giant(&self) -> Result<usize> {
         if let Some(i) = self.empty.pop(self) {
             match self[i].update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant)) {
                 Ok(_) => {
-                    self.local[core].persist(i * Table::span(2));
+                    self.lower.persist(i * Table::span(2));
                     Ok(i * Table::span(2))
                 }
                 Err(pte3) => {
@@ -321,18 +308,16 @@ impl ArrayAlignedAlloc {
         }
     }
 
-    fn put_giant(&self, core: usize, page: usize) -> Result<()> {
+    fn put_giant(&self, page: usize) -> Result<()> {
         let i = page / Table::span(2);
         if page % Table::span(2) != 0 {
             error!("Invalid align {page:x}");
             return Err(Error::Address);
         }
-        self.local[core].clear_giant(page);
+        self.lower.clear_giant(page);
 
-        match self[i].compare_exchange(
-            Entry3::new_giant(),
-            Entry3::new().with_free(Table::span(2)),
-        ) {
+        match self[i].compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Table::span(2)))
+        {
             Ok(_) => {
                 // Add to empty list
                 self.empty.push(self, i);
@@ -345,7 +330,7 @@ impl ArrayAlignedAlloc {
         }
     }
 
-    fn put_small(&self, core: usize, page: usize, pte3: Entry3) -> Result<()> {
+    fn put_small(&self, page: usize, pte3: Entry3) -> Result<()> {
         let max = self
             .pages()
             .saturating_sub(Table::round(2, page))
@@ -356,8 +341,7 @@ impl ArrayAlignedAlloc {
         }
 
         let i = page / Table::span(2);
-        let local = &self.local[core];
-        let size = local.put(page)?;
+        let size = self.lower.put(page)?;
         if let Ok(pte3) = self[i].update(|v| v.inc(size, max)) {
             if !pte3.reserved() {
                 let new_pages = pte3.free() + Table::span(size as _);

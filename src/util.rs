@@ -42,6 +42,7 @@ pub const fn align_down(v: usize, align: usize) -> usize {
     v & !(align - 1)
 }
 
+/// Wrapper for 64bit atomic values.
 pub struct Atomic<T: From<u64> + Into<u64>>(AtomicU64, PhantomData<T>);
 
 impl<T: From<u64> + Into<u64>> Atomic<T> {
@@ -157,6 +158,7 @@ unsafe fn time_stamp_counter() -> u64 {
     lo as u64 | (hi as u64) << 32
 }
 
+/// x86 cycle timer.
 #[cfg(target_arch = "x86_64")]
 #[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
@@ -172,6 +174,7 @@ impl Cycles {
     }
 }
 
+/// Fallback to default ns timer.
 #[cfg(not(target_arch = "x86_64"))]
 #[derive(Debug, Clone, Copy)]
 pub struct Cycles(std::time::Instant);
@@ -300,6 +303,9 @@ where
     }
 }
 
+/// Simple bare bones random number generator based on wyhash.
+///
+/// @see https://github.com/wangyi-fudan/wyhash
 pub struct WyRand {
     pub seed: u64,
 }

@@ -11,7 +11,7 @@ pub mod table;
 pub mod thread;
 pub mod util;
 
-#[cfg(feature = "wait")]
+#[cfg(feature = "stop")]
 pub mod stop;
 
 use std::ffi::c_void;

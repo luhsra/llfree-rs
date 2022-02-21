@@ -1,4 +1,3 @@
-use std::ops::Range;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
@@ -7,7 +6,7 @@ use spin::{Mutex, MutexGuard};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
-use crate::lower_alloc::{LowerAlloc, LowerAccess};
+use crate::lower_alloc::LowerAlloc;
 use crate::table::Table;
 use crate::util::{Atomic, Page};
 
@@ -24,9 +23,8 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// Volatile shared metadata
 #[repr(align(64))]
 pub struct ArrayLockedAlloc {
-    memory: Range<*const Page>,
     meta: *mut Meta,
-    local: Vec<LowerAlloc<Self>>,
+    lower: LowerAlloc,
     entries: Vec<Atomic<Entry3>>,
 
     empty: Mutex<Vec<usize>>,
@@ -36,12 +34,6 @@ pub struct ArrayLockedAlloc {
 
 const INITIALIZING: *mut ArrayLockedAlloc = usize::MAX as _;
 static mut SHARED: AtomicPtr<ArrayLockedAlloc> = AtomicPtr::new(null_mut());
-
-impl LowerAccess for ArrayLockedAlloc {
-    fn lower_allocs<'a>() -> &'a [LowerAlloc<Self>] {
-        &Self::instance().local
-    }
-}
 
 impl Alloc for ArrayLockedAlloc {
     #[cold]
@@ -119,23 +111,23 @@ impl Alloc for ArrayLockedAlloc {
 
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         match size {
-            Size::L2 => self.get_giant(core),
+            Size::L2 => self.get_giant(),
             _ => self.get_small(core, size == Size::L1),
         }
-        .map(|p| unsafe { self.memory.start.add(p as _) } as u64)
+        .map(|p| unsafe { self.lower.memory().start.add(p as _) } as u64)
     }
 
     fn put(&self, core: usize, addr: u64) -> Result<()> {
-        if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) {
+        if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
             error!("invalid addr");
             return Err(Error::Memory);
         }
-        let page = unsafe { (addr as *const Page).offset_from(self.memory.start) } as usize;
+        let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
 
         let i = page / Table::span(2);
         let pte = self.entries[i].load();
         if pte.page() {
-            self.put_giant(core, page)
+            self.put_giant(page)
         } else {
             self.put_small(core, page, pte)
         }
@@ -150,7 +142,7 @@ impl Alloc for ArrayLockedAlloc {
             pages -= pte.free();
         }
         // Pages allocated in reserved subtrees
-        for local in &self.local {
+        for local in self.lower.iter() {
             pages -= local.pte(false).load().free();
             pages -= local.pte(true).load().free();
         }
@@ -162,25 +154,20 @@ impl ArrayLockedAlloc {
     #[cold]
     fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
         // Last frame is reserved for metadata
-        let pages = (memory.len() - 1).min(MAX_PAGES);
-        let (memory, rem) = memory.split_at_mut(pages);
+        let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
         let meta = rem[0].cast_mut::<Meta>();
 
-        // level 2 tables are stored at the end of the NVM
-        let pages = pages - Table::num_pts(2, pages);
-        let (memory, _pt2) = memory.split_at_mut(pages);
+        // Create lower allocator
+        let lower = LowerAlloc::new(cores, memory);
 
         // Array with all pte3
-        let pte3_num = Table::num_pts(2, pages);
+        let pte3_num = Table::num_pts(2, lower.pages);
         let mut entries = Vec::with_capacity(pte3_num);
         entries.resize_with(pte3_num, || Atomic::new(Entry3::new()));
 
-        let local = vec![LowerAlloc::new(memory.as_ptr() as usize, pages); cores];
-
         Ok(Self {
-            memory: memory.as_ptr_range(),
             meta,
-            local,
+            lower,
             entries,
             empty: Mutex::new(Vec::with_capacity(pte3_num)),
             partial_l1: Mutex::new(Vec::with_capacity(pte3_num)),
@@ -189,12 +176,12 @@ impl ArrayLockedAlloc {
     }
 
     fn pages(&self) -> usize {
-        (self.memory.end as usize - self.memory.start as usize) / Page::SIZE
+        self.lower.pages
     }
 
     #[cold]
     fn setup(&mut self) {
-        self.local[0].clear();
+        self.lower.clear();
 
         // Add all entries to the empty list
         let mut empty = self.empty.lock();
@@ -224,7 +211,7 @@ impl ArrayLockedAlloc {
         let mut total = 0;
         for i in 0..Table::num_pts(2, self.pages()) {
             let page = i * Table::span(2);
-            let (pages, size) = self.local[0].recover(page, deep)?;
+            let (pages, size) = self.lower.recover(page, deep)?;
             if size == Size::L2 {
                 self.entries[i].store(Entry3::new_giant());
             } else {
@@ -301,9 +288,8 @@ impl ArrayLockedAlloc {
     }
 
     fn get_small(&self, core: usize, huge: bool) -> Result<usize> {
-        let local = &self.local[core];
-        let start_a = local.start(huge);
-        let pte_a = local.pte(huge);
+        let start_a = self.lower[core].start(huge);
+        let pte_a = self.lower[core].pte(huge);
         let mut start = start_a.load(Ordering::SeqCst);
 
         if start == usize::MAX {
@@ -322,15 +308,15 @@ impl ArrayLockedAlloc {
         }
 
         let page = if huge {
-            local.get_huge(start)?
+            self.lower.get_huge(start)?
         } else {
-            local.get(start)?
+            self.lower.get(core, start)?
         };
         start_a.store(page, Ordering::SeqCst);
         Ok(page)
     }
 
-    fn get_giant(&self, core: usize) -> Result<usize> {
+    fn get_giant(&self) -> Result<usize> {
         if let Some(i) = self.empty.lock().pop() {
             if self.entries[i]
                 .compare_exchange(
@@ -339,7 +325,7 @@ impl ArrayLockedAlloc {
                 )
                 .is_ok()
             {
-                self.local[core].persist(i * Table::span(2));
+                self.lower.persist(i * Table::span(2));
                 Ok(i * Table::span(2))
             } else {
                 error!("CAS invalid i{i}");
@@ -351,13 +337,13 @@ impl ArrayLockedAlloc {
         }
     }
 
-    fn put_giant(&self, core: usize, page: usize) -> Result<()> {
+    fn put_giant(&self, page: usize) -> Result<()> {
         let i = page / Table::span(2);
         if page % Table::span(2) != 0 {
             error!("Invalid align {page:x}");
             return Err(Error::Address);
         }
-        self.local[core].clear_giant(page);
+        self.lower.clear_giant(page);
 
         if self.entries[i]
             .compare_exchange(
@@ -386,35 +372,34 @@ impl ArrayLockedAlloc {
         }
 
         let i = page / Table::span(2);
-        let local = &self.local[core];
-        let size = local.put(page)?;
+        let huge = self.lower.put(page)?;
 
         // Try decrement own pte first
-        let pte_a = local.pte(size);
-        if pte_a.update(|v| v.inc_idx(size, i, max)).is_ok() {
+        let pte_a = self.lower[core].pte(huge);
+        if pte_a.update(|v| v.inc_idx(huge, i, max)).is_ok() {
             return Ok(());
         }
 
         // Subtree not owned by us
-        if let Ok(pte) = self.entries[i].update(|v| v.inc(size, max)) {
+        if let Ok(pte) = self.entries[i].update(|v| v.inc(huge, max)) {
             if !pte.reserved() {
-                let new_pages = pte.free() + Table::span(size as _);
+                let new_pages = pte.free() + Table::span(huge as _);
                 if pte.free() <= PTE3_FULL && new_pages > PTE3_FULL {
                     // Try to reserve it for bulk frees
-                    if let Ok(pte) = self.entries[i].update(|v| v.reserve(size)) {
+                    if let Ok(pte) = self.entries[i].update(|v| v.reserve(huge)) {
                         let pte = pte.with_idx(i);
                         warn!("put reserve {i}");
-                        self.swap_reserved(size, pte, pte_a)?;
-                        local.start(size).store(page, Ordering::SeqCst);
+                        self.swap_reserved(huge, pte, pte_a)?;
+                        self.lower[core].start(huge).store(page, Ordering::SeqCst);
                     } else {
                         // Add to partially free list
-                        self.partial(size).push(i);
+                        self.partial(huge).push(i);
                     }
                 }
             }
             Ok(())
         } else {
-            error!("Corruption l3 i{i} p=-{size:?}");
+            error!("Corruption l3 i{i} p=-{huge:?}");
             Err(Error::Corruption)
         }
     }

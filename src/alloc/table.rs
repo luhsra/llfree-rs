@@ -1,5 +1,4 @@
 //! Simple reduced non-volatile memory allocator.
-use std::ops::Range;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
@@ -7,7 +6,7 @@ use log::{error, info, warn};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
-use crate::lower_alloc::{LowerAlloc, LowerAccess};
+use crate::lower_alloc::LowerAlloc;
 use crate::table::Table;
 use crate::util::{Atomic, Page};
 
@@ -24,20 +23,13 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// Volatile shared metadata
 #[repr(align(64))]
 pub struct TableAlloc {
-    memory: Range<*const Page>,
     meta: *mut Meta,
-    local: Vec<LowerAlloc<Self>>,
+    lower: LowerAlloc,
     tables: Vec<Page>,
 }
 
 const INITIALIZING: *mut TableAlloc = usize::MAX as _;
 static mut SHARED: AtomicPtr<TableAlloc> = AtomicPtr::new(null_mut());
-
-impl LowerAccess for TableAlloc {
-    fn lower_allocs<'a>() -> &'a [LowerAlloc<Self>] {
-        &Self::instance().local
-    }
-}
 
 impl Alloc for TableAlloc {
     #[cold]
@@ -77,7 +69,7 @@ impl Alloc for TableAlloc {
             warn!("Recovered {pages:?}");
         } else {
             warn!("Setup allocator state p={}", alloc.pages());
-            alloc.local[0].clear();
+            alloc.lower.clear();
 
             alloc.setup_rec(Table::LAYERS, 0);
 
@@ -120,19 +112,19 @@ impl Alloc for TableAlloc {
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         // Start at the reserved memory chunk for this thread
         let page = match size {
-            Size::L2 => self.get_giant(core, Table::LAYERS, 0)?,
+            Size::L2 => self.get_giant(Table::LAYERS, 0)?,
             _ => self.get_small(core, size == Size::L1)?,
         };
 
-        Ok(unsafe { self.memory.start.add(page as _) } as u64)
+        Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
     }
 
     fn put(&self, core: usize, addr: u64) -> Result<()> {
-        if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) {
+        if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
             error!("invalid addr");
             return Err(Error::Memory);
         }
-        let page = unsafe { (addr as *const Page).offset_from(self.memory.start) } as usize;
+        let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
 
         self.put_rec(core, page)
     }
@@ -141,7 +133,7 @@ impl Alloc for TableAlloc {
     fn allocated_pages(&self) -> usize {
         let mut pages = self.allocated_pages_rec(Table::LAYERS, 0);
         // Pages allocated in reserved subtrees
-        for (_t, local) in self.local.iter().enumerate() {
+        for (_t, local) in self.lower.iter().enumerate() {
             let pte = local.pte(false).load();
             // warn!("L {t:>2}: L0 {pte:?}");
             pages += pte.free();
@@ -157,25 +149,21 @@ impl TableAlloc {
     #[cold]
     fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
         // Last frame is reserved for metadata
-        let mut pages = (memory.len() - 1).min(MAX_PAGES);
-        let (memory, rem) = memory.split_at_mut(pages);
+        let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
         let meta = rem[0].cast_mut::<Meta>();
 
-        // level 2 tables are stored at the end of the NVM
-        pages -= Table::num_pts(2, pages);
-        let (memory, _pt2) = memory.split_at_mut(pages);
+        // Create lower allocator
+        let lower = LowerAlloc::new(cores, memory);
 
         let mut num_pt = 0;
         for layer in 3..=Table::LAYERS {
-            num_pt += Table::num_pts(layer, pages);
+            num_pt += Table::num_pts(layer, lower.pages);
         }
         let tables = vec![Page::new(); num_pt];
-        let local = vec![LowerAlloc::new(memory.as_ptr() as _, pages); cores];
 
         Ok(Self {
-            memory: memory.as_ptr_range(),
             meta,
-            local,
+            lower,
             tables,
         })
     }
@@ -203,7 +191,7 @@ impl TableAlloc {
     }
 
     fn pages(&self) -> usize {
-        (self.memory.end as usize - self.memory.start as usize) / Page::SIZE
+        self.lower.pages
     }
 
     /// Returns the page table of the given `layer` that contains the `page`.
@@ -304,7 +292,7 @@ impl TableAlloc {
                 break;
             }
 
-            let (pages, size) = self.local[0].recover(page, deep)?;
+            let (pages, size) = self.lower.recover(page, deep)?;
             if size == Size::L2 {
                 pt.set(i, Entry3::new_giant());
             } else if pages > 0 {
@@ -430,9 +418,9 @@ impl TableAlloc {
         }
     }
 
-    fn get_giant(&self, core: usize, layer: usize, start: usize) -> Result<usize> {
+    fn get_giant(&self, layer: usize, start: usize) -> Result<usize> {
         if layer == 3 {
-            return self.get_giant_l3(core, start);
+            return self.get_giant_l3(start);
         }
 
         let pt = self.pt(layer, start);
@@ -447,7 +435,7 @@ impl TableAlloc {
                 continue;
             }
 
-            return self.get_giant(core, layer - 1, page);
+            return self.get_giant(layer - 1, page);
         }
 
         error!("Nothing found l{layer} s={start}");
@@ -455,7 +443,7 @@ impl TableAlloc {
     }
 
     /// Search free page table entry.
-    fn get_giant_l3(&self, core: usize, start: usize) -> Result<usize> {
+    fn get_giant_l3(&self, start: usize) -> Result<usize> {
         let pt = self.pt3(start);
 
         for i in 0..Table::LEN {
@@ -469,7 +457,7 @@ impl TableAlloc {
             {
                 let page = Table::page(3, start, i);
                 info!("allocated l3 i{i} p={page} s={start}");
-                self.local[core].persist(page);
+                self.lower.persist(page);
                 return Ok(page);
             }
         }
@@ -478,9 +466,8 @@ impl TableAlloc {
     }
 
     fn get_small(&self, core: usize, huge: bool) -> Result<usize> {
-        let leaf = &self.local[core];
-        let pte_a = leaf.pte(huge);
-        let start_a = leaf.start(huge);
+        let pte_a = self.lower[core].pte(huge);
+        let start_a = self.lower[core].start(huge);
         let mut start = start_a.load(Ordering::SeqCst);
 
         if start == usize::MAX {
@@ -505,9 +492,9 @@ impl TableAlloc {
         }
 
         let page = if huge {
-            leaf.get_huge(start)?
+            self.lower.get_huge(start)?
         } else {
-            leaf.get(start)?
+            self.lower.get(core, start)?
         };
         start_a.store(page, Ordering::SeqCst);
         Ok(page)
@@ -520,7 +507,7 @@ impl TableAlloc {
 
         if pte.page() {
             warn!("free giant l3 i{i}");
-            return self.put_giant(core, page);
+            return self.put_giant(page);
         }
 
         let max = (self.pages() - Table::round(2, page)).min(Table::span(2));
@@ -529,11 +516,9 @@ impl TableAlloc {
             return Err(Error::Address);
         }
 
-        let leaf = &self.local[core];
-
-        let size = leaf.put(page)?;
+        let size = self.lower.put(page)?;
         let idx = page / Table::span(2);
-        let pte_a = leaf.pte(size);
+        let pte_a = self.lower[core].pte(size);
         if pte_a.update(|v| v.inc_idx(size, idx, max)).is_ok() {
             return Ok(());
         }
@@ -549,7 +534,7 @@ impl TableAlloc {
                 if let Ok(pte) = pt.update(i, |v| v.reserve(size)) {
                     warn!("put reserve {i}");
                     self.swap_reserved(size, pte.with_idx(i), pte_a)?;
-                    leaf.start(size).store(page, Ordering::SeqCst);
+                    self.lower[core].start(size).store(page, Ordering::SeqCst);
                     Ok(())
                 } else {
                     self.update_parents(page, Change::p_inc(size))
@@ -563,7 +548,7 @@ impl TableAlloc {
         }
     }
 
-    fn put_giant(&self, core: usize, page: usize) -> Result<()> {
+    fn put_giant(&self, page: usize) -> Result<()> {
         if (page % Table::span(Size::L2 as _)) != 0 {
             error!(
                 "Invalid alignment p={page:x} a={:x}",
@@ -573,7 +558,7 @@ impl TableAlloc {
         }
 
         // Clear pt1's & remove pt2 flag
-        self.local[core].clear_giant(page);
+        self.lower.clear_giant(page);
 
         let pt = self.pt3(page);
         let i = Table::idx(3, page);

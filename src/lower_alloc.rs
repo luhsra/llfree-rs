@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::ops::{Deref, Range};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
@@ -11,61 +11,71 @@ use crate::Page;
 
 const CAS_RETRIES: usize = 4096;
 
-#[cfg(all(test, feature = "wait"))]
+#[cfg(all(test, feature = "stop"))]
 macro_rules! stop {
     () => {
         crate::stop::stop().unwrap()
     };
 }
-#[cfg(not(all(test, feature = "wait")))]
+#[cfg(not(all(test, feature = "stop")))]
 macro_rules! stop {
     () => {};
 }
 
-pub trait LowerAccess: Sized {
-    fn lower_allocs<'a>() -> &'a [LowerAlloc<Self>];
-}
-
-/// Layer 2 page allocator, per core.
+/// Layer 2 page allocator.
 #[repr(align(64))]
-pub struct LowerAlloc<A: LowerAccess> {
+pub struct LowerAlloc {
     pub begin: usize,
     pub pages: usize,
-    alloc_pt1: AtomicUsize,
-    start_l0: AtomicUsize,
-    pte_l0: Atomic<Entry3>,
-    start_l1: AtomicUsize,
-    pte_l1: Atomic<Entry3>,
-    _phantom: PhantomData<A>,
+    local: Vec<Local>,
 }
 
-impl<A: LowerAccess> Clone for LowerAlloc<A> {
-    fn clone(&self) -> Self {
+/// Per core data.
+#[repr(align(64))]
+pub struct Local {
+    alloc_pt1: AtomicUsize,
+    start: [AtomicUsize; 2],
+    pte: [Atomic<Entry3>; 2],
+}
+
+impl Local {
+    fn new() -> Self {
         Self {
-            begin: self.begin,
-            pages: self.pages,
             alloc_pt1: AtomicUsize::new(0),
-            start_l0: AtomicUsize::new(usize::MAX),
-            pte_l0: Atomic::new(Entry3::new()),
-            start_l1: AtomicUsize::new(usize::MAX),
-            pte_l1: Atomic::new(Entry3::new()),
-            _phantom: PhantomData,
+            start: [AtomicUsize::new(usize::MAX), AtomicUsize::new(usize::MAX)],
+            pte: [Atomic::new(Entry3::new()), Atomic::new(Entry3::new())],
         }
+    }
+    pub fn start(&self, huge: bool) -> &AtomicUsize {
+        &self.start[huge as usize]
+    }
+    pub fn pte(&self, huge: bool) -> &Atomic<Entry3> {
+        &self.pte[huge as usize]
     }
 }
 
-impl<A: LowerAccess> LowerAlloc<A> {
-    pub fn new(begin: usize, pages: usize) -> Self {
+impl Deref for LowerAlloc {
+    type Target = [Local];
+
+    fn deref(&self) -> &Self::Target {
+        &self.local
+    }
+}
+
+impl LowerAlloc {
+    pub fn new(cores: usize, memory: &mut [Page]) -> Self {
+        let mut local = Vec::with_capacity(cores);
+        local.resize_with(cores, Local::new);
         Self {
-            begin,
-            pages,
-            alloc_pt1: AtomicUsize::new(0),
-            start_l0: AtomicUsize::new(usize::MAX),
-            pte_l0: Atomic::new(Entry3::new()),
-            start_l1: AtomicUsize::new(usize::MAX),
-            pte_l1: Atomic::new(Entry3::new()),
-            _phantom: PhantomData,
+            begin: memory.as_ptr() as usize,
+            // level 2 tables are stored at the end of the NVM
+            pages: memory.len() - Table::num_pts(2, memory.len()),
+            local,
         }
+    }
+
+    pub fn memory(&self) -> Range<*const Page> {
+        self.begin as *const Page..(self.begin + self.pages * Page::SIZE) as *const Page
     }
 
     pub fn clear(&self) {
@@ -91,23 +101,6 @@ impl<A: LowerAccess> LowerAlloc<A> {
                     pt1.set(j, Entry1::Page);
                 }
             }
-        }
-    }
-
-    #[inline]
-    pub fn pte(&self, huge: bool) -> &Atomic<Entry3> {
-        if huge {
-            &self.pte_l1
-        } else {
-            &self.pte_l0
-        }
-    }
-
-    pub fn start(&self, huge: bool) -> &AtomicUsize {
-        if huge {
-            &self.start_l1
-        } else {
-            &self.start_l0
         }
     }
 
@@ -144,10 +137,7 @@ impl<A: LowerAccess> LowerAlloc<A> {
             } else if deep && pte.free() > 0 && size == Size::L0 {
                 let p = self.recover_l1(Table::page(1, start, i), pte)?;
                 if pte.free() != p {
-                    warn!(
-                        "Invalid PTE2 start=0x{start:x} i{i}: {} != {p}",
-                        pte.free(),
-                    );
+                    warn!("Invalid PTE2 start=0x{start:x} i{i}: {} != {p}", pte.free());
                     pt.set(i, pte.with_free(p));
                 }
                 pages += p;
@@ -179,7 +169,7 @@ impl<A: LowerAccess> LowerAlloc<A> {
     }
 
     /// Allocate a single page
-    pub fn get(&self, start: usize) -> Result<usize> {
+    pub fn get(&self, core: usize, start: usize) -> Result<usize> {
         let pt2 = self.pt2(start);
 
         for _ in 0..CAS_RETRIES {
@@ -194,21 +184,22 @@ impl<A: LowerAccess> LowerAlloc<A> {
                     continue;
                 }
 
-                self.alloc_pt1
+                self[core]
+                    .alloc_pt1
                     .store(!Table::page(1, start, pte2.i1()), Ordering::SeqCst);
 
                 stop!();
 
                 if let Ok(pte2) = pt2.update(i2, |v| v.dec(pte2.i1())) {
                     let page = if pte2.free() == 1 {
-                        self.get_last(pte2, newstart)
+                        self.get_last(core, pte2, newstart)
                     } else {
                         self.get_table(pte2, newstart)
                     };
-                    self.alloc_pt1.store(0, Ordering::SeqCst);
+                    self[core].alloc_pt1.store(0, Ordering::SeqCst);
                     return page;
                 }
-                self.alloc_pt1.store(0, Ordering::SeqCst);
+                self[core].alloc_pt1.store(0, Ordering::SeqCst);
             }
         }
         error!("Exceeding retries {start} {}", start / Table::span(2));
@@ -226,7 +217,7 @@ impl<A: LowerAccess> LowerAlloc<A> {
                     continue;
                 }
 
-                #[cfg(feature = "wait")]
+                #[cfg(feature = "stop")]
                 if pt1.get(i) != Entry1::Empty {
                     continue;
                 } else {
@@ -246,7 +237,7 @@ impl<A: LowerAccess> LowerAlloc<A> {
     }
 
     /// Allocate the last page (the pt1 is reused as last page).
-    fn get_last(&self, pte2: Entry2, start: usize) -> Result<usize> {
+    fn get_last(&self, core: usize, pte2: Entry2, start: usize) -> Result<usize> {
         stop!();
         info!("alloc last {} s={}", pte2.i1(), start);
 
@@ -254,12 +245,10 @@ impl<A: LowerAccess> LowerAlloc<A> {
         let alloc_p1 = !Table::page(1, start, pte2.i1());
 
         // Wait for others to finish
-        for (i, leaf) in A::lower_allocs().iter().enumerate() {
-            if leaf as *const _ != self as *const _ {
+        for (i, leaf) in self.iter().enumerate() {
+            if i != core {
                 while leaf.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
-                    warn!("Waiting for cpu {i} on {}", unsafe {
-                        (self as *const Self).offset_from(&A::lower_allocs()[0] as *const _)
-                    });
+                    warn!("Waiting for cpu {i} on {core}");
                     stop!();
                 }
             }
@@ -424,12 +413,10 @@ impl<A: LowerAccess> LowerAlloc<A> {
 
             let pte2 = pt2.get(i2);
             info!(
-                "{:1$}l2 i={2} 0x{3:x}: {4:?}",
+                "{:1$}l2 i={i2} 0x{2:x}: {pte2:?}",
                 "",
                 (Table::LAYERS - 2) * 4,
-                i2,
                 start * Page::SIZE,
-                pte2
             );
             if !pte2.giant() && !pte2.page() && pte2.free() > 0 && pte2.free() < Table::LEN {
                 let pt1 = self.pt1(pte2, start);
@@ -450,22 +437,19 @@ impl<A: LowerAccess> LowerAlloc<A> {
     }
 }
 
-#[cfg(feature = "wait")]
+#[cfg(feature = "stop")]
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
 
     use log::warn;
 
-    use super::LowerAccess;
-    use crate::alloc::{array_aligned::ArrayAlignedAlloc, Alloc};
     use crate::entry::Entry1;
+    use crate::lower_alloc::LowerAlloc;
+    use crate::stop::{StopRand, StopVec, Stopper};
     use crate::table::Table;
     use crate::thread;
     use crate::util::{logging, Page};
-    use crate::stop::{Stopper, StopRand, StopVec};
-
-    type Allocator = ArrayAlignedAlloc;
 
     fn count(pt: &Table<Entry1>) -> usize {
         let mut pages = 0;
@@ -490,26 +474,24 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer, true).unwrap();
-            Allocator::lower_allocs()[0].get(0).unwrap();
+            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            lower.clear();
+            lower.get(0, 0).unwrap();
 
-            let wait = StopVec::new(2, order);
+            let stop = StopVec::new(2, order);
 
+            let l = lower.clone();
             thread::parallel(2, move |t| {
                 thread::pin(t);
-                let key = Stopper::init(wait, t as _);
-                let local = &Allocator::lower_allocs()[t];
+                let key = Stopper::init(stop, t as _);
 
-                let page = local.get(0).unwrap();
+                let page = l.get(t, 0).unwrap();
                 drop(key);
                 assert!(page != 0);
             });
 
-            let local = &Allocator::lower_allocs()[0];
-            assert_eq!(local.pt2(0).get(0).free(), Table::LEN - 3);
-            assert_eq!(count(local.pt1(local.pt2(0).get(0), 0)), Table::LEN - 3);
-
-            Allocator::destroy()
+            assert_eq!(lower.pt2(0).get(0).free(), Table::LEN - 3);
+            assert_eq!(count(lower.pt1(lower.pt2(0).get(0), 0)), Table::LEN - 3);
         }
     }
 
@@ -528,23 +510,20 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer, true).unwrap();
+            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            lower.clear();
 
-            let wait = StopVec::new(2, order);
-
+            let stop = StopVec::new(2, order);
+            let l = lower.clone();
             thread::parallel(2, move |t| {
                 thread::pin(t);
-                let _key = Stopper::init(wait, t as _);
-                let local = &Allocator::lower_allocs()[t];
+                let _stopper = Stopper::init(stop, t as _);
 
-                local.get(0).unwrap();
+                l.get(t, 0).unwrap();
             });
 
-            let local = &Allocator::lower_allocs()[0];
-            assert_eq!(local.pt2(0).get(0).free(), Table::LEN - 2);
-            assert_eq!(count(local.pt1(local.pt2(0).get(0), 0)), Table::LEN - 2);
-
-            Allocator::destroy()
+            assert_eq!(lower.pt2(0).get(0).free(), Table::LEN - 2);
+            assert_eq!(count(lower.pt1(lower.pt2(0).get(0), 0)), Table::LEN - 2);
         }
     }
 
@@ -563,28 +542,26 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer, true).unwrap();
-            let local = &Allocator::lower_allocs()[0];
-            for _ in 0..Table::LEN - 1 {
-                local.get(0).unwrap();
-            }
-            let wait = StopVec::new(2, order);
+            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            lower.clear();
 
+            for _ in 0..Table::LEN - 1 {
+                lower.get(0, 0).unwrap();
+            }
+
+            let stop = StopVec::new(2, order);
+            let l = lower.clone();
             thread::parallel(2, move |t| {
                 thread::pin(t);
-                let _key = Stopper::init(wait, t as _);
-                let local = &Allocator::lower_allocs()[t];
+                let _stopper = Stopper::init(stop, t as _);
 
-                local.get(0).unwrap();
+                l.get(t, 0).unwrap();
             });
 
-            let local = &Allocator::lower_allocs()[0];
-            let pt2 = local.pt2(0);
+            let pt2 = lower.pt2(0);
             assert_eq!(pt2.get(0).free(), 0);
             assert_eq!(pt2.get(1).free(), Table::LEN - 1);
-            assert_eq!(count(local.pt1(pt2.get(1), Table::LEN)), Table::LEN - 1);
-
-            Allocator::destroy()
+            assert_eq!(count(lower.pt1(pt2.get(1), Table::LEN)), Table::LEN - 1);
         }
     }
 
@@ -603,26 +580,24 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer, true).unwrap();
-            let local = &Allocator::lower_allocs()[0];
-            pages[0] = local.get(0).unwrap();
-            pages[1] = local.get(0).unwrap();
-            let wait = StopVec::new(2, order);
+            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            lower.clear();
 
+            pages[0] = lower.get(0, 0).unwrap();
+            pages[1] = lower.get(0, 0).unwrap();
+
+            let stop = StopVec::new(2, order);
+            let l = lower.clone();
             thread::parallel(2, {
                 let pages = pages.clone();
                 move |t| {
-                    let _key = Stopper::init(wait, t as _);
-                    let local = &Allocator::lower_allocs()[t];
+                    let _stopper = Stopper::init(stop, t as _);
 
-                    local.put(pages[t as usize]).unwrap();
+                    l.put(pages[t as usize]).unwrap();
                 }
             });
 
-            let local = &Allocator::lower_allocs()[0];
-            assert_eq!(local.pt2(0).get(0).free(), Table::LEN);
-
-            Allocator::destroy()
+            assert_eq!(lower.pt2(0).get(0).free(), Table::LEN);
         }
     }
 
@@ -641,29 +616,24 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer, true).unwrap();
-            let local = &Allocator::lower_allocs()[0];
+            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            lower.clear();
+
             for page in &mut pages {
-                *page = local.get(0).unwrap();
+                *page = lower.get(0, 0).unwrap();
             }
-            let wait = StopVec::new(2, order);
 
-            thread::parallel(2, {
-                let pages = pages.clone();
-                move |t| {
-                    let _key = Stopper::init(wait, t as _);
-                    let local = &Allocator::lower_allocs()[t];
+            let stop = StopVec::new(2, order);
+            let l = lower.clone();
+            thread::parallel(2, move |t| {
+                let _stopper = Stopper::init(stop, t as _);
 
-                    local.put(pages[t as usize]).unwrap();
-                }
+                l.put(pages[t as usize]).unwrap();
             });
 
-            let local = &Allocator::lower_allocs()[0];
-            let pt2 = local.pt2(0);
+            let pt2 = lower.pt2(0);
             assert_eq!(pt2.get(0).free(), 2);
-            assert_eq!(count(local.pt1(pt2.get(0), 0)), 2);
-
-            Allocator::destroy()
+            assert_eq!(count(lower.pt1(pt2.get(0), 0)), 2);
         }
     }
 
@@ -685,43 +655,42 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            Allocator::init(2, &mut buffer, true).unwrap();
-            let local = &Allocator::lower_allocs()[0];
+            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            lower.clear();
+
             for page in &mut pages[..Table::LEN - 1] {
-                *page = local.get(0).unwrap();
+                *page = lower.get(0, 0).unwrap();
             }
-            let wait = StopVec::new(2, order);
+            let stop = StopVec::new(2, order);
 
-            let wait_clone = Arc::clone(&wait);
-            let handle = std::thread::spawn(move || {
-                let _key = Stopper::init(wait_clone, 1);
-                let local = &Allocator::lower_allocs()[1];
+            let handle = std::thread::spawn({
+                let stop = Arc::clone(&stop);
+                let lower = lower.clone();
+                move || {
+                    let _stopper = Stopper::init(stop, 1);
 
-                local.get(0).unwrap();
+                    lower.get(1, 0).unwrap();
+                }
             });
 
             {
-                let _key = Stopper::init(wait, 0);
-                let local = &Allocator::lower_allocs()[0];
+                let _stopper = Stopper::init(stop, 0);
 
-                local.put(pages[0]).unwrap();
+                lower.put(pages[0]).unwrap();
             }
 
             handle.join().unwrap();
 
-            let local = &Allocator::lower_allocs()[0];
-            let pt2 = local.pt2(0);
+            let pt2 = lower.pt2(0);
             if pt2.get(0).free() == 1 {
-                assert_eq!(count(local.pt1(pt2.get(0), 0)), 1);
+                assert_eq!(count(lower.pt1(pt2.get(0), 0)), 1);
             } else {
                 // Table entry skipped
                 assert_eq!(pt2.get(0).free(), 2);
-                assert_eq!(count(local.pt1(pt2.get(0), 0)), 2);
+                assert_eq!(count(lower.pt1(pt2.get(0), 0)), 2);
                 assert_eq!(pt2.get(1).free(), Table::LEN - 1);
-                assert_eq!(count(local.pt1(pt2.get(1), Table::LEN)), Table::LEN - 1);
+                assert_eq!(count(lower.pt1(pt2.get(1), Table::LEN)), Table::LEN - 1);
             }
-
-            Allocator::destroy()
         }
     }
 
@@ -736,31 +705,29 @@ mod test {
             let seed = unsafe { libc::rand() } as u64;
             warn!("order: {seed:x}");
 
-            Allocator::init(THREADS, &mut buffer, true).unwrap();
+            let lower = Arc::new(LowerAlloc::new(THREADS, &mut buffer));
+            lower.clear();
 
-            let wait = StopRand::new(THREADS, seed);
+            let stop = StopRand::new(THREADS, seed);
+            let l = lower.clone();
             thread::parallel(THREADS, move |t| {
-                let _key = Stopper::init(wait, t);
-                let local = &Allocator::lower_allocs()[t];
+                let _stopper = Stopper::init(stop, t);
 
                 let mut pages = [0; 4];
                 for p in &mut pages {
-                    *p = local.get(0).unwrap();
+                    *p = l.get(t, 0).unwrap();
                 }
                 pages.reverse();
                 for p in pages {
-                    local.put(p).unwrap();
+                    l.put(p).unwrap();
                 }
             });
 
-            let local = &Allocator::lower_allocs()[0];
-            let pt2 = local.pt2(0);
+            let pt2 = lower.pt2(0);
             assert_eq!(pt2.get(0).free(), Table::LEN);
             assert_eq!(pt2.get(1).free(), Table::LEN);
-            assert_eq!(pt2.get(0).free(), count(local.pt1(pt2.get(0), 0)));
-            assert_eq!(pt2.get(1).free(), count(local.pt1(pt2.get(1), Table::LEN)));
-
-            Allocator::destroy()
+            assert_eq!(pt2.get(0).free(), count(lower.pt1(pt2.get(0), 0)));
+            assert_eq!(pt2.get(1).free(), count(lower.pt1(pt2.get(1), Table::LEN)));
         }
     }
 
@@ -776,31 +743,28 @@ mod test {
             let seed = unsafe { libc::rand() } as u64;
             warn!("order: {seed:x}");
 
-            Allocator::init(THREADS, &mut buffer, true).unwrap();
-            let local = &Allocator::lower_allocs()[0];
+            let lower = Arc::new(LowerAlloc::new(THREADS, &mut buffer));
+            lower.clear();
             for page in &mut pages[..Table::LEN - 3] {
-                *page = local.get(0).unwrap();
+                *page = lower.get(0, 0).unwrap();
             }
 
-            let wait = StopRand::new(THREADS, seed);
+            let stop = StopRand::new(THREADS, seed);
+            let l = lower.clone();
             thread::parallel(THREADS, move |t| {
-                let _key = Stopper::init(wait, t);
-                let local = &Allocator::lower_allocs()[t];
+                let _stopper = Stopper::init(stop, t);
 
                 if t < THREADS / 2 {
-                    local.put(pages[t]).unwrap();
+                    l.put(pages[t]).unwrap();
                 } else {
-                    local.get(0).unwrap();
+                    l.get(t, 0).unwrap();
                 }
             });
 
-            let local = &Allocator::lower_allocs()[0];
-            let pt2 = local.pt2(0);
+            let pt2 = lower.pt2(0);
             assert_eq!(pt2.get(0).free() + pt2.get(1).free(), 3 + Table::LEN);
-            assert_eq!(pt2.get(0).free(), count(local.pt1(pt2.get(0), 0)));
-            assert_eq!(pt2.get(1).free(), count(local.pt1(pt2.get(1), Table::LEN)));
-
-            Allocator::destroy()
+            assert_eq!(pt2.get(0).free(), count(lower.pt1(pt2.get(0), 0)));
+            assert_eq!(pt2.get(1).free(), count(lower.pt1(pt2.get(1), Table::LEN)));
         }
     }
 }
