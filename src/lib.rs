@@ -5,14 +5,14 @@
 
 pub mod alloc;
 pub mod entry;
-mod leaf_alloc;
+mod lower_alloc;
 pub mod mmap;
 pub mod table;
 pub mod thread;
 pub mod util;
 
 #[cfg(feature = "wait")]
-pub mod wait;
+pub mod stop;
 
 use std::ffi::c_void;
 use std::sync::atomic::AtomicU64;

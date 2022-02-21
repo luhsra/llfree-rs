@@ -18,13 +18,13 @@ Currently, the nightly version `2022-02-08` (or newer) is used to have access to
 The [src/alloc](src/alloc/) directory contains the different allocator variants.
 The general interface is defined in [src/alloc.rs](src/alloc.rs), together with various unit tests and stress tests.
 
-The persistent leaf allocator can be found in [src/leaf_alloc.rs](src/leaf_alloc.rs).
+The persistent lower allocator can be found in [src/lower_alloc.rs](src/lower_alloc.rs).
 It is responsible for managing the layer one and layer two-page tables that are persisted on the non-volatile memory.
-Most of the allocators in [src/alloc](src/alloc/) use the leaf allocator and focus only on managing the higher level 1G subtrees using volatile data structures.
+Most of the upper allocators in [src/alloc](src/alloc/) use the lower allocator and focus only on managing the higher level 1G subtrees using volatile data structures.
 
-The leaf allocator is heavily tested for race conditions using synchronization points (`wait`) to control the execution order of parallel threads.
+The lower allocator is heavily tested for race conditions using synchronization points (`stop`) to control the execution order of parallel threads.
 They are similar to barriers where, on every synchronization point, the next running CPU is chosen either by a previously defined order or in a pseudo-randomized manner.
-This mechanism is implemented in [src/wait.rs](src/wait.rs).
+This mechanism is implemented in [src/stop.rs](src/stop.rs).
 
 The paging data structures are defined in [src/entry.rs](src/entry.rs) and [src/table.rs](src/table.rs).
 

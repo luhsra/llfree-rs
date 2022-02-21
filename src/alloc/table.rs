@@ -7,7 +7,7 @@ use log::{error, info, warn};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
-use crate::leaf_alloc::{LeafAllocator, Leafs};
+use crate::lower_alloc::{LowerAlloc, LowerAccess};
 use crate::table::Table;
 use crate::util::{Atomic, Page};
 
@@ -26,15 +26,15 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 pub struct TableAlloc {
     memory: Range<*const Page>,
     meta: *mut Meta,
-    local: Vec<LeafAllocator<Self>>,
+    local: Vec<LowerAlloc<Self>>,
     tables: Vec<Page>,
 }
 
 const INITIALIZING: *mut TableAlloc = usize::MAX as _;
 static mut SHARED: AtomicPtr<TableAlloc> = AtomicPtr::new(null_mut());
 
-impl Leafs for TableAlloc {
-    fn leafs<'a>() -> &'a [LeafAllocator<Self>] {
+impl LowerAccess for TableAlloc {
+    fn lower_allocs<'a>() -> &'a [LowerAlloc<Self>] {
         &Self::instance().local
     }
 }
@@ -170,7 +170,7 @@ impl TableAlloc {
             num_pt += Table::num_pts(layer, pages);
         }
         let tables = vec![Page::new(); num_pt];
-        let local = vec![LeafAllocator::new(memory.as_ptr() as _, pages); cores];
+        let local = vec![LowerAlloc::new(memory.as_ptr() as _, pages); cores];
 
         Ok(Self {
             memory: memory.as_ptr_range(),

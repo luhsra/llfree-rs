@@ -12,23 +12,23 @@ use crate::Page;
 const CAS_RETRIES: usize = 4096;
 
 #[cfg(all(test, feature = "wait"))]
-macro_rules! wait {
+macro_rules! stop {
     () => {
-        crate::wait::wait().unwrap()
+        crate::stop::stop().unwrap()
     };
 }
 #[cfg(not(all(test, feature = "wait")))]
-macro_rules! wait {
+macro_rules! stop {
     () => {};
 }
 
-pub trait Leafs: Sized {
-    fn leafs<'a>() -> &'a [LeafAllocator<Self>];
+pub trait LowerAccess: Sized {
+    fn lower_allocs<'a>() -> &'a [LowerAlloc<Self>];
 }
 
 /// Layer 2 page allocator, per core.
 #[repr(align(64))]
-pub struct LeafAllocator<A: Leafs> {
+pub struct LowerAlloc<A: LowerAccess> {
     pub begin: usize,
     pub pages: usize,
     alloc_pt1: AtomicUsize,
@@ -39,7 +39,7 @@ pub struct LeafAllocator<A: Leafs> {
     _phantom: PhantomData<A>,
 }
 
-impl<A: Leafs> Clone for LeafAllocator<A> {
+impl<A: LowerAccess> Clone for LowerAlloc<A> {
     fn clone(&self) -> Self {
         Self {
             begin: self.begin,
@@ -54,7 +54,7 @@ impl<A: Leafs> Clone for LeafAllocator<A> {
     }
 }
 
-impl<A: Leafs> LeafAllocator<A> {
+impl<A: LowerAccess> LowerAlloc<A> {
     pub fn new(begin: usize, pages: usize) -> Self {
         Self {
             begin,
@@ -186,7 +186,7 @@ impl<A: Leafs> LeafAllocator<A> {
             for newstart in Table::iterate(2, start) {
                 let i2 = Table::idx(2, newstart);
 
-                wait!();
+                stop!();
 
                 let pte2 = pt2.get(i2);
 
@@ -197,7 +197,7 @@ impl<A: Leafs> LeafAllocator<A> {
                 self.alloc_pt1
                     .store(!Table::page(1, start, pte2.i1()), Ordering::SeqCst);
 
-                wait!();
+                stop!();
 
                 if let Ok(pte2) = pt2.update(i2, |v| v.dec(pte2.i1())) {
                     let page = if pte2.free() == 1 {
@@ -230,7 +230,7 @@ impl<A: Leafs> LeafAllocator<A> {
                 if pt1.get(i) != Entry1::Empty {
                     continue;
                 } else {
-                    wait!();
+                    stop!();
                 }
 
                 if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
@@ -239,7 +239,7 @@ impl<A: Leafs> LeafAllocator<A> {
             }
 
             warn!("Nothing found, retry {}", start / Table::span(2));
-            wait!();
+            stop!();
         }
         error!("Exceeding retries {} {pte2:?}", start / Table::span(2));
         Err(Error::Corruption)
@@ -247,20 +247,20 @@ impl<A: Leafs> LeafAllocator<A> {
 
     /// Allocate the last page (the pt1 is reused as last page).
     fn get_last(&self, pte2: Entry2, start: usize) -> Result<usize> {
-        wait!();
+        stop!();
         info!("alloc last {} s={}", pte2.i1(), start);
 
         let pt1 = self.pt1(pte2, start);
         let alloc_p1 = !Table::page(1, start, pte2.i1());
 
         // Wait for others to finish
-        for (i, leaf) in A::leafs().iter().enumerate() {
+        for (i, leaf) in A::lower_allocs().iter().enumerate() {
             if leaf as *const _ != self as *const _ {
                 while leaf.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
                     warn!("Waiting for cpu {i} on {}", unsafe {
-                        (self as *const Self).offset_from(&A::leafs()[0] as *const _)
+                        (self as *const Self).offset_from(&A::lower_allocs()[0] as *const _)
                     });
-                    wait!();
+                    stop!();
                 }
             }
         }
@@ -296,7 +296,7 @@ impl<A: Leafs> LeafAllocator<A> {
         let pt2 = self.pt2(page);
         let i2 = Table::idx(2, page);
 
-        wait!();
+        stop!();
 
         let mut old = pt2.get(i2);
         if old.page() {
@@ -339,7 +339,7 @@ impl<A: Leafs> LeafAllocator<A> {
             return self.put_full(pte2, page);
         }
 
-        wait!();
+        stop!();
 
         let pt1 = self.pt1(pte2, page);
         let i1 = Table::idx(1, page);
@@ -350,7 +350,7 @@ impl<A: Leafs> LeafAllocator<A> {
             return Err(Error::Address);
         }
 
-        wait!();
+        stop!();
 
         if let Err(pte2) = pt2.update(i2, |pte| pte.inc(pte2.i1())) {
             return if pte2.free() == Table::LEN {
@@ -361,7 +361,7 @@ impl<A: Leafs> LeafAllocator<A> {
             };
         }
 
-        wait!();
+        stop!();
 
         if pt1.cas(i1, Entry1::Page, Entry1::Empty).is_err() {
             error!("Corruption l1 i{i1}");
@@ -377,7 +377,7 @@ impl<A: Leafs> LeafAllocator<A> {
         let i2 = Table::idx(2, page);
         let i1 = Table::idx(1, page);
 
-        wait!();
+        stop!();
 
         // The freed page becomes the new pt
         let pt1 = unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) };
@@ -457,13 +457,13 @@ mod test {
 
     use log::warn;
 
-    use super::Leafs;
+    use super::LowerAccess;
     use crate::alloc::{array_aligned::ArrayAlignedAlloc, Alloc};
     use crate::entry::Entry1;
     use crate::table::Table;
     use crate::thread;
     use crate::util::{logging, Page};
-    use crate::wait::{DbgWaitKey, DbgWaitRand, DbgWaitVec};
+    use crate::stop::{Stopper, StopRand, StopVec};
 
     type Allocator = ArrayAlignedAlloc;
 
@@ -491,21 +491,21 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer, true).unwrap();
-            Allocator::leafs()[0].get(0).unwrap();
+            Allocator::lower_allocs()[0].get(0).unwrap();
 
-            let wait = DbgWaitVec::new(2, order);
+            let wait = StopVec::new(2, order);
 
             thread::parallel(2, move |t| {
                 thread::pin(t);
-                let key = DbgWaitKey::init(wait, t as _);
-                let local = &Allocator::leafs()[t];
+                let key = Stopper::init(wait, t as _);
+                let local = &Allocator::lower_allocs()[t];
 
                 let page = local.get(0).unwrap();
                 drop(key);
                 assert!(page != 0);
             });
 
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             assert_eq!(local.pt2(0).get(0).free(), Table::LEN - 3);
             assert_eq!(count(local.pt1(local.pt2(0).get(0), 0)), Table::LEN - 3);
 
@@ -530,17 +530,17 @@ mod test {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer, true).unwrap();
 
-            let wait = DbgWaitVec::new(2, order);
+            let wait = StopVec::new(2, order);
 
             thread::parallel(2, move |t| {
                 thread::pin(t);
-                let _key = DbgWaitKey::init(wait, t as _);
-                let local = &Allocator::leafs()[t];
+                let _key = Stopper::init(wait, t as _);
+                let local = &Allocator::lower_allocs()[t];
 
                 local.get(0).unwrap();
             });
 
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             assert_eq!(local.pt2(0).get(0).free(), Table::LEN - 2);
             assert_eq!(count(local.pt1(local.pt2(0).get(0), 0)), Table::LEN - 2);
 
@@ -564,21 +564,21 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer, true).unwrap();
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             for _ in 0..Table::LEN - 1 {
                 local.get(0).unwrap();
             }
-            let wait = DbgWaitVec::new(2, order);
+            let wait = StopVec::new(2, order);
 
             thread::parallel(2, move |t| {
                 thread::pin(t);
-                let _key = DbgWaitKey::init(wait, t as _);
-                let local = &Allocator::leafs()[t];
+                let _key = Stopper::init(wait, t as _);
+                let local = &Allocator::lower_allocs()[t];
 
                 local.get(0).unwrap();
             });
 
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             let pt2 = local.pt2(0);
             assert_eq!(pt2.get(0).free(), 0);
             assert_eq!(pt2.get(1).free(), Table::LEN - 1);
@@ -604,22 +604,22 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer, true).unwrap();
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             pages[0] = local.get(0).unwrap();
             pages[1] = local.get(0).unwrap();
-            let wait = DbgWaitVec::new(2, order);
+            let wait = StopVec::new(2, order);
 
             thread::parallel(2, {
                 let pages = pages.clone();
                 move |t| {
-                    let _key = DbgWaitKey::init(wait, t as _);
-                    let local = &Allocator::leafs()[t];
+                    let _key = Stopper::init(wait, t as _);
+                    let local = &Allocator::lower_allocs()[t];
 
                     local.put(pages[t as usize]).unwrap();
                 }
             });
 
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             assert_eq!(local.pt2(0).get(0).free(), Table::LEN);
 
             Allocator::destroy()
@@ -642,23 +642,23 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer, true).unwrap();
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             for page in &mut pages {
                 *page = local.get(0).unwrap();
             }
-            let wait = DbgWaitVec::new(2, order);
+            let wait = StopVec::new(2, order);
 
             thread::parallel(2, {
                 let pages = pages.clone();
                 move |t| {
-                    let _key = DbgWaitKey::init(wait, t as _);
-                    let local = &Allocator::leafs()[t];
+                    let _key = Stopper::init(wait, t as _);
+                    let local = &Allocator::lower_allocs()[t];
 
                     local.put(pages[t as usize]).unwrap();
                 }
             });
 
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             let pt2 = local.pt2(0);
             assert_eq!(pt2.get(0).free(), 2);
             assert_eq!(count(local.pt1(pt2.get(0), 0)), 2);
@@ -686,30 +686,30 @@ mod test {
         for order in orders {
             warn!("order: {:?}", order);
             Allocator::init(2, &mut buffer, true).unwrap();
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             for page in &mut pages[..Table::LEN - 1] {
                 *page = local.get(0).unwrap();
             }
-            let wait = DbgWaitVec::new(2, order);
+            let wait = StopVec::new(2, order);
 
             let wait_clone = Arc::clone(&wait);
             let handle = std::thread::spawn(move || {
-                let _key = DbgWaitKey::init(wait_clone, 1);
-                let local = &Allocator::leafs()[1];
+                let _key = Stopper::init(wait_clone, 1);
+                let local = &Allocator::lower_allocs()[1];
 
                 local.get(0).unwrap();
             });
 
             {
-                let _key = DbgWaitKey::init(wait, 0);
-                let local = &Allocator::leafs()[0];
+                let _key = Stopper::init(wait, 0);
+                let local = &Allocator::lower_allocs()[0];
 
                 local.put(pages[0]).unwrap();
             }
 
             handle.join().unwrap();
 
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             let pt2 = local.pt2(0);
             if pt2.get(0).free() == 1 {
                 assert_eq!(count(local.pt1(pt2.get(0), 0)), 1);
@@ -738,10 +738,10 @@ mod test {
 
             Allocator::init(THREADS, &mut buffer, true).unwrap();
 
-            let wait = DbgWaitRand::new(THREADS, seed);
+            let wait = StopRand::new(THREADS, seed);
             thread::parallel(THREADS, move |t| {
-                let _key = DbgWaitKey::init(wait, t);
-                let local = &Allocator::leafs()[t];
+                let _key = Stopper::init(wait, t);
+                let local = &Allocator::lower_allocs()[t];
 
                 let mut pages = [0; 4];
                 for p in &mut pages {
@@ -753,7 +753,7 @@ mod test {
                 }
             });
 
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             let pt2 = local.pt2(0);
             assert_eq!(pt2.get(0).free(), Table::LEN);
             assert_eq!(pt2.get(1).free(), Table::LEN);
@@ -777,15 +777,15 @@ mod test {
             warn!("order: {seed:x}");
 
             Allocator::init(THREADS, &mut buffer, true).unwrap();
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             for page in &mut pages[..Table::LEN - 3] {
                 *page = local.get(0).unwrap();
             }
 
-            let wait = DbgWaitRand::new(THREADS, seed);
+            let wait = StopRand::new(THREADS, seed);
             thread::parallel(THREADS, move |t| {
-                let _key = DbgWaitKey::init(wait, t);
-                let local = &Allocator::leafs()[t];
+                let _key = Stopper::init(wait, t);
+                let local = &Allocator::lower_allocs()[t];
 
                 if t < THREADS / 2 {
                     local.put(pages[t]).unwrap();
@@ -794,7 +794,7 @@ mod test {
                 }
             });
 
-            let local = &Allocator::leafs()[0];
+            let local = &Allocator::lower_allocs()[0];
             let pt2 = local.pt2(0);
             assert_eq!(pt2.get(0).free() + pt2.get(1).free(), 3 + Table::LEN);
             assert_eq!(pt2.get(0).free(), count(local.pt1(pt2.get(0), 0)));

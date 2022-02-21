@@ -6,7 +6,7 @@ use log::{error, warn};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
-use crate::leaf_alloc::{LeafAllocator, Leafs};
+use crate::lower_alloc::{LowerAlloc, LowerAccess};
 use crate::table::Table;
 use crate::util::{AStack, Atomic, Page};
 
@@ -25,7 +25,7 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 pub struct ArrayAtomicAlloc {
     memory: Range<*const Page>,
     meta: *mut Meta,
-    local: Vec<LeafAllocator<Self>>,
+    local: Vec<LowerAlloc<Self>>,
     entries: Vec<Atomic<Entry3>>,
 
     empty: AStack<Entry3>,
@@ -36,8 +36,8 @@ pub struct ArrayAtomicAlloc {
 const INITIALIZING: *mut ArrayAtomicAlloc = usize::MAX as _;
 static mut SHARED: AtomicPtr<ArrayAtomicAlloc> = AtomicPtr::new(null_mut());
 
-impl Leafs for ArrayAtomicAlloc {
-    fn leafs<'a>() -> &'a [LeafAllocator<Self>] {
+impl LowerAccess for ArrayAtomicAlloc {
+    fn lower_allocs<'a>() -> &'a [LowerAlloc<Self>] {
         &Self::instance().local
     }
 }
@@ -174,7 +174,7 @@ impl ArrayAtomicAlloc {
         let mut entries = Vec::with_capacity(pte3_num);
         entries.resize_with(pte3_num, || Atomic::new(Entry3::new()));
 
-        let local = vec![LeafAllocator::new(memory.as_ptr() as usize, pages); cores];
+        let local = vec![LowerAlloc::new(memory.as_ptr() as usize, pages); cores];
 
         Ok(Self {
             memory: memory.as_ptr_range(),

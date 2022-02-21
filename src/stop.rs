@@ -12,56 +12,57 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
-struct WaitData {
-    id: usize,
-    inner: Arc<dyn DbgWait>,
+struct StopData {
+    tid: usize,
+    inner: Arc<dyn Stop>,
 }
 
 thread_local! {
-    static DATA: RefCell<Option<WaitData>> = RefCell::new(None);
+    /// Per thread wait data.
+    static DATA: RefCell<Option<StopData>> = RefCell::new(None);
 }
 
-/// Per thread wait data.
-pub struct DbgWaitKey;
+/// Manages per thread stopping behavior.
+pub struct Stopper;
 
-impl DbgWaitKey {
-    /// Per thread initialization. Has to be called on every thread that calls wait.
-    pub fn init(inner: Arc<dyn DbgWait>, id: usize) -> Result<Self> {
+impl Stopper {
+    /// Per thread initialization.
+    /// Has to be called on every thread that calls wait.
+    pub fn init(inner: Arc<dyn Stop>, tid: usize) -> Result<Self> {
         DATA.with(|data| {
-            *data.borrow_mut() = Some(WaitData { id, inner });
-            Ok(DbgWaitKey)
+            *data.borrow_mut() = Some(StopData { tid, inner });
+            Ok(Stopper)
         })
     }
 }
 
-impl Drop for DbgWaitKey {
-    /// Has to be called at the end of a thread.
+impl Drop for Stopper {
     fn drop(&mut self) {
         DATA.with(|data| {
             let mut data = data.borrow_mut();
             let data = data.take().unwrap();
 
             // Tell the others that we finished
-            trace!("Finished {}", data.id);
-            data.inner.complete(data.id).unwrap();
-            trace!("Stop {}", data.id);
+            trace!("Finished {}", data.tid);
+            data.inner.complete(data.tid).unwrap();
+            trace!("Stop {}", data.tid);
         })
     }
 }
 
 /// Synchronization point with the other threads.
 #[track_caller]
-pub fn wait() -> Result<()> {
+pub fn stop() -> Result<()> {
     let caller = core::panic::Location::caller();
     // Check if activated
     DATA.with(|data| {
         let mut data = data.borrow_mut();
         if let Some(data) = data.as_mut() {
             loop {
-                trace!("Wait t{}", data.id);
+                trace!("Wait t{}", data.tid);
 
-                if data.inner.wait(data.id)? {
-                    trace!("Run t{} {caller}", data.id);
+                if data.inner.stop(data.tid)? {
+                    trace!("Run t{} {caller}", data.tid);
                     return Ok(());
                 }
             }
@@ -72,13 +73,15 @@ pub fn wait() -> Result<()> {
 }
 
 /// Chooses the next threads to execute.
-pub trait DbgWait {
+pub trait Stop {
     /// Waits and returns true if this thread may continue.
-    fn wait(&self, t: usize) -> Result<bool>;
-    fn complete(&self, t: usize) -> Result<()>;
+    fn stop(&self, tid: usize) -> Result<bool>;
+    /// Waits for the other threads to complete.
+    fn complete(&self, tid: usize) -> Result<()>;
 }
 
-pub struct DbgWaitVec {
+/// Stops and continues threads base on predefined order.
+pub struct StopVec {
     threads: usize,
     barrier: Barrier,
     order: Vec<usize>,
@@ -86,7 +89,7 @@ pub struct DbgWaitVec {
     finished: AtomicUsize,
 }
 
-impl DbgWaitVec {
+impl StopVec {
     /// Initializes the order and number of threads.
     pub fn new(threads: usize, order: Vec<usize>) -> Arc<Self> {
         let mut finished = Vec::with_capacity(threads as _);
@@ -101,8 +104,8 @@ impl DbgWaitVec {
         })
     }
 }
-impl DbgWait for DbgWaitVec {
-    fn wait(&self, t: usize) -> Result<bool> {
+impl Stop for StopVec {
+    fn stop(&self, tid: usize) -> Result<bool> {
         if self.barrier.wait().is_leader() {
             self.i.fetch_add(1, Ordering::SeqCst);
         }
@@ -113,10 +116,10 @@ impl DbgWait for DbgWaitVec {
             error!("Overflow ordering {i} >= {}", self.order.len());
             Err(Error::OverflowOrdering)
         } else {
-            Ok(self.order[i] == t)
+            Ok(self.order[i] == tid)
         }
     }
-    fn complete(&self, t: usize) -> Result<()> {
+    fn complete(&self, tid: usize) -> Result<()> {
         if self.barrier.wait().is_leader() {
             self.i.fetch_add(1, Ordering::SeqCst);
         }
@@ -131,11 +134,11 @@ impl DbgWait for DbgWaitVec {
 
             let i = self.i.load(Ordering::SeqCst) - 1;
             if i >= self.order.len() {
-                error!("Overflow ordering for {t}");
+                error!("Overflow ordering for {tid}");
                 return Err(Error::OverflowOrdering);
             }
-            if self.order[i] == t {
-                error!("Wake suspended {t} for {i}");
+            if self.order[i] == tid {
+                error!("Wake suspended {tid} for {i}");
                 return Err(Error::WakeSuspended);
             }
 
@@ -146,13 +149,15 @@ impl DbgWait for DbgWaitVec {
     }
 }
 
-pub struct DbgWaitRand {
+/// Stops and continues threads base seeded rng.
+pub struct StopRand {
     threads: usize,
     barrier: Barrier,
     seed: AtomicU64,
     finished: AtomicUsize,
 }
-impl DbgWaitRand {
+
+impl StopRand {
     /// Initializes the order and number of threads. Has to be called before the init calls.
     pub fn new(threads: usize, seed: u64) -> Arc<Self> {
         Arc::new(Self {
@@ -163,8 +168,8 @@ impl DbgWaitRand {
         })
     }
 }
-impl DbgWait for DbgWaitRand {
-    fn wait(&self, t: usize) -> Result<bool> {
+impl Stop for StopRand {
+    fn stop(&self, tid: usize) -> Result<bool> {
         self.barrier.wait();
 
         let mut rng = WyRand::new(self.seed.load(Ordering::SeqCst));
@@ -174,9 +179,9 @@ impl DbgWait for DbgWaitRand {
             self.seed.store(rng.seed, Ordering::SeqCst);
         }
 
-        Ok(v == t)
+        Ok(v == tid)
     }
-    fn complete(&self, _t: usize) -> Result<()> {
+    fn complete(&self, _tid: usize) -> Result<()> {
         self.barrier.wait();
         self.finished.fetch_add(1, Ordering::SeqCst);
 
@@ -205,12 +210,12 @@ mod test {
     use log::trace;
 
     use crate::util::logging;
-    use crate::wait::{wait, DbgWaitKey, DbgWaitRand, DbgWaitVec};
+    use crate::stop::{stop, Stopper, StopRand, StopVec};
 
     #[test]
-    fn wait_vec() {
+    fn stop_vec() {
         logging();
-        let b = DbgWaitVec::new(2, vec![0, 0, 1, 1, 0, 1]);
+        let b = StopVec::new(2, vec![0, 0, 1, 1, 0, 1]);
 
         let counter = Arc::new(AtomicUsize::new(0));
 
@@ -218,21 +223,21 @@ mod test {
 
         let b1 = b.clone();
         let handle = thread::spawn(move || {
-            let _key = DbgWaitKey::init(b1, 1).unwrap();
+            let _key = Stopper::init(b1, 1).unwrap();
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 1: 0");
             counter_c
                 .compare_exchange(2, 3, Ordering::SeqCst, Ordering::SeqCst)
                 .unwrap();
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 1: 1");
             counter_c
                 .compare_exchange(3, 4, Ordering::SeqCst, Ordering::SeqCst)
                 .unwrap();
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 1: 2");
             counter_c
                 .compare_exchange(5, 6, Ordering::SeqCst, Ordering::SeqCst)
@@ -240,21 +245,21 @@ mod test {
         });
 
         {
-            let _key = DbgWaitKey::init(b, 0).unwrap();
+            let _key = Stopper::init(b, 0).unwrap();
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 0: 0");
             counter
                 .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
                 .unwrap();
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 0: 1");
             counter
                 .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
                 .unwrap();
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 0: 2");
             counter
                 .compare_exchange(4, 5, Ordering::SeqCst, Ordering::SeqCst)
@@ -269,7 +274,7 @@ mod test {
     #[test]
     fn wait_rand() {
         logging();
-        let b = DbgWaitRand::new(2, 1);
+        let b = StopRand::new(2, 1);
 
         let counter = Arc::new(AtomicUsize::new(0));
 
@@ -277,33 +282,33 @@ mod test {
 
         let b1 = b.clone();
         let handle = thread::spawn(move || {
-            let _key = DbgWaitKey::init(b1, 1).unwrap();
+            let _key = Stopper::init(b1, 1).unwrap();
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 1: 0");
             counter_c.fetch_add(1, Ordering::SeqCst);
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 1: 1");
             counter_c.fetch_add(1, Ordering::SeqCst);
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 1: 2");
             counter_c.fetch_add(1, Ordering::SeqCst);
         });
 
         {
-            let _key = DbgWaitKey::init(b, 0).unwrap();
+            let _key = Stopper::init(b, 0).unwrap();
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 0: 0");
             counter.fetch_add(1, Ordering::SeqCst);
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 0: 1");
             counter.fetch_add(1, Ordering::SeqCst);
 
-            wait().unwrap();
+            stop().unwrap();
             trace!("thread 0: 2");
             counter.fetch_add(1, Ordering::SeqCst);
         }
