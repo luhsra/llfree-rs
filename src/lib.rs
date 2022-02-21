@@ -1,8 +1,6 @@
 //! # Persistent non-volatile memory allocator
 //!
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
-#![feature(const_fn_trait_bound)]
-
 pub mod alloc;
 pub mod entry;
 mod lower_alloc;
