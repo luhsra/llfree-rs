@@ -28,6 +28,9 @@ pub struct TableAlloc {
     tables: Vec<Page>,
 }
 
+unsafe impl Send for TableAlloc {}
+unsafe impl Sync for TableAlloc {}
+
 impl Alloc for TableAlloc {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
@@ -56,7 +59,6 @@ impl Alloc for TableAlloc {
 
         self.tables = vec![Page::new(); num_pt];
 
-
         if !overwrite
             && meta.pages.load(Ordering::SeqCst) == self.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
@@ -80,12 +82,6 @@ impl Alloc for TableAlloc {
 
         meta.active.store(1, Ordering::SeqCst);
         Ok(())
-    }
-
-    #[cold]
-    fn uninit(&mut self) {
-        let meta = unsafe { &*self.meta };
-        meta.active.store(0, Ordering::SeqCst);
     }
 
     #[cold]
@@ -131,9 +127,17 @@ impl Alloc for TableAlloc {
     }
 }
 
+impl Drop for TableAlloc {
+    fn drop(&mut self) {
+        warn!("drop");
+        let meta = unsafe { &*self.meta };
+        meta.active.store(0, Ordering::SeqCst);
+    }
+}
+
 impl TableAlloc {
     #[cold]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             meta: null_mut(),
             lower: LowerAlloc::default(),

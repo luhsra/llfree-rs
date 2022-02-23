@@ -1,4 +1,3 @@
-#![feature(ptr_metadata)]
 //! # Persistent non-volatile memory allocator
 //!
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
@@ -13,11 +12,35 @@ pub mod util;
 #[cfg(feature = "stop")]
 pub mod stop;
 
-use std::ffi::c_void;
 use std::sync::atomic::AtomicU64;
+use std::{ffi::c_void, sync::Arc};
 
-use alloc::{Error, Size};
+use alloc::{Alloc, Error, Size};
 use util::Page;
+
+pub type Allocator = alloc::table::TableAlloc;
+static mut ALLOC: Option<Arc<dyn Alloc>> = None;
+
+pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> alloc::Result<()> {
+    let mut alloc = Allocator::new();
+    alloc.init(cores, memory, overwrite)?;
+    unsafe { ALLOC = Some(Arc::new(alloc)) };
+    Ok(())
+}
+
+pub fn instance<'a>() -> &'a dyn Alloc {
+    unsafe { ALLOC.as_ref().unwrap().as_ref() }
+}
+
+pub fn destroy() {
+    let mut a = unsafe { ALLOC.take().unwrap() };
+    let alloc = Arc::get_mut(&mut a).unwrap();
+    alloc.destroy();
+}
+
+pub fn uninit() {
+    unsafe { ALLOC.take().unwrap() };
+}
 
 // C bindings
 
@@ -26,7 +49,7 @@ use util::Page;
 #[no_mangle]
 pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwrite: u32) -> i64 {
     let memory = unsafe { std::slice::from_raw_parts_mut(addr as *mut Page, pages as _) };
-    match alloc::init(cores as _, memory, overwrite != 0) {
+    match init(cores as _, memory, overwrite != 0) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
     }
@@ -35,7 +58,7 @@ pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwr
 /// Shut down the allocator normally.
 #[no_mangle]
 pub extern "C" fn nvalloc_uninit() {
-    alloc::uninit();
+    uninit();
 }
 
 /// Allocate a page of the given `size` on the given cpu `core`.
@@ -48,7 +71,7 @@ pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
         _ => return -(Error::Memory as usize as i64),
     };
 
-    match alloc::instance().get(core as _, size) {
+    match instance().get(core as _, size) {
         Ok(addr) => addr as i64,
         Err(e) => -(e as usize as i64),
     }
@@ -73,14 +96,7 @@ pub extern "C" fn nvalloc_get_cas(
 
     let dst = unsafe { &*(dst as *const AtomicU64) };
 
-    match alloc::get_cas(
-        alloc::instance(),
-        core as _,
-        size,
-        dst,
-        |p| translate(p),
-        expected,
-    ) {
+    match alloc::get_cas(instance(), core as _, size, dst, |p| translate(p), expected) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
     }
@@ -89,7 +105,7 @@ pub extern "C" fn nvalloc_get_cas(
 /// Frees the given page.
 #[no_mangle]
 pub extern "C" fn nvalloc_put(core: u32, addr: u64) -> i64 {
-    match alloc::instance().put(core as _, addr) {
+    match instance().put(core as _, addr) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
     }
@@ -101,11 +117,11 @@ mod test {
 
     use log::info;
 
-    use crate::alloc;
     use crate::mmap::MMap;
     use crate::table::Table;
     use crate::thread::parallel;
     use crate::util::logging;
+    use crate::{alloc, init, instance, uninit};
     use crate::{Page, Size};
 
     #[test]
@@ -122,20 +138,20 @@ mod test {
 
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
 
-        alloc::init(THREADS, &mut mapping[..], true).unwrap();
+        init(THREADS, &mut mapping[..], true).unwrap();
 
         parallel(THREADS, |t| {
             let pages = [DEFAULT; Table::LEN];
             for addr in &pages {
-                alloc::get_cas(alloc::instance(), t, Size::L0, addr, |v| v, 0).unwrap();
+                alloc::get_cas(instance(), t, Size::L0, addr, |v| v, 0).unwrap();
             }
 
             for addr in &pages {
-                alloc::instance()
-                    .put(t, addr.load(Ordering::SeqCst))
-                    .unwrap();
+                instance().put(t, addr.load(Ordering::SeqCst)).unwrap();
             }
         });
+
+        uninit();
 
         info!("Finish");
     }

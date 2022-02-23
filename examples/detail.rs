@@ -6,11 +6,13 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::alloc::{array_atomic, Alloc, Size, MIN_PAGES};
+use nvalloc::alloc::{self, Alloc, Size, MIN_PAGES};
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::thread;
 use nvalloc::util::{logging, Page};
+
+type Allocator = alloc::array_atomic::ArrayAtomicAlloc;
 
 /// Benchmarking an allocator in more detail.
 #[derive(Parser, Debug)]
@@ -29,8 +31,6 @@ struct Args {
     #[clap(long, default_value_t = 1)]
     cpu_stride: usize,
 }
-
-type A = array_atomic::ArrayAtomicAlloc;
 
 fn main() {
     let Args {
@@ -69,15 +69,17 @@ fn main() {
     for page in &mut mapping[..] {
         *page.cast_mut::<usize>() = 1;
     }
-
     for _ in 0..iterations {
         let timer = Instant::now();
-        A::init(threads, &mut mapping, true).unwrap();
+        let alloc = Arc::new({
+            let mut a = Allocator::new();
+            a.init(threads, &mut mapping, true).unwrap();
+            a
+        });
         warn!("init time {}ms", timer.elapsed().as_millis());
 
         let barrier = Arc::new(Barrier::new(threads));
-
-        let barrier = barrier.clone();
+        let a = alloc.clone();
         let t_times = thread::parallel(threads as _, move |t| {
             thread::pin(t);
             barrier.wait();
@@ -88,7 +90,7 @@ fn main() {
             let t_get = &mut times[0..Table::LEN];
             for i in 0..allocs {
                 let timer = Instant::now();
-                pages.push(A::instance().get(t, size).unwrap());
+                pages.push(alloc.get(t, size).unwrap());
                 let t = timer.elapsed().as_nanos() as f64;
 
                 let p = &mut t_get[i % Table::LEN];
@@ -103,7 +105,7 @@ fn main() {
             let t_put = &mut times[Table::LEN..];
             for (i, page) in pages.into_iter().enumerate() {
                 let timer = Instant::now();
-                A::instance().put(t, page).unwrap();
+                alloc.put(t, page).unwrap();
                 let t = timer.elapsed().as_nanos() as f64;
 
                 let p = &mut t_put[i % Table::LEN];
@@ -123,9 +125,8 @@ fn main() {
             times
         });
 
-        assert_eq!(A::instance().allocated_pages(), 0);
-
-        A::destroy();
+        assert_eq!(a.allocated_pages(), 0);
+        drop(a);
 
         for t in t_times {
             for i in 0..2 * Table::LEN {
@@ -145,9 +146,9 @@ fn main() {
         t.std = (t.std / n - t.avg * t.avg).sqrt();
     }
 
-    let alloc = type_name::<A>();
-    let alloc = alloc.rsplit_once(':').map(|s| s.1).unwrap_or(alloc);
-    let alloc = alloc.strip_suffix("Alloc").unwrap_or(alloc);
+    let name = type_name::<Allocator>();
+    let name = name.rsplit_once(':').map(|s| s.1).unwrap_or(name);
+    let name = name.strip_suffix("Alloc").unwrap_or(name);
 
     let mut outfile = File::create(outfile).unwrap();
     writeln!(outfile, "alloc,threads,op,num,avg,std,min,max").unwrap();
@@ -155,14 +156,14 @@ fn main() {
         if num < 512 {
             writeln!(
                 outfile,
-                "{alloc},{threads},get,{num},{avg},{std},{min},{max}"
+                "{name},{threads},get,{num},{avg},{std},{min},{max}"
             )
             .unwrap();
         } else {
             let num = num - 512;
             writeln!(
                 outfile,
-                "{alloc},{threads},put,{num},{avg},{std},{min},{max}"
+                "{name},{threads},put,{num},{avg},{std},{min},{max}"
             )
             .unwrap();
         }

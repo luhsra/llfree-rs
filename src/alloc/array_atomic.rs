@@ -1,5 +1,5 @@
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, warn};
 
@@ -31,12 +31,12 @@ pub struct ArrayAtomicAlloc {
     partial_l0: AStack<Entry3>,
 }
 
-const INITIALIZING: *mut ArrayAtomicAlloc = usize::MAX as _;
-static mut SHARED: AtomicPtr<ArrayAtomicAlloc> = AtomicPtr::new(null_mut());
+unsafe impl Send for ArrayAtomicAlloc {}
+unsafe impl Sync for ArrayAtomicAlloc {}
 
 impl Alloc for ArrayAtomicAlloc {
     #[cold]
-    fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
+    fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -46,66 +46,50 @@ impl Alloc for ArrayAtomicAlloc {
             error!("memory {} < {}", memory.len(), MIN_PAGES * cores);
             return Err(Error::Memory);
         }
+        // Last frame is reserved for metadata
+        let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
+        let meta = rem[0].cast_mut::<Meta>();
+        self.meta = meta;
 
-        if unsafe {
-            SHARED
-                .compare_exchange(null_mut(), INITIALIZING, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        } {
-            return Err(Error::Initialization);
-        }
+        // Create lower allocator
+        self.lower = LowerAlloc::new(cores, memory);
 
-        let alloc = Self::new(cores, memory)?;
-        let alloc = Box::leak(Box::new(alloc));
-        let meta = unsafe { &mut *alloc.meta };
+        // Array with all pte3
+        let pte3_num = Table::num_pts(2, self.lower.pages);
+        self.entries = Vec::with_capacity(pte3_num);
+        self.entries
+            .resize_with(pte3_num, || Atomic::new(Entry3::new()));
+
+        self.empty = AStack::new();
+        self.partial_l0 = AStack::new();
+        self.partial_l1 = AStack::new();
 
         warn!("init");
         if !overwrite
-            && meta.pages.load(Ordering::SeqCst) == alloc.pages()
+            && meta.pages.load(Ordering::SeqCst) == self.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
         {
-            warn!("Recover allocator state p={}", alloc.pages());
+            warn!("Recover allocator state p={}", self.pages());
             let deep = meta.active.load(Ordering::SeqCst) != 0;
-            let pages = alloc.recover(deep)?;
+            let pages = self.recover(deep)?;
             warn!("Recovered pages {pages}");
         } else {
-            warn!("Setup allocator state p={}", alloc.pages());
-            alloc.setup();
+            warn!("Setup allocator state p={}", self.pages());
+            self.setup();
 
-            meta.pages.store(alloc.pages(), Ordering::SeqCst);
+            meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
         }
 
         meta.active.store(1, Ordering::SeqCst);
-        unsafe { SHARED.store(alloc, Ordering::SeqCst) };
         Ok(())
     }
 
     #[cold]
-    fn uninit() {
-        let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
-        assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
-
-        let alloc = unsafe { &mut *ptr };
-        let meta = unsafe { &*alloc.meta };
+    fn destroy(&mut self) {
+        let meta = unsafe { &*self.meta };
         meta.active.store(0, Ordering::SeqCst);
-
-        drop(unsafe { Box::from_raw(alloc) });
-        unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
-    }
-
-    #[cold]
-    fn destroy() {
-        let alloc = Self::instance();
-        let meta = unsafe { &*alloc.meta };
         meta.magic.store(0, Ordering::SeqCst);
-        Self::uninit();
-    }
-
-    fn instance<'a>() -> &'a Self {
-        let ptr = unsafe { SHARED.load(Ordering::SeqCst) };
-        assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
-        unsafe { &*ptr }
     }
 
     fn get(&self, core: usize, size: Size) -> Result<u64> {
@@ -149,29 +133,24 @@ impl Alloc for ArrayAtomicAlloc {
     }
 }
 
+impl Drop for ArrayAtomicAlloc {
+    fn drop(&mut self) {
+        let meta = unsafe { &*self.meta };
+        meta.active.store(0, Ordering::SeqCst);
+    }
+}
+
 impl ArrayAtomicAlloc {
     #[cold]
-    fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
-        // Last frame is reserved for metadata
-        let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
-        let meta = rem[0].cast_mut::<Meta>();
-
-        // Create lower allocator
-        let lower = LowerAlloc::new(cores, memory);
-
-        // Array with all pte3
-        let pte3_num = Table::num_pts(2, lower.pages);
-        let mut entries = Vec::with_capacity(pte3_num);
-        entries.resize_with(pte3_num, || Atomic::new(Entry3::new()));
-
-        Ok(Self {
-            meta,
-            lower,
-            entries,
+    pub fn new() -> Self {
+        Self {
+            meta: null_mut(),
+            lower: LowerAlloc::default(),
+            entries: Vec::new(),
             empty: AStack::new(),
             partial_l1: AStack::new(),
             partial_l0: AStack::new(),
-        })
+        }
     }
 
     fn pages(&self) -> usize {

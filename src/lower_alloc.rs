@@ -1,5 +1,4 @@
 use std::ops::{Deref, Range};
-use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
@@ -64,7 +63,7 @@ impl Deref for LowerAlloc {
 }
 
 impl LowerAlloc {
-    pub const fn default() -> Self {
+    pub fn default() -> Self {
         Self {
             begin: 0,
             pages: 0,
@@ -134,7 +133,8 @@ impl LowerAlloc {
 
         let pt = self.pt2(start);
         for i in 0..Table::LEN {
-            if Table::page(2, start, i) > self.pages {
+            let start = Table::page(2, start, i);
+            if start > self.pages {
                 pt.set(i, Entry2::new());
             }
 
@@ -144,7 +144,7 @@ impl LowerAlloc {
             } else if pte.page() {
                 size = Size::L1;
             } else if deep && pte.free() > 0 && size == Size::L0 {
-                let p = self.recover_l1(Table::page(1, start, i), pte)?;
+                let p = self.recover_l1(start, pte)?;
                 if pte.free() != p {
                     warn!("Invalid PTE2 start=0x{start:x} i{i}: {} != {p}", pte.free());
                     pt.set(i, pte.with_free(p));

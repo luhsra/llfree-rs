@@ -1,5 +1,4 @@
-use std::ptr::null_mut;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, warn};
 
@@ -16,12 +15,18 @@ struct Local {
     counter: AtomicUsize,
 }
 
-const INITIALIZING: *mut MallocAlloc = usize::MAX as _;
-static mut SHARED: AtomicPtr<MallocAlloc> = AtomicPtr::new(null_mut());
+impl MallocAlloc {
+    pub fn new() -> Self {
+        Self { local: Vec::new() }
+    }
+}
+
+unsafe impl Send for MallocAlloc {}
+unsafe impl Sync for MallocAlloc {}
 
 impl Alloc for MallocAlloc {
     #[cold]
-    fn init(cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
+    fn init(&mut self, cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -31,47 +36,16 @@ impl Alloc for MallocAlloc {
             warn!("This allocator uses its own memory range");
         }
 
-        if unsafe {
-            SHARED
-                .compare_exchange(null_mut(), INITIALIZING, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        } {
-            return Err(Error::Initialization);
-        }
-
-        let mut local = Vec::with_capacity(cores);
-        local.resize_with(cores, || Local {
+        self.local = Vec::with_capacity(cores);
+        self.local.resize_with(cores, || Local {
             counter: AtomicUsize::new(0),
         });
 
-        let alloc = Box::new(MallocAlloc { local });
-        let alloc = Box::leak(alloc);
-
-        unsafe { SHARED.store(alloc, Ordering::SeqCst) };
         Ok(())
     }
 
     #[cold]
-    fn uninit() {
-        let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
-        assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
-
-        let alloc = unsafe { &mut *ptr };
-
-        drop(unsafe { Box::from_raw(alloc) });
-        unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
-    }
-
-    #[cold]
-    fn destroy() {
-        Self::uninit();
-    }
-
-    fn instance<'a>() -> &'a Self {
-        let ptr = unsafe { SHARED.load(Ordering::SeqCst) };
-        assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
-        unsafe { &*ptr }
-    }
+    fn destroy(&mut self) {}
 
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         if size != Size::L0 {
