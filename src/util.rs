@@ -43,7 +43,10 @@ pub const fn align_down(v: usize, align: usize) -> usize {
 }
 
 /// Wrapper for 64bit atomic values.
+#[repr(transparent)]
 pub struct Atomic<T: From<u64> + Into<u64>>(AtomicU64, PhantomData<T>);
+
+const _: () = assert!(std::mem::size_of::<Atomic<u64>>() == 8);
 
 impl<T: From<u64> + Into<u64>> Atomic<T> {
     #[inline]

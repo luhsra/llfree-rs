@@ -1,3 +1,4 @@
+#![feature(ptr_metadata)]
 //! # Persistent non-volatile memory allocator
 //!
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
@@ -15,7 +16,7 @@ pub mod stop;
 use std::ffi::c_void;
 use std::sync::atomic::AtomicU64;
 
-use alloc::{Alloc, Allocator, Error, Size};
+use alloc::{Error, Size};
 use util::Page;
 
 // C bindings
@@ -25,7 +26,7 @@ use util::Page;
 #[no_mangle]
 pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwrite: u32) -> i64 {
     let memory = unsafe { std::slice::from_raw_parts_mut(addr as *mut Page, pages as _) };
-    match Allocator::init(cores as _, memory, overwrite != 0) {
+    match alloc::init(cores as _, memory, overwrite != 0) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
     }
@@ -34,7 +35,7 @@ pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwr
 /// Shut down the allocator normally.
 #[no_mangle]
 pub extern "C" fn nvalloc_uninit() {
-    Allocator::uninit();
+    alloc::uninit();
 }
 
 /// Allocate a page of the given `size` on the given cpu `core`.
@@ -47,8 +48,7 @@ pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
         _ => return -(Error::Memory as usize as i64),
     };
 
-    let alloc = Allocator::instance();
-    match alloc.get(core as _, size) {
+    match alloc::instance().get(core as _, size) {
         Ok(addr) => addr as i64,
         Err(e) => -(e as usize as i64),
     }
@@ -72,9 +72,15 @@ pub extern "C" fn nvalloc_get_cas(
     };
 
     let dst = unsafe { &*(dst as *const AtomicU64) };
-    let alloc = Allocator::instance();
 
-    match alloc.get_cas(core as _, size, dst, |p| translate(p), expected) {
+    match alloc::get_cas(
+        alloc::instance(),
+        core as _,
+        size,
+        dst,
+        |p| translate(p),
+        expected,
+    ) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
     }
@@ -83,7 +89,7 @@ pub extern "C" fn nvalloc_get_cas(
 /// Frees the given page.
 #[no_mangle]
 pub extern "C" fn nvalloc_put(core: u32, addr: u64) -> i64 {
-    match Allocator::instance().put(core as _, addr) {
+    match alloc::instance().put(core as _, addr) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
     }
@@ -95,11 +101,12 @@ mod test {
 
     use log::info;
 
+    use crate::alloc;
     use crate::mmap::MMap;
     use crate::table::Table;
     use crate::thread::parallel;
     use crate::util::logging;
-    use crate::{Alloc, Allocator, Page, Size};
+    use crate::{Page, Size};
 
     #[test]
     fn threading() {
@@ -114,18 +121,17 @@ mod test {
         info!("init alloc");
 
         const DEFAULT: AtomicU64 = AtomicU64::new(0);
-        Allocator::init(THREADS, &mut mapping[..], true).unwrap();
+
+        alloc::init(THREADS, &mut mapping[..], true).unwrap();
 
         parallel(THREADS, |t| {
             let pages = [DEFAULT; Table::LEN];
             for addr in &pages {
-                Allocator::instance()
-                    .get_cas(t, Size::L0, addr, |v| v, 0)
-                    .unwrap();
+                alloc::get_cas(alloc::instance(), t, Size::L0, addr, |v| v, 0).unwrap();
             }
 
             for addr in &pages {
-                Allocator::instance()
+                alloc::instance()
                     .put(t, addr.load(Ordering::SeqCst))
                     .unwrap();
             }

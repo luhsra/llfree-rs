@@ -1,4 +1,5 @@
 use std::ops::{Deref, Range};
+use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
@@ -63,6 +64,14 @@ impl Deref for LowerAlloc {
 }
 
 impl LowerAlloc {
+    pub const fn default() -> Self {
+        Self {
+            begin: 0,
+            pages: 0,
+            local: Vec::new(),
+        }
+    }
+
     pub fn new(cores: usize, memory: &mut [Page]) -> Self {
         let mut local = Vec::with_capacity(cores);
         local.resize_with(cores, Local::new);

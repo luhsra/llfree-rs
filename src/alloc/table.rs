@@ -1,6 +1,6 @@
 //! Simple reduced non-volatile memory allocator.
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
 
@@ -28,12 +28,9 @@ pub struct TableAlloc {
     tables: Vec<Page>,
 }
 
-const INITIALIZING: *mut TableAlloc = usize::MAX as _;
-static mut SHARED: AtomicPtr<TableAlloc> = AtomicPtr::new(null_mut());
-
 impl Alloc for TableAlloc {
     #[cold]
-    fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
+    fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
         warn!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -44,69 +41,58 @@ impl Alloc for TableAlloc {
             return Err(Error::Memory);
         }
 
-        if unsafe {
-            SHARED
-                .compare_exchange(null_mut(), INITIALIZING, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-        } {
-            return Err(Error::Initialization);
+        // Last frame is reserved for metadata
+        let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
+        let meta = rem[0].cast_mut::<Meta>();
+        self.meta = meta;
+
+        // Create lower allocator
+        self.lower = LowerAlloc::new(cores, memory);
+
+        let mut num_pt = 0;
+        for layer in 3..=Table::LAYERS {
+            num_pt += Table::num_pts(layer, self.lower.pages);
         }
 
-        let alloc = Self::new(cores, memory)?;
-        let alloc = Box::leak(Box::new(alloc));
-        let meta = unsafe { &mut *alloc.meta };
+        self.tables = vec![Page::new(); num_pt];
+
 
         if !overwrite
-            && meta.pages.load(Ordering::SeqCst) == alloc.pages()
+            && meta.pages.load(Ordering::SeqCst) == self.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
         {
-            warn!("Recover allocator state p={}", alloc.pages());
+            warn!("Recover allocator state p={}", self.pages());
             let deep = meta.active.load(Ordering::SeqCst) != 0;
             if deep {
                 error!("Allocator unexpectedly terminated");
             }
-            let pages = alloc.recover_rec(Table::LAYERS, 0, deep)?;
+            let pages = self.recover_rec(Table::LAYERS, 0, deep)?;
             warn!("Recovered {pages:?}");
         } else {
-            warn!("Setup allocator state p={}", alloc.pages());
-            alloc.lower.clear();
+            warn!("Setup allocator state p={}", self.pages());
+            self.lower.clear();
 
-            alloc.setup_rec(Table::LAYERS, 0);
+            self.setup_rec(Table::LAYERS, 0);
 
-            meta.pages.store(alloc.pages(), Ordering::SeqCst);
+            meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
         }
 
         meta.active.store(1, Ordering::SeqCst);
-        unsafe { SHARED.store(alloc, Ordering::SeqCst) };
         Ok(())
     }
 
     #[cold]
-    fn uninit() {
-        let ptr = unsafe { SHARED.swap(INITIALIZING, Ordering::SeqCst) };
-        assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
-
-        let alloc = unsafe { &mut *ptr };
-        let meta = unsafe { &*alloc.meta };
+    fn uninit(&mut self) {
+        let meta = unsafe { &*self.meta };
         meta.active.store(0, Ordering::SeqCst);
-
-        drop(unsafe { Box::from_raw(alloc) });
-        unsafe { SHARED.store(null_mut(), Ordering::SeqCst) };
     }
 
     #[cold]
-    fn destroy() {
-        let alloc = Self::instance();
-        let meta = unsafe { &*alloc.meta };
+    fn destroy(&mut self) {
+        let meta = unsafe { &*self.meta };
+        meta.active.store(0, Ordering::SeqCst);
         meta.magic.store(0, Ordering::SeqCst);
-        Self::uninit();
-    }
-
-    fn instance<'a>() -> &'a Self {
-        let ptr = unsafe { SHARED.load(Ordering::SeqCst) };
-        assert!(!ptr.is_null() && ptr != INITIALIZING, "Not initialized");
-        unsafe { &*ptr }
     }
 
     fn get(&self, core: usize, size: Size) -> Result<u64> {
@@ -147,25 +133,12 @@ impl Alloc for TableAlloc {
 
 impl TableAlloc {
     #[cold]
-    fn new(cores: usize, memory: &mut [Page]) -> Result<Self> {
-        // Last frame is reserved for metadata
-        let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
-        let meta = rem[0].cast_mut::<Meta>();
-
-        // Create lower allocator
-        let lower = LowerAlloc::new(cores, memory);
-
-        let mut num_pt = 0;
-        for layer in 3..=Table::LAYERS {
-            num_pt += Table::num_pts(layer, lower.pages);
+    pub const fn new() -> Self {
+        Self {
+            meta: null_mut(),
+            lower: LowerAlloc::default(),
+            tables: Vec::new(),
         }
-        let tables = vec![Page::new(); num_pt];
-
-        Ok(Self {
-            meta,
-            lower,
-            tables,
-        })
     }
 
     fn allocated_pages_rec(&self, layer: usize, start: usize) -> usize {

@@ -28,8 +28,13 @@ use nvalloc::{thread, util};
 struct Args {
     #[clap(arg_enum)]
     benchmark: Benchmark,
+    /// Tested number of threads / allocations / filling levels / cpu stride, depending on benchmark.
     #[clap(short, long, default_value = "1")]
-    threads: Vec<usize>,
+    x: Vec<usize>,
+    /// Max number of threads
+    #[clap(short, long, default_value = "6")]
+    threads: usize,
+
     #[clap(short, long, default_value = "bench/out/bench.csv")]
     outfile: String,
     #[clap(long)]
@@ -40,33 +45,15 @@ struct Args {
     size: usize,
     #[clap(long, default_value_t = 1)]
     cpu_stride: usize,
-    /// Memory in GiB
+    /// Max amount of memory in GiB. Is by the max thread count.
     #[clap(short, long, default_value_t = 16)]
     memory: usize,
-}
-#[derive(Debug, Clone, Copy, ArgEnum)]
-enum Benchmark {
-    /// Allocate half the memory at once and free it afterwards
-    Bulk,
-    /// Initially allocate half the memory and then repeatedly allocate and free the same page
-    Repeat,
-    /// Initially allocate half the memory and then repeatedly free an random page
-    /// and replace it with a newly allocated one
-    Rand,
-}
-impl Benchmark {
-    fn expected_allocs(&self, size: Size, threads: usize, allocs: usize) -> usize {
-        match self {
-            Benchmark::Bulk => 0,
-            Benchmark::Repeat => Table::span(size as _) * threads * allocs,
-            Benchmark::Rand => Table::span(size as _) * threads * allocs,
-        }
-    }
 }
 
 fn main() {
     let Args {
         benchmark,
+        x,
         threads,
         outfile,
         dax,
@@ -78,18 +65,10 @@ fn main() {
 
     util::logging();
 
-    for &thread in &threads {
-        assert!(thread >= 1);
-        assert!(thread * cpu_stride <= std::thread::available_parallelism().unwrap().get());
-    }
-    let max_threads = threads.iter().copied().max().unwrap();
-    let thread_pages = (memory * Table::span(2)) / max_threads;
-    assert!(
-        thread_pages >= MIN_PAGES,
-        "{} !=> {}",
-        thread_pages,
-        MIN_PAGES
-    );
+    benchmark.check(&x, threads, cpu_stride);
+
+    let thread_pages = (memory * Table::span(2)) / threads;
+    assert!(thread_pages >= MIN_PAGES);
 
     unsafe { nvalloc::thread::CPU_STRIDE = cpu_stride };
 
@@ -102,8 +81,7 @@ fn main() {
         2 => Size::L2,
         _ => panic!("`size` has to be 0, 1 or 2"),
     };
-    let allocs = thread_pages / 2 / Table::span(size as _);
-    warn!("Allocs: {allocs} of size {size:?}");
+    warn!("Allocating size {size:?}");
 
     let mut mapping = mapping(0x1000_0000_0000, memory * Table::span(2), dax).unwrap();
 
@@ -112,7 +90,7 @@ fn main() {
         *page.cast_mut::<usize>() = 1;
     }
 
-    for threads in threads {
+    for threads in x {
         let mapping = &mut mapping[..thread_pages * threads];
         for i in 0..iterations {
             bench_alloc::<ArrayAlignedAlloc>(mapping, size, threads, benchmark, i, &mut outfile);
@@ -197,21 +175,12 @@ fn bench_alloc<A: Alloc>(
     warn!("init time {init}ms");
 
     let barrier = Arc::new(Barrier::new(threads));
-
-    let mut perf = Perf::avg(match benchmark {
-        Benchmark::Bulk => thread::parallel(threads as _, move |t| {
-            bulk_alloc::<A>(t, allocs, size, barrier)
-        }),
-        Benchmark::Repeat => thread::parallel(threads as _, move |t| {
-            reallocate::<A>(t, allocs, size, barrier)
-        }),
-        Benchmark::Rand => {
-            thread::parallel(threads as _, move |t| random::<A>(t, allocs, size, barrier))
-        }
-    });
+    let mut perf = Perf::avg(thread::parallel(threads, move |t| {
+        benchmark.thread::<A>(t, allocs, size, barrier)
+    }));
     assert_eq!(
         A::instance().allocated_pages(),
-        benchmark.expected_allocs(size, threads, allocs)
+        benchmark.resulting_allocs(size, threads, allocs)
     );
 
     A::destroy();
@@ -221,7 +190,49 @@ fn bench_alloc<A: Alloc>(
     writeln!(out, "{name},{threads},{i},{allocs},{perf}").unwrap();
 }
 
-fn bulk_alloc<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
+#[derive(Debug, Clone, Copy, ArgEnum)]
+enum Benchmark {
+    /// Allocate half the memory at once and free it afterwards
+    Bulk,
+    /// Initially allocate half the memory and then repeatedly allocate and free the same page
+    Repeat,
+    /// Initially allocate half the memory and then repeatedly free an random page
+    /// and replace it with a newly allocated one
+    Rand,
+}
+impl Benchmark {
+    fn check(&self, x: &[usize], threads: usize, cpu_stride: usize) {
+        match self {
+            Benchmark::Bulk | Benchmark::Repeat | Benchmark::Rand => {
+                for &thread in x {
+                    assert!(thread >= 1);
+                    assert!(
+                        thread * cpu_stride <= std::thread::available_parallelism().unwrap().get()
+                    );
+                }
+                assert_eq!(threads, x.iter().copied().max().unwrap());
+            }
+        }
+    }
+
+    fn thread<A: Alloc>(&self, t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
+        match self {
+            Benchmark::Bulk => bulk::<A>(t, allocs, size, barrier),
+            Benchmark::Repeat => repeat::<A>(t, allocs, size, barrier),
+            Benchmark::Rand => rand::<A>(t, allocs, size, barrier),
+        }
+    }
+
+    fn resulting_allocs(&self, size: Size, threads: usize, allocs: usize) -> usize {
+        match self {
+            Benchmark::Bulk => 0,
+            Benchmark::Repeat => Table::span(size as _) * threads * allocs,
+            Benchmark::Rand => Table::span(size as _) * threads * allocs,
+        }
+    }
+}
+
+fn bulk<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
     thread::pin(t);
 
     barrier.wait();
@@ -251,7 +262,7 @@ fn bulk_alloc<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrie
     }
 }
 
-fn reallocate<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
+fn repeat<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
     thread::pin(t);
     for _ in 0..allocs {
         A::instance().get(t, size).unwrap();
@@ -277,7 +288,7 @@ fn reallocate<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrie
     }
 }
 
-fn random<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
+fn rand<A: Alloc>(t: usize, allocs: usize, size: Size, barrier: Arc<Barrier>) -> Perf {
     thread::pin(t);
     let mut pages = Vec::with_capacity(allocs);
     for _ in 0..allocs {
@@ -364,17 +375,19 @@ impl Perf {
 
 impl fmt::Display for Perf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Perf {
+            get_min,
+            get_avg,
+            get_max,
+            put_min,
+            put_avg,
+            put_max,
+            init,
+            total,
+        } = self;
         write!(
             f,
-            "{},{},{},{},{},{},{},{}",
-            self.get_min,
-            self.get_avg,
-            self.get_max,
-            self.put_min,
-            self.put_avg,
-            self.put_max,
-            self.init,
-            self.total
+            "{get_min},{get_avg},{get_max},{put_min},{put_avg},{put_max},{init},{total}"
         )
     }
 }
