@@ -99,13 +99,6 @@ impl Alloc for ArrayAlignedAlloc {
         Ok(())
     }
 
-    #[cold]
-    fn destroy(&mut self) {
-        let meta = unsafe { &*self.meta };
-        meta.active.store(0, Ordering::SeqCst);
-        meta.magic.store(0, Ordering::SeqCst);
-    }
-
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         match size {
             Size::L2 => self.get_giant(),
@@ -128,6 +121,10 @@ impl Alloc for ArrayAlignedAlloc {
         } else {
             self.put_small(page, pte3)
         }
+    }
+
+    fn pages(&self) -> usize {
+        self.lower.pages
     }
 
     #[cold]

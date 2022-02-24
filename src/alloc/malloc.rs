@@ -44,9 +44,6 @@ impl Alloc for MallocAlloc {
         Ok(())
     }
 
-    #[cold]
-    fn destroy(&mut self) {}
-
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         if size != Size::L0 {
             error!("Invalid size {size:?}");
@@ -70,6 +67,10 @@ impl Alloc for MallocAlloc {
             .counter
             .fetch_sub(Table::span(0), Ordering::Relaxed);
         Ok(())
+    }
+
+    fn pages(&self) -> usize {
+        0
     }
 
     #[cold]

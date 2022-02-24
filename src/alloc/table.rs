@@ -84,13 +84,6 @@ impl Alloc for TableAlloc {
         Ok(())
     }
 
-    #[cold]
-    fn destroy(&mut self) {
-        let meta = unsafe { &*self.meta };
-        meta.active.store(0, Ordering::SeqCst);
-        meta.magic.store(0, Ordering::SeqCst);
-    }
-
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         // Start at the reserved memory chunk for this thread
         let page = match size {
@@ -111,6 +104,10 @@ impl Alloc for TableAlloc {
         self.put_rec(core, page)
     }
 
+    fn pages(&self) -> usize {
+        self.lower.pages
+    }
+
     #[cold]
     fn allocated_pages(&self) -> usize {
         let mut pages = self.allocated_pages_rec(Table::LAYERS, 0);
@@ -129,7 +126,6 @@ impl Alloc for TableAlloc {
 
 impl Drop for TableAlloc {
     fn drop(&mut self) {
-        warn!("drop");
         let meta = unsafe { &*self.meta };
         meta.active.store(0, Ordering::SeqCst);
     }
@@ -165,10 +161,6 @@ impl TableAlloc {
             }
         }
         pages
-    }
-
-    fn pages(&self) -> usize {
-        self.lower.pages
     }
 
     /// Returns the page table of the given `layer` that contains the `page`.

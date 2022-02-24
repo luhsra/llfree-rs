@@ -11,6 +11,7 @@ use crate::util::Page;
 pub struct ListLocalAlloc {
     memory: Range<*const Page>,
     local: Vec<Local>,
+    pages: usize,
 }
 
 impl ListLocalAlloc {
@@ -18,6 +19,7 @@ impl ListLocalAlloc {
         Self {
             memory: null()..null(),
             local: Vec::new(),
+            pages: 0,
         }
     }
 }
@@ -59,13 +61,11 @@ impl Alloc for ListLocalAlloc {
             local.push(l);
         }
 
+        self.pages = p_core * cores;
         self.memory = memory[..p_core * cores].as_ptr_range();
         self.local = local;
         Ok(())
     }
-
-    #[cold]
-    fn destroy(&mut self) {}
 
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         if size != Size::L0 {
@@ -95,6 +95,10 @@ impl Alloc for ListLocalAlloc {
         local.next.push(unsafe { &mut *(addr as *mut Node) });
         local.counter.fetch_sub(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn pages(&self) -> usize {
+        self.pages
     }
 
     #[cold]

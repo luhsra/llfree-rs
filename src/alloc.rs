@@ -48,15 +48,14 @@ pub trait Alloc: Sync + Send {
     /// Initialize the allocator.
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()>;
-    /// Clear the persistent memory pool.
-    #[cold]
-    fn destroy(&mut self);
 
     /// Allocate a new page.
     fn get(&self, core: usize, size: Size) -> Result<u64>;
     /// Free the given page.
     fn put(&self, core: usize, addr: u64) -> Result<()>;
 
+    /// Return the number of pages that can be allocated.
+    fn pages(&self) -> usize;
     /// Return the number of allocated pages.
     #[cold]
     fn allocated_pages(&self) -> usize;
@@ -64,8 +63,7 @@ pub trait Alloc: Sync + Send {
     fn name(&self) -> &'static str {
         let name = type_name::<Self>();
         let name = name.rsplit_once(':').map(|s| s.1).unwrap_or(name);
-        let name = name.strip_suffix("Alloc").unwrap_or(name);
-        name
+        name.strip_suffix("Alloc").unwrap_or(name)
     }
 }
 
@@ -158,6 +156,7 @@ mod test {
         warn!("check...");
 
         assert_eq!(alloc.allocated_pages(), 1 + pages.len());
+        assert_eq!(alloc.allocated_pages(), alloc.pages());
         pages.sort_unstable();
 
         // Check that the same page was not allocated twice

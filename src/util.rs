@@ -209,8 +209,7 @@ impl ANode for Entry3 {
 
 /// Simple atomic stack with atomic entries.
 pub struct AStack<T: ANode> {
-    start: Atomic<u64>,
-    _phantom: PhantomData<T>,
+    start: Atomic<T>,
 }
 
 unsafe impl<T: ANode> Send for AStack<T> {}
@@ -219,8 +218,7 @@ unsafe impl<T: ANode> Sync for AStack<T> {}
 impl<T: ANode> AStack<T> {
     pub fn new() -> Self {
         Self {
-            start: Atomic::new(u64::MAX),
-            _phantom: PhantomData,
+            start: Atomic::new(T::from(0).with_next(None)),
         }
     }
     pub fn push<B>(&self, buf: &B, idx: usize)
@@ -230,13 +228,13 @@ impl<T: ANode> AStack<T> {
         let mut start = self.start.load();
         let elem = &buf[idx];
         loop {
-            if elem
-                .update(|v| Some(v.with_next((start < u64::MAX).then(|| start as _))))
-                .is_err()
-            {
+            if elem.update(|v| Some(v.with_next(start.next()))).is_err() {
                 panic!();
             }
-            match self.start.compare_exchange(start, idx as _) {
+            match self
+                .start
+                .compare_exchange(start, start.with_next(Some(idx)))
+            {
                 Ok(_) => return,
                 Err(s) => start = s,
             }
@@ -248,16 +246,10 @@ impl<T: ANode> AStack<T> {
     {
         let mut start = self.start.load();
         loop {
-            if start == u64::MAX {
-                return None;
-            }
-            let next = buf[start as usize]
-                .load()
-                .next()
-                .map(|s| s as u64)
-                .unwrap_or(u64::MAX);
-            match self.start.compare_exchange(start, next) {
-                Ok(_) => return Some(start as usize),
+            let idx = start.next()?;
+            let next = buf[idx].load().next();
+            match self.start.compare_exchange(start, start.with_next(next)) {
+                Ok(_) => return start.next(),
                 Err(s) => start = s,
             }
         }
@@ -277,9 +269,9 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut dbg = f.debug_list();
 
-        match self.0.start.load() {
-            u64::MAX => {}
-            i => {
+        match self.0.start.load().next() {
+            None => {}
+            Some(i) => {
                 let mut i = i as usize;
                 let mut ended = false;
                 for _ in 0..1000 {

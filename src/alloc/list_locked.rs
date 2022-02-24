@@ -68,9 +68,6 @@ impl Alloc for ListLockedAlloc {
         Ok(())
     }
 
-    #[cold]
-    fn destroy(&mut self) {}
-
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         if size != Size::L0 {
             error!("{size:?} not supported");
@@ -97,6 +94,10 @@ impl Alloc for ListLockedAlloc {
         self.next.lock().push(unsafe { &mut *(addr as *mut Node) });
         self.local[core].counter.fetch_sub(1, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn pages(&self) -> usize {
+        unsafe { self.memory.end.offset_from(self.memory.start) as usize }
     }
 
     #[cold]

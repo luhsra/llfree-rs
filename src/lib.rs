@@ -18,7 +18,7 @@ use std::{ffi::c_void, sync::Arc};
 use alloc::{Alloc, Error, Size};
 use util::Page;
 
-pub type Allocator = alloc::table::TableAlloc;
+pub type Allocator = alloc::array_atomic::ArrayAtomicAlloc;
 static mut ALLOC: Option<Arc<dyn Alloc>> = None;
 
 pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> alloc::Result<()> {
@@ -30,12 +30,6 @@ pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> alloc::Result
 
 pub fn instance<'a>() -> &'a dyn Alloc {
     unsafe { ALLOC.as_ref().unwrap().as_ref() }
-}
-
-pub fn destroy() {
-    let mut a = unsafe { ALLOC.take().unwrap() };
-    let alloc = Arc::get_mut(&mut a).unwrap();
-    alloc.destroy();
 }
 
 pub fn uninit() {

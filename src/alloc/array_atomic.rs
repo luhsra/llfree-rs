@@ -85,13 +85,6 @@ impl Alloc for ArrayAtomicAlloc {
         Ok(())
     }
 
-    #[cold]
-    fn destroy(&mut self) {
-        let meta = unsafe { &*self.meta };
-        meta.active.store(0, Ordering::SeqCst);
-        meta.magic.store(0, Ordering::SeqCst);
-    }
-
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         match size {
             Size::L2 => self.get_giant(),
@@ -114,6 +107,10 @@ impl Alloc for ArrayAtomicAlloc {
         } else {
             self.put_small(core, page, pte)
         }
+    }
+
+    fn pages(&self) -> usize {
+        self.lower.pages
     }
 
     #[cold]
