@@ -11,7 +11,7 @@ The two main design goals are multicore scalability and crash consistency.
 
 To compile and test the allocator, you have to [install rust](https://www.rust-lang.org/learn/get-started).
 
-Currently, the nightly version `2022-02-08` (or newer) is used to have access to inline assembly.
+The version `1.59.0` (or newer) is required to have access to inline assembly.
 
 ## Project structure
 
