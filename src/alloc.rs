@@ -7,6 +7,7 @@ use crate::table::Table;
 use crate::util::Page;
 
 pub mod array_aligned;
+pub mod array_unaligned;
 pub mod array_atomic;
 pub mod array_locked;
 pub mod list_local;
@@ -106,7 +107,7 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::array_locked::ArrayLockedAlloc;
+    type Allocator = super::array_unaligned::ArrayUnalignedAlloc;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]

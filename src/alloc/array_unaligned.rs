@@ -22,32 +22,29 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
 /// Volatile shared metadata
 #[repr(align(64))]
-pub struct ArrayAlignedAlloc {
+pub struct ArrayUnalignedAlloc {
     meta: *mut Meta,
     lower: LowerAlloc,
-    entries: Vec<Aligned>,
+    entries: Vec<Atomic<Entry3>>,
 
     empty: AStack<Entry3>,
     partial_l1: AStack<Entry3>,
     partial_l0: AStack<Entry3>,
 }
 
-#[repr(align(64))]
-struct Aligned(Atomic<Entry3>);
-
-impl Index<usize> for ArrayAlignedAlloc {
+impl Index<usize> for ArrayUnalignedAlloc {
     type Output = Atomic<Entry3>;
 
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
-        &self.entries[index].0
+        &self.entries[index]
     }
 }
 
-unsafe impl Send for ArrayAlignedAlloc {}
-unsafe impl Sync for ArrayAlignedAlloc {}
+unsafe impl Send for ArrayUnalignedAlloc {}
+unsafe impl Sync for ArrayUnalignedAlloc {}
 
-impl Alloc for ArrayAlignedAlloc {
+impl Alloc for ArrayUnalignedAlloc {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
         warn!(
@@ -72,7 +69,7 @@ impl Alloc for ArrayAlignedAlloc {
         let pte3_num = Table::num_pts(2, self.lower.pages);
         self.entries = Vec::with_capacity(pte3_num);
         self.entries
-            .resize_with(pte3_num, || Aligned(Atomic::new(Entry3::new())));
+            .resize_with(pte3_num, || Atomic::new(Entry3::new()));
 
         self.empty = AStack::new();
         self.partial_l0 = AStack::new();
@@ -139,7 +136,7 @@ impl Alloc for ArrayAlignedAlloc {
     }
 }
 
-impl Drop for ArrayAlignedAlloc {
+impl Drop for ArrayUnalignedAlloc {
     fn drop(&mut self) {
         if !self.meta.is_null() {
             let meta = unsafe { &*self.meta };
@@ -148,7 +145,7 @@ impl Drop for ArrayAlignedAlloc {
     }
 }
 
-impl ArrayAlignedAlloc {
+impl ArrayUnalignedAlloc {
     #[cold]
     pub fn new() -> Self {
         Self {

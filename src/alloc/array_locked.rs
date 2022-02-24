@@ -134,8 +134,10 @@ impl Alloc for ArrayLockedAlloc {
 
 impl Drop for ArrayLockedAlloc {
     fn drop(&mut self) {
-        let meta = unsafe { &*self.meta };
-        meta.active.store(0, Ordering::SeqCst);
+        if !self.meta.is_null() {
+            let meta = unsafe { &*self.meta };
+            meta.active.store(0, Ordering::SeqCst);
+        }
     }
 }
 

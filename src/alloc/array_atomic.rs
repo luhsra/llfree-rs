@@ -132,8 +132,10 @@ impl Alloc for ArrayAtomicAlloc {
 
 impl Drop for ArrayAtomicAlloc {
     fn drop(&mut self) {
-        let meta = unsafe { &*self.meta };
-        meta.active.store(0, Ordering::SeqCst);
+        if !self.meta.is_null() {
+            let meta = unsafe { &*self.meta };
+            meta.active.store(0, Ordering::SeqCst);
+        }
     }
 }
 

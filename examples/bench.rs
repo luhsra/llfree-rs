@@ -1,8 +1,10 @@
 #![cfg(all(feature = "thread", feature = "logger"))]
 
 use core::fmt;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
+use std::iter::FromIterator;
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
@@ -12,6 +14,7 @@ use log::warn;
 use nvalloc::alloc::array_aligned::ArrayAlignedAlloc;
 use nvalloc::alloc::array_atomic::ArrayAtomicAlloc;
 use nvalloc::alloc::array_locked::ArrayLockedAlloc;
+use nvalloc::alloc::array_unaligned::ArrayUnalignedAlloc;
 use nvalloc::alloc::list_local::ListLocalAlloc;
 use nvalloc::alloc::list_locked::ListLockedAlloc;
 use nvalloc::alloc::table::TableAlloc;
@@ -27,6 +30,7 @@ use nvalloc::{thread, util};
 struct Args {
     #[clap(arg_enum)]
     bench: Benchmark,
+    allocs: Vec<String>,
     /// Tested number of threads / allocations / filling levels / cpu stride, depending on benchmark.
     #[clap(short, long, default_value = "1")]
     x: Vec<usize>,
@@ -50,6 +54,7 @@ struct Args {
 fn main() {
     let Args {
         bench,
+        allocs,
         x,
         threads,
         outfile,
@@ -82,20 +87,20 @@ fn main() {
         *page.cast_mut::<usize>() = 1;
     }
 
-    let mut allocs: Vec<(usize, Arc<dyn Alloc>)> = vec![
+    let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
+    let allocs: Vec<(usize, Arc<dyn Alloc>)> = vec![
         (usize::MAX, Arc::new(ArrayAlignedAlloc::new())),
+        (usize::MAX, Arc::new(ArrayUnalignedAlloc::new())),
         (usize::MAX, Arc::new(ArrayLockedAlloc::new())),
         (usize::MAX, Arc::new(ArrayAtomicAlloc::new())),
         (usize::MAX, Arc::new(TableAlloc::new())),
+        (usize::MAX, Arc::new(ListLocalAlloc::new())),
+        (16, Arc::new(ListLockedAlloc::new())),
     ];
-    if size == Size::L0 {
-        allocs.push((usize::MAX, Arc::new(ListLocalAlloc::new())));
-        allocs.push((12, Arc::new(ListLockedAlloc::new())))
-    }
 
     for x in x {
         for (max_threads, alloc) in &allocs {
-            if bench.threads(threads, x) <= *max_threads {
+            if alloc_names.contains(alloc.name()) && bench.threads(threads, x) <= *max_threads {
                 for i in 0..iterations {
                     let perf = bench.run(alloc.clone(), &mut mapping, size, threads, x);
                     writeln!(out, "{},{x},{i},{pages},{perf}", alloc.name()).unwrap();
@@ -103,6 +108,8 @@ fn main() {
             }
         }
     }
+    warn!("Ok");
+    drop(allocs); // drop first
 }
 
 fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page>, ()> {
