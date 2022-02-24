@@ -80,7 +80,7 @@ fn main() {
     };
     warn!("Allocating size {size:?}");
 
-    let mut mapping = mapping(0x1000_0000_0000, pages * threads, dax).unwrap();
+    let mut mapping = mapping(0x1000_0000_0000, memory * Table::span(2), dax).unwrap();
 
     // Warmup
     for page in &mut mapping[..] {
@@ -102,7 +102,13 @@ fn main() {
         for (max_threads, alloc) in &allocs {
             if alloc_names.contains(alloc.name()) && bench.threads(threads, x) <= *max_threads {
                 for i in 0..iterations {
-                    let perf = bench.run(alloc.clone(), &mut mapping, size, threads, x);
+                    let perf = bench.run(
+                        alloc.clone(),
+                        &mut mapping[..pages * threads],
+                        size,
+                        threads,
+                        x,
+                    );
                     writeln!(out, "{},{x},{i},{pages},{perf}", alloc.name()).unwrap();
                 }
             }
