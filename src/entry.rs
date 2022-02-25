@@ -208,7 +208,7 @@ impl Entry3 {
     #[inline]
     pub fn unreserve(self) -> Option<Entry3> {
         if !self.page() && self.reserved() {
-            Some(self.with_reserved(false).with_idx(0))
+            Some(self.with_reserved(false))
         } else {
             None
         }
@@ -227,8 +227,7 @@ impl Entry3 {
             Some(
                 self.with_free(pages)
                     .with_huge(huge && pages < max)
-                    .with_reserved(false)
-                    .with_idx(0),
+                    .with_reserved(false),
             )
         } else {
             error!("{self:?} + {other:?}, {pages} <= {max}");

@@ -248,11 +248,14 @@ impl ArrayAtomicAlloc {
 
         if let Ok(v) = self.entries[i].update(|v| v.unreserve_add(huge, pte, max)) {
             // Add to list if new counter is small enough
-            let new_pages = v.free() + pte.free();
-            if new_pages == max {
-                self.empty.push(&self.entries, i);
-            } else if new_pages > PTE3_FULL {
-                self.partial(huge).push(&self.entries, i);
+            // Only if not already in list
+            if v.idx() == Entry3::IDX_MAX {
+                let new_pages = v.free() + pte.free();
+                if new_pages == max {
+                    self.empty.push(&self.entries, i);
+                } else if new_pages > PTE3_FULL {
+                    self.partial(huge).push(&self.entries, i);
+                }
             }
             Ok(())
         } else {
@@ -342,6 +345,8 @@ impl ArrayAtomicAlloc {
         let i = page / Table::span(2);
         let huge = self.lower.put(page)?;
 
+        self.lower[core].frees_push(page);
+
         // Try decrement own pte first
         let pte_a = self.lower[core].pte(huge);
         if pte_a.update(|v| v.inc_idx(huge, i, max)).is_ok() {
@@ -352,17 +357,24 @@ impl ArrayAtomicAlloc {
         if let Ok(pte) = self.entries[i].update(|v| v.inc(huge, max)) {
             if !pte.reserved() {
                 let new_pages = pte.free() + Table::span(huge as _);
-                if pte.free() <= PTE3_FULL && new_pages > PTE3_FULL {
+
+                // check if recent frees also operated in this subtree
+                if new_pages > PTE3_FULL && self.lower[core].frees_related(page) {
                     // Try to reserve it for bulk frees
                     if let Ok(pte) = self.entries[i].update(|v| v.reserve(huge)) {
                         let pte = pte.with_idx(i);
                         warn!("put reserve {i}");
                         self.swap_reserved(huge, pte, pte_a)?;
                         self.lower[core].start(huge).store(page, Ordering::SeqCst);
-                    } else {
-                        // Add to partially free list
-                        self.partial(huge).push(&self.entries, i);
+                        return Ok(());
                     }
+                }
+
+                // Add to partially free list
+                // Only if not already in list
+                if pte.idx() == Entry3::IDX_MAX && pte.free() <= PTE3_FULL && new_pages > PTE3_FULL
+                {
+                    self.partial(huge).push(&self.entries, i);
                 }
             }
             Ok(())

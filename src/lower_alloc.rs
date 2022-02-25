@@ -33,17 +33,22 @@ pub struct LowerAlloc {
 /// Per core data.
 #[repr(align(64))]
 pub struct Local {
-    alloc_pt1: AtomicUsize,
     start: [AtomicUsize; 2],
     pte: [Atomic<Entry3>; 2],
+    frees: [AtomicUsize; 4],
+    frees_i: AtomicUsize,
+    alloc_pt1: AtomicUsize,
 }
 
 impl Local {
     fn new() -> Self {
+        const F: AtomicUsize = AtomicUsize::new(usize::MAX);
         Self {
             alloc_pt1: AtomicUsize::new(0),
             start: [AtomicUsize::new(usize::MAX), AtomicUsize::new(usize::MAX)],
             pte: [Atomic::new(Entry3::new()), Atomic::new(Entry3::new())],
+            frees_i: AtomicUsize::new(0),
+            frees: [F; 4],
         }
     }
     pub fn start(&self, huge: bool) -> &AtomicUsize {
@@ -51,6 +56,16 @@ impl Local {
     }
     pub fn pte(&self, huge: bool) -> &Atomic<Entry3> {
         &self.pte[huge as usize]
+    }
+    pub fn frees_push(&self, page: usize) {
+        let i = self.frees_i.fetch_add(1, Ordering::Relaxed) % self.frees.len();
+        self.frees[i].store(page, Ordering::Relaxed);
+    }
+    pub fn frees_related(&self, page: usize) -> bool {
+        let n = page / Table::span(2);
+        self.frees
+            .iter()
+            .all(|p| p.load(Ordering::Relaxed) / Table::span(2) == n)
     }
 }
 

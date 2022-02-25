@@ -249,7 +249,11 @@ impl<T: ANode> AStack<T> {
             let idx = start.next()?;
             let next = buf[idx].load().next();
             match self.start.compare_exchange(start, start.with_next(next)) {
-                Ok(_) => return start.next(),
+                Ok(old) => {
+                    let i = old.next()?;
+                    let _ = buf[i].update(|v| Some(v.with_next(None)));
+                    return Some(i);
+                }
                 Err(s) => start = s,
             }
         }

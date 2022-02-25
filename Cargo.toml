@@ -6,6 +6,7 @@ edition = "2018"
 [profile.release]
 lto = "thin"
 opt-level = 3
+strip = true
 
 [dependencies]
 log = "0.4"
