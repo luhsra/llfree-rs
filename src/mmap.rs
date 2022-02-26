@@ -6,6 +6,8 @@ use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::prelude::AsRawFd;
 
+use crate::util::{align_down, Page};
+
 pub fn perror(s: &str) {
     let s = CString::new(s).unwrap();
     unsafe { libc::perror(s.as_ptr()) }
@@ -14,6 +16,7 @@ pub fn perror(s: &str) {
 /// Chunk of mapped memory.
 pub struct MMap<T: 'static> {
     slice: &'static mut [T],
+    fd: Option<i32>,
 }
 
 impl<T> MMap<T> {
@@ -34,6 +37,7 @@ impl<T> MMap<T> {
         if addr != libc::MAP_FAILED {
             Ok(MMap {
                 slice: unsafe { std::slice::from_raw_parts_mut(addr as _, len) },
+                fd: Some(fd),
             })
         } else {
             unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
@@ -59,6 +63,7 @@ impl<T> MMap<T> {
         if addr != libc::MAP_FAILED {
             Ok(MMap {
                 slice: unsafe { std::slice::from_raw_parts_mut(addr as _, len) },
+                fd: Some(fd),
             })
         } else {
             unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
@@ -70,6 +75,7 @@ impl<T> MMap<T> {
         if len == 0 {
             return Ok(MMap {
                 slice: unsafe { std::slice::from_raw_parts_mut(begin as _, len) },
+                fd: None,
             });
         }
 
@@ -78,7 +84,7 @@ impl<T> MMap<T> {
                 begin as _,
                 (len * size_of::<T>()) as _,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
                 -1,
                 0,
             )
@@ -86,10 +92,34 @@ impl<T> MMap<T> {
         if addr != libc::MAP_FAILED {
             Ok(MMap {
                 slice: unsafe { std::slice::from_raw_parts_mut(addr as _, len) },
+                fd: None,
             })
         } else {
             unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
             Err(())
+        }
+    }
+
+    pub fn f_sync(&self) {
+        unsafe {
+            if let Some(fd) = self.fd {
+                if libc::fsync(fd) != 0 {
+                    libc::perror(b"fsync failed\0" as *const _ as _);
+                }
+            }
+        }
+    }
+}
+
+pub fn m_async<T>(slice: &mut [T]) {
+    unsafe {
+        if libc::msync(
+            align_down(slice.as_mut_ptr() as usize, Page::SIZE) as *mut _,
+            slice.len() * size_of::<T>(),
+            libc::MS_ASYNC,
+        ) != 0
+        {
+            libc::perror(b"fsync failed\0" as *const _ as _);
         }
     }
 }

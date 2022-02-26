@@ -181,7 +181,7 @@ impl ArrayAtomicAlloc {
     #[cold]
     fn recover(&self, deep: bool) -> Result<usize> {
         if deep {
-            error!("Allocator unexpectedly terminated");
+            error!("Try recover crashed allocator!");
         }
         let mut total = 0;
         for i in 0..Table::num_pts(2, self.pages()) {
@@ -244,8 +244,11 @@ impl ArrayAtomicAlloc {
     fn swap_reserved(&self, huge: bool, new_pte: Entry3, pte_a: &Atomic<Entry3>) -> Result<()> {
         let pte = pte_a.swap(new_pte);
         let i = pte.idx();
-        let max = (self.pages() - i * Table::span(2)).min(Table::span(2));
+        if i >= Entry3::IDX_MAX {
+            return Ok(());
+        }
 
+        let max = (self.pages() - i * Table::span(2)).min(Table::span(2));
         if let Ok(v) = self.entries[i].update(|v| v.unreserve_add(huge, pte, max)) {
             // Add to list if new counter is small enough
             // Only if not already in list
@@ -363,7 +366,7 @@ impl ArrayAtomicAlloc {
                     // Try to reserve it for bulk frees
                     if let Ok(pte) = self.entries[i].update(|v| v.reserve(huge)) {
                         let pte = pte.with_idx(i);
-                        warn!("put reserve {i}");
+                        // warn!("put reserve {i}");
                         self.swap_reserved(huge, pte, pte_a)?;
                         self.lower[core].start(huge).store(page, Ordering::SeqCst);
                         return Ok(());

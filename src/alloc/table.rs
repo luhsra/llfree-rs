@@ -66,7 +66,7 @@ impl Alloc for TableAlloc {
             warn!("Recover allocator state p={}", self.pages());
             let deep = meta.active.load(Ordering::SeqCst) != 0;
             if deep {
-                error!("Allocator unexpectedly terminated");
+                error!("Try recover crashed allocator!");
             }
             let pages = self.recover_rec(Table::LAYERS, 0, deep)?;
             warn!("Recovered {pages:?}");
@@ -368,6 +368,10 @@ impl TableAlloc {
     #[cold]
     fn swap_reserved(&self, huge: bool, new_pte: Entry3, pte_a: &Atomic<Entry3>) -> Result<()> {
         let old = pte_a.swap(new_pte);
+        if old.idx() >= Entry3::IDX_MAX {
+            return Ok(());
+        }
+
         let start = old.idx() * Table::span(2);
         let i = Table::idx(3, start);
         let pt = self.pt3(start);

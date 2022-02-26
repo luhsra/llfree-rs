@@ -243,7 +243,7 @@ impl fmt::Debug for Entry3 {
             .field("idx", &self.idx())
             .field("reserved", &self.reserved())
             .field("huge", &self.huge())
-            .field("giant", &self.page())
+            .field("page", &self.page())
             .finish()
     }
 }

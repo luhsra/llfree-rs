@@ -187,7 +187,7 @@ impl ArrayUnalignedAlloc {
     #[cold]
     fn recover(&self, deep: bool) -> Result<usize> {
         if deep {
-            error!("Allocator unexpectedly terminated");
+            error!("Try recover crashed allocator!");
         }
         let mut total = 0;
         for i in 0..Table::num_pts(2, self.pages()) {

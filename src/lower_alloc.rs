@@ -46,7 +46,10 @@ impl Local {
         Self {
             alloc_pt1: AtomicUsize::new(0),
             start: [AtomicUsize::new(usize::MAX), AtomicUsize::new(usize::MAX)],
-            pte: [Atomic::new(Entry3::new()), Atomic::new(Entry3::new())],
+            pte: [
+                Atomic::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
+                Atomic::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
+            ],
             frees_i: AtomicUsize::new(0),
             frees: [F; 4],
         }
