@@ -213,7 +213,7 @@ fn monitor(
     let expected = allocs * threads - threads;
     let actual = alloc.allocated_pages();
     warn!("expected={expected} actual={actual}");
-    assert!(expected <= actual && actual <= actual + threads);
+    assert!(expected <= actual && actual <= expected + threads);
 
     for t in 0..threads {
         let data = &out_mapping[t * out_size..(t + 1) * out_size];
