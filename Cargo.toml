@@ -36,6 +36,10 @@ name = "bench"
 required-features = ["logger", "thread"]
 
 [[example]]
+name = "crash"
+required-features = ["logger", "thread"]
+
+[[example]]
 name = "detail"
 required-features = ["logger", "thread"]
 
