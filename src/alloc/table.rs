@@ -491,34 +491,43 @@ impl TableAlloc {
             return Err(Error::Address);
         }
 
-        let size = self.lower.put(page)?;
+        let huge = self.lower.put(page)?;
+
+        self.lower[core].frees_push(page);
+
         let idx = page / Table::span(2);
-        let pte_a = self.lower[core].pte(size);
-        if pte_a.update(|v| v.inc_idx(size, idx, max)).is_ok() {
+        let pte_a = self.lower[core].pte(huge);
+        if pte_a.update(|v| v.inc_idx(huge, idx, max)).is_ok() {
             return Ok(());
         }
 
-        if let Ok(pte) = pt.update(i, |v| v.inc(size, max)) {
-            let new_pages = pte.free() + Table::span(size as _);
+        if let Ok(pte) = pt.update(i, |v| v.inc(huge, max)) {
+            let new_pages = pte.free() + Table::span(huge as _);
             if pte.reserved() {
                 Ok(())
             } else if new_pages == Table::span(2) {
-                self.update_parents(page, Change::p_dec(size))
-            } else if pte.free() <= PTE3_FULL && new_pages > PTE3_FULL {
-                // reserve for bulk put
-                if let Ok(pte) = pt.update(i, |v| v.reserve(size)) {
+                self.update_parents(page, Change::p_dec(huge))
+            } else if new_pages > PTE3_FULL && self.lower[core].frees_related(page) {
+                // Reserve for bulk put
+                if let Ok(pte) = pt.update(i, |v| v.reserve(huge)) {
                     warn!("put reserve {i}");
-                    self.swap_reserved(size, pte.with_idx(i), pte_a)?;
-                    self.lower[core].start(size).store(page, Ordering::SeqCst);
+                    self.swap_reserved(huge, pte.with_idx(i), pte_a)?;
+
+                    // Decrement partial counter if previously updated
+                    if pte.free() <= PTE3_FULL {
+                        self.update_parents(page, Change::p_dec(huge))?;
+                    }
+
+                    self.lower[core].start(huge).store(page, Ordering::SeqCst);
                     Ok(())
                 } else {
-                    self.update_parents(page, Change::p_inc(size))
+                    self.update_parents(page, Change::p_inc(huge))
                 }
             } else {
                 Ok(())
             }
         } else {
-            error!("Corruption l3 i{i} {size:?}");
+            error!("Corruption l3 i{i} {huge}");
             Err(Error::Corruption)
         }
     }
