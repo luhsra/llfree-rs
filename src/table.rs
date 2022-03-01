@@ -2,7 +2,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{self, AtomicU64, Ordering};
 
 use crate::util::Atomic;
 use crate::Page;
@@ -96,10 +96,11 @@ impl<T: Sized + From<u64> + Into<u64>> Table<T> {
             phantom: PhantomData,
         }
     }
-    pub fn clear(&self) {
-        for i in 0..Table::LEN {
-            self.entries[i].store(T::from(0));
-        }
+    pub fn zeroize(&self) {
+        // Cast to raw memory to allow vectorization
+        let mem = unsafe { &mut *(&self.entries as *const _ as *mut [u64; Table::LEN]) };
+        mem.fill(0);
+        atomic::fence(Ordering::SeqCst);
     }
     #[inline]
     pub fn get(&self, i: usize) -> T {
@@ -119,24 +120,11 @@ impl<T: Sized + From<u64> + Into<u64>> Table<T> {
     }
 }
 
-impl<T: Sized + From<u64> + Into<u64>> Clone for Table<T> {
-    fn clone(&self) -> Self {
-        let entries: [Atomic<T>; Table::LEN] = unsafe { std::mem::zeroed() };
-        for i in 0..Table::LEN {
-            entries[i].store(self.entries[i].load());
-        }
-        Self {
-            entries,
-            phantom: self.phantom,
-        }
-    }
-}
-
 impl<T: fmt::Debug + Sized + From<u64> + Into<u64>> fmt::Debug for Table<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Table {{")?;
         for (i, entry) in self.entries.iter().enumerate() {
-            writeln!(f, "    {:>3}; {:?},", i, entry.load())?;
+            writeln!(f, "    {i:>3}; {:?},", entry.load())?;
         }
         writeln!(f, "}}")
     }

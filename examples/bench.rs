@@ -274,7 +274,7 @@ fn repeat(
             total: timer.elapsed().as_millis(),
         }
     }));
-    assert_eq!(a.allocated_pages(), allocs * threads);
+    assert_eq!(a.allocated_pages(), allocs * threads * Table::span(size as _));
 
     perf.init = init;
     warn!("{perf:#?}");
@@ -329,7 +329,7 @@ fn rand(
             total: timer.elapsed().as_millis(),
         }
     }));
-    assert_eq!(a.allocated_pages(), allocs * threads);
+    assert_eq!(a.allocated_pages(), allocs * threads * Table::span(size as _));
 
     perf.init = init;
     warn!("{perf:#?}");
@@ -357,6 +357,7 @@ fn filling(
     // Allocate to filling level
     let fill = (allocs as f64 * (x as f64 / 100.0)) as usize;
     let allocs = allocs / 10;
+    warn!("fill={fill} allocs={allocs}");
 
     assert!((fill + allocs) * threads < alloc.pages());
 
@@ -395,7 +396,7 @@ fn filling(
             total: t1.elapsed().as_millis(),
         }
     }));
-    assert_eq!(a.allocated_pages(), fill * threads);
+    assert_eq!(a.allocated_pages(), fill * threads * Table::span(size as _));
 
     perf.init = init;
     warn!("{perf:#?}");

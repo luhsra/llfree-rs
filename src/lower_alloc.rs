@@ -119,12 +119,16 @@ impl LowerAlloc {
             // Within first page of own area
             let pt1 = unsafe { &*((self.begin + i * Table::m_span(1)) as *const Table<Entry1>) };
 
-            for j in 0..Table::LEN {
-                let page = i * Table::span(1) + j;
-                if page < self.pages {
-                    pt1.set(j, Entry1::Empty);
-                } else {
-                    pt1.set(j, Entry1::Page);
+            if i + 1 < Table::num_pts(1, self.pages) {
+                pt1.zeroize();
+            } else {
+                for j in 0..Table::LEN {
+                    let page = i * Table::span(1) + j;
+                    if page < self.pages {
+                        pt1.set(j, Entry1::Empty);
+                    } else {
+                        pt1.set(j, Entry1::Page);
+                    }
                 }
             }
         }
@@ -323,7 +327,7 @@ impl LowerAlloc {
             }
 
             let pt1 = unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) };
-            pt1.clear();
+            pt1.zeroize();
 
             match pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
                 Ok(_) => Ok(true),
@@ -423,7 +427,7 @@ impl LowerAlloc {
             let pt1 = unsafe {
                 &*((self.begin + (page + i * Table::span(1)) * Page::SIZE) as *const Table<Entry1>)
             };
-            pt1.clear();
+            pt1.zeroize();
         }
         // Clear the persist flag
         self.pt2(page).set(0, Entry2::new_table(Table::LEN, 0));

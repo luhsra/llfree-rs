@@ -147,19 +147,13 @@ impl TableAlloc {
         let mut pages = 0;
         if layer == 3 {
             let pt3 = self.pt3(start);
-            for i in Table::range(3, 0..self.pages()) {
+            for i in Table::range(3, start..self.pages()) {
                 let pte3 = pt3.get(i);
-                // warn!(" - {i:>3}: {pte3:?}");
                 pages += pte3.free();
             }
         } else {
-            let pt = self.pt(layer, start);
-            for i in Table::range(layer, 0..self.pages()) {
-                let pte = pt.get(i);
-                // warn!("{i:>3}: {pte:?}");
-                if pte.empty() > 0 || pte.partial_l0() > 0 || pte.partial_l1() > 0 {
-                    pages += self.allocated_pages_rec(layer - 1, Table::page(layer, start, i));
-                }
+            for i in Table::range(layer, start..self.pages()) {
+                pages += self.allocated_pages_rec(layer - 1, Table::page(layer, start, i));
             }
         }
         pages
@@ -301,6 +295,7 @@ impl TableAlloc {
             }
         }
         error!("No memory l{layer}");
+        self.dump();
         Err(Error::Memory)
     }
 
@@ -558,6 +553,35 @@ impl TableAlloc {
                 error!("Invalid {page}");
                 Err(Error::Address)
             }
+        }
+    }
+
+    #[allow(unused)]
+    fn dump(&self) {
+        fn dump_rec(this: &TableAlloc, layer: usize, start: usize) {
+            if layer == 3 {
+                let pt3 = this.pt3(start);
+                for i in Table::range(3, start..this.pages()) {
+                    let pte3 = pt3.get(i);
+                    let l = 3 + (Table::LAYERS - layer) * 4;
+                    error!("{i:>l$} {pte3:?}");
+                }
+            } else {
+                let pt = this.pt(layer, start);
+                for i in Table::range(layer, start..this.pages()) {
+                    let pte = pt.get(i);
+                    let l = 3 + (Table::LAYERS - layer) * 4;
+                    error!("{i:>l$} {pte:?}");
+                    this.allocated_pages_rec(layer - 1, Table::page(layer, start, i));
+                }
+            }
+        }
+
+        for (t, local) in self.lower.iter().enumerate() {
+            let pte = local.pte(false).load();
+            error!("L {t:>2}: L0 {pte:?}");
+            let pte = local.pte(true).load();
+            error!("L {t:>2}: L1 {pte:?}");
         }
     }
 }
