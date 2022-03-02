@@ -89,17 +89,16 @@ impl Table {
     }
 }
 
-impl<T: Sized + From<u64> + Into<u64>> Table<T> {
+impl<T: Sized + From<u64> + Into<u64> + Clone> Table<T> {
     pub fn empty() -> Self {
         Self {
             entries: unsafe { std::mem::zeroed() },
             phantom: PhantomData,
         }
     }
-    pub fn zeroize(&self) {
-        // Cast to raw memory to allow vectorization
-        let mem = unsafe { &mut *(&self.entries as *const _ as *mut [u64; Table::LEN]) };
-        mem.fill(0);
+    pub fn fill(&self, e: T) {
+        let mem = unsafe { &mut *(&self.entries as *const _ as *mut [T; Table::LEN]) };
+        mem.fill(e);
         atomic::fence(Ordering::SeqCst);
     }
     #[inline]

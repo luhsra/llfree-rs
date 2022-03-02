@@ -108,10 +108,14 @@ impl LowerAlloc {
         // Init pt2
         for i in 0..Table::num_pts(2, self.pages) {
             let pt2 = self.pt2(i * Table::span(2));
-            for j in 0..Table::LEN {
-                let page = i * Table::span(2) + j * Table::span(1);
-                let max = Table::span(1).min(self.pages.saturating_sub(page));
-                pt2.set(j, Entry2::new().with_free(max));
+            if i + 1 < Table::num_pts(2, self.pages) {
+                pt2.fill(Entry2::new().with_free(Table::span(1)));
+            } else {
+                for j in 0..Table::LEN {
+                    let page = i * Table::span(2) + j * Table::span(1);
+                    let max = Table::span(1).min(self.pages.saturating_sub(page));
+                    pt2.set(j, Entry2::new().with_free(max));
+                }
             }
         }
         // Init pt1
@@ -120,7 +124,7 @@ impl LowerAlloc {
             let pt1 = unsafe { &*((self.begin + i * Table::m_span(1)) as *const Table<Entry1>) };
 
             if i + 1 < Table::num_pts(1, self.pages) {
-                pt1.zeroize();
+                pt1.fill(Entry1::Empty);
             } else {
                 for j in 0..Table::LEN {
                     let page = i * Table::span(1) + j;
@@ -135,8 +139,8 @@ impl LowerAlloc {
     }
 
     /// Returns the l1 page table that contains the `page`.
-    fn pt1(&self, pte2: Entry2, page: usize) -> &Table<Entry1> {
-        let page = Table::page(1, page, pte2.i1());
+    fn pt1(&self, page: usize, i1: usize) -> &Table<Entry1> {
+        let page = Table::page(1, page, i1);
         unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) }
     }
 
@@ -181,7 +185,7 @@ impl LowerAlloc {
     }
 
     fn recover_l1(&self, start: usize, pte2: Entry2) -> Result<usize> {
-        let pt = self.pt1(pte2, start);
+        let pt = self.pt1(start, pte2.i1());
         let mut pages = 0;
         for i in 0..Table::LEN {
             if Table::page(1, start, i) > self.pages {
@@ -239,7 +243,7 @@ impl LowerAlloc {
 
     /// Search free page table entry.
     fn get_table(&self, pte2: Entry2, start: usize) -> Result<usize> {
-        let pt1 = self.pt1(pte2, start);
+        let pt1 = self.pt1(start, pte2.i1());
 
         for _ in 0..CAS_RETRIES {
             for page in Table::iterate(1, start) {
@@ -272,7 +276,7 @@ impl LowerAlloc {
         stop!();
         info!("alloc last {} s={}", pte2.i1(), start);
 
-        let pt1 = self.pt1(pte2, start);
+        let pt1 = self.pt1(start, pte2.i1());
         let alloc_p1 = !Table::page(1, start, pte2.i1());
 
         // Wait for others to finish
@@ -326,8 +330,8 @@ impl LowerAlloc {
                 return Err(Error::Address);
             }
 
-            let pt1 = unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) };
-            pt1.zeroize();
+            let pt1 = self.pt1(page, 0);
+            pt1.fill(Entry1::Empty);
 
             match pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
                 Ok(_) => Ok(true),
@@ -361,7 +365,7 @@ impl LowerAlloc {
 
         stop!();
 
-        let pt1 = self.pt1(pte2, page);
+        let pt1 = self.pt1(page, pte2.i1());
         let i1 = Table::idx(1, page);
         let pte1 = pt1.get(i1);
 
@@ -400,16 +404,11 @@ impl LowerAlloc {
         stop!();
 
         // The freed page becomes the new pt
-        let pt1 = unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) };
+        let pt1 = self.pt1(page, i1);
         info!("free: init last pt1 {page} (i{i1})");
 
-        for j in 0..Table::LEN {
-            if j == i1 {
-                pt1.set(j, Entry1::Empty);
-            } else {
-                pt1.set(j, Entry1::Page);
-            }
-        }
+        pt1.fill(Entry1::Page);
+        pt1.set(i1, Entry1::Empty);
 
         match pt2.cas(i2, pte2, Entry2::new_table(1, i1)) {
             Ok(_) => Ok(()),
@@ -422,12 +421,12 @@ impl LowerAlloc {
 
     pub fn clear_giant(&self, page: usize) {
         // Clear all layer 1 page tables in this area
-        for i in 0..Table::LEN {
+        for i in Table::range(2, page..self.pages) {
+            let start = Table::page(2, page, i);
+
             // i1 is initially 0
-            let pt1 = unsafe {
-                &*((self.begin + (page + i * Table::span(1)) * Page::SIZE) as *const Table<Entry1>)
-            };
-            pt1.zeroize();
+            let pt1 = self.pt1(start, 0);
+            pt1.fill(Entry1::Empty);
         }
         // Clear the persist flag
         self.pt2(page).set(0, Entry2::new_table(Table::LEN, 0));
@@ -443,25 +442,17 @@ impl LowerAlloc {
             }
 
             let pte2 = pt2.get(i2);
-            info!(
-                "{:1$}l2 i={i2} 0x{2:x}: {pte2:?}",
-                "",
-                (Table::LAYERS - 2) * 4,
-                start * Page::SIZE,
-            );
+            let indent = (Table::LAYERS - 2) * 4;
+            let addr = start * Page::SIZE;
+            info!("{:indent$}l2 i={i2} 0x{addr:x}: {pte2:?}", "");
             if !pte2.giant() && !pte2.page() && pte2.free() > 0 && pte2.free() < Table::LEN {
-                let pt1 = self.pt1(pte2, start);
+                let pt1 = self.pt1(start, pte2.i1());
                 for i1 in 0..Table::LEN {
                     let page = Table::page(1, start, i1);
                     let pte1 = pt1.get(i1);
-                    info!(
-                        "{:1$}l1 i={2} 0x{3:x}: {4:?}",
-                        "",
-                        (Table::LAYERS - 1) * 4,
-                        i1,
-                        page * Page::SIZE,
-                        pte1
-                    );
+                    let indent = (Table::LAYERS - 1) * 4;
+                    let addr = page * Page::SIZE;
+                    info!("{:indent$}l1 i={i1} 0x{addr:x}: {pte1:?}", "");
                 }
             }
         }
@@ -522,7 +513,10 @@ mod test {
             });
 
             assert_eq!(lower.pt2(0).get(0).free(), Table::LEN - 3);
-            assert_eq!(count(lower.pt1(lower.pt2(0).get(0), 0)), Table::LEN - 3);
+            assert_eq!(
+                count(lower.pt1(0, lower.pt2(0).get(0).i1())),
+                Table::LEN - 3
+            );
         }
     }
 
@@ -553,8 +547,9 @@ mod test {
                 l.get(t, 0).unwrap();
             });
 
-            assert_eq!(lower.pt2(0).get(0).free(), Table::LEN - 2);
-            assert_eq!(count(lower.pt1(lower.pt2(0).get(0), 0)), Table::LEN - 2);
+            let pte2 = lower.pt2(0).get(0);
+            assert_eq!(pte2.free(), Table::LEN - 2);
+            assert_eq!(count(lower.pt1(0, pte2.i1())), Table::LEN - 2);
         }
     }
 
@@ -592,7 +587,10 @@ mod test {
             let pt2 = lower.pt2(0);
             assert_eq!(pt2.get(0).free(), 0);
             assert_eq!(pt2.get(1).free(), Table::LEN - 1);
-            assert_eq!(count(lower.pt1(pt2.get(1), Table::LEN)), Table::LEN - 1);
+            assert_eq!(
+                count(lower.pt1(Table::LEN, pt2.get(1).i1())),
+                Table::LEN - 1
+            );
         }
     }
 
@@ -664,7 +662,7 @@ mod test {
 
             let pt2 = lower.pt2(0);
             assert_eq!(pt2.get(0).free(), 2);
-            assert_eq!(count(lower.pt1(pt2.get(0), 0)), 2);
+            assert_eq!(count(lower.pt1(0, pt2.get(0).i1())), 2);
         }
     }
 
@@ -714,13 +712,16 @@ mod test {
 
             let pt2 = lower.pt2(0);
             if pt2.get(0).free() == 1 {
-                assert_eq!(count(lower.pt1(pt2.get(0), 0)), 1);
+                assert_eq!(count(lower.pt1(0, pt2.get(0).i1())), 1);
             } else {
                 // Table entry skipped
                 assert_eq!(pt2.get(0).free(), 2);
-                assert_eq!(count(lower.pt1(pt2.get(0), 0)), 2);
+                assert_eq!(count(lower.pt1(0, pt2.get(0).i1())), 2);
                 assert_eq!(pt2.get(1).free(), Table::LEN - 1);
-                assert_eq!(count(lower.pt1(pt2.get(1), Table::LEN)), Table::LEN - 1);
+                assert_eq!(
+                    count(lower.pt1(Table::LEN, pt2.get(1).i1())),
+                    Table::LEN - 1
+                );
             }
         }
     }
@@ -757,8 +758,11 @@ mod test {
             let pt2 = lower.pt2(0);
             assert_eq!(pt2.get(0).free(), Table::LEN);
             assert_eq!(pt2.get(1).free(), Table::LEN);
-            assert_eq!(pt2.get(0).free(), count(lower.pt1(pt2.get(0), 0)));
-            assert_eq!(pt2.get(1).free(), count(lower.pt1(pt2.get(1), Table::LEN)));
+            assert_eq!(pt2.get(0).free(), count(lower.pt1(0, pt2.get(0).i1())));
+            assert_eq!(
+                pt2.get(1).free(),
+                count(lower.pt1(Table::LEN, pt2.get(1).i1()))
+            );
         }
     }
 
@@ -794,8 +798,11 @@ mod test {
 
             let pt2 = lower.pt2(0);
             assert_eq!(pt2.get(0).free() + pt2.get(1).free(), 3 + Table::LEN);
-            assert_eq!(pt2.get(0).free(), count(lower.pt1(pt2.get(0), 0)));
-            assert_eq!(pt2.get(1).free(), count(lower.pt1(pt2.get(1), Table::LEN)));
+            assert_eq!(pt2.get(0).free(), count(lower.pt1(0, pt2.get(0).i1())));
+            assert_eq!(
+                pt2.get(1).free(),
+                count(lower.pt1(Table::LEN, pt2.get(1).i1()))
+            );
         }
     }
 }

@@ -598,7 +598,7 @@ mod test {
     fn parallel_free() {
         logging();
 
-        const THREADS: usize = 6;
+        const THREADS: usize = 4;
         const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 2 * THREADS);
         const MEM_SIZE: usize = 2 * THREADS * Table::m_span(2);
 
