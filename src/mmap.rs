@@ -1,17 +1,11 @@
 //! Barebones linux mmap wrapper
 
-use std::ffi::CString;
 use std::fs::File;
 use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::prelude::AsRawFd;
 
 use crate::util::{align_down, Page};
-
-pub fn perror(s: &str) {
-    let s = CString::new(s).unwrap();
-    unsafe { libc::perror(s.as_ptr()) }
-}
 
 /// Chunk of mapped memory.
 pub struct MMap<T: 'static> {
@@ -140,10 +134,20 @@ impl<T> DerefMut for MMap<T> {
 impl<T> Drop for MMap<T> {
     fn drop(&mut self) {
         if self.len() > 0 {
-            let ret = unsafe { libc::munmap(self.slice.as_ptr() as _, self.slice.len() as _) };
+            let ret = unsafe {
+                libc::munmap(
+                    self.slice.as_ptr() as _,
+                    (self.slice.len() * size_of::<T>()) as _,
+                )
+            };
             if ret != 0 {
                 unsafe { libc::perror(b"munmap failed\0" as *const _ as _) };
-                panic!();
+                panic!(
+                    "{:?} l={} (0x{:x})",
+                    self.slice.as_ptr(),
+                    self.slice.len(),
+                    self.slice.len() * size_of::<T>()
+                );
             }
         }
     }
@@ -186,7 +190,7 @@ mod test {
 
         let file = std::env::var("NVM_DAX").unwrap_or("/dev/dax0.1".into());
 
-        info!("MMap file {} l={}G", file, 1);
+        info!("MMap file {file} l=1G");
 
         let f = std::fs::OpenOptions::new()
             .read(true)

@@ -632,6 +632,7 @@ mod test {
             }
         });
 
+        warn!("check");
         assert_eq!(a.allocated_pages(), 0);
     }
 
@@ -682,6 +683,7 @@ mod test {
 
         handle.join().unwrap();
 
+        warn!("check");
         assert_eq!(alloc.allocated_pages(), ALLOC_PER_THREAD);
     }
 
