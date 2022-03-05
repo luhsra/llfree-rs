@@ -96,6 +96,7 @@ impl Alloc for ArrayUnalignedAlloc {
         Ok(())
     }
 
+    #[inline(never)]
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         match size {
             Size::L2 => self.get_giant(),
@@ -104,6 +105,7 @@ impl Alloc for ArrayUnalignedAlloc {
         .map(|p| unsafe { self.lower.memory().start.add(p as _) } as u64)
     }
 
+    #[inline(never)]
     fn put(&self, _core: usize, addr: u64) -> Result<()> {
         if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
             error!("invalid addr");

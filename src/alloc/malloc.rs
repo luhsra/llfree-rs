@@ -44,6 +44,7 @@ impl Alloc for MallocAlloc {
         Ok(())
     }
 
+    #[inline(never)]
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         if size != Size::L0 {
             error!("Invalid size {size:?}");
@@ -61,6 +62,7 @@ impl Alloc for MallocAlloc {
         }
     }
 
+    #[inline(never)]
     fn put(&self, core: usize, addr: u64) -> Result<()> {
         unsafe { libc::free(addr as *mut _) };
         self.local[core]

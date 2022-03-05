@@ -84,6 +84,7 @@ impl Alloc for TableAlloc {
         Ok(())
     }
 
+    #[inline(never)]
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         // Start at the reserved memory chunk for this thread
         let page = match size {
@@ -94,6 +95,7 @@ impl Alloc for TableAlloc {
         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
     }
 
+    #[inline(never)]
     fn put(&self, core: usize, addr: u64) -> Result<()> {
         if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
             error!("invalid addr");

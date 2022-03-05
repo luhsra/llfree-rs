@@ -68,6 +68,7 @@ impl Alloc for ListLockedAlloc {
         Ok(())
     }
 
+    #[inline(never)]
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         if size != Size::L0 {
             error!("{size:?} not supported");
@@ -85,6 +86,7 @@ impl Alloc for ListLockedAlloc {
         }
     }
 
+    #[inline(never)]
     fn put(&self, core: usize, addr: u64) -> Result<()> {
         if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) {
             error!("invalid addr");

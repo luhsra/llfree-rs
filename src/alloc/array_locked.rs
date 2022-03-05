@@ -87,6 +87,7 @@ impl Alloc for ArrayLockedAlloc {
         Ok(())
     }
 
+    #[inline(never)]
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         match size {
             Size::L2 => self.get_giant(),
@@ -95,6 +96,7 @@ impl Alloc for ArrayLockedAlloc {
         .map(|p| unsafe { self.lower.memory().start.add(p as _) } as u64)
     }
 
+    #[inline(never)]
     fn put(&self, core: usize, addr: u64) -> Result<()> {
         if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
             error!("invalid addr");
