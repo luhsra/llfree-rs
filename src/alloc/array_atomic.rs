@@ -383,7 +383,7 @@ impl ArrayAtomicAlloc {
             if self.subtrees[i]
                 .update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant))
                 .is_ok()
-                {
+            {
                 self.lower.persist(i * Table::span(2));
                 Ok(i * Table::span(2))
             } else {

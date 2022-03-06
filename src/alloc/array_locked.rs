@@ -165,6 +165,7 @@ impl Drop for ArrayLockedAlloc {
 }
 
 impl ArrayLockedAlloc {
+    #[cold]
     pub fn new() -> Self {
         Self {
             meta: null_mut(),
@@ -186,8 +187,8 @@ impl ArrayLockedAlloc {
 
         let pte3_num = Table::num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
-            empty.push(i);
             self.subtrees[i] = Atomic::new(Entry3::new().with_free(Table::span(2)));
+            empty.push(i);
         }
 
         // The last one may be cut off
