@@ -27,6 +27,11 @@ L1-icache-load-misses,\
 dTLB-loads,\
 dTLB-load-misses,\
 iTLB-loads,\
-iTLB-load-misses\
- \
+iTLB-load-misses,\
+\
+offcore_requests.all_requests,\
+offcore_requests.demand_rfo,\
+resource_stalls.any,\
+resource_stalls.sb \
+\
 $*
