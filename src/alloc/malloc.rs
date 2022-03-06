@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, warn};
 
@@ -6,6 +6,7 @@ use super::{Alloc, Error, Result, Size};
 use crate::table::Table;
 use crate::util::Page;
 
+/// Wrapper for libc malloc.
 pub struct MallocAlloc {
     local: Vec<Local>,
 }

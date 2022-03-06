@@ -1,5 +1,5 @@
-use std::ops::{Deref, Range};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use core::ops::{Deref, Range};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
 

@@ -1,8 +1,8 @@
-use std::fmt;
-use std::marker::PhantomData;
-use std::mem::size_of;
-use std::ops::Range;
-use std::sync::atomic::{self, AtomicU64, Ordering};
+use core::fmt;
+use core::marker::PhantomData;
+use core::mem::size_of;
+use core::ops::Range;
+use core::sync::atomic::{self, AtomicU64, Ordering};
 
 use crate::util::Atomic;
 use crate::Page;

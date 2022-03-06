@@ -1,6 +1,6 @@
-use std::ops::Index;
-use std::ptr::null_mut;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use core::ops::Index;
+use core::ptr::null_mut;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, warn};
 
@@ -20,18 +20,40 @@ struct Meta {
 }
 const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
-/// Volatile shared metadata
+/// This allocator splits its memory range into 1G chunks.
+/// Giant pages are directly allocated in it.
+/// For smaller pages, however, the 1G chunk is handed over to the
+/// lower allocator, managing these smaller allocations.
+/// These 1G chunks are, due to the inner workins of the lower allocator,
+/// called 1G *subtrees*.
+///
+/// This allocator uses a cache-line aligned array to store the subtrees
+/// (layer 3 entries).
+/// The subtree reservation is speed up using free lists for
+/// empty and partially empty subtrees.
+/// These free lists are implemented as atomic linked lists with their next
+/// pointers stored inside the layer 3 entries.
+///
+/// This volatile shared metadata is rebuild on boot from
+/// the persistent metadata of the lower allocator.
 #[repr(align(64))]
 pub struct ArrayAlignedAlloc {
+    /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
+    /// Metadata of the lower alloc
     lower: LowerAlloc,
-    entries: Vec<Aligned>,
+    /// Array of layer 3 entries, the roots of the 1G subtrees, the lower alloc manages
+    subtrees: Vec<Aligned>,
 
+    /// List of idx to subtrees that are not allocated at all
     empty: AStack<Entry3>,
+    /// List of idx to subtrees that are partially allocated with small pages
     partial_l1: AStack<Entry3>,
+    /// List of idx to subtrees that are partially allocated with huge pages
     partial_l0: AStack<Entry3>,
 }
 
+/// Cache line aligned entries to prevent false-sharing.
 #[repr(align(64))]
 struct Aligned(Atomic<Entry3>);
 
@@ -40,7 +62,7 @@ impl Index<usize> for ArrayAlignedAlloc {
 
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
-        &self.entries[index].0
+        &self.subtrees[index].0
     }
 }
 
@@ -70,8 +92,8 @@ impl Alloc for ArrayAlignedAlloc {
 
         // Array with all pte3
         let pte3_num = Table::num_pts(2, self.lower.pages);
-        self.entries = Vec::with_capacity(pte3_num);
-        self.entries
+        self.subtrees = Vec::with_capacity(pte3_num);
+        self.subtrees
             .resize_with(pte3_num, || Aligned(Atomic::new(Entry3::new())));
 
         self.empty = AStack::new();
@@ -103,7 +125,7 @@ impl Alloc for ArrayAlignedAlloc {
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         match size {
             Size::L2 => self.get_giant(),
-            _ => self.get_small(core, size == Size::L1),
+            _ => self.get_lower(core, size == Size::L1),
         }
         .map(|p| unsafe { self.lower.memory().start.add(p as _) } as u64)
     }
@@ -117,11 +139,11 @@ impl Alloc for ArrayAlignedAlloc {
         let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
 
         let i = page / Table::span(2);
-        let pte3 = self[i].load();
-        if pte3.page() {
+        let pte = self[i].load();
+        if pte.page() {
             self.put_giant(page)
         } else {
-            self.put_small(page, pte3)
+            self.put_lower(page, pte)
         }
     }
 
@@ -156,17 +178,14 @@ impl ArrayAlignedAlloc {
         Self {
             meta: null_mut(),
             lower: LowerAlloc::default(),
-            entries: Vec::new(),
+            subtrees: Vec::new(),
             empty: AStack::new(),
             partial_l1: AStack::new(),
             partial_l0: AStack::new(),
         }
     }
 
-    fn pages(&self) -> usize {
-        self.lower.pages
-    }
-
+    /// Setup a new allocator.
     #[cold]
     fn setup(&mut self) {
         self.lower.clear();
@@ -189,6 +208,8 @@ impl ArrayAlignedAlloc {
         }
     }
 
+    /// Recover the allocator from NVM after reboot.
+    /// If `deep` then the layer 1 page tables are traversed and diverging counters are corrected.
     #[cold]
     fn recover(&self, deep: bool) -> Result<usize> {
         if deep {
@@ -223,7 +244,9 @@ impl ArrayAlignedAlloc {
         }
     }
 
-    fn reserve_dec(&self, huge: bool) -> Result<usize> {
+    /// Reserves a new subtree, prioritizing partially filled subtrees,
+    /// and allocates a page from it in one step.
+    fn reserve(&self, huge: bool) -> Result<usize> {
         while let Some(i) = self.partial(huge).pop(self) {
             // Skip empty entries
             if self[i].load().free() < Table::span(2) {
@@ -245,17 +268,18 @@ impl ArrayAlignedAlloc {
         }
     }
 
-    fn get_small(&self, core: usize, huge: bool) -> Result<usize> {
+    /// Allocate a small or huge page from the lower alloc.
+    fn get_lower(&self, core: usize, huge: bool) -> Result<usize> {
         let start_a = self.lower[core].start(huge);
         let mut start = start_a.load(Ordering::Relaxed);
 
         if start == usize::MAX {
             warn!("Try reserve first");
-            start = self.reserve_dec(huge)?;
+            start = self.reserve(huge)?;
         } else {
             let i = start / Table::span(2);
             if self[i].update(|v| v.dec(huge)).is_err() {
-                start = self.reserve_dec(huge)?;
+                start = self.reserve(huge)?;
                 if self[i].update(Entry3::unreserve).is_err() {
                     panic!("Unreserve failed")
                 }
@@ -271,6 +295,35 @@ impl ArrayAlignedAlloc {
         Ok(page)
     }
 
+    /// Free a small or huge page from the lower alloc.
+    fn put_lower(&self, page: usize, pte: Entry3) -> Result<()> {
+        let max = self
+            .pages()
+            .saturating_sub(Table::round(2, page))
+            .min(Table::span(2));
+        if pte.free() == max {
+            error!("Not allocated {page}");
+            return Err(Error::Address);
+        }
+
+        let i = page / Table::span(2);
+        let huge = self.lower.put(page)?;
+        if let Ok(pte3) = self[i].update(|v| v.inc(huge, max)) {
+            if !pte3.reserved() {
+                let new_pages = pte3.free() + Table::span(huge as _);
+                if pte3.free() <= PTE3_FULL && new_pages > PTE3_FULL {
+                    // Add back to partial
+                    self.partial(huge).push(self, i);
+                }
+            }
+            Ok(())
+        } else {
+            error!("Corruption l3 i{i} p=-{huge:?}");
+            Err(Error::Corruption)
+        }
+    }
+
+    /// Allocate a giant page.
     fn get_giant(&self) -> Result<usize> {
         if let Some(i) = self.empty.pop(self) {
             match self[i].update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant)) {
@@ -289,6 +342,7 @@ impl ArrayAlignedAlloc {
         }
     }
 
+    /// Free a giant page.
     fn put_giant(&self, page: usize) -> Result<()> {
         let i = page / Table::span(2);
         if page % Table::span(2) != 0 {
@@ -308,33 +362,6 @@ impl ArrayAlignedAlloc {
                 error!("CAS invalid i{i}");
                 Err(Error::Address)
             }
-        }
-    }
-
-    fn put_small(&self, page: usize, pte3: Entry3) -> Result<()> {
-        let max = self
-            .pages()
-            .saturating_sub(Table::round(2, page))
-            .min(Table::span(2));
-        if pte3.free() == max {
-            error!("Not allocated {page}");
-            return Err(Error::Address);
-        }
-
-        let i = page / Table::span(2);
-        let size = self.lower.put(page)?;
-        if let Ok(pte3) = self[i].update(|v| v.inc(size, max)) {
-            if !pte3.reserved() {
-                let new_pages = pte3.free() + Table::span(size as _);
-                if pte3.free() <= PTE3_FULL && new_pages > PTE3_FULL {
-                    // Add back to partial
-                    self.partial(size).push(self, i);
-                }
-            }
-            Ok(())
-        } else {
-            error!("Corruption l3 i{i} p=-{size:?}");
-            Err(Error::Corruption)
         }
     }
 }

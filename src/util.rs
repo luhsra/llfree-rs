@@ -1,10 +1,11 @@
+use core::alloc::Layout;
+use core::fmt::Debug;
+use core::marker::PhantomData;
+use core::mem::size_of;
+use core::ops::{Index, Range};
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use log::error;
-use std::alloc::Layout;
-use std::fmt::Debug;
-use std::marker::PhantomData;
-use std::mem::size_of;
-use std::ops::{Index, Range};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::entry::Entry3;
 

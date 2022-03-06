@@ -1,15 +1,24 @@
-use std::ops::Range;
-use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::ops::Range;
+use core::ptr::{null, null_mut};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use log::{error, warn};
 
 use super::{Alloc, Error, Result, Size, MIN_PAGES};
 use crate::util::Page;
 
+/// Simple volatile 4K page allocator that uses CPU-local linked lists.
+/// During initialization allocators memory is split into pages
+/// and evenly distributed to the cores.
+/// The linked lists are build directly within the pages,
+/// storing the next pointers at the beginning of the free pages.
+///
+/// No extra load balancing is made, if a core runs out of memory,
+/// the allocation fails.
 #[repr(align(64))]
 pub struct ListLocalAlloc {
     memory: Range<*const Page>,
+    /// CPU local metadata
     local: Vec<Local>,
     pages: usize,
 }

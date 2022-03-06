@@ -1,5 +1,5 @@
 #![cfg(any(test, feature = "thread"))]
-use std::sync::atomic::AtomicUsize;
+use core::sync::atomic::AtomicUsize;
 
 thread_local! {
     pub static PINNED: AtomicUsize = AtomicUsize::new(0);

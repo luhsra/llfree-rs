@@ -1,5 +1,5 @@
-use std::any::type_name;
-use std::sync::atomic::{AtomicU64, Ordering};
+use core::any::type_name;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use log::error;
 
@@ -7,9 +7,9 @@ use crate::table::Table;
 use crate::util::Page;
 
 pub mod array_aligned;
-pub mod array_unaligned;
 pub mod array_atomic;
 pub mod array_locked;
+pub mod array_unaligned;
 pub mod list_local;
 pub mod list_locked;
 pub mod malloc;
@@ -93,9 +93,11 @@ pub fn get_cas<F: FnOnce(u64) -> u64>(
 #[cfg(test)]
 mod test {
 
-    use std::ptr::null_mut;
-    use std::sync::{Arc, Barrier};
+    use core::ptr::null_mut;
+    use std::sync::Arc;
     use std::time::Instant;
+
+    use spin::Barrier;
 
     use log::{info, warn};
 

@@ -1,5 +1,5 @@
 use core::fmt;
-use std::cmp::Ordering;
+use core::cmp::Ordering;
 
 use bitfield_struct::bitfield;
 use log::error;

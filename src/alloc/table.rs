@@ -1,6 +1,6 @@
 //! Simple reduced non-volatile memory allocator.
-use std::ptr::null_mut;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use core::ptr::null_mut;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
 
@@ -20,11 +20,28 @@ struct Meta {
 }
 const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
-/// Volatile shared metadata
+/// This allocator splits its memory range into 1G chunks.
+/// Giant pages are directly allocated in it.
+/// For smaller pages, however, the 1G chunk is handed over to the
+/// lower allocator, managing these smaller allocations.
+/// These 1G chunks are, due to the inner workins of the lower allocator,
+/// called 1G *subtrees*.
+///
+/// This allocator uses page tables to manage the empty and partially
+/// allocated subtrees.
+///
+/// This volatile shared metadata is rebuild on boot from
+/// the persistent metadata of the lower allocator.
 #[repr(align(64))]
 pub struct TableAlloc {
+    /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
+    /// Metadata of the lower alloc
     lower: LowerAlloc,
+    /// Array of the volatile layer 3-5 page tables
+    /// ```text
+    /// DRAM: [ 1*PT5 | n*PT4 | m*PT3 ]
+    /// ```
     tables: Vec<Page>,
 }
 
@@ -162,9 +179,6 @@ impl TableAlloc {
     }
 
     /// Returns the page table of the given `layer` that contains the `page`.
-    /// ```text
-    /// DRAM: [ PT4 | n*PT3 (| ...) ]
-    /// ```
     fn pt(&self, layer: usize, page: usize) -> &Table<Entry> {
         assert!((4..=Table::LAYERS).contains(&layer));
 
@@ -176,9 +190,6 @@ impl TableAlloc {
     }
 
     /// Returns the page table of the given `layer` that contains the `page`.
-    /// ```text
-    /// DRAM: [ PT4 | n*PT3 (| ...) ]
-    /// ```
     fn pt3(&self, page: usize) -> &Table<Entry3> {
         let i = page >> (Table::LEN_BITS * 3);
         let offset: usize = (3..Table::LAYERS)
@@ -187,6 +198,7 @@ impl TableAlloc {
         self.tables[offset + i].cast()
     }
 
+    /// Setup a new allocator.
     #[cold]
     fn setup_rec(&self, layer: usize, start: usize) {
         for i in 0..Table::LEN {
@@ -214,6 +226,8 @@ impl TableAlloc {
         }
     }
 
+    /// Recover the allocator from NVM after reboot.
+    /// If `deep` then the layer 1 page tables are traversed and diverging counters are corrected.
     #[cold]
     fn recover_rec(&self, layer: usize, start: usize, deep: bool) -> Result<(usize, usize, usize)> {
         let mut empty = 0;
@@ -280,6 +294,7 @@ impl TableAlloc {
         Ok((empty, partial_l0, partial_l1))
     }
 
+    /// Try to reserve an empty subtree.
     #[cold]
     fn reserve_rec_empty(&self, layer: usize, start: usize, huge: bool) -> Result<Entry3> {
         if layer == 3 {
@@ -316,6 +331,7 @@ impl TableAlloc {
         Err(Error::Memory)
     }
 
+    /// Try to reserve a partially filled subtree.
     #[cold]
     fn reserve_rec_partial(&self, layer: usize, start: usize, huge: bool) -> Result<Entry3> {
         if layer == 3 {
@@ -349,6 +365,7 @@ impl TableAlloc {
         Err(Error::Memory)
     }
 
+    /// Propagates counter updates up to the root.
     #[cold]
     fn update_parents(&self, page: usize, change: Change) -> Result<()> {
         for layer in 4..=Table::LAYERS {

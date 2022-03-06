@@ -1,8 +1,8 @@
 //! Barebones linux mmap wrapper
 
+use core::mem::size_of;
+use core::ops::{Deref, DerefMut};
 use std::fs::File;
-use std::mem::size_of;
-use std::ops::{Deref, DerefMut};
 use std::os::unix::prelude::AsRawFd;
 
 use crate::util::{align_down, Page};

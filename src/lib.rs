@@ -12,8 +12,9 @@ pub mod util;
 #[cfg(feature = "stop")]
 pub mod stop;
 
-use std::sync::atomic::AtomicU64;
-use std::{ffi::c_void, sync::Arc};
+use core::ffi::c_void;
+use core::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use alloc::{Alloc, Error, Size};
 use util::Page;

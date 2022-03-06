@@ -1,6 +1,8 @@
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use spin::Barrier;
 
 use crate::util::WyRand;
 use log::{error, trace};
@@ -203,14 +205,14 @@ impl Stop for StopRand {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
 
     use log::trace;
 
+    use crate::stop::{stop, StopRand, StopVec, Stopper};
     use crate::util::logging;
-    use crate::stop::{stop, Stopper, StopRand, StopVec};
 
     #[test]
     fn stop_vec() {

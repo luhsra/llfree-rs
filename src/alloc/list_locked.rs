@@ -1,6 +1,6 @@
-use std::ops::Range;
-use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::ops::Range;
+use core::ptr::{null, null_mut};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use log::{error, warn};
 use spin::mutex::TicketMutex;
@@ -8,10 +8,17 @@ use spin::mutex::TicketMutex;
 use super::{Alloc, Error, Result, Size, MIN_PAGES};
 use crate::util::Page;
 
+/// Simple volatile 4K page allocator that uses a single shared linked lists
+/// protected by a ticked lock.
+/// The linked list is build directly within the pages,
+/// storing the next pointers at the beginning of the free pages.
+///
+/// As expected the contention on the ticket lock is very high.
 #[repr(align(64))]
 pub struct ListLockedAlloc {
     memory: Range<*const Page>,
     next: TicketMutex<Node>,
+    /// CPU local metadata
     local: Vec<LocalCounter>,
 }
 
