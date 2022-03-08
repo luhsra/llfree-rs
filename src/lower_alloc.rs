@@ -274,7 +274,7 @@ impl LowerAlloc {
     /// Allocate the last page (the pt1 is reused as last page).
     fn get_last(&self, core: usize, pte2: Entry2, start: usize) -> Result<usize> {
         stop!();
-        info!("alloc last {} s={}", pte2.i1(), start);
+        info!("alloc last {} s={start}", pte2.i1());
 
         let pt1 = self.pt1(start, pte2.i1());
         let alloc_p1 = !Table::page(1, start, pte2.i1());
@@ -283,14 +283,15 @@ impl LowerAlloc {
         for (i, leaf) in self.iter().enumerate() {
             if i != core {
                 while leaf.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
-                    warn!("Waiting for cpu {i} on {core}");
+                    #[cfg(not(feature = "stop"))]
+                    core::hint::spin_loop(); // pause CPU while waiting
                     stop!();
                 }
             }
         }
 
         if pt1.cas(pte2.i1(), Entry1::Empty, Entry1::Page).is_err() {
-            error!("Corruption l1 i{} {:?}", pte2.i1(), pte2);
+            error!("Corruption l1 i{} {pte2:?}", pte2.i1());
             return Err(Error::Corruption);
         }
 
