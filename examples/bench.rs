@@ -100,7 +100,8 @@ fn main() {
 
     for x in x {
         for (max_threads, alloc) in &allocs {
-            if alloc_names.contains(alloc.name()) && bench.threads(threads, x) <= *max_threads {
+            let name = alloc.name();
+            if alloc_names.contains(name) && bench.threads(threads, x) <= *max_threads {
                 for i in 0..iterations {
                     let perf = bench.run(
                         alloc.clone(),
@@ -109,7 +110,7 @@ fn main() {
                         threads,
                         x,
                     );
-                    writeln!(out, "{},{x},{i},{pages},{perf}", alloc.name()).unwrap();
+                    writeln!(out, "{name},{x},{i},{pages},{perf}").unwrap();
                 }
             }
         }
@@ -274,7 +275,10 @@ fn repeat(
             total: timer.elapsed().as_millis(),
         }
     }));
-    assert_eq!(a.allocated_pages(), allocs * threads * Table::span(size as _));
+    assert_eq!(
+        a.allocated_pages(),
+        allocs * threads * Table::span(size as _)
+    );
 
     perf.init = init;
     warn!("{perf:#?}");
@@ -329,7 +333,10 @@ fn rand(
             total: timer.elapsed().as_millis(),
         }
     }));
-    assert_eq!(a.allocated_pages(), allocs * threads * Table::span(size as _));
+    assert_eq!(
+        a.allocated_pages(),
+        allocs * threads * Table::span(size as _)
+    );
 
     perf.init = init;
     warn!("{perf:#?}");
@@ -378,6 +385,7 @@ fn filling(
         }
         let get = t1.elapsed().as_nanos() / allocs as u128;
 
+        pages.reverse();
         barrier.wait();
         let t2 = Instant::now();
         for page in pages {
