@@ -206,6 +206,7 @@ fn bulk(
             pages.push(alloc.get(t, size).unwrap());
         }
         let get = t1.elapsed().as_nanos() / allocs as u128;
+        pages.reverse();
 
         barrier.wait();
         let t2 = Instant::now();
@@ -384,8 +385,8 @@ fn filling(
             pages.push(alloc.get(t, size).unwrap());
         }
         let get = t1.elapsed().as_nanos() / allocs as u128;
-
         pages.reverse();
+
         barrier.wait();
         let t2 = Instant::now();
         for page in pages {
