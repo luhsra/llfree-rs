@@ -1,6 +1,6 @@
 use core::ops::Range;
 use core::ptr::{null, null_mut};
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, warn};
 use spin::mutex::TicketMutex;
@@ -34,7 +34,7 @@ impl ListLockedAlloc {
     pub fn new() -> Self {
         Self {
             memory: null()..null(),
-            next: TicketMutex::new(Node(AtomicPtr::new(null_mut()))),
+            next: TicketMutex::new(Node::new()),
             local: Vec::new(),
         }
     }
@@ -65,7 +65,7 @@ impl Alloc for ListLockedAlloc {
         memory[pages - 1].cast_mut::<Node>().set(null_mut());
 
         self.memory = memory.as_ptr_range();
-        self.next = TicketMutex::new(Node(AtomicPtr::new(begin as _)));
+        self.next = TicketMutex::new(Node(begin as _));
 
         self.local = Vec::with_capacity(cores);
         self.local.resize_with(cores, || LocalCounter {
@@ -118,23 +118,23 @@ impl Alloc for ListLockedAlloc {
     }
 }
 
-struct Node(AtomicPtr<Node>);
+struct Node(*mut Node);
 
 impl Node {
-    fn set(&self, v: *mut Node) {
-        self.0.store(v, Ordering::Relaxed);
+    fn new() -> Self {
+        Self(null_mut())
     }
-    fn push(&self, v: &mut Node) {
-        let next = self.0.load(Ordering::Relaxed);
-        v.0.store(next, Ordering::Relaxed);
-        self.0.store(v, Ordering::Relaxed);
+    fn set(&mut self, v: *mut Node) {
+        self.0 = v;
     }
-    fn pop(&self) -> Option<&mut Node> {
-        let curr = self.0.load(Ordering::Relaxed);
-        if !curr.is_null() {
-            let curr = unsafe { &mut *curr };
-            let next = curr.0.load(Ordering::Relaxed);
-            self.0.store(next, Ordering::Relaxed);
+    fn push(&mut self, v: &mut Node) {
+        v.0 = self.0;
+        self.0 = v;
+    }
+    fn pop(&mut self) -> Option<&mut Node> {
+        if !self.0.is_null() {
+            let curr = unsafe { &mut *self.0 };
+            self.0 = curr.0;
             Some(curr)
         } else {
             None

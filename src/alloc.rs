@@ -109,7 +109,7 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::table::TableAlloc;
+    type Allocator = super::array_atomic::ArrayAtomicAlloc;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]

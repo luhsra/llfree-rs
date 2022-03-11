@@ -271,7 +271,7 @@ impl ArrayAlignedAlloc {
     /// Allocate a small or huge page from the lower alloc.
     fn get_lower(&self, core: usize, huge: bool) -> Result<usize> {
         let start_a = self.lower[core].start(huge);
-        let mut start = start_a.load(Ordering::Relaxed);
+        let mut start = *start_a;
 
         if start == usize::MAX {
             warn!("Try reserve first");
@@ -291,7 +291,7 @@ impl ArrayAlignedAlloc {
         } else {
             self.lower.get(core, start)?
         };
-        start_a.store(page, Ordering::Relaxed);
+        *start_a = page;
         Ok(page)
     }
 

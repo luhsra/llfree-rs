@@ -1,12 +1,12 @@
 use core::ops::{Deref, Range};
 use core::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::UnsafeCell;
 
 use log::{error, info, warn};
 
 use crate::alloc::{Error, Result, Size};
 use crate::entry::{Entry1, Entry2, Entry3};
 use crate::table::Table;
-use crate::util::Atomic;
 use crate::Page;
 
 const CAS_RETRIES: usize = 4096;
@@ -33,42 +33,59 @@ pub struct LowerAlloc {
 /// Per core data.
 #[repr(align(64))]
 pub struct Local {
-    start: [AtomicUsize; 2],
-    pte: [Atomic<Entry3>; 2],
-    frees: [AtomicUsize; 4],
-    frees_i: AtomicUsize,
-    alloc_pt1: AtomicUsize,
+    private: UnsafeCell<Private>,
+    shared: Shared,
+}
+
+unsafe impl Send for Local {}
+unsafe impl Sync for Local {}
+
+#[repr(align(64))]
+struct Private {
+    start: [usize; 2],
+    pte: [Entry3; 2],
+    frees: [usize; 4],
+    frees_i: usize,
+}
+#[repr(align(64))]
+struct Shared {
+    pub alloc_pt1: AtomicUsize,
 }
 
 impl Local {
     fn new() -> Self {
-        const F: AtomicUsize = AtomicUsize::new(usize::MAX);
         Self {
-            alloc_pt1: AtomicUsize::new(0),
-            start: [AtomicUsize::new(usize::MAX), AtomicUsize::new(usize::MAX)],
-            pte: [
-                Atomic::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
-                Atomic::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
-            ],
-            frees_i: AtomicUsize::new(0),
-            frees: [F; 4],
+            private: UnsafeCell::new(Private {
+                start: [usize::MAX, usize::MAX],
+                pte: [
+                    Entry3::new().with_idx(Entry3::IDX_MAX),
+                    Entry3::new().with_idx(Entry3::IDX_MAX),
+                ],
+                frees_i: 0,
+                frees: [usize::MAX; 4],
+            }),
+            shared: Shared {
+                alloc_pt1: AtomicUsize::new(0),
+            },
         }
     }
-    pub fn start(&self, huge: bool) -> &AtomicUsize {
-        &self.start[huge as usize]
+    fn p(&self) -> &mut Private {
+        unsafe { &mut *self.private.get() }
     }
-    pub fn pte(&self, huge: bool) -> &Atomic<Entry3> {
-        &self.pte[huge as usize]
+    pub fn start(&self, huge: bool) -> &mut usize {
+        &mut self.p().start[huge as usize]
+    }
+    pub fn pte(&self, huge: bool) -> &mut Entry3 {
+        &mut self.p().pte[huge as usize]
     }
     pub fn frees_push(&self, page: usize) {
-        let i = self.frees_i.fetch_add(1, Ordering::Relaxed) % self.frees.len();
-        self.frees[i].store(page, Ordering::Relaxed);
+        let private = self.p();
+        private.frees_i = (private.frees_i + 1) % private.frees.len();
+        private.frees[private.frees_i] = page;
     }
     pub fn frees_related(&self, page: usize) -> bool {
         let n = page / Table::span(2);
-        self.frees
-            .iter()
-            .all(|p| p.load(Ordering::Relaxed) / Table::span(2) == n)
+        self.p().frees.iter().all(|p| p / Table::span(2) == n)
     }
 }
 
@@ -220,6 +237,7 @@ impl LowerAlloc {
                 }
 
                 self[core]
+                    .shared
                     .alloc_pt1
                     .store(!Table::page(1, start, pte2.i1()), Ordering::SeqCst);
 
@@ -231,10 +249,10 @@ impl LowerAlloc {
                     } else {
                         self.get_table(pte2, newstart)
                     };
-                    self[core].alloc_pt1.store(0, Ordering::SeqCst);
+                    self[core].shared.alloc_pt1.store(0, Ordering::SeqCst);
                     return page;
                 }
-                self[core].alloc_pt1.store(0, Ordering::SeqCst);
+                self[core].shared.alloc_pt1.store(0, Ordering::SeqCst);
             }
         }
         error!("Exceeding retries {start} {}", start / Table::span(2));
@@ -282,7 +300,7 @@ impl LowerAlloc {
         // Wait for others to finish
         for (i, leaf) in self.iter().enumerate() {
             if i != core {
-                while leaf.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
+                while leaf.shared.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
                     #[cfg(not(feature = "stop"))]
                     core::hint::spin_loop(); // pause CPU while waiting
                     stop!();

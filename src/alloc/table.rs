@@ -1,4 +1,5 @@
 //! Simple reduced non-volatile memory allocator.
+use core::mem;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -8,7 +9,7 @@ use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
 use crate::lower_alloc::LowerAlloc;
 use crate::table::Table;
-use crate::util::{Atomic, Page};
+use crate::util::Page;
 
 const PTE3_FULL: usize = 8 * Table::span(1);
 
@@ -132,10 +133,10 @@ impl Alloc for TableAlloc {
         let mut pages = self.allocated_pages_rec(Table::LAYERS, 0);
         // Pages allocated in reserved subtrees
         for (_t, local) in self.lower.iter().enumerate() {
-            let pte = local.pte(false).load();
+            let pte = local.pte(false);
             // warn!("L {t:>2}: L0 {pte:?}");
             pages += pte.free();
-            let pte = local.pte(true).load();
+            let pte = local.pte(true);
             // warn!("L {t:>2}: L1 {pte:?}");
             pages += pte.free();
         }
@@ -380,8 +381,8 @@ impl TableAlloc {
     }
 
     #[cold]
-    fn swap_reserved(&self, huge: bool, new_pte: Entry3, pte_a: &Atomic<Entry3>) -> Result<()> {
-        let old = pte_a.swap(new_pte);
+    fn swap_reserved(&self, huge: bool, new_pte: Entry3, pte_a: &mut Entry3) -> Result<()> {
+        let old = mem::replace(pte_a, new_pte);
         if old.idx() >= Entry3::IDX_MAX {
             return Ok(());
         }
@@ -457,7 +458,7 @@ impl TableAlloc {
     fn get_small(&self, core: usize, huge: bool) -> Result<usize> {
         let pte_a = self.lower[core].pte(huge);
         let start_a = self.lower[core].start(huge);
-        let mut start = start_a.load(Ordering::SeqCst);
+        let mut start = *start_a;
 
         if start == usize::MAX {
             warn!("try reserve first");
@@ -465,11 +466,13 @@ impl TableAlloc {
                 .reserve_rec_partial(Table::LAYERS, 0, huge)
                 .or_else(|_| self.reserve_rec_empty(Table::LAYERS, 0, huge))?;
             warn!("reserved {}", pte.idx());
-            pte_a.store(pte);
+            *pte_a = pte;
             start = pte.idx() * Table::span(2);
         } else {
-            // Increment or reserve new if full
-            if pte_a.update(|v| v.dec(huge)).is_err() {
+            // Decrement or reserve new if full
+            if let Some(pte) = pte_a.dec(huge) {
+                *pte_a = pte;
+            } else {
                 warn!("try reserve next");
                 let pte = self
                     .reserve_rec_partial(Table::LAYERS, start, huge)
@@ -485,7 +488,7 @@ impl TableAlloc {
         } else {
             self.lower.get(core, start)?
         };
-        start_a.store(page, Ordering::SeqCst);
+        *start_a = page;
         Ok(page)
     }
 
@@ -507,11 +510,13 @@ impl TableAlloc {
 
         let huge = self.lower.put(page)?;
 
-        self.lower[core].frees_push(page);
+        let lower = &self.lower[core];
+        lower.frees_push(page);
 
         let idx = page / Table::span(2);
-        let pte_a = self.lower[core].pte(huge);
-        if pte_a.update(|v| v.inc_idx(huge, idx, max)).is_ok() {
+        let pte_a = lower.pte(huge);
+        if let Some(pte) = pte_a.inc_idx(huge, idx, max) {
+            *pte_a = pte;
             return Ok(());
         }
 
@@ -521,7 +526,7 @@ impl TableAlloc {
                 Ok(())
             } else if new_pages == Table::span(2) {
                 self.update_parents(page, Change::p_dec(huge))
-            } else if new_pages > PTE3_FULL && self.lower[core].frees_related(page) {
+            } else if new_pages > PTE3_FULL && lower.frees_related(page) {
                 // Reserve for bulk put
                 if let Ok(pte) = pt.update(i, |v| v.reserve(huge)) {
                     warn!("put reserve {i}");
@@ -532,7 +537,7 @@ impl TableAlloc {
                         self.update_parents(page, Change::p_dec(huge))?;
                     }
 
-                    self.lower[core].start(huge).store(page, Ordering::SeqCst);
+                    *lower.start(huge) = page;
                     Ok(())
                 } else {
                     self.update_parents(page, Change::p_inc(huge))
@@ -597,9 +602,9 @@ impl TableAlloc {
         }
 
         for (t, local) in self.lower.iter().enumerate() {
-            let pte = local.pte(false).load();
+            let pte = local.pte(false);
             error!("L {t:>2}: L0 {pte:?}");
-            let pte = local.pte(true).load();
+            let pte = local.pte(true);
             error!("L {t:>2}: L1 {pte:?}");
         }
     }

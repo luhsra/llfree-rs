@@ -1,5 +1,6 @@
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::mem;
 
 use log::{error, warn};
 use spin::mutex::{TicketMutex, TicketMutexGuard};
@@ -148,8 +149,8 @@ impl Alloc for ArrayLockedAlloc {
         }
         // Pages allocated in reserved subtrees
         for local in self.lower.iter() {
-            pages -= local.pte(false).load().free();
-            pages -= local.pte(true).load().free();
+            pages -= local.pte(false).free();
+            pages -= local.pte(true).free();
         }
         pages
     }
@@ -272,8 +273,8 @@ impl ArrayLockedAlloc {
 
     /// Swap the current reserved subtree out replacing it with a new one.
     /// The old subtree is unreserved and added back to the lists.
-    fn swap_reserved(&self, huge: bool, new_pte: Entry3, pte_a: &Atomic<Entry3>) -> Result<()> {
-        let pte = pte_a.swap(new_pte);
+    fn swap_reserved(&self, huge: bool, new_pte: Entry3, pte_a: &mut Entry3) -> Result<()> {
+        let pte = mem::replace(pte_a, new_pte);
         let i = pte.idx();
         if i >= Entry3::IDX_MAX {
             return Ok(());
@@ -302,16 +303,18 @@ impl ArrayLockedAlloc {
     fn get_lower(&self, core: usize, huge: bool) -> Result<usize> {
         let start_a = self.lower[core].start(huge);
         let pte_a = self.lower[core].pte(huge);
-        let mut start = start_a.load(Ordering::SeqCst);
+        let mut start = *start_a;
 
         if start == usize::MAX {
             warn!("Try reserve first");
             let (s, pte) = self.reserve(huge)?;
-            pte_a.store(pte);
+            *pte_a = pte;
             start = s
         } else {
             // Incremet or clear (atomic sync with put dec)
-            if pte_a.update(|v| v.dec(huge)).is_err() {
+            if let Some(pte) = pte_a.dec(huge) {
+                *pte_a = pte;
+            } else {
                 warn!("Try reserve next");
                 let (s, new_pte) = self.reserve(huge)?;
                 self.swap_reserved(huge, new_pte, pte_a)?;
@@ -324,7 +327,7 @@ impl ArrayLockedAlloc {
         } else {
             self.lower.get(core, start)?
         };
-        start_a.store(page, Ordering::SeqCst);
+        *start_a = page;
         Ok(page)
     }
 
@@ -342,11 +345,13 @@ impl ArrayLockedAlloc {
         let i = page / Table::span(2);
         let huge = self.lower.put(page)?;
 
-        self.lower[core].frees_push(page);
+        let lower = &self.lower[core];
+        lower.frees_push(page);
 
         // Try decrement own pte first
-        let pte_a = self.lower[core].pte(huge);
-        if pte_a.update(|v| v.inc_idx(huge, i, max)).is_ok() {
+        let pte_a = lower.pte(huge);
+        if let Some(pte) = pte_a.inc_idx(huge, i, max) {
+            *pte_a = pte;
             return Ok(());
         }
 
@@ -356,13 +361,13 @@ impl ArrayLockedAlloc {
                 let new_pages = pte.free() + Table::span(huge as _);
 
                 // check if recent frees also operated in this subtree
-                if new_pages > PTE3_FULL && self.lower[core].frees_related(page) {
+                if new_pages > PTE3_FULL && lower.frees_related(page) {
                     // Try to reserve it for bulk frees
                     if let Ok(pte) = self.subtrees[i].update(|v| v.reserve(huge)) {
                         let pte = pte.with_idx(i);
                         // warn!("put reserve {i}");
                         self.swap_reserved(huge, pte, pte_a)?;
-                        self.lower[core].start(huge).store(page, Ordering::SeqCst);
+                        *lower.start(huge) = page;
                         return Ok(());
                     }
                 }
