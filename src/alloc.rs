@@ -60,12 +60,19 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     fn pages(&self) -> usize;
     /// Return the number of allocated pages.
     #[cold]
-    fn allocated_pages(&self) -> usize;
+    fn dbg_allocated_pages(&self) -> usize;
     #[cold]
-    fn name(&self) -> &'static str {
+    fn name(&self) -> String {
         let name = type_name::<Self>();
+        let (name, suffix) = if let Some((prefix, suffix)) = name.split_once('<') {
+            let suffix = suffix.rsplit_once('>').map(|s| s.0).unwrap_or(suffix);
+            let suffix = suffix.rsplit_once(':').map(|s| s.1).unwrap_or(suffix);
+            (prefix, &suffix[0..1])
+        } else {
+            (name, "")
+        };
         let name = name.rsplit_once(':').map(|s| s.1).unwrap_or(name);
-        name.strip_suffix("Alloc").unwrap_or(name)
+        format!("{}{}", name.strip_suffix("Alloc").unwrap_or(name), suffix)
     }
 }
 
@@ -105,12 +112,13 @@ mod test {
     use super::Error;
     use crate::alloc::Alloc;
     use crate::alloc::MIN_PAGES;
+    use crate::lower::dynamic::DynamicLower;
     use crate::mmap::MMap;
     use crate::table::Table;
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::array_atomic::ArrayAtomicAlloc;
+    type Allocator = super::array_atomic::ArrayAtomicAlloc<DynamicLower>;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -144,7 +152,7 @@ mod test {
         warn!("start alloc...");
         let small = alloc.get(0, Size::L0).unwrap();
 
-        assert_eq!(alloc.allocated_pages(), 1);
+        assert_eq!(alloc.dbg_allocated_pages(), 1);
 
         // Stress test
         let mut pages = Vec::new();
@@ -159,8 +167,8 @@ mod test {
         warn!("allocated {}", 1 + pages.len());
         warn!("check...");
 
-        assert_eq!(alloc.allocated_pages(), 1 + pages.len());
-        assert_eq!(alloc.allocated_pages(), alloc.pages());
+        assert_eq!(alloc.dbg_allocated_pages(), 1 + pages.len());
+        assert_eq!(alloc.dbg_allocated_pages(), alloc.pages());
         pages.sort_unstable();
 
         // Check that the same page was not allocated twice
@@ -180,7 +188,7 @@ mod test {
         }
 
         assert_eq!(
-            alloc.allocated_pages(),
+            alloc.dbg_allocated_pages(),
             1 + pages.len() - Table::span(2) + 10
         );
 
@@ -199,7 +207,7 @@ mod test {
 
         warn!("{alloc:?}");
 
-        assert_eq!(alloc.allocated_pages(), 0);
+        assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
 
     #[test]
@@ -226,7 +234,7 @@ mod test {
         warn!("allocated {}", pages.len());
 
         warn!("check...");
-        assert_eq!(alloc.allocated_pages(), pages.len());
+        assert_eq!(alloc.dbg_allocated_pages(), pages.len());
         // Check that the same page was not allocated twice
         pages.sort_unstable();
         for i in 0..pages.len() - 1 {
@@ -248,7 +256,7 @@ mod test {
         }
 
         warn!("check...");
-        assert_eq!(alloc.allocated_pages(), pages.len());
+        assert_eq!(alloc.dbg_allocated_pages(), pages.len());
         // Check that the same page was not allocated twice
         pages.sort_unstable();
         for i in 0..pages.len() - 1 {
@@ -264,7 +272,7 @@ mod test {
         for page in &pages {
             alloc.put(0, *page).unwrap();
         }
-        assert_eq!(alloc.allocated_pages(), 0);
+        assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
 
     #[test]
@@ -336,7 +344,7 @@ mod test {
             }
         });
 
-        assert_eq!(a.allocated_pages(), 0);
+        assert_eq!(a.dbg_allocated_pages(), 0);
     }
 
     #[test]
@@ -354,14 +362,14 @@ mod test {
             a
         });
 
-        assert_eq!(alloc.allocated_pages(), 0);
+        assert_eq!(alloc.dbg_allocated_pages(), 0);
 
         warn!("start alloc");
         let small = alloc.get(0, Size::L0).unwrap();
         let huge = alloc.get(0, Size::L1).unwrap();
         let giant = alloc.get(0, Size::L2).unwrap();
 
-        assert_eq!(alloc.allocated_pages(), 1 + Table::LEN + Table::span(2));
+        assert_eq!(alloc.dbg_allocated_pages(), 1 + Table::LEN + Table::span(2));
         assert!(small != huge && small != giant && huge != giant);
 
         warn!("start stress test");
@@ -375,7 +383,7 @@ mod test {
         warn!("check");
 
         assert_eq!(
-            alloc.allocated_pages(),
+            alloc.dbg_allocated_pages(),
             1 + Table::LEN + Table::span(2) + pages.len()
         );
 
@@ -417,7 +425,7 @@ mod test {
             alloc.put(0, *page).unwrap();
         }
 
-        assert_eq!(alloc.allocated_pages(), 0);
+        assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
 
     #[test]
@@ -454,7 +462,7 @@ mod test {
         });
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        assert_eq!(alloc.allocated_pages(), pages.len());
+        assert_eq!(alloc.dbg_allocated_pages(), pages.len());
         warn!("allocated pages: {}", pages.len());
 
         // Check that the same page was not allocated twice
@@ -501,7 +509,7 @@ mod test {
         });
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        assert_eq!(alloc.allocated_pages(), pages.len() * Table::span(1));
+        assert_eq!(alloc.dbg_allocated_pages(), pages.len() * Table::span(1));
         warn!("allocated pages: {}", pages.len());
 
         // Check that the same page was not allocated twice
@@ -638,7 +646,7 @@ mod test {
         });
 
         warn!("check");
-        assert_eq!(a.allocated_pages(), 0);
+        assert_eq!(a.dbg_allocated_pages(), 0);
     }
 
     #[test]
@@ -689,7 +697,7 @@ mod test {
         handle.join().unwrap();
 
         warn!("check");
-        assert_eq!(alloc.allocated_pages(), ALLOC_PER_THREAD);
+        assert_eq!(alloc.dbg_allocated_pages(), ALLOC_PER_THREAD);
     }
 
     #[test]
@@ -714,7 +722,7 @@ mod test {
             alloc.get(0, Size::L2).unwrap();
 
             assert_eq!(
-                alloc.allocated_pages(),
+                alloc.dbg_allocated_pages(),
                 Table::span(2) + Table::LEN + 2 + Table::LEN * (Table::LEN + 2)
             );
 
@@ -729,7 +737,7 @@ mod test {
         });
 
         assert_eq!(
-            alloc.allocated_pages(),
+            alloc.dbg_allocated_pages(),
             Table::span(2) + Table::LEN + 2 + Table::LEN * (Table::LEN + 2)
         );
     }

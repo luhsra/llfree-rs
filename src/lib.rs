@@ -3,7 +3,7 @@
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
 pub mod alloc;
 pub mod entry;
-mod lower_alloc;
+pub mod lower;
 pub mod mmap;
 pub mod table;
 pub mod thread;
@@ -17,9 +17,10 @@ use core::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use alloc::{Alloc, Error, Size};
+use lower::dynamic::DynamicLower;
 use util::Page;
 
-pub type Allocator = alloc::array_atomic::ArrayAtomicAlloc;
+pub type Allocator = alloc::array_atomic::ArrayAtomicAlloc<DynamicLower>;
 static mut ALLOC: Option<Arc<dyn Alloc>> = None;
 
 pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> alloc::Result<()> {

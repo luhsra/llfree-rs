@@ -1,5 +1,5 @@
-use core::fmt;
 use core::cmp::Ordering;
+use core::fmt;
 
 use bitfield_struct::bitfield;
 use log::error;
@@ -289,13 +289,22 @@ impl Entry2 {
     }
     /// Increments the free pages counter.
     #[inline]
-    pub fn inc(self, i1: usize) -> Option<Self> {
+    pub fn inc_partial(self, i1: usize) -> Option<Self> {
         if !self.giant()
             && !self.page()
             && i1 == self.i1()
             && self.free() > 0 // is the child pt already initialized?
             && self.free() < Table::LEN
         {
+            Some(self.with_free(self.free() + 1))
+        } else {
+            None
+        }
+    }
+    /// Increments the free pages counter.
+    #[inline]
+    pub fn inc(self) -> Option<Self> {
+        if !self.giant() && !self.page() && self.free() < Table::LEN {
             Some(self.with_free(self.free() + 1))
         } else {
             None

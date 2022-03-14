@@ -7,7 +7,7 @@ use log::{error, info, warn};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
-use crate::lower_alloc::LowerAlloc;
+use crate::lower::LowerAlloc;
 use crate::table::Table;
 use crate::util::Page;
 
@@ -34,11 +34,11 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
 #[repr(align(64))]
-pub struct TableAlloc {
+pub struct TableAlloc<L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
     /// Metadata of the lower alloc
-    lower: LowerAlloc,
+    lower: L,
     /// Array of the volatile layer 3-5 page tables
     /// ```text
     /// DRAM: [ 1*PT5 | n*PT4 | m*PT3 ]
@@ -46,21 +46,21 @@ pub struct TableAlloc {
     tables: Vec<Page>,
 }
 
-unsafe impl Send for TableAlloc {}
-unsafe impl Sync for TableAlloc {}
+unsafe impl<L: LowerAlloc> Send for TableAlloc<L> {}
+unsafe impl<L: LowerAlloc> Sync for TableAlloc<L> {}
 
-impl fmt::Debug for TableAlloc {
+impl<L: LowerAlloc> fmt::Debug for TableAlloc<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
         writeln!(
             f,
             "    memory: {:?} ({})",
             self.lower.memory(),
-            self.lower.pages
+            self.lower.pages()
         )?;
 
-        fn dump_rec(
-            this: &TableAlloc,
+        fn dump_rec<L: LowerAlloc>(
+            this: &TableAlloc<L>,
             f: &mut fmt::Formatter<'_>,
             layer: usize,
             start: usize,
@@ -96,7 +96,7 @@ impl fmt::Debug for TableAlloc {
     }
 }
 
-impl Alloc for TableAlloc {
+impl<L: LowerAlloc> Alloc for TableAlloc<L> {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
         warn!(
@@ -115,11 +115,11 @@ impl Alloc for TableAlloc {
         self.meta = meta;
 
         // Create lower allocator
-        self.lower = LowerAlloc::new(cores, memory);
+        self.lower = L::new(cores, memory);
 
         let mut num_pt = 0;
         for layer in 3..=Table::LAYERS {
-            num_pt += Table::num_pts(layer, self.lower.pages);
+            num_pt += Table::num_pts(layer, self.lower.pages());
         }
 
         self.tables = vec![Page::new(); num_pt];
@@ -172,11 +172,11 @@ impl Alloc for TableAlloc {
     }
 
     fn pages(&self) -> usize {
-        self.lower.pages
+        self.lower.pages()
     }
 
     #[cold]
-    fn allocated_pages(&self) -> usize {
+    fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.allocated_pages_rec(Table::LAYERS, 0);
         // Pages allocated in reserved subtrees
         for (_t, local) in self.lower.iter().enumerate() {
@@ -191,7 +191,7 @@ impl Alloc for TableAlloc {
     }
 }
 
-impl Drop for TableAlloc {
+impl<L: LowerAlloc> Drop for TableAlloc<L> {
     fn drop(&mut self) {
         if !self.meta.is_null() {
             let meta = unsafe { &*self.meta };
@@ -200,12 +200,12 @@ impl Drop for TableAlloc {
     }
 }
 
-impl TableAlloc {
+impl<L: LowerAlloc> TableAlloc<L> {
     #[cold]
     pub fn new() -> Self {
         Self {
             meta: null_mut(),
-            lower: LowerAlloc::default(),
+            lower: L::default(),
             tables: Vec::new(),
         }
     }
@@ -496,7 +496,7 @@ impl TableAlloc {
             {
                 let page = Table::page(3, start, i);
                 info!("allocated l3 i{i} p={page} s={start}");
-                self.lower.persist(page);
+                self.lower.set_giant(page);
                 return Ok(page);
             }
         }
@@ -532,11 +532,7 @@ impl TableAlloc {
             }
         }
 
-        let page = if huge {
-            self.lower.get_huge(start)?
-        } else {
-            self.lower.get(core, start)?
-        };
+        let page = self.lower.get(core, huge, start)?;
         *start_a = page;
         Ok(page)
     }
@@ -631,7 +627,7 @@ impl TableAlloc {
 
     #[allow(unused)]
     fn dump(&self) {
-        fn dump_rec(this: &TableAlloc, layer: usize, start: usize) {
+        fn dump_rec<L: LowerAlloc>(this: &TableAlloc<L>, layer: usize, start: usize) {
             if layer == 3 {
                 let pt3 = this.pt3(start);
                 for i in Table::range(3, start..this.pages()) {

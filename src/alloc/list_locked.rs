@@ -122,7 +122,7 @@ impl Alloc for ListLockedAlloc {
     }
 
     #[cold]
-    fn allocated_pages(&self) -> usize {
+    fn dbg_allocated_pages(&self) -> usize {
         self.local
             .iter()
             .map(|c| c.counter.load(Ordering::SeqCst))

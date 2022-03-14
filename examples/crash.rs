@@ -13,6 +13,7 @@ use nvalloc::alloc::array_locked::ArrayLockedAlloc;
 use nvalloc::alloc::array_unaligned::ArrayUnalignedAlloc;
 use nvalloc::alloc::table::TableAlloc;
 use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
+use nvalloc::lower::dynamic::DynamicLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::thread;
@@ -57,11 +58,11 @@ fn main() {
     };
 
     let allocs: [Arc<dyn Alloc>; 5] = [
-        Arc::new(ArrayAlignedAlloc::new()),
-        Arc::new(ArrayUnalignedAlloc::new()),
-        Arc::new(ArrayLockedAlloc::new()),
-        Arc::new(ArrayAtomicAlloc::new()),
-        Arc::new(TableAlloc::new()),
+        Arc::new(ArrayAlignedAlloc::<DynamicLower>::new()),
+        Arc::new(ArrayUnalignedAlloc::<DynamicLower>::new()),
+        Arc::new(ArrayLockedAlloc::<DynamicLower>::new()),
+        Arc::new(ArrayAtomicAlloc::<DynamicLower>::new()),
+        Arc::new(TableAlloc::<DynamicLower>::new()),
     ];
     for a in allocs {
         if a.name() == alloc {
@@ -211,7 +212,7 @@ fn monitor(
         .unwrap();
 
     let expected = allocs * threads - threads;
-    let actual = alloc.allocated_pages();
+    let actual = alloc.dbg_allocated_pages();
     warn!("expected={expected} actual={actual}");
     assert!(expected <= actual && actual <= expected + threads);
 
@@ -241,7 +242,7 @@ fn monitor(
     }
     // Check if the remaining pages, that were allocated/freed during the crash,
     // is less equal to the number of concurrent threads (upper bound).
-    assert!(alloc.allocated_pages() <= threads);
+    assert!(alloc.dbg_allocated_pages() <= threads);
     warn!("Ok");
 }
 

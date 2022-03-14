@@ -1,95 +1,28 @@
+use core::fmt;
 use core::ops::{Deref, Range};
-use core::sync::atomic::{AtomicUsize, Ordering};
-use std::cell::UnsafeCell;
+use std::sync::atomic::Ordering;
 
 use log::{error, info, warn};
 
 use crate::alloc::{Error, Result, Size};
-use crate::entry::{Entry1, Entry2, Entry3};
+use crate::entry::{Entry1, Entry2};
 use crate::table::Table;
-use crate::Page;
+use crate::util::Page;
 
-const CAS_RETRIES: usize = 4096;
-
-#[cfg(all(test, feature = "stop"))]
-macro_rules! stop {
-    () => {
-        crate::stop::stop().unwrap()
-    };
-}
-#[cfg(not(all(test, feature = "stop")))]
-macro_rules! stop {
-    () => {};
-}
+use super::{Local, LowerAlloc, CAS_RETRIES};
 
 /// Layer 2 page allocator.
+/// ```text
+/// NVRAM: [ Pages & PT1s | PT2s | Meta ]
+/// ```
 #[repr(align(64))]
-pub struct LowerAlloc {
+pub struct DynamicLower {
     pub begin: usize,
     pub pages: usize,
     local: Vec<Local>,
 }
 
-/// Per core data.
-#[repr(align(64))]
-pub struct Local {
-    private: UnsafeCell<Private>,
-    shared: Shared,
-}
-
-unsafe impl Send for Local {}
-unsafe impl Sync for Local {}
-
-#[repr(align(64))]
-struct Private {
-    start: [usize; 2],
-    pte: [Entry3; 2],
-    frees: [usize; 4],
-    frees_i: usize,
-}
-#[repr(align(64))]
-struct Shared {
-    pub alloc_pt1: AtomicUsize,
-}
-
-impl Local {
-    fn new() -> Self {
-        Self {
-            private: UnsafeCell::new(Private {
-                start: [usize::MAX, usize::MAX],
-                pte: [
-                    Entry3::new().with_idx(Entry3::IDX_MAX),
-                    Entry3::new().with_idx(Entry3::IDX_MAX),
-                ],
-                frees_i: 0,
-                frees: [usize::MAX; 4],
-            }),
-            shared: Shared {
-                alloc_pt1: AtomicUsize::new(0),
-            },
-        }
-    }
-    fn p(&self) -> &mut Private {
-        unsafe { &mut *self.private.get() }
-    }
-    pub fn start(&self, huge: bool) -> &mut usize {
-        &mut self.p().start[huge as usize]
-    }
-    pub fn pte(&self, huge: bool) -> &mut Entry3 {
-        &mut self.p().pte[huge as usize]
-    }
-    pub fn frees_push(&self, page: usize) {
-        let private = self.p();
-        private.frees_i = (private.frees_i + 1) % private.frees.len();
-        private.frees[private.frees_i] = page;
-    }
-    pub fn frees_related(&self, page: usize) -> bool {
-        let n = page / Table::span(2);
-        self.p().frees.iter().all(|p| p / Table::span(2) == n)
-    }
-}
-
-impl Deref for LowerAlloc {
+impl Deref for DynamicLower {
     type Target = [Local];
 
     fn deref(&self) -> &Self::Target {
@@ -97,16 +30,28 @@ impl Deref for LowerAlloc {
     }
 }
 
-impl LowerAlloc {
-    pub fn default() -> Self {
+impl Default for DynamicLower {
+    fn default() -> Self {
         Self {
             begin: 0,
             pages: 0,
             local: Vec::new(),
         }
     }
+}
 
-    pub fn new(cores: usize, memory: &mut [Page]) -> Self {
+impl fmt::Debug for DynamicLower {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.dump(0);
+        f.debug_struct("DynamicLower")
+            .field("begin", &self.begin)
+            .field("pages", &self.pages)
+            .finish()
+    }
+}
+
+impl LowerAlloc for DynamicLower {
+    fn new(cores: usize, memory: &mut [Page]) -> Self {
         let mut local = Vec::with_capacity(cores);
         local.resize_with(cores, Local::new);
         Self {
@@ -117,11 +62,15 @@ impl LowerAlloc {
         }
     }
 
-    pub fn memory(&self) -> Range<*const Page> {
+    fn pages(&self) -> usize {
+        self.pages
+    }
+
+    fn memory(&self) -> Range<*const Page> {
         self.begin as *const Page..(self.begin + self.pages * Page::SIZE) as *const Page
     }
 
-    pub fn clear(&self) {
+    fn clear(&self) {
         // Init pt2
         for i in 0..Table::num_pts(2, self.pages) {
             let pt2 = self.pt2(i * Table::span(2));
@@ -155,22 +104,7 @@ impl LowerAlloc {
         }
     }
 
-    /// Returns the l1 page table that contains the `page`.
-    fn pt1(&self, page: usize, i1: usize) -> &Table<Entry1> {
-        let page = Table::page(1, page, i1);
-        unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) }
-    }
-
-    /// Returns the l2 page table that contains the `page`.
-    /// ```text
-    /// NVRAM: [ Pages & PT1 | PT2 | Meta ]
-    /// ```
-    fn pt2(&self, page: usize) -> &Table<Entry2> {
-        let i = page >> (Table::LEN_BITS * 2);
-        unsafe { &*((self.begin + (self.pages + i) * Page::SIZE) as *mut Table<Entry2>) }
-    }
-
-    pub fn recover(&self, start: usize, deep: bool) -> Result<(usize, Size)> {
+    fn recover(&self, start: usize, deep: bool) -> Result<(usize, Size)> {
         let mut pages = 0;
         let mut size = Size::L0;
 
@@ -201,6 +135,124 @@ impl LowerAlloc {
         Ok((pages, size))
     }
 
+    fn get(&self, core: usize, huge: bool, start: usize) -> Result<usize> {
+        if !huge {
+            return self.get_small(core, start);
+        }
+
+        let pt = self.pt2(start);
+        for _ in 0..CAS_RETRIES {
+            for page in Table::iterate(2, start) {
+                let i = Table::idx(2, page);
+                if pt.update(i, Entry2::mark_huge).is_ok() {
+                    return Ok(page);
+                }
+            }
+        }
+        error!("Exceeding retries {}", start / Table::span(2));
+        Err(Error::Corruption)
+    }
+
+    /// Free single page and returns if the page was huge
+    fn put(&self, page: usize) -> Result<bool> {
+        let pt2 = self.pt2(page);
+        let i2 = Table::idx(2, page);
+
+        stop!();
+
+        let mut old = pt2.get(i2);
+        if old.page() {
+            // Free huge page
+            if page % Table::span(Size::L1 as _) != 0 {
+                error!("Invalid address {page}");
+                return Err(Error::Address);
+            }
+
+            let pt1 = self.pt1(page, 0);
+            pt1.fill(Entry1::Empty);
+
+            match pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
+                Ok(_) => Ok(true),
+                Err(_) => {
+                    error!("Corruption l2 i{i2}");
+                    Err(Error::Corruption)
+                }
+            }
+        } else if !old.giant() && old.free() < Table::LEN {
+            for _ in 0..CAS_RETRIES {
+                match self.put_small(old, page) {
+                    Err(Error::CAS) => old = pt2.get(i2),
+                    Err(e) => return Err(e),
+                    Ok(_) => return Ok(false),
+                }
+            }
+            error!("Exceeding retries {} {old:?}", page / Table::span(2));
+            Err(Error::CAS)
+        } else {
+            Err(Error::Address)
+        }
+    }
+
+    fn set_giant(&self, page: usize) {
+        self.pt2(page).set(0, Entry2::new().with_giant(true));
+    }
+    fn clear_giant(&self, page: usize) {
+        // Clear all layer 1 page tables in this area
+        for i in Table::range(2, page..self.pages) {
+            let start = Table::page(2, page, i);
+
+            // i1 is initially 0
+            let pt1 = self.pt1(start, 0);
+            pt1.fill(Entry1::Empty);
+        }
+        // Clear the persist flag
+        self.pt2(page).set(0, Entry2::new_table(Table::LEN, 0));
+    }
+
+    fn dbg_allocated_pages(&self) -> usize {
+        let mut pages = self.pages;
+        for i in 0..Table::num_pts(2, self.pages) {
+            let start = i * Table::span(2);
+            let pt2 = self.pt2(start);
+            for i2 in Table::range(2, start..self.pages) {
+                let start = Table::page(2, start, i2);
+                let pte2 = pt2.get(i2);
+
+                assert!(!pte2.giant());
+
+                pages -= if pte2.page() {
+                    Table::span(1)
+                } else {
+                    let pt1 = self.pt1(start, pte2.i1());
+                    let mut child_pages = 0;
+                    for i1 in Table::range(1, start..self.pages) {
+                        child_pages += (pt1.get(i1) == Entry1::Empty) as usize;
+                    }
+                    assert_eq!(child_pages, pte2.free());
+                    child_pages
+                }
+            }
+        }
+        pages
+    }
+}
+
+impl DynamicLower {
+    /// Returns the l1 page table that contains the `page`.
+    fn pt1(&self, page: usize, i1: usize) -> &Table<Entry1> {
+        let page = Table::page(1, page, i1);
+        unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) }
+    }
+
+    /// Returns the l2 page table that contains the `page`.
+    /// ```text
+    /// NVRAM: [ Pages & PT1s | PT2s | Meta ]
+    /// ```
+    fn pt2(&self, page: usize) -> &Table<Entry2> {
+        let i = page >> (Table::LEN_BITS * 2);
+        unsafe { &*((self.begin + (self.pages + i) * Page::SIZE) as *mut Table<Entry2>) }
+    }
+
     fn recover_l1(&self, start: usize, pte2: Entry2) -> Result<usize> {
         let pt = self.pt1(start, pte2.i1());
         let mut pages = 0;
@@ -221,7 +273,7 @@ impl LowerAlloc {
     }
 
     /// Allocate a single page
-    pub fn get(&self, core: usize, start: usize) -> Result<usize> {
+    fn get_small(&self, core: usize, start: usize) -> Result<usize> {
         let pt2 = self.pt2(start);
 
         for _ in 0..CAS_RETRIES {
@@ -316,64 +368,6 @@ impl LowerAlloc {
         Ok(Table::page(1, start, pte2.i1()))
     }
 
-    pub fn get_huge(&self, start: usize) -> Result<usize> {
-        let pt = self.pt2(start);
-        for _ in 0..CAS_RETRIES {
-            for page in Table::iterate(2, start) {
-                let i = Table::idx(2, page);
-                if pt.update(i, Entry2::mark_huge).is_ok() {
-                    return Ok(page);
-                }
-            }
-        }
-        error!("Exceeding retries {}", start / Table::span(2));
-        Err(Error::Corruption)
-    }
-
-    pub fn persist(&self, page: usize) {
-        self.pt2(page).set(0, Entry2::new().with_giant(true));
-    }
-
-    /// Free single page and returns if the page was huge
-    pub fn put(&self, page: usize) -> Result<bool> {
-        let pt2 = self.pt2(page);
-        let i2 = Table::idx(2, page);
-
-        stop!();
-
-        let mut old = pt2.get(i2);
-        if old.page() {
-            // Free huge page
-            if page % Table::span(Size::L1 as _) != 0 {
-                error!("Invalid address {page}");
-                return Err(Error::Address);
-            }
-
-            let pt1 = self.pt1(page, 0);
-            pt1.fill(Entry1::Empty);
-
-            match pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
-                Ok(_) => Ok(true),
-                Err(_) => {
-                    error!("Corruption l2 i{i2}");
-                    Err(Error::Corruption)
-                }
-            }
-        } else if !old.giant() && old.free() < Table::LEN {
-            for _ in 0..CAS_RETRIES {
-                match self.put_small(old, page) {
-                    Err(Error::CAS) => old = pt2.get(i2),
-                    Err(e) => return Err(e),
-                    Ok(_) => return Ok(false),
-                }
-            }
-            error!("Exceeding retries {} {old:?}", page / Table::span(2));
-            Err(Error::CAS)
-        } else {
-            Err(Error::Address)
-        }
-    }
-
     fn put_small(&self, pte2: Entry2, page: usize) -> Result<()> {
         let pt2 = self.pt2(page);
         let i2 = Table::idx(2, page);
@@ -395,7 +389,7 @@ impl LowerAlloc {
 
         stop!();
 
-        if let Err(pte2) = pt2.update(i2, |pte| pte.inc(pte2.i1())) {
+        if let Err(pte2) = pt2.update(i2, |pte| pte.inc_partial(pte2.i1())) {
             return if pte2.free() == Table::LEN {
                 error!("Invalid Addr l1 i{i1} p={page}");
                 Err(Error::Address)
@@ -438,19 +432,6 @@ impl LowerAlloc {
         }
     }
 
-    pub fn clear_giant(&self, page: usize) {
-        // Clear all layer 1 page tables in this area
-        for i in Table::range(2, page..self.pages) {
-            let start = Table::page(2, page, i);
-
-            // i1 is initially 0
-            let pt1 = self.pt1(start, 0);
-            pt1.fill(Entry1::Empty);
-        }
-        // Clear the persist flag
-        self.pt2(page).set(0, Entry2::new_table(Table::LEN, 0));
-    }
-
     #[allow(dead_code)]
     pub fn dump(&self, start: usize) {
         let pt2 = self.pt2(start);
@@ -485,9 +466,10 @@ mod test {
 
     use log::warn;
 
+    use super::DynamicLower;
     use crate::entry::Entry1;
-    use crate::lower_alloc::LowerAlloc;
-    use crate::stop::{StopRand, StopVec, Stopper};
+    use crate::lower::LowerAlloc;
+    use crate::stop::{StopVec, Stopper};
     use crate::table::Table;
     use crate::thread;
     use crate::util::{logging, Page};
@@ -515,9 +497,9 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            let lower = Arc::new(DynamicLower::new(2, &mut buffer));
             lower.clear();
-            lower.get(0, 0).unwrap();
+            lower.get(0, false, 0).unwrap();
 
             let stop = StopVec::new(2, order);
 
@@ -526,7 +508,7 @@ mod test {
                 thread::pin(t);
                 let key = Stopper::init(stop, t as _);
 
-                let page = l.get(t, 0).unwrap();
+                let page = l.get(t, false, 0).unwrap();
                 drop(key);
                 assert!(page != 0);
             });
@@ -554,7 +536,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            let lower = Arc::new(DynamicLower::new(2, &mut buffer));
             lower.clear();
 
             let stop = StopVec::new(2, order);
@@ -563,7 +545,7 @@ mod test {
                 thread::pin(t);
                 let _stopper = Stopper::init(stop, t as _);
 
-                l.get(t, 0).unwrap();
+                l.get(t, false, 0).unwrap();
             });
 
             let pte2 = lower.pt2(0).get(0);
@@ -587,11 +569,11 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            let lower = Arc::new(DynamicLower::new(2, &mut buffer));
             lower.clear();
 
             for _ in 0..Table::LEN - 1 {
-                lower.get(0, 0).unwrap();
+                lower.get(0, false, 0).unwrap();
             }
 
             let stop = StopVec::new(2, order);
@@ -600,7 +582,7 @@ mod test {
                 thread::pin(t);
                 let _stopper = Stopper::init(stop, t as _);
 
-                l.get(t, 0).unwrap();
+                l.get(t, false, 0).unwrap();
             });
 
             let pt2 = lower.pt2(0);
@@ -628,11 +610,11 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            let lower = Arc::new(DynamicLower::new(2, &mut buffer));
             lower.clear();
 
-            pages[0] = lower.get(0, 0).unwrap();
-            pages[1] = lower.get(0, 0).unwrap();
+            pages[0] = lower.get(0, false, 0).unwrap();
+            pages[1] = lower.get(0, false, 0).unwrap();
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
@@ -664,11 +646,11 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            let lower = Arc::new(DynamicLower::new(2, &mut buffer));
             lower.clear();
 
             for page in &mut pages {
-                *page = lower.get(0, 0).unwrap();
+                *page = lower.get(0, false, 0).unwrap();
             }
 
             let stop = StopVec::new(2, order);
@@ -703,11 +685,11 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(LowerAlloc::new(2, &mut buffer));
+            let lower = Arc::new(DynamicLower::new(2, &mut buffer));
             lower.clear();
 
             for page in &mut pages[..Table::LEN - 1] {
-                *page = lower.get(0, 0).unwrap();
+                *page = lower.get(0, false, 0).unwrap();
             }
             let stop = StopVec::new(2, order);
 
@@ -717,7 +699,7 @@ mod test {
                 move || {
                     let _stopper = Stopper::init(stop, 1);
 
-                    lower.get(1, 0).unwrap();
+                    lower.get(1, false, 0).unwrap();
                 }
             });
 
@@ -742,86 +724,6 @@ mod test {
                     Table::LEN - 1
                 );
             }
-        }
-    }
-
-    #[test]
-    fn rand_realloc_first() {
-        logging();
-
-        const THREADS: usize = 12;
-        let mut buffer = vec![Page::new(); 2 * THREADS * Table::span(2)];
-
-        for _ in 0..64 {
-            let seed = unsafe { libc::rand() } as u64;
-            warn!("order: {seed:x}");
-
-            let lower = Arc::new(LowerAlloc::new(THREADS, &mut buffer));
-            lower.clear();
-
-            let stop = StopRand::new(THREADS, seed);
-            let l = lower.clone();
-            thread::parallel(THREADS, move |t| {
-                let _stopper = Stopper::init(stop, t);
-
-                let mut pages = [0; 4];
-                for p in &mut pages {
-                    *p = l.get(t, 0).unwrap();
-                }
-                pages.reverse();
-                for p in pages {
-                    l.put(p).unwrap();
-                }
-            });
-
-            let pt2 = lower.pt2(0);
-            assert_eq!(pt2.get(0).free(), Table::LEN);
-            assert_eq!(pt2.get(1).free(), Table::LEN);
-            assert_eq!(pt2.get(0).free(), count(lower.pt1(0, pt2.get(0).i1())));
-            assert_eq!(
-                pt2.get(1).free(),
-                count(lower.pt1(Table::LEN, pt2.get(1).i1()))
-            );
-        }
-    }
-
-    #[test]
-    fn rand_realloc_last() {
-        logging();
-
-        const THREADS: usize = 12;
-        let mut pages = [0; Table::LEN];
-        let mut buffer = vec![Page::new(); 2 * THREADS * Table::span(2)];
-
-        for _ in 0..64 {
-            let seed = unsafe { libc::rand() } as u64;
-            warn!("order: {seed:x}");
-
-            let lower = Arc::new(LowerAlloc::new(THREADS, &mut buffer));
-            lower.clear();
-            for page in &mut pages[..Table::LEN - 3] {
-                *page = lower.get(0, 0).unwrap();
-            }
-
-            let stop = StopRand::new(THREADS, seed);
-            let l = lower.clone();
-            thread::parallel(THREADS, move |t| {
-                let _stopper = Stopper::init(stop, t);
-
-                if t < THREADS / 2 {
-                    l.put(pages[t]).unwrap();
-                } else {
-                    l.get(t, 0).unwrap();
-                }
-            });
-
-            let pt2 = lower.pt2(0);
-            assert_eq!(pt2.get(0).free() + pt2.get(1).free(), 3 + Table::LEN);
-            assert_eq!(pt2.get(0).free(), count(lower.pt1(0, pt2.get(0).i1())));
-            assert_eq!(
-                pt2.get(1).free(),
-                count(lower.pt1(Table::LEN, pt2.get(1).i1()))
-            );
         }
     }
 }

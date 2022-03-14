@@ -18,7 +18,9 @@ use nvalloc::alloc::array_unaligned::ArrayUnalignedAlloc;
 use nvalloc::alloc::list_local::ListLocalAlloc;
 use nvalloc::alloc::list_locked::ListLockedAlloc;
 use nvalloc::alloc::table::TableAlloc;
+use nvalloc::lower::dynamic::DynamicLower;
 use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
+use nvalloc::lower::fixed::FixedLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::util::{Page, WyRand};
@@ -89,11 +91,16 @@ fn main() {
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
     let allocs: Vec<(usize, Arc<dyn Alloc>)> = vec![
-        (usize::MAX, Arc::new(ArrayAlignedAlloc::new())),
-        (usize::MAX, Arc::new(ArrayUnalignedAlloc::new())),
-        (usize::MAX, Arc::new(ArrayLockedAlloc::new())),
-        (usize::MAX, Arc::new(ArrayAtomicAlloc::new())),
-        (usize::MAX, Arc::new(TableAlloc::new())),
+        (usize::MAX, Arc::new(ArrayAlignedAlloc::<DynamicLower>::new())),
+        (usize::MAX, Arc::new(ArrayUnalignedAlloc::<DynamicLower>::new())),
+        (usize::MAX, Arc::new(ArrayLockedAlloc::<DynamicLower>::new())),
+        (usize::MAX, Arc::new(ArrayAtomicAlloc::<DynamicLower>::new())),
+        (usize::MAX, Arc::new(TableAlloc::<DynamicLower>::new())),
+        (usize::MAX, Arc::new(ArrayAlignedAlloc::<FixedLower>::new())),
+        (usize::MAX, Arc::new(ArrayUnalignedAlloc::<FixedLower>::new())),
+        (usize::MAX, Arc::new(ArrayLockedAlloc::<FixedLower>::new())),
+        (usize::MAX, Arc::new(ArrayAtomicAlloc::<FixedLower>::new())),
+        (usize::MAX, Arc::new(TableAlloc::<FixedLower>::new())),
         (usize::MAX, Arc::new(ListLocalAlloc::new())),
         (16, Arc::new(ListLockedAlloc::new())),
     ];
@@ -101,7 +108,7 @@ fn main() {
     for x in x {
         for (max_threads, alloc) in &allocs {
             let name = alloc.name();
-            if alloc_names.contains(name) && bench.threads(threads, x) <= *max_threads {
+            if alloc_names.contains(&name) && bench.threads(threads, x) <= *max_threads {
                 for i in 0..iterations {
                     let perf = bench.run(
                         alloc.clone(),
@@ -226,7 +233,7 @@ fn bulk(
             total: t1.elapsed().as_millis(),
         }
     }));
-    assert_eq!(a.allocated_pages(), 0);
+    assert_eq!(a.dbg_allocated_pages(), 0);
 
     perf.init = init;
     warn!("{perf:#?}");
@@ -277,7 +284,7 @@ fn repeat(
         }
     }));
     assert_eq!(
-        a.allocated_pages(),
+        a.dbg_allocated_pages(),
         allocs * threads * Table::span(size as _)
     );
 
@@ -335,7 +342,7 @@ fn rand(
         }
     }));
     assert_eq!(
-        a.allocated_pages(),
+        a.dbg_allocated_pages(),
         allocs * threads * Table::span(size as _)
     );
 
@@ -405,7 +412,7 @@ fn filling(
             total: t1.elapsed().as_millis(),
         }
     }));
-    assert_eq!(a.allocated_pages(), fill * threads * Table::span(size as _));
+    assert_eq!(a.dbg_allocated_pages(), fill * threads * Table::span(size as _));
 
     perf.init = init;
     warn!("{perf:#?}");

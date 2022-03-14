@@ -7,7 +7,7 @@ use log::{error, warn};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
-use crate::lower_alloc::LowerAlloc;
+use crate::lower::LowerAlloc;
 use crate::table::Table;
 use crate::util::{AStack, AStackDbg, Atomic, Page};
 
@@ -38,11 +38,11 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
 #[repr(align(64))]
-pub struct ArrayAlignedAlloc {
+pub struct ArrayAlignedAlloc<L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
     /// Metadata of the lower alloc
-    lower: LowerAlloc,
+    lower: L,
     /// Array of layer 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Vec<Aligned>,
 
@@ -58,7 +58,7 @@ pub struct ArrayAlignedAlloc {
 #[repr(align(64))]
 struct Aligned(Atomic<Entry3>);
 
-impl Index<usize> for ArrayAlignedAlloc {
+impl<L: LowerAlloc> Index<usize> for ArrayAlignedAlloc<L> {
     type Output = Atomic<Entry3>;
 
     #[inline]
@@ -67,17 +67,17 @@ impl Index<usize> for ArrayAlignedAlloc {
     }
 }
 
-unsafe impl Send for ArrayAlignedAlloc {}
-unsafe impl Sync for ArrayAlignedAlloc {}
+unsafe impl<L: LowerAlloc> Send for ArrayAlignedAlloc<L> {}
+unsafe impl<L: LowerAlloc> Sync for ArrayAlignedAlloc<L> {}
 
-impl fmt::Debug for ArrayAlignedAlloc {
+impl<L: LowerAlloc> fmt::Debug for ArrayAlignedAlloc<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
         writeln!(
             f,
             "    memory: {:?} ({})",
             self.lower.memory(),
-            self.lower.pages
+            self.lower.pages()
         )?;
         for (i, entry) in self.subtrees.iter().enumerate() {
             let pte = entry.0.load();
@@ -91,7 +91,7 @@ impl fmt::Debug for ArrayAlignedAlloc {
     }
 }
 
-impl Alloc for ArrayAlignedAlloc {
+impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
         warn!(
@@ -110,10 +110,10 @@ impl Alloc for ArrayAlignedAlloc {
         self.meta = meta;
 
         // Create lower allocator
-        self.lower = LowerAlloc::new(cores, memory);
+        self.lower = L::new(cores, memory);
 
         // Array with all pte3
-        let pte3_num = Table::num_pts(2, self.lower.pages);
+        let pte3_num = Table::num_pts(2, self.lower.pages());
         self.subtrees = Vec::with_capacity(pte3_num);
         self.subtrees
             .resize_with(pte3_num, || Aligned(Atomic::new(Entry3::new())));
@@ -170,11 +170,11 @@ impl Alloc for ArrayAlignedAlloc {
     }
 
     fn pages(&self) -> usize {
-        self.lower.pages
+        self.lower.pages()
     }
 
     #[cold]
-    fn allocated_pages(&self) -> usize {
+    fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self[i].load();
@@ -185,7 +185,7 @@ impl Alloc for ArrayAlignedAlloc {
     }
 }
 
-impl Drop for ArrayAlignedAlloc {
+impl<L: LowerAlloc> Drop for ArrayAlignedAlloc<L> {
     fn drop(&mut self) {
         if !self.meta.is_null() {
             let meta = unsafe { &*self.meta };
@@ -194,12 +194,12 @@ impl Drop for ArrayAlignedAlloc {
     }
 }
 
-impl ArrayAlignedAlloc {
+impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
     #[cold]
     pub fn new() -> Self {
         Self {
             meta: null_mut(),
-            lower: LowerAlloc::default(),
+            lower: L::default(),
             subtrees: Vec::new(),
             empty: AStack::new(),
             partial_l1: AStack::new(),
@@ -308,11 +308,7 @@ impl ArrayAlignedAlloc {
             }
         }
 
-        let page = if huge {
-            self.lower.get_huge(start)?
-        } else {
-            self.lower.get(core, start)?
-        };
+        let page = self.lower.get(core, huge, start)?;
         *start_a = page;
         Ok(page)
     }
@@ -350,7 +346,7 @@ impl ArrayAlignedAlloc {
         if let Some(i) = self.empty.pop(self) {
             match self[i].update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant)) {
                 Ok(_) => {
-                    self.lower.persist(i * Table::span(2));
+                    self.lower.set_giant(i * Table::span(2));
                     Ok(i * Table::span(2))
                 }
                 Err(pte3) => {

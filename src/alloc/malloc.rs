@@ -89,7 +89,7 @@ impl Alloc for MallocAlloc {
     }
 
     #[cold]
-    fn allocated_pages(&self) -> usize {
+    fn dbg_allocated_pages(&self) -> usize {
         self.local
             .iter()
             .map(|l| l.counter.load(Ordering::Relaxed))

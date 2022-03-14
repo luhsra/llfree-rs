@@ -7,12 +7,13 @@ use std::time::Instant;
 use clap::Parser;
 use log::warn;
 use nvalloc::alloc::{self, Alloc, Size, MIN_PAGES};
+use nvalloc::lower::dynamic::DynamicLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::thread;
 use nvalloc::util::{logging, Page};
 
-type Allocator = alloc::array_atomic::ArrayAtomicAlloc;
+type Allocator = alloc::array_atomic::ArrayAtomicAlloc::<DynamicLower>;
 
 /// Benchmarking an allocator in more detail.
 #[derive(Parser, Debug)]
@@ -125,7 +126,7 @@ fn main() {
             times
         });
 
-        assert_eq!(a.allocated_pages(), 0);
+        assert_eq!(a.dbg_allocated_pages(), 0);
         drop(a);
 
         for t in t_times {

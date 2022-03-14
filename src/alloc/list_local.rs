@@ -126,7 +126,7 @@ impl Alloc for ListLocalAlloc {
     }
 
     #[cold]
-    fn allocated_pages(&self) -> usize {
+    fn dbg_allocated_pages(&self) -> usize {
         let mut pages = 0;
         for local in &self.local {
             let local = unsafe { &*local.get() };
