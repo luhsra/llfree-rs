@@ -1,4 +1,5 @@
 use core::any::type_name;
+use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use log::error;
@@ -45,7 +46,7 @@ pub enum Size {
     L2 = 2,
 }
 
-pub trait Alloc: Sync + Send {
+pub trait Alloc: Sync + Send + fmt::Debug {
     /// Initialize the allocator.
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()>;
@@ -195,6 +196,8 @@ mod test {
         for page in &pages {
             alloc.put(0, *page).unwrap();
         }
+
+        warn!("{alloc:?}");
 
         assert_eq!(alloc.allocated_pages(), 0);
     }

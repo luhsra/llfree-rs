@@ -1,7 +1,7 @@
 //! Simple reduced non-volatile memory allocator.
-use core::mem;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{fmt, mem};
 
 use log::{error, info, warn};
 
@@ -48,6 +48,53 @@ pub struct TableAlloc {
 
 unsafe impl Send for TableAlloc {}
 unsafe impl Sync for TableAlloc {}
+
+impl fmt::Debug for TableAlloc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{} {{", self.name())?;
+        writeln!(
+            f,
+            "    memory: {:?} ({})",
+            self.lower.memory(),
+            self.lower.pages
+        )?;
+
+        fn dump_rec(
+            this: &TableAlloc,
+            f: &mut fmt::Formatter<'_>,
+            layer: usize,
+            start: usize,
+        ) -> fmt::Result {
+            if layer == 3 {
+                let pt3 = this.pt3(start);
+                for i in Table::range(3, start..this.pages()) {
+                    let pte3 = pt3.get(i);
+                    let l = 7 + (Table::LAYERS - layer) * 4;
+                    writeln!(f, "{i:>l$} {pte3:?}")?;
+                }
+            } else {
+                let pt = this.pt(layer, start);
+                for i in Table::range(layer, start..this.pages()) {
+                    let pte = pt.get(i);
+                    let l = 7 + (Table::LAYERS - layer) * 4;
+                    writeln!(f, "{i:>l$} {pte:?}")?;
+                    dump_rec(this, f, layer - 1, Table::page(layer, start, i))?;
+                }
+            }
+            Ok(())
+        }
+        dump_rec(self, f, Table::LAYERS, 0)?;
+
+        for (t, local) in self.lower.iter().enumerate() {
+            let pte = local.pte(false);
+            writeln!(f, "    L{t:>2}: L0 {pte:?}")?;
+            let pte = local.pte(true);
+            writeln!(f, "         L1 {pte:?}")?;
+        }
+        writeln!(f, "}}")?;
+        Ok(())
+    }
+}
 
 impl Alloc for TableAlloc {
     #[cold]
@@ -313,7 +360,9 @@ impl TableAlloc {
             }
         }
         error!("No memory l{layer}");
-        self.dump();
+        if layer == Table::LAYERS {
+            error!("{self:?}");
+        }
         Err(Error::Memory)
     }
 

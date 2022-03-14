@@ -1,6 +1,6 @@
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use core::mem;
+use core::{fmt, mem};
 
 use log::{error, warn};
 use spin::mutex::{TicketMutex, TicketMutexGuard};
@@ -56,6 +56,33 @@ pub struct ArrayLockedAlloc {
 
 unsafe impl Send for ArrayLockedAlloc {}
 unsafe impl Sync for ArrayLockedAlloc {}
+
+impl fmt::Debug for ArrayLockedAlloc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{} {{", self.name())?;
+        writeln!(
+            f,
+            "    memory: {:?} ({})",
+            self.lower.memory(),
+            self.lower.pages
+        )?;
+        for (i, entry) in self.subtrees.iter().enumerate() {
+            let pte = entry.load();
+            writeln!(f, "    {i:>3}: {pte:?}")?;
+        }
+        writeln!(f, "    empty: {:?}", self.empty.lock())?;
+        writeln!(f, "    partial_l0: {:?}", self.partial_l0.lock())?;
+        writeln!(f, "    partial_l1: {:?}", self.partial_l1.lock())?;
+        for (t, local) in self.lower.iter().enumerate() {
+            let pte = local.pte(false);
+            writeln!(f, "    L{t:>2}: L0 {pte:?}")?;
+            let pte = local.pte(true);
+            writeln!(f, "         L1 {pte:?}")?;
+        }
+        writeln!(f, "}}")?;
+        Ok(())
+    }
+}
 
 impl Alloc for ArrayLockedAlloc {
     #[cold]
@@ -144,7 +171,6 @@ impl Alloc for ArrayLockedAlloc {
         let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self.subtrees[i].load();
-            // warn!("{i:>3}: {pte:?}");
             pages -= pte.free();
         }
         // Pages allocated in reserved subtrees
@@ -245,7 +271,10 @@ impl ArrayLockedAlloc {
     fn reserve(&self, huge: bool) -> Result<(usize, Entry3)> {
         while let Some(i) = self.partial(huge).pop() {
             warn!("reserve partial {i}");
-            match self.subtrees[i].update(|v| v.reserve_partial(huge, PTE3_FULL)) {
+            match self.subtrees[i].update(|v| {
+                v.reserve_partial(huge, PTE3_FULL)
+                    .map(|v| v.with_idx(Entry3::IDX_MAX))
+            }) {
                 Ok(pte) => {
                     let pte = pte.dec(huge).unwrap().with_idx(i);
                     return Ok((i * Table::span(2), pte));
@@ -253,6 +282,7 @@ impl ArrayLockedAlloc {
                 Err(pte) => {
                     // Skip empty entries
                     if !pte.reserved() && pte.free() == Table::span(2) {
+                        let _ = self.subtrees[i].update(|v| Some(v.with_idx(0)));
                         self.empty.lock().push(i);
                     }
                 }
@@ -261,13 +291,15 @@ impl ArrayLockedAlloc {
 
         while let Some(i) = self.empty.lock().pop() {
             warn!("reserve empty {i}");
-            if let Ok(pte) = self.subtrees[i].update(|v| v.reserve_empty(huge)) {
+            if let Ok(pte) = self.subtrees[i]
+                .update(|v| v.reserve_empty(huge).map(|v| v.with_idx(Entry3::IDX_MAX)))
+            {
                 let pte = pte.dec(huge).unwrap().with_idx(i);
                 return Ok((i * Table::span(2), pte));
             }
         }
 
-        error!("No memory");
+        error!("No memory {self:?}");
         Err(Error::Memory)
     }
 
@@ -282,13 +314,15 @@ impl ArrayLockedAlloc {
 
         let max = (self.pages() - i * Table::span(2)).min(Table::span(2));
         if let Ok(v) = self.subtrees[i].update(|v| v.unreserve_add(huge, pte, max)) {
-            // Add to list if new counter is small enough
             // Only if not already in list
             if v.idx() == Entry3::IDX_MAX {
+                // Add to list if new counter is small enough
                 let new_pages = v.free() + pte.free();
                 if new_pages == max {
+                    let _ = self.subtrees[i].update(|v| Some(v.with_idx(0)));
                     self.empty.lock().push(i);
                 } else if new_pages > PTE3_FULL {
+                    let _ = self.subtrees[i].update(|v| Some(v.with_idx(0)));
                     self.partial(huge).push(i);
                 }
             }
@@ -376,6 +410,7 @@ impl ArrayLockedAlloc {
                 // Only if not already in list
                 if pte.idx() == Entry3::IDX_MAX && pte.free() <= PTE3_FULL && new_pages > PTE3_FULL
                 {
+                    let _ = self.subtrees[i].update(|v| Some(v.with_idx(0)));
                     self.partial(huge).push(i);
                 }
             }

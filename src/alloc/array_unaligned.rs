@@ -1,3 +1,4 @@
+use core::fmt;
 use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -8,7 +9,7 @@ use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
 use crate::lower_alloc::LowerAlloc;
 use crate::table::Table;
-use crate::util::{AStack, Atomic, Page};
+use crate::util::{AStack, AStackDbg, Atomic, Page};
 
 const PTE3_FULL: usize = 8 * Table::span(1);
 
@@ -55,6 +56,27 @@ impl Index<usize> for ArrayUnalignedAlloc {
 
 unsafe impl Send for ArrayUnalignedAlloc {}
 unsafe impl Sync for ArrayUnalignedAlloc {}
+
+impl fmt::Debug for ArrayUnalignedAlloc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{} {{", self.name())?;
+        writeln!(
+            f,
+            "    memory: {:?} ({})",
+            self.lower.memory(),
+            self.lower.pages
+        )?;
+        for (i, entry) in self.subtrees.iter().enumerate() {
+            let pte = entry.0.load();
+            writeln!(f, "    {i:>3}: {pte:?}")?;
+        }
+        writeln!(f, "    empty: {:?}", AStackDbg(&self.empty, self))?;
+        writeln!(f, "    partial_l0: {:?}", AStackDbg(&self.partial_l0, self))?;
+        writeln!(f, "    partial_l1: {:?}", AStackDbg(&self.partial_l1, self))?;
+        writeln!(f, "}}")?;
+        Ok(())
+    }
+}
 
 impl Alloc for ArrayUnalignedAlloc {
     #[cold]

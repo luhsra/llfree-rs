@@ -261,14 +261,14 @@ impl<T: ANode> AStack<T> {
     }
 }
 #[allow(dead_code)]
-pub struct AArrayDebug<'a, T, B>(pub &'a AStack<T>, pub &'a B)
+pub struct AStackDbg<'a, T, B>(pub &'a AStack<T>, pub &'a B)
 where
-    T: ANode + Debug,
+    T: ANode,
     B: Index<usize, Output = Atomic<T>>;
 
-impl<'a, T, B> Debug for AArrayDebug<'a, T, B>
+impl<'a, T, B> Debug for AStackDbg<'a, T, B>
 where
-    T: ANode + Debug,
+    T: ANode,
     B: Index<usize, Output = Atomic<T>>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -280,8 +280,8 @@ where
                 let mut i = i as usize;
                 let mut ended = false;
                 for _ in 0..1000 {
+                    dbg.entry(&i);
                     let elem = self.1[i].load();
-                    dbg.entry(&elem);
                     if let Some(next) = elem.next() {
                         i = next;
                     } else {
@@ -333,7 +333,7 @@ mod test {
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Barrier};
 
-    use super::{AArrayDebug, ANode, AStack, Cycles, WyRand};
+    use super::{ANode, AStack, AStackDbg, Cycles, WyRand};
     use crate::thread;
     use crate::{thread::parallel, util::Atomic};
 
@@ -371,7 +371,7 @@ mod test {
         stack.push(unsafe { &DATA }, 0);
         stack.push(unsafe { &DATA }, 1);
 
-        println!("{:?}", AArrayDebug(&stack, unsafe { &DATA }));
+        println!("{:?}", AStackDbg(&stack, unsafe { &DATA }));
 
         assert_eq!(stack.pop(unsafe { &DATA }), Some(1));
         assert_eq!(stack.pop(unsafe { &DATA }), Some(0));

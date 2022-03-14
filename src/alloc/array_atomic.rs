@@ -1,6 +1,6 @@
-use core::mem;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{fmt, mem};
 
 use log::{error, warn};
 
@@ -8,7 +8,7 @@ use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::Entry3;
 use crate::lower_alloc::LowerAlloc;
 use crate::table::Table;
-use crate::util::{AStack, Atomic, Page};
+use crate::util::{AStack, AStackDbg, Atomic, Page};
 
 const PTE3_FULL: usize = 8 * Table::span(1);
 
@@ -55,6 +55,34 @@ pub struct ArrayAtomicAlloc {
 
 unsafe impl Send for ArrayAtomicAlloc {}
 unsafe impl Sync for ArrayAtomicAlloc {}
+
+impl fmt::Debug for ArrayAtomicAlloc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{} {{", self.name())?;
+        writeln!(
+            f,
+            "    memory: {:?} ({})",
+            self.lower.memory(),
+            self.lower.pages
+        )?;
+        for (i, entry) in self.subtrees.iter().enumerate() {
+            let pte = entry.load();
+            writeln!(f, "    {i:>3}: {pte:?}")?;
+        }
+        let s = &self.subtrees;
+        writeln!(f, "    empty: {:?}", AStackDbg(&self.empty, s))?;
+        writeln!(f, "    partial_l0: {:?}", AStackDbg(&self.partial_l0, s))?;
+        writeln!(f, "    partial_l1: {:?}", AStackDbg(&self.partial_l1, s))?;
+        for (t, local) in self.lower.iter().enumerate() {
+            let pte = local.pte(false);
+            writeln!(f, "    L{t:>2}: L0 {pte:?}")?;
+            let pte = local.pte(true);
+            writeln!(f, "         L1 {pte:?}")?;
+        }
+        writeln!(f, "}}")?;
+        Ok(())
+    }
+}
 
 impl Alloc for ArrayAtomicAlloc {
     #[cold]
@@ -143,7 +171,6 @@ impl Alloc for ArrayAtomicAlloc {
         let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {
             let pte = self.subtrees[i].load();
-            // warn!("{i:>3}: {pte:?}");
             pages -= pte.free();
         }
         // Pages allocated in reserved subtrees
@@ -263,7 +290,7 @@ impl ArrayAtomicAlloc {
             }
         }
 
-        error!("No memory");
+        error!("No memory {self:?}");
         Err(Error::Memory)
     }
 
@@ -278,9 +305,9 @@ impl ArrayAtomicAlloc {
 
         let max = (self.pages() - i * Table::span(2)).min(Table::span(2));
         if let Ok(v) = self.subtrees[i].update(|v| v.unreserve_add(huge, pte, max)) {
-            // Add to list if new counter is small enough
             // Only if not already in list
             if v.idx() == Entry3::IDX_MAX {
+                // Add to list if new counter is small enough
                 let new_pages = v.free() + pte.free();
                 if new_pages == max {
                     self.empty.push(&self.subtrees, i);

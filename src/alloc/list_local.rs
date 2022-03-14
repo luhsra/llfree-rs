@@ -1,3 +1,4 @@
+use core::fmt;
 use core::ops::Range;
 use core::ptr::{null, null_mut};
 use std::cell::UnsafeCell;
@@ -23,6 +24,21 @@ pub struct ListLocalAlloc {
     pages: usize,
 }
 
+unsafe impl Send for ListLocalAlloc {}
+unsafe impl Sync for ListLocalAlloc {}
+
+impl fmt::Debug for ListLocalAlloc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{} {{", self.name())?;
+        for (t, l) in self.local.iter().enumerate() {
+            let local = unsafe { &mut *l.get() };
+            writeln!(f, "    L {t:>2} C={}", local.counter)?;
+        }
+        writeln!(f, "}}")?;
+        Ok(())
+    }
+}
+
 impl ListLocalAlloc {
     pub fn new() -> Self {
         Self {
@@ -32,9 +48,6 @@ impl ListLocalAlloc {
         }
     }
 }
-
-unsafe impl Send for ListLocalAlloc {}
-unsafe impl Sync for ListLocalAlloc {}
 
 impl Alloc for ListLocalAlloc {
     #[cold]

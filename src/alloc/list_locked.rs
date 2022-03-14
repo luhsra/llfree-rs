@@ -1,3 +1,4 @@
+use core::fmt;
 use core::ops::Range;
 use core::ptr::{null, null_mut};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -29,6 +30,17 @@ struct LocalCounter {
 
 unsafe impl Send for ListLockedAlloc {}
 unsafe impl Sync for ListLockedAlloc {}
+
+impl fmt::Debug for ListLockedAlloc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{} {{", self.name())?;
+        for (t, l) in self.local.iter().enumerate() {
+            writeln!(f, "    L {t:>2} C={}", l.counter.load(Ordering::Relaxed))?;
+        }
+        writeln!(f, "}}")?;
+        Ok(())
+    }
+}
 
 impl ListLockedAlloc {
     pub fn new() -> Self {
