@@ -153,41 +153,23 @@ impl LowerAlloc for FixedLower {
 
     /// Free single page and returns if the page was huge
     fn put(&self, page: usize) -> Result<bool> {
-        let pt2 = self.pt2(page);
-        let i2 = Table::idx(2, page);
-
         stop!();
 
-        let mut old = pt2.get(i2);
-        if old.page() {
-            // Free huge page
-            if page % Table::span(Size::L1 as _) != 0 {
-                error!("Invalid address {page}");
-                return Err(Error::Address);
+        let pt2 = self.pt2(page);
+        let i2 = Table::idx(2, page);
+        // try free huge
+        if let Err(old) = pt2.cas(
+            i2,
+            Entry2::new().with_giant(true),
+            Entry2::new_table(Table::LEN, 0),
+        ) {
+            if !old.giant() && old.free() < Table::LEN {
+                self.put_small(page).map(|_| true)
+            } else {
+                Err(Error::Address)
             }
-
-            let pt1 = self.pt1(page);
-            pt1.fill(Entry1::Empty);
-
-            match pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
-                Ok(_) => Ok(true),
-                Err(_) => {
-                    error!("Corruption l2 i{i2}");
-                    Err(Error::Corruption)
-                }
-            }
-        } else if !old.giant() && old.free() < Table::LEN {
-            for _ in 0..CAS_RETRIES {
-                match self.put_small(page) {
-                    Err(Error::CAS) => old = pt2.get(i2),
-                    Err(e) => return Err(e),
-                    Ok(_) => return Ok(false),
-                }
-            }
-            error!("Exceeding retries {} {old:?}", page / Table::span(2));
-            Err(Error::CAS)
         } else {
-            Err(Error::Address)
+            Ok(true)
         }
     }
 
@@ -195,15 +177,6 @@ impl LowerAlloc for FixedLower {
         self.pt2(page).set(0, Entry2::new().with_giant(true));
     }
     fn clear_giant(&self, page: usize) {
-        // Clear all layer 1 page tables in this area
-        for i in Table::range(2, page..self.pages) {
-            let start = Table::page(2, page, i);
-
-            // i1 is initially 0
-            let pt1 = self.pt1(start);
-            pt1.fill(Entry1::Empty);
-        }
-        // Clear the persist flag
         self.pt2(page).set(0, Entry2::new_table(Table::LEN, 0));
     }
 
@@ -268,15 +241,14 @@ impl FixedLower {
             for newstart in Table::iterate(2, start) {
                 let i2 = Table::idx(2, newstart);
 
-                stop!();
-
-                let pte2 = pt2.get(i2);
-
-                if pte2.page() || pte2.free() == 0 {
-                    continue;
+                #[cfg(feature = "stop")]
+                {
+                    let pte2 = pt2.get(i2);
+                    if pte2.page() || pte2.free() == 0 {
+                        continue;
+                    }
+                    stop!();
                 }
-
-                stop!();
 
                 if pt2.update(i2, |v| v.dec(0)).is_ok() {
                     return self.get_table(newstart);
@@ -296,9 +268,10 @@ impl FixedLower {
                 let i = Table::idx(1, page);
 
                 #[cfg(feature = "stop")]
-                if pt1.get(i) != Entry1::Empty {
-                    continue;
-                } else {
+                {
+                    if pt1.get(i) != Entry1::Empty {
+                        continue;
+                    }
                     stop!();
                 }
 
@@ -315,32 +288,22 @@ impl FixedLower {
     }
 
     fn put_small(&self, page: usize) -> Result<()> {
-        let pt2 = self.pt2(page);
-        let i2 = Table::idx(2, page);
-
         stop!();
 
         let pt1 = self.pt1(page);
         let i1 = Table::idx(1, page);
-        let pte1 = pt1.get(i1);
-
-        if pte1 != Entry1::Page {
+        if pt1.cas(i1, Entry1::Page, Entry1::Empty).is_err() {
             error!("Invalid Addr l1 i{i1} p={page}");
             return Err(Error::Address);
         }
 
         stop!();
 
+        let pt2 = self.pt2(page);
+        let i2 = Table::idx(2, page);
         if let Err(pte2) = pt2.update(i2, |pte| pte.inc()) {
             error!("Invalid Addr l1 i{i1} p={page} {pte2:?}");
             return Err(Error::Address);
-        }
-
-        stop!();
-
-        if pt1.cas(i1, Entry1::Page, Entry1::Empty).is_err() {
-            error!("Corruption l1 i{i1}");
-            return Err(Error::Corruption);
         }
 
         Ok(())
@@ -401,10 +364,11 @@ mod test {
         logging();
 
         let orders = [
-            vec![0, 0, 0, 1, 1, 1],
+            vec![0, 0, 1, 1],
             vec![0, 0, 1, 1, 1, 0, 0],
             vec![1, 1, 0, 0, 0, 1, 1],
-            vec![1, 0, 1, 0, 1, 0, 0],
+            vec![1, 0, 1, 0, 0],
+            vec![1, 1, 0, 0],
         ];
 
         let mut buffer = vec![Page::new(); 4 * Table::span(2)];
@@ -437,10 +401,10 @@ mod test {
         logging();
 
         let orders = [
-            vec![0, 0, 0, 1, 1, 1],
-            vec![0, 1, 1, 0, 0, 1, 1],
-            vec![0, 1, 0, 1, 0, 1, 1],
-            vec![0, 1, 1, 1, 0, 0],
+            vec![0, 0, 1, 1],
+            vec![0, 1, 1, 0, 0],
+            vec![0, 1, 0, 1, 1],
+            vec![1, 1, 0, 0],
         ];
 
         let mut buffer = vec![Page::new(); 4 * Table::span(2)];
@@ -470,10 +434,10 @@ mod test {
         logging();
 
         let orders = [
-            vec![0, 0, 0, 1, 1, 1, 1],
-            vec![0, 0, 1, 1, 0, 1, 1, 0],
-            vec![1, 0, 0, 1, 1, 1, 1, 0],
-            vec![1, 1, 0, 1, 0, 0, 0],
+            vec![0, 0, 1, 1, 1],
+            vec![0, 1, 1, 0, 1, 1, 0],
+            vec![1, 0, 0, 1, 0],
+            vec![1, 1, 0, 0, 0],
         ];
 
         let mut buffer = vec![Page::new(); 4 * Table::span(2)];
@@ -508,9 +472,9 @@ mod test {
         logging();
 
         let orders = [
-            vec![0, 0, 0, 0, 1, 1, 1, 1], // first 0, then 1
+            vec![0, 0, 0, 1, 1, 1], // first 0, then 1
             vec![0, 1, 0, 1, 0, 1, 0, 1],
-            vec![0, 0, 1, 1, 1, 1, 0, 0],
+            vec![0, 0, 1, 1, 1, 0, 0],
         ];
 
         let mut pages = [0; 2];
@@ -544,7 +508,7 @@ mod test {
         logging();
 
         let orders = [
-            vec![0, 0, 0, 0, 1, 1, 1, 1],
+            vec![0, 0, 0, 1, 1, 1],
             vec![0, 1, 0, 1, 0, 1, 0, 1],
             vec![0, 1, 1, 0, 0, 1, 1, 0],
         ];
@@ -580,12 +544,14 @@ mod test {
         logging();
 
         let orders = [
-            vec![0, 0, 0, 0, 1, 1, 1], // free then alloc
-            vec![1, 1, 1, 0, 0, 0, 0], // alloc last then free last
-            vec![0, 1, 1, 1, 0, 0, 0], // 1 skips table
-            vec![0, 1, 0, 1, 0, 1, 0], // 1 skips table
-            vec![0, 0, 1, 0, 1, 0, 1, 1],
-            vec![0, 0, 0, 1, 1, 0, 1, 1], // nothing found & retry
+            vec![0, 0, 0, 1, 1], // free then alloc
+            vec![1, 1, 0, 0, 0], // alloc last then free last
+            vec![0, 1, 1, 0, 0],
+            vec![0, 0, 1, 1, 0],
+            vec![1, 0, 1, 0, 0],
+            vec![0, 1, 0, 1, 0],
+            vec![0, 0, 1, 0, 1],
+            vec![1, 0, 0, 0, 1],
         ];
 
         let mut pages = [0; Table::LEN];

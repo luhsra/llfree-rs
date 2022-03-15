@@ -389,6 +389,7 @@ impl DynamicLower {
 
         stop!();
 
+        // Update pt2 first, to avoid write in freed pt1
         if let Err(pte2) = pt2.update(i2, |pte| pte.inc_partial(pte2.i1())) {
             return if pte2.free() == Table::LEN {
                 error!("Invalid Addr l1 i{i1} p={page}");
