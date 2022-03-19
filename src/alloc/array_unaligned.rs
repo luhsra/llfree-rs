@@ -30,7 +30,7 @@ pub struct ArrayUnalignedAlloc<L: LowerAlloc> {
     meta: *mut Meta,
     /// Metadata of the lower alloc
     lower: L,
-    /// Array of layer 3 entries, the roots of the 1G subtrees, the lower alloc manages
+    /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Vec<Aligned>,
 
     /// List of idx to subtrees that are not allocated at all
@@ -105,9 +105,9 @@ impl<L: LowerAlloc> Alloc for ArrayUnalignedAlloc<L> {
         self.subtrees
             .resize_with(pte3_num, || Aligned(Atomic::new(Entry3::new())));
 
-        self.empty = AStack::new();
-        self.partial_l0 = AStack::new();
-        self.partial_l1 = AStack::new();
+        self.empty = AStack::default();
+        self.partial_l0 = AStack::default();
+        self.partial_l1 = AStack::default();
 
         warn!("init");
         if !overwrite
@@ -181,19 +181,20 @@ impl<L: LowerAlloc> Drop for ArrayUnalignedAlloc<L> {
     }
 }
 
-impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
-    #[cold]
-    pub fn new() -> Self {
+impl<L: LowerAlloc> Default for ArrayUnalignedAlloc<L> {
+    fn default() -> Self {
         Self {
             meta: null_mut(),
             lower: L::default(),
             subtrees: Vec::new(),
-            empty: AStack::new(),
-            partial_l1: AStack::new(),
-            partial_l0: AStack::new(),
+            empty: AStack::default(),
+            partial_l1: AStack::default(),
+            partial_l0: AStack::default(),
         }
     }
+}
 
+impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
     /// Setup a new allocator.
     #[cold]
     fn setup(&mut self) {
@@ -218,7 +219,7 @@ impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
     }
 
     /// Recover the allocator from NVM after reboot.
-    /// If `deep` then the layer 1 page tables are traversed and diverging counters are corrected.
+    /// If `deep` then the level 1 page tables are traversed and diverging counters are corrected.
     #[cold]
     fn recover(&self, deep: bool) -> Result<usize> {
         if deep {

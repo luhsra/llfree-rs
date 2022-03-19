@@ -19,7 +19,7 @@ The [src/alloc](src/alloc/) directory contains the different allocator variants.
 The general interface is defined in [src/alloc.rs](src/alloc.rs), together with various unit tests and stress tests.
 
 The persistent lower allocator can be found in [src/lower_alloc.rs](src/lower_alloc.rs).
-It is responsible for managing the layer one and layer two-page tables that are persisted on the non-volatile memory.
+It is responsible for managing the level one and level two-page tables that are persisted on the non-volatile memory.
 Most of the upper allocators in [src/alloc](src/alloc/) use the lower allocator and focus only on managing the higher level 1G subtrees using volatile data structures.
 
 The lower allocator is heavily tested for race conditions using synchronization points (`stop`) to control the execution order of parallel threads.

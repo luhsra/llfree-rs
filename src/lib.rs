@@ -24,7 +24,7 @@ pub type Allocator = alloc::array_atomic::ArrayAtomicAlloc<DynamicLower>;
 static mut ALLOC: Option<Arc<dyn Alloc>> = None;
 
 pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> alloc::Result<()> {
-    let mut alloc = Allocator::new();
+    let mut alloc = Allocator::default();
     alloc.init(cores, memory, overwrite)?;
     unsafe { ALLOC = Some(Arc::new(alloc)) };
     Ok(())

@@ -28,42 +28,42 @@ impl Table {
 
     /// Area in bytes that a page table covers
     #[inline]
-    pub const fn m_span(layer: usize) -> usize {
-        Self::span(layer) << Page::SIZE_BITS
+    pub const fn m_span(level: usize) -> usize {
+        Self::span(level) << Page::SIZE_BITS
     }
 
     /// Area in pages that a page table covers
     #[inline]
-    pub const fn span(layer: usize) -> usize {
-        1 << (Self::LEN_BITS * layer)
+    pub const fn span(level: usize) -> usize {
+        1 << (Self::LEN_BITS * level)
     }
 
     /// Returns pt index that contains the `page`
     #[inline]
-    pub const fn idx(layer: usize, page: usize) -> usize {
-        (page >> (Self::LEN_BITS * (layer - 1))) & (Self::LEN - 1)
+    pub const fn idx(level: usize, page: usize) -> usize {
+        (page >> (Self::LEN_BITS * (level - 1))) & (Self::LEN - 1)
     }
 
     /// Returns the starting page of the corresponding page table
     #[inline]
-    pub const fn round(layer: usize, page: usize) -> usize {
-        page & !((1 << (Self::LEN_BITS * layer)) - 1)
+    pub const fn round(level: usize, page: usize) -> usize {
+        page & !((1 << (Self::LEN_BITS * level)) - 1)
     }
 
     /// Returns the page at the given index `i`
     #[inline]
-    pub const fn page(layer: usize, start: usize, i: usize) -> usize {
-        Self::round(layer, start) + i * Self::span(layer - 1)
+    pub const fn page(level: usize, start: usize, i: usize) -> usize {
+        Self::round(level, start) + i * Self::span(level - 1)
     }
 
     #[inline]
-    pub const fn num_pts(layer: usize, pages: usize) -> usize {
-        (pages + Self::span(layer) - 1) / Self::span(layer)
+    pub const fn num_pts(level: usize, pages: usize) -> usize {
+        (pages + Self::span(level) - 1) / Self::span(level)
     }
 
     /// Computes the index range for the given page range
-    pub fn range(layer: usize, pages: Range<usize>) -> Range<usize> {
-        let bits = Self::LEN_BITS * (layer - 1);
+    pub fn range(level: usize, pages: Range<usize>) -> Range<usize> {
+        let bits = Self::LEN_BITS * (level - 1);
         let start = pages.start >> bits;
         let end = (pages.end >> bits) + (pages.end.trailing_zeros() < bits as _) as usize;
 
@@ -75,11 +75,11 @@ impl Table {
 
     /// Iterates over the table pages beginning with `start`.
     /// It wraps around the end and ends one before `start`.
-    pub fn iterate(layer: usize, start: usize) -> impl Iterator<Item = usize> {
-        debug_assert!(layer >= 1);
+    pub fn iterate(level: usize, start: usize) -> impl Iterator<Item = usize> {
+        debug_assert!(level >= 1);
 
-        let bits = Self::LEN_BITS * (layer - 1);
-        let pt_start = Self::round(layer, start);
+        let bits = Self::LEN_BITS * (level - 1);
+        let pt_start = Self::round(level, start);
         let offset = (start >> bits) % Self::LEN;
         std::iter::once(start).chain(
             (1..Table::LEN)
@@ -97,8 +97,11 @@ impl<T: Sized + From<u64> + Into<u64> + Clone> Table<T> {
         }
     }
     pub fn fill(&self, e: T) {
+        // cast to raw memory to let the compiler use vector instructions
+        #[allow(clippy::cast_ref_to_mut)]
         let mem = unsafe { &mut *(&self.entries as *const _ as *mut [T; Table::LEN]) };
         mem.fill(e);
+        // memory ordering has to be enforced with a memory barrier
         atomic::fence(Ordering::SeqCst);
     }
     #[inline]

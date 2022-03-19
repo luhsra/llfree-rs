@@ -42,8 +42,8 @@ impl fmt::Debug for ListLockedAlloc {
     }
 }
 
-impl ListLockedAlloc {
-    pub fn new() -> Self {
+impl Default for ListLockedAlloc {
+    fn default() -> Self {
         Self {
             memory: null()..null(),
             next: TicketMutex::new(Node::new()),

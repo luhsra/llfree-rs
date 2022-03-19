@@ -39,7 +39,7 @@ pub struct TableAlloc<L: LowerAlloc> {
     meta: *mut Meta,
     /// Metadata of the lower alloc
     lower: L,
-    /// Array of the volatile layer 3-5 page tables
+    /// Array of the volatile level 3-5 page tables
     /// ```text
     /// DRAM: [ 1*PT5 | n*PT4 | m*PT3 ]
     /// ```
@@ -62,23 +62,23 @@ impl<L: LowerAlloc> fmt::Debug for TableAlloc<L> {
         fn dump_rec<L: LowerAlloc>(
             this: &TableAlloc<L>,
             f: &mut fmt::Formatter<'_>,
-            layer: usize,
+            level: usize,
             start: usize,
         ) -> fmt::Result {
-            if layer == 3 {
+            if level == 3 {
                 let pt3 = this.pt3(start);
                 for i in Table::range(3, start..this.pages()) {
                     let pte3 = pt3.get(i);
-                    let l = 7 + (Table::LAYERS - layer) * 4;
+                    let l = 7 + (Table::LAYERS - level) * 4;
                     writeln!(f, "{i:>l$} {pte3:?}")?;
                 }
             } else {
-                let pt = this.pt(layer, start);
-                for i in Table::range(layer, start..this.pages()) {
+                let pt = this.pt(level, start);
+                for i in Table::range(level, start..this.pages()) {
                     let pte = pt.get(i);
-                    let l = 7 + (Table::LAYERS - layer) * 4;
+                    let l = 7 + (Table::LAYERS - level) * 4;
                     writeln!(f, "{i:>l$} {pte:?}")?;
-                    dump_rec(this, f, layer - 1, Table::page(layer, start, i))?;
+                    dump_rec(this, f, level - 1, Table::page(level, start, i))?;
                 }
             }
             Ok(())
@@ -118,8 +118,8 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         self.lower = L::new(cores, memory);
 
         let mut num_pt = 0;
-        for layer in 3..=Table::LAYERS {
-            num_pt += Table::num_pts(layer, self.lower.pages());
+        for level in 3..=Table::LAYERS {
+            num_pt += Table::num_pts(level, self.lower.pages());
         }
 
         self.tables = vec![Page::new(); num_pt];
@@ -199,45 +199,45 @@ impl<L: LowerAlloc> Drop for TableAlloc<L> {
         }
     }
 }
-
-impl<L: LowerAlloc> TableAlloc<L> {
-    #[cold]
-    pub fn new() -> Self {
+impl<L: LowerAlloc> Default for TableAlloc<L> {
+    fn default() -> Self {
         Self {
             meta: null_mut(),
             lower: L::default(),
             tables: Vec::new(),
         }
     }
+}
 
-    fn allocated_pages_rec(&self, layer: usize, start: usize) -> usize {
+impl<L: LowerAlloc> TableAlloc<L> {
+    fn allocated_pages_rec(&self, level: usize, start: usize) -> usize {
         let mut pages = 0;
-        if layer == 3 {
+        if level == 3 {
             let pt3 = self.pt3(start);
             for i in Table::range(3, start..self.pages()) {
                 let pte3 = pt3.get(i);
                 pages += pte3.free();
             }
         } else {
-            for i in Table::range(layer, start..self.pages()) {
-                pages += self.allocated_pages_rec(layer - 1, Table::page(layer, start, i));
+            for i in Table::range(level, start..self.pages()) {
+                pages += self.allocated_pages_rec(level - 1, Table::page(level, start, i));
             }
         }
         pages
     }
 
-    /// Returns the page table of the given `layer` that contains the `page`.
-    fn pt(&self, layer: usize, page: usize) -> &Table<Entry> {
-        assert!((4..=Table::LAYERS).contains(&layer));
+    /// Returns the page table of the given `level` that contains the `page`.
+    fn pt(&self, level: usize, page: usize) -> &Table<Entry> {
+        assert!((4..=Table::LAYERS).contains(&level));
 
-        let i = page >> (Table::LEN_BITS * layer);
-        let offset: usize = (layer..Table::LAYERS)
+        let i = page >> (Table::LEN_BITS * level);
+        let offset: usize = (level..Table::LAYERS)
             .map(|i| Table::num_pts(i, self.pages()))
             .sum();
         self.tables[offset + i].cast()
     }
 
-    /// Returns the page table of the given `layer` that contains the `page`.
+    /// Returns the page table of the given `level` that contains the `page`.
     fn pt3(&self, page: usize) -> &Table<Entry3> {
         let i = page >> (Table::LEN_BITS * 3);
         let offset: usize = (3..Table::LAYERS)
@@ -248,20 +248,20 @@ impl<L: LowerAlloc> TableAlloc<L> {
 
     /// Setup a new allocator.
     #[cold]
-    fn setup_rec(&self, layer: usize, start: usize) {
+    fn setup_rec(&self, level: usize, start: usize) {
         for i in 0..Table::LEN {
-            let page = Table::page(layer, start, i);
+            let page = Table::page(level, start, i);
             if page > self.pages() {
                 break;
             }
 
-            if layer == 3 {
+            if level == 3 {
                 let pt = self.pt3(page);
                 let max = (self.pages() - page).min(Table::span(2));
                 pt.set(i, Entry3::new().with_free(max));
             } else {
-                let pt = self.pt(layer, page);
-                let max = (self.pages() - page).min(Table::span(layer));
+                let pt = self.pt(level, page);
+                let max = (self.pages() - page).min(Table::span(level));
                 let empty = max / Table::span(2);
 
                 if max - empty * Table::span(2) > PTE3_FULL {
@@ -269,29 +269,29 @@ impl<L: LowerAlloc> TableAlloc<L> {
                 } else {
                     pt.set(i, Entry::new().with_empty(empty));
                 }
-                self.setup_rec(layer - 1, page);
+                self.setup_rec(level - 1, page);
             }
         }
     }
 
     /// Recover the allocator from NVM after reboot.
-    /// If `deep` then the layer 1 page tables are traversed and diverging counters are corrected.
+    /// If `deep` then the level 1 page tables are traversed and diverging counters are corrected.
     #[cold]
-    fn recover_rec(&self, layer: usize, start: usize, deep: bool) -> Result<(usize, usize, usize)> {
+    fn recover_rec(&self, level: usize, start: usize, deep: bool) -> Result<(usize, usize, usize)> {
         let mut empty = 0;
         let mut partial_l0 = 0;
         let mut partial_l1 = 0;
-        let pt = self.pt(layer, start);
+        let pt = self.pt(level, start);
         for i in 0..Table::LEN {
-            let page = Table::page(layer, start, i);
+            let page = Table::page(level, start, i);
             if page > self.pages() {
                 break;
             }
 
-            let (c_empty, c_pl0, c_pl1) = if layer - 1 == 3 {
+            let (c_empty, c_pl0, c_pl1) = if level - 1 == 3 {
                 self.recover_l3(page, deep)?
             } else {
-                self.recover_rec(layer - 1, page, deep)?
+                self.recover_rec(level - 1, page, deep)?
             };
 
             pt.set(
@@ -344,23 +344,23 @@ impl<L: LowerAlloc> TableAlloc<L> {
 
     /// Try to reserve an empty subtree.
     #[cold]
-    fn reserve_rec_empty(&self, layer: usize, start: usize, huge: bool) -> Result<Entry3> {
-        if layer == 3 {
+    fn reserve_rec_empty(&self, level: usize, start: usize, huge: bool) -> Result<Entry3> {
+        if level == 3 {
             return self.reserve_l3_empty(start, huge);
         }
 
-        for page in Table::iterate(layer, start) {
+        for page in Table::iterate(level, start) {
             if page > self.pages() {
                 continue;
             }
-            let i = Table::idx(layer, page);
-            let pt = self.pt(layer, start);
+            let i = Table::idx(level, page);
+            let pt = self.pt(level, start);
             if pt.update(i, |v| v.dec_empty()).is_ok() {
-                return self.reserve_rec_empty(layer - 1, page, huge);
+                return self.reserve_rec_empty(level - 1, page, huge);
             }
         }
-        error!("No memory l{layer}");
-        if layer == Table::LAYERS {
+        error!("No memory l{level}");
+        if level == Table::LAYERS {
             error!("{self:?}");
         }
         Err(Error::Memory)
@@ -383,19 +383,19 @@ impl<L: LowerAlloc> TableAlloc<L> {
 
     /// Try to reserve a partially filled subtree.
     #[cold]
-    fn reserve_rec_partial(&self, layer: usize, start: usize, huge: bool) -> Result<Entry3> {
-        if layer == 3 {
+    fn reserve_rec_partial(&self, level: usize, start: usize, huge: bool) -> Result<Entry3> {
+        if level == 3 {
             return self.reserve_l3_partial(start, huge);
         }
 
-        for page in Table::iterate(layer, start) {
+        for page in Table::iterate(level, start) {
             if page > self.pages() {
                 continue;
             }
-            let i = Table::idx(layer, page);
-            let pt = self.pt(layer, start);
+            let i = Table::idx(level, page);
+            let pt = self.pt(level, start);
             if pt.update(i, |v| v.dec_partial(huge)).is_ok() {
-                return self.reserve_rec_partial(layer - 1, page, huge);
+                return self.reserve_rec_partial(level - 1, page, huge);
             }
         }
         Err(Error::Memory)
@@ -418,11 +418,11 @@ impl<L: LowerAlloc> TableAlloc<L> {
     /// Propagates counter updates up to the root.
     #[cold]
     fn update_parents(&self, page: usize, change: Change) -> Result<()> {
-        for layer in 4..=Table::LAYERS {
-            let pt = self.pt(layer, page);
-            let i = Table::idx(layer, page);
+        for level in 4..=Table::LAYERS {
+            let pt = self.pt(level, page);
+            let i = Table::idx(level, page);
             if pt.update(i, |v| v.change(change)).is_err() {
-                error!("Update failed l{layer} i{i} {change:?}");
+                error!("Update failed l{level} i{i} {change:?}");
                 return Err(Error::Corruption);
             }
         }
@@ -457,14 +457,14 @@ impl<L: LowerAlloc> TableAlloc<L> {
         }
     }
 
-    fn get_giant(&self, layer: usize, start: usize) -> Result<usize> {
-        if layer == 3 {
+    fn get_giant(&self, level: usize, start: usize) -> Result<usize> {
+        if level == 3 {
             return self.get_giant_l3(start);
         }
 
-        let pt = self.pt(layer, start);
+        let pt = self.pt(level, start);
         for i in 0..Table::LEN {
-            let page = Table::page(layer, start, i);
+            let page = Table::page(level, start, i);
             if page > self.pages() {
                 break;
             }
@@ -474,10 +474,10 @@ impl<L: LowerAlloc> TableAlloc<L> {
                 continue;
             }
 
-            return self.get_giant(layer - 1, page);
+            return self.get_giant(level - 1, page);
         }
 
-        error!("Nothing found l{layer} s={start}");
+        error!("Nothing found l{level} s={start}");
         Err(Error::Memory)
     }
 
@@ -627,21 +627,21 @@ impl<L: LowerAlloc> TableAlloc<L> {
 
     #[allow(unused)]
     fn dump(&self) {
-        fn dump_rec<L: LowerAlloc>(this: &TableAlloc<L>, layer: usize, start: usize) {
-            if layer == 3 {
+        fn dump_rec<L: LowerAlloc>(this: &TableAlloc<L>, level: usize, start: usize) {
+            if level == 3 {
                 let pt3 = this.pt3(start);
                 for i in Table::range(3, start..this.pages()) {
                     let pte3 = pt3.get(i);
-                    let l = 3 + (Table::LAYERS - layer) * 4;
+                    let l = 3 + (Table::LAYERS - level) * 4;
                     error!("{i:>l$} {pte3:?}");
                 }
             } else {
-                let pt = this.pt(layer, start);
-                for i in Table::range(layer, start..this.pages()) {
+                let pt = this.pt(level, start);
+                for i in Table::range(level, start..this.pages()) {
                     let pte = pt.get(i);
-                    let l = 3 + (Table::LAYERS - layer) * 4;
+                    let l = 3 + (Table::LAYERS - level) * 4;
                     error!("{i:>l$} {pte:?}");
-                    this.allocated_pages_rec(layer - 1, Table::page(layer, start, i));
+                    this.allocated_pages_rec(level - 1, Table::page(level, start, i));
                 }
             }
         }

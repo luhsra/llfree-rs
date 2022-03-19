@@ -28,7 +28,7 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// These 1G chunks are, due to the inner workins of the lower allocator,
 /// called 1G *subtrees*.
 ///
-/// This allocator stores the layer three entries (subtree roots) in a
+/// This allocator stores the level three entries (subtree roots) in a
 /// packed array.
 /// The subtree reservation is speed up using free lists for
 /// empty and partially empty subtrees.
@@ -43,7 +43,7 @@ pub struct ArrayLockedAlloc<L: LowerAlloc> {
     meta: *mut Meta,
     /// Metadata of the lower alloc
     lower: L,
-    /// Array of layer 3 entries, the roots of the 1G subtrees, the lower alloc manages
+    /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Vec<Atomic<Entry3>>,
 
     /// List of idx to subtrees that are not allocated at all
@@ -190,10 +190,8 @@ impl<L: LowerAlloc> Drop for ArrayLockedAlloc<L> {
         }
     }
 }
-
-impl<L: LowerAlloc> ArrayLockedAlloc<L> {
-    #[cold]
-    pub fn new() -> Self {
+impl<L: LowerAlloc> Default for ArrayLockedAlloc<L> {
+    fn default() -> Self {
         Self {
             meta: null_mut(),
             lower: L::default(),
@@ -203,7 +201,9 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
             partial_l0: TicketMutex::new(Vec::new()),
         }
     }
+}
 
+impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     /// Setup a new allocator.
     #[cold]
     fn setup(&mut self) {
@@ -230,7 +230,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     }
 
     /// Recover the allocator from NVM after reboot.
-    /// If `deep` then the layer 1 page tables are traversed and diverging counters are corrected.
+    /// If `deep` then the level 1 page tables are traversed and diverging counters are corrected.
     #[cold]
     fn recover(&self, deep: bool) -> Result<usize> {
         if deep {

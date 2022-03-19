@@ -73,7 +73,7 @@ fn main() {
     for _ in 0..iterations {
         let timer = Instant::now();
         let alloc = Arc::new({
-            let mut a = Allocator::new();
+            let mut a = Allocator::default();
             a.init(threads, &mut mapping, true).unwrap();
             a
         });

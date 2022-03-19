@@ -1,5 +1,6 @@
 use core::fmt;
-use core::ops::{Deref, Range};
+use core::ops::Range;
+use std::ops::Deref;
 
 use log::{error, info, warn};
 
@@ -8,35 +9,18 @@ use crate::entry::{Entry1, Entry2};
 use crate::table::Table;
 use crate::util::Page;
 
-use super::{Local, LowerAlloc, CAS_RETRIES};
+use super::{Local, LowerAlloc};
 
-/// Layer 2 page allocator.
+/// Level 2 page allocator.
 /// ```text
 /// NVRAM: [ Pages | PT1s | PT2s | Meta ]
 /// ```
 #[repr(align(64))]
+#[derive(Default)]
 pub struct FixedLower {
     pub begin: usize,
     pub pages: usize,
     local: Vec<Local>,
-}
-
-impl Deref for FixedLower {
-    type Target = [Local];
-
-    fn deref(&self) -> &Self::Target {
-        &self.local
-    }
-}
-
-impl Default for FixedLower {
-    fn default() -> Self {
-        Self {
-            begin: 0,
-            pages: 0,
-            local: Vec::new(),
-        }
-    }
 }
 
 impl fmt::Debug for FixedLower {
@@ -46,6 +30,14 @@ impl fmt::Debug for FixedLower {
             .field("begin", &self.begin)
             .field("pages", &self.pages)
             .finish()
+    }
+}
+
+impl Deref for FixedLower {
+    type Target = [Local];
+
+    fn deref(&self) -> &Self::Target {
+        &self.local
     }
 }
 
@@ -139,12 +131,10 @@ impl LowerAlloc for FixedLower {
         }
 
         let pt = self.pt2(start);
-        for _ in 0..CAS_RETRIES {
-            for page in Table::iterate(2, start) {
-                let i = Table::idx(2, page);
-                if pt.update(i, Entry2::mark_huge).is_ok() {
-                    return Ok(page);
-                }
+        for page in Table::iterate(2, start) {
+            let i = Table::idx(2, page);
+            if pt.update(i, Entry2::mark_huge).is_ok() {
+                return Ok(page);
             }
         }
         error!("Exceeding retries {}", start / Table::span(2));
@@ -153,6 +143,7 @@ impl LowerAlloc for FixedLower {
 
     /// Free single page and returns if the page was huge
     fn put(&self, page: usize) -> Result<bool> {
+        debug_assert!(page < self.pages);
         stop!();
 
         let pt2 = self.pt2(page);
@@ -160,12 +151,13 @@ impl LowerAlloc for FixedLower {
         // try free huge
         if let Err(old) = pt2.cas(
             i2,
-            Entry2::new().with_giant(true),
+            Entry2::new().with_page(true),
             Entry2::new_table(Table::LEN, 0),
         ) {
             if !old.giant() && old.free() < Table::LEN {
-                self.put_small(page).map(|_| true)
+                self.put_small(page).map(|_| false)
             } else {
+                error!("Addr {old:?}");
                 Err(Error::Address)
             }
         } else {
@@ -237,25 +229,23 @@ impl FixedLower {
     fn get_small(&self, start: usize) -> Result<usize> {
         let pt2 = self.pt2(start);
 
-        for _ in 0..CAS_RETRIES {
-            for newstart in Table::iterate(2, start) {
-                let i2 = Table::idx(2, newstart);
+        for newstart in Table::iterate(2, start) {
+            let i2 = Table::idx(2, newstart);
 
-                #[cfg(feature = "stop")]
-                {
-                    let pte2 = pt2.get(i2);
-                    if pte2.page() || pte2.free() == 0 {
-                        continue;
-                    }
-                    stop!();
+            #[cfg(feature = "stop")]
+            {
+                let pte2 = pt2.get(i2);
+                if pte2.page() || pte2.free() == 0 {
+                    continue;
                 }
+                stop!();
+            }
 
-                if pt2.update(i2, |v| v.dec(0)).is_ok() {
-                    return self.get_table(newstart);
-                }
+            if pt2.update(i2, |v| v.dec(0)).is_ok() {
+                return self.get_table(newstart);
             }
         }
-        error!("Exceeding retries {start} {}", start / Table::span(2));
+        error!("Nothing found {start} {}", start / Table::span(2));
         Err(Error::Corruption)
     }
 
@@ -263,27 +253,23 @@ impl FixedLower {
     fn get_table(&self, start: usize) -> Result<usize> {
         let pt1 = self.pt1(start);
 
-        for _ in 0..CAS_RETRIES {
-            for page in Table::iterate(1, start) {
-                let i = Table::idx(1, page);
+        for page in Table::iterate(1, start) {
+            let i = Table::idx(1, page);
 
-                #[cfg(feature = "stop")]
-                {
-                    if pt1.get(i) != Entry1::Empty {
-                        continue;
-                    }
-                    stop!();
+            #[cfg(feature = "stop")]
+            {
+                if pt1.get(i) != Entry1::Empty {
+                    continue;
                 }
-
-                if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
-                    return Ok(page);
-                }
+                stop!();
             }
 
-            warn!("Nothing found, retry {}", start / Table::span(2));
-            stop!();
+            if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
+                return Ok(page);
+            }
         }
-        error!("Exceeding retries {}", start / Table::span(2));
+
+        warn!("Nothing found {}", start / Table::span(2));
         Err(Error::Corruption)
     }
 

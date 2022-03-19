@@ -8,6 +8,7 @@ use crate::table::Table;
 use crate::util::Page;
 
 /// Wrapper for libc malloc.
+#[derive(Default)]
 pub struct MallocAlloc {
     local: Vec<Local>,
 }
@@ -15,12 +16,6 @@ pub struct MallocAlloc {
 #[repr(align(64))]
 struct Local {
     counter: AtomicUsize,
-}
-
-impl MallocAlloc {
-    pub fn new() -> Self {
-        Self { local: Vec::new() }
-    }
 }
 
 unsafe impl Send for MallocAlloc {}

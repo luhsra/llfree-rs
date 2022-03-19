@@ -117,7 +117,7 @@ impl Entry3 {
     pub fn new_giant() -> Entry3 {
         Entry3::new().with_page(true)
     }
-    /// Creates a new entry referring to a layer 2 page table.
+    /// Creates a new entry referring to a level 2 page table.
     #[inline]
     pub fn new_table(pages: usize, size: Size, reserved: bool) -> Entry3 {
         Entry3::new()
@@ -253,7 +253,7 @@ pub struct Entry2 {
     /// Number of free pages.
     #[bits(10)]
     pub free: usize,
-    /// Index of the layer one page table.
+    /// Index of the level one page table.
     #[bits(9)]
     pub i1: usize,
     #[bits(43)]
@@ -265,7 +265,7 @@ pub struct Entry2 {
 }
 
 impl Entry2 {
-    /// Creates a new entry referencing a layer one page table.
+    /// Creates a new entry referencing a level one page table.
     #[inline]
     pub fn new_table(pages: usize, i1: usize) -> Self {
         Self::new().with_free(pages).with_i1(i1)
@@ -273,7 +273,7 @@ impl Entry2 {
     #[inline]
     pub fn mark_huge(self) -> Option<Self> {
         if !self.giant() && !self.page() && self.free() == Table::span(Size::L1 as _) {
-            Some(Entry2::new().with_free(0).with_i1(0).with_page(true))
+            Some(Entry2::new().with_page(true))
         } else {
             None
         }

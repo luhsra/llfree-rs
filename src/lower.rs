@@ -1,7 +1,7 @@
 use core::fmt;
-use core::ops::{Deref, Range};
-use core::sync::atomic::AtomicUsize;
+use core::ops::Range;
 use std::cell::UnsafeCell;
+use std::ops::Deref;
 
 use crate::alloc::{Result, Size};
 use crate::entry::Entry3;
@@ -24,7 +24,7 @@ macro_rules! stop {
 pub mod dynamic;
 pub mod fixed;
 
-/// Layer 2 page allocator.
+/// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug + Deref<Target = [Local]> {
     fn new(cores: usize, memory: &mut [Page]) -> Self;
 
@@ -45,46 +45,35 @@ pub trait LowerAlloc: Default + fmt::Debug + Deref<Target = [Local]> {
 }
 
 /// Per core data.
+/// # Safety
+/// This should only be accessed from the corresponding (virtual) CPU core!
 #[repr(align(64))]
-pub struct Local {
-    private: UnsafeCell<Private>,
-    shared: Shared,
-}
-
-unsafe impl Send for Local {}
-unsafe impl Sync for Local {}
-
+pub struct Local(UnsafeCell<Inner>);
 #[repr(align(64))]
-struct Private {
+struct Inner {
     start: [usize; 2],
     pte: [Entry3; 2],
     frees: [usize; 4],
     frees_i: usize,
 }
-#[repr(align(64))]
-struct Shared {
-    pub alloc_pt1: AtomicUsize,
-}
+
+unsafe impl Send for Local {}
+unsafe impl Sync for Local {}
 
 impl Local {
     fn new() -> Self {
-        Self {
-            private: UnsafeCell::new(Private {
-                start: [usize::MAX, usize::MAX],
-                pte: [
-                    Entry3::new().with_idx(Entry3::IDX_MAX),
-                    Entry3::new().with_idx(Entry3::IDX_MAX),
-                ],
-                frees_i: 0,
-                frees: [usize::MAX; 4],
-            }),
-            shared: Shared {
-                alloc_pt1: AtomicUsize::new(0),
-            },
-        }
+        Self(UnsafeCell::new(Inner {
+            start: [usize::MAX, usize::MAX],
+            pte: [
+                Entry3::new().with_idx(Entry3::IDX_MAX),
+                Entry3::new().with_idx(Entry3::IDX_MAX),
+            ],
+            frees_i: 0,
+            frees: [usize::MAX; 4],
+        }))
     }
-    fn p(&self) -> &mut Private {
-        unsafe { &mut *self.private.get() }
+    fn p(&self) -> &mut Inner {
+        unsafe { &mut *self.0.get() }
     }
     pub fn start(&self, huge: bool) -> &mut usize {
         &mut self.p().start[huge as usize]
@@ -93,9 +82,8 @@ impl Local {
         &mut self.p().pte[huge as usize]
     }
     pub fn frees_push(&self, page: usize) {
-        let private = self.p();
-        private.frees_i = (private.frees_i + 1) % private.frees.len();
-        private.frees[private.frees_i] = page;
+        self.p().frees_i = (self.p().frees_i + 1) % self.p().frees.len();
+        self.p().frees[self.p().frees_i] = page;
     }
     pub fn frees_related(&self, page: usize) -> bool {
         let n = page / Table::span(2);

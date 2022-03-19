@@ -14,6 +14,7 @@ use nvalloc::alloc::array_unaligned::ArrayUnalignedAlloc;
 use nvalloc::alloc::table::TableAlloc;
 use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
 use nvalloc::lower::dynamic::DynamicLower;
+use nvalloc::lower::fixed::FixedLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::thread;
@@ -57,12 +58,17 @@ fn main() {
         _ => panic!("`size` has to be 0, 1 or 2"),
     };
 
-    let allocs: [Arc<dyn Alloc>; 5] = [
-        Arc::new(ArrayAlignedAlloc::<DynamicLower>::new()),
-        Arc::new(ArrayUnalignedAlloc::<DynamicLower>::new()),
-        Arc::new(ArrayLockedAlloc::<DynamicLower>::new()),
-        Arc::new(ArrayAtomicAlloc::<DynamicLower>::new()),
-        Arc::new(TableAlloc::<DynamicLower>::new()),
+    let allocs: [Arc<dyn Alloc>; 10] = [
+        Arc::new(ArrayAlignedAlloc::<DynamicLower>::default()),
+        Arc::new(ArrayUnalignedAlloc::<DynamicLower>::default()),
+        Arc::new(ArrayLockedAlloc::<DynamicLower>::default()),
+        Arc::new(ArrayAtomicAlloc::<DynamicLower>::default()),
+        Arc::new(TableAlloc::<DynamicLower>::default()),
+        Arc::new(ArrayAlignedAlloc::<FixedLower>::default()),
+        Arc::new(ArrayUnalignedAlloc::<FixedLower>::default()),
+        Arc::new(ArrayLockedAlloc::<FixedLower>::default()),
+        Arc::new(ArrayAtomicAlloc::<FixedLower>::default()),
+        Arc::new(TableAlloc::<FixedLower>::default()),
     ];
     for a in allocs {
         if a.name() == alloc {

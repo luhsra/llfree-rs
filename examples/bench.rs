@@ -18,8 +18,8 @@ use nvalloc::alloc::array_unaligned::ArrayUnalignedAlloc;
 use nvalloc::alloc::list_local::ListLocalAlloc;
 use nvalloc::alloc::list_locked::ListLockedAlloc;
 use nvalloc::alloc::table::TableAlloc;
-use nvalloc::lower::dynamic::DynamicLower;
 use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
+use nvalloc::lower::dynamic::DynamicLower;
 use nvalloc::lower::fixed::FixedLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
@@ -91,18 +91,42 @@ fn main() {
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
     let allocs: Vec<(usize, Arc<dyn Alloc>)> = vec![
-        (usize::MAX, Arc::new(ArrayAlignedAlloc::<DynamicLower>::new())),
-        (usize::MAX, Arc::new(ArrayUnalignedAlloc::<DynamicLower>::new())),
-        (usize::MAX, Arc::new(ArrayLockedAlloc::<DynamicLower>::new())),
-        (usize::MAX, Arc::new(ArrayAtomicAlloc::<DynamicLower>::new())),
-        (usize::MAX, Arc::new(TableAlloc::<DynamicLower>::new())),
-        (usize::MAX, Arc::new(ArrayAlignedAlloc::<FixedLower>::new())),
-        (usize::MAX, Arc::new(ArrayUnalignedAlloc::<FixedLower>::new())),
-        (usize::MAX, Arc::new(ArrayLockedAlloc::<FixedLower>::new())),
-        (usize::MAX, Arc::new(ArrayAtomicAlloc::<FixedLower>::new())),
-        (usize::MAX, Arc::new(TableAlloc::<FixedLower>::new())),
-        (usize::MAX, Arc::new(ListLocalAlloc::new())),
-        (16, Arc::new(ListLockedAlloc::new())),
+        (
+            usize::MAX,
+            Arc::new(ArrayAlignedAlloc::<DynamicLower>::default()),
+        ),
+        (
+            usize::MAX,
+            Arc::new(ArrayUnalignedAlloc::<DynamicLower>::default()),
+        ),
+        (
+            usize::MAX,
+            Arc::new(ArrayLockedAlloc::<DynamicLower>::default()),
+        ),
+        (
+            usize::MAX,
+            Arc::new(ArrayAtomicAlloc::<DynamicLower>::default()),
+        ),
+        (usize::MAX, Arc::new(TableAlloc::<DynamicLower>::default())),
+        (
+            usize::MAX,
+            Arc::new(ArrayAlignedAlloc::<FixedLower>::default()),
+        ),
+        (
+            usize::MAX,
+            Arc::new(ArrayUnalignedAlloc::<FixedLower>::default()),
+        ),
+        (
+            usize::MAX,
+            Arc::new(ArrayLockedAlloc::<FixedLower>::default()),
+        ),
+        (
+            usize::MAX,
+            Arc::new(ArrayAtomicAlloc::<FixedLower>::default()),
+        ),
+        (usize::MAX, Arc::new(TableAlloc::<FixedLower>::default())),
+        (usize::MAX, Arc::new(ListLocalAlloc::default())),
+        (16, Arc::new(ListLockedAlloc::default())),
     ];
 
     for x in x {
@@ -412,7 +436,10 @@ fn filling(
             total: t1.elapsed().as_millis(),
         }
     }));
-    assert_eq!(a.dbg_allocated_pages(), fill * threads * Table::span(size as _));
+    assert_eq!(
+        a.dbg_allocated_pages(),
+        fill * threads * Table::span(size as _)
+    );
 
     perf.init = init;
     warn!("{perf:#?}");

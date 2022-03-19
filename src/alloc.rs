@@ -112,13 +112,13 @@ mod test {
     use super::Error;
     use crate::alloc::Alloc;
     use crate::alloc::MIN_PAGES;
-    use crate::lower::dynamic::DynamicLower;
+    use crate::lower::fixed::FixedLower;
     use crate::mmap::MMap;
     use crate::table::Table;
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::array_atomic::ArrayAtomicAlloc<DynamicLower>;
+    type Allocator = super::array_atomic::ArrayAtomicAlloc<FixedLower>;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -144,7 +144,7 @@ mod test {
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
         let alloc = Arc::new({
-            let mut a = Allocator::new();
+            let mut a = Allocator::default();
             a.init(1, &mut mapping, true).unwrap();
             a
         });
@@ -205,8 +205,6 @@ mod test {
             alloc.put(0, *page).unwrap();
         }
 
-        warn!("{alloc:?}");
-
         assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
 
@@ -220,7 +218,7 @@ mod test {
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
         let alloc = Arc::new({
-            let mut a = Allocator::new();
+            let mut a = Allocator::default();
             a.init(1, &mut mapping, true).unwrap();
             a
         });
@@ -288,7 +286,7 @@ mod test {
         let range = range.start as u64..range.end as u64;
 
         let alloc = Arc::new({
-            let mut a = Allocator::new();
+            let mut a = Allocator::default();
             a.init(THREADS, &mut mapping, true).unwrap();
             a
         });
@@ -357,7 +355,7 @@ mod test {
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
         let alloc = Arc::new({
-            let mut a = Allocator::new();
+            let mut a = Allocator::default();
             a.init(1, &mut mapping, true).unwrap();
             a
         });
@@ -439,7 +437,7 @@ mod test {
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
 
         let alloc = Arc::new({
-            let mut a = Allocator::new();
+            let mut a = Allocator::default();
             a.init(THREADS, &mut mapping, true).unwrap();
             a
         });
@@ -486,7 +484,7 @@ mod test {
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
 
         let alloc = Arc::new({
-            let mut a = Allocator::new();
+            let mut a = Allocator::default();
             a.init(THREADS, &mut mapping, true).unwrap();
             a
         });
@@ -618,7 +616,7 @@ mod test {
         let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
         let alloc = Arc::new({
-            let mut a = Allocator::new();
+            let mut a = Allocator::default();
             a.init(THREADS, &mut mapping, true).unwrap();
             a
         });
@@ -658,7 +656,7 @@ mod test {
         let mut mapping = mapping(0x1000_0000_0000, 4 * Table::span(2)).unwrap();
 
         let alloc = Arc::new({
-            let mut a = Allocator::new();
+            let mut a = Allocator::default();
             a.init(THREADS, &mut mapping, true).unwrap();
             a
         });
@@ -709,7 +707,7 @@ mod test {
 
         {
             let alloc = Arc::new({
-                let mut a = Allocator::new();
+                let mut a = Allocator::default();
                 a.init(1, &mut mapping, true).unwrap();
                 a
             });
@@ -731,7 +729,7 @@ mod test {
         }
 
         let alloc = Arc::new({
-            let mut a = Allocator::new();
+            let mut a = Allocator::default();
             a.init(1, &mut mapping, false).unwrap();
             a
         });

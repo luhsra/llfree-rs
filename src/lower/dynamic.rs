@@ -1,6 +1,7 @@
 use core::fmt;
-use core::ops::{Deref, Range};
-use std::sync::atomic::Ordering;
+use core::ops::Range;
+use std::ops::Deref;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
 
@@ -11,33 +12,23 @@ use crate::util::Page;
 
 use super::{Local, LowerAlloc, CAS_RETRIES};
 
-/// Layer 2 page allocator.
+/// Level 2 page allocator.
 /// ```text
 /// NVRAM: [ Pages & PT1s | PT2s | Meta ]
 /// ```
 #[repr(align(64))]
+#[derive(Default)]
 pub struct DynamicLower {
     pub begin: usize,
     pub pages: usize,
-    local: Vec<Local>,
+    private: Vec<Local>,
+    shared: Vec<Shared>,
 }
 
-impl Deref for DynamicLower {
-    type Target = [Local];
-
-    fn deref(&self) -> &Self::Target {
-        &self.local
-    }
-}
-
-impl Default for DynamicLower {
-    fn default() -> Self {
-        Self {
-            begin: 0,
-            pages: 0,
-            local: Vec::new(),
-        }
-    }
+#[repr(align(64))]
+struct Shared {
+    /// Flag used to determine if a cpu is still updating a level 1 page table
+    pub alloc_pt1: AtomicUsize,
 }
 
 impl fmt::Debug for DynamicLower {
@@ -50,15 +41,29 @@ impl fmt::Debug for DynamicLower {
     }
 }
 
+impl Deref for DynamicLower {
+    type Target = [Local];
+
+    fn deref(&self) -> &Self::Target {
+        &self.private
+    }
+}
+
 impl LowerAlloc for DynamicLower {
     fn new(cores: usize, memory: &mut [Page]) -> Self {
-        let mut local = Vec::with_capacity(cores);
-        local.resize_with(cores, Local::new);
+        let mut private = Vec::with_capacity(cores);
+        private.resize_with(cores, Local::new);
+        let mut shared = Vec::with_capacity(cores);
+        shared.resize_with(cores, || Shared {
+            alloc_pt1: AtomicUsize::new(0),
+        });
+
         Self {
             begin: memory.as_ptr() as usize,
             // level 2 tables are stored at the end of the NVM
             pages: memory.len() - Table::num_pts(2, memory.len()),
-            local,
+            private,
+            shared,
         }
     }
 
@@ -197,7 +202,7 @@ impl LowerAlloc for DynamicLower {
         self.pt2(page).set(0, Entry2::new().with_giant(true));
     }
     fn clear_giant(&self, page: usize) {
-        // Clear all layer 1 page tables in this area
+        // Clear all level 1 page tables in this area
         for i in Table::range(2, page..self.pages) {
             let start = Table::page(2, page, i);
 
@@ -288,8 +293,7 @@ impl DynamicLower {
                     continue;
                 }
 
-                self[core]
-                    .shared
+                self.shared[core]
                     .alloc_pt1
                     .store(!Table::page(1, start, pte2.i1()), Ordering::SeqCst);
 
@@ -301,10 +305,10 @@ impl DynamicLower {
                     } else {
                         self.get_table(pte2, newstart)
                     };
-                    self[core].shared.alloc_pt1.store(0, Ordering::SeqCst);
+                    self.shared[core].alloc_pt1.store(0, Ordering::SeqCst);
                     return page;
                 }
-                self[core].shared.alloc_pt1.store(0, Ordering::SeqCst);
+                self.shared[core].alloc_pt1.store(0, Ordering::SeqCst);
             }
         }
         error!("Exceeding retries {start} {}", start / Table::span(2));
@@ -350,9 +354,9 @@ impl DynamicLower {
         let alloc_p1 = !Table::page(1, start, pte2.i1());
 
         // Wait for others to finish
-        for (i, leaf) in self.iter().enumerate() {
+        for (i, shared) in self.shared.iter().enumerate() {
             if i != core {
-                while leaf.shared.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
+                while shared.alloc_pt1.load(Ordering::SeqCst) == alloc_p1 {
                     #[cfg(not(feature = "stop"))]
                     core::hint::spin_loop(); // pause CPU while waiting
                     stop!();

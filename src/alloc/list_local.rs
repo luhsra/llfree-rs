@@ -39,8 +39,8 @@ impl fmt::Debug for ListLocalAlloc {
     }
 }
 
-impl ListLocalAlloc {
-    pub fn new() -> Self {
+impl Default for ListLocalAlloc {
+    fn default() -> Self {
         Self {
             memory: null()..null(),
             local: Vec::new(),
@@ -69,7 +69,7 @@ impl Alloc for ListLocalAlloc {
         let mut local = Vec::with_capacity(cores);
         let p_core = pages / cores;
         for core in 0..cores {
-            let mut l = Local::new();
+            let mut l = Local::default();
             // build linked list
             for i in core * p_core + 1..(core + 1) * p_core {
                 memory[i - 1]
@@ -142,8 +142,8 @@ struct Local {
     counter: usize,
 }
 
-impl Local {
-    fn new() -> Self {
+impl Default for Local {
+    fn default() -> Self {
         Self {
             next: Node::new(),
             counter: 0,

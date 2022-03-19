@@ -29,11 +29,11 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// called 1G *subtrees*.
 ///
 /// This allocator uses a cache-line aligned array to store the subtrees
-/// (layer 3 entries).
+/// (level 3 entries).
 /// The subtree reservation is speed up using free lists for
 /// empty and partially empty subtrees.
 /// These free lists are implemented as atomic linked lists with their next
-/// pointers stored inside the layer 3 entries.
+/// pointers stored inside the level 3 entries.
 ///
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
@@ -43,7 +43,7 @@ pub struct ArrayAlignedAlloc<L: LowerAlloc> {
     meta: *mut Meta,
     /// Metadata of the lower alloc
     lower: L,
-    /// Array of layer 3 entries, the roots of the 1G subtrees, the lower alloc manages
+    /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Vec<Aligned>,
 
     /// List of idx to subtrees that are not allocated at all
@@ -118,9 +118,9 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
         self.subtrees
             .resize_with(pte3_num, || Aligned(Atomic::new(Entry3::new())));
 
-        self.empty = AStack::new();
-        self.partial_l0 = AStack::new();
-        self.partial_l1 = AStack::new();
+        self.empty = AStack::default();
+        self.partial_l0 = AStack::default();
+        self.partial_l1 = AStack::default();
 
         warn!("init");
         if !overwrite
@@ -194,19 +194,21 @@ impl<L: LowerAlloc> Drop for ArrayAlignedAlloc<L> {
     }
 }
 
-impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
+impl<L: LowerAlloc> Default for ArrayAlignedAlloc<L> {
     #[cold]
-    pub fn new() -> Self {
+    fn default() -> Self {
         Self {
             meta: null_mut(),
             lower: L::default(),
             subtrees: Vec::new(),
-            empty: AStack::new(),
-            partial_l1: AStack::new(),
-            partial_l0: AStack::new(),
+            empty: AStack::default(),
+            partial_l1: AStack::default(),
+            partial_l0: AStack::default(),
         }
     }
+}
 
+impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
     /// Setup a new allocator.
     #[cold]
     fn setup(&mut self) {
@@ -231,7 +233,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
     }
 
     /// Recover the allocator from NVM after reboot.
-    /// If `deep` then the layer 1 page tables are traversed and diverging counters are corrected.
+    /// If `deep` then the level 1 page tables are traversed and diverging counters are corrected.
     #[cold]
     fn recover(&self, deep: bool) -> Result<usize> {
         if deep {

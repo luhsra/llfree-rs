@@ -216,12 +216,15 @@ pub struct AStack<T: ANode> {
 unsafe impl<T: ANode> Send for AStack<T> {}
 unsafe impl<T: ANode> Sync for AStack<T> {}
 
-impl<T: ANode> AStack<T> {
-    pub fn new() -> Self {
+impl<T: ANode> Default for AStack<T> {
+    fn default() -> Self {
         Self {
             start: Atomic::new(T::from(0).with_next(None)),
         }
     }
+}
+
+impl<T: ANode> AStack<T> {
     pub fn push<B>(&self, buf: &B, idx: usize)
     where
         B: Index<usize, Output = Atomic<T>>,
@@ -367,7 +370,7 @@ mod test {
             }
         }
 
-        let stack = AStack::new();
+        let stack = AStack::default();
         stack.push(unsafe { &DATA }, 0);
         stack.push(unsafe { &DATA }, 1);
 
