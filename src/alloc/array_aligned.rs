@@ -6,10 +6,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use log::{error, warn};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use crate::atomic::{AStack, AStackDbg, Atomic};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::table::Table;
-use crate::util::{AStack, AStackDbg, Atomic, Page};
+use crate::util::Page;
 
 const PTE3_FULL: usize = 8 * Table::span(1);
 
@@ -44,7 +45,7 @@ pub struct ArrayAlignedAlloc<L: LowerAlloc> {
     /// Metadata of the lower alloc
     lower: L,
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
-    subtrees: Vec<Aligned>,
+    subtrees: Box<[Aligned]>,
 
     /// List of idx to subtrees that are not allocated at all
     empty: AStack<Entry3>,
@@ -114,9 +115,9 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
 
         // Array with all pte3
         let pte3_num = Table::num_pts(2, self.lower.pages());
-        self.subtrees = Vec::with_capacity(pte3_num);
-        self.subtrees
-            .resize_with(pte3_num, || Aligned(Atomic::new(Entry3::new())));
+        let mut subtrees = Vec::with_capacity(pte3_num);
+        subtrees.resize_with(pte3_num, || Aligned(Atomic::new(Entry3::new())));
+        self.subtrees = subtrees.into();
 
         self.empty = AStack::default();
         self.partial_l0 = AStack::default();
@@ -200,7 +201,7 @@ impl<L: LowerAlloc> Default for ArrayAlignedAlloc<L> {
         Self {
             meta: null_mut(),
             lower: L::default(),
-            subtrees: Vec::new(),
+            subtrees: Box::new([]),
             empty: AStack::default(),
             partial_l1: AStack::default(),
             partial_l0: AStack::default(),

@@ -64,13 +64,14 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     #[cold]
     fn name(&self) -> String {
         let name = type_name::<Self>();
+        // Add first letter of generic type as suffix
         let (name, suffix) = if let Some((prefix, suffix)) = name.split_once('<') {
-            let suffix = suffix.rsplit_once('>').map(|s| s.0).unwrap_or(suffix);
             let suffix = suffix.rsplit_once(':').map(|s| s.1).unwrap_or(suffix);
             (prefix, &suffix[0..1])
         } else {
             (name, "")
         };
+        // Strip namespaces
         let name = name.rsplit_once(':').map(|s| s.1).unwrap_or(name);
         format!("{}{}", name.strip_suffix("Alloc").unwrap_or(name), suffix)
     }

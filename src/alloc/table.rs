@@ -43,7 +43,7 @@ pub struct TableAlloc<L: LowerAlloc> {
     /// ```text
     /// DRAM: [ 1*PT5 | n*PT4 | m*PT3 ]
     /// ```
-    tables: Vec<Page>,
+    tables: Box<[Page]>,
 }
 
 unsafe impl<L: LowerAlloc> Send for TableAlloc<L> {}
@@ -86,10 +86,8 @@ impl<L: LowerAlloc> fmt::Debug for TableAlloc<L> {
         dump_rec(self, f, Table::LAYERS, 0)?;
 
         for (t, local) in self.lower.iter().enumerate() {
-            let pte = local.pte(false);
-            writeln!(f, "    L{t:>2}: L0 {pte:?}")?;
-            let pte = local.pte(true);
-            writeln!(f, "         L1 {pte:?}")?;
+            writeln!(f, "    L{t:>2}: L0 {:?}", local.pte(false))?;
+            writeln!(f, "         L1 {:?}", local.pte(true))?;
         }
         writeln!(f, "}}")?;
         Ok(())
@@ -122,7 +120,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
             num_pt += Table::num_pts(level, self.lower.pages());
         }
 
-        self.tables = vec![Page::new(); num_pt];
+        self.tables = vec![Page::new(); num_pt].into();
 
         if !overwrite
             && meta.pages.load(Ordering::SeqCst) == self.pages()
@@ -204,7 +202,7 @@ impl<L: LowerAlloc> Default for TableAlloc<L> {
         Self {
             meta: null_mut(),
             lower: L::default(),
-            tables: Vec::new(),
+            tables: Box::new([]),
         }
     }
 }

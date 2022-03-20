@@ -1,3 +1,4 @@
+use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, mem};
@@ -6,10 +7,11 @@ use log::{error, warn};
 use spin::mutex::{TicketMutex, TicketMutexGuard};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use crate::atomic::Atomic;
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::table::Table;
-use crate::util::{Atomic, Page};
+use crate::util::Page;
 
 const PTE3_FULL: usize = 8 * Table::span(1);
 
@@ -44,7 +46,7 @@ pub struct ArrayLockedAlloc<L: LowerAlloc> {
     /// Metadata of the lower alloc
     lower: L,
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
-    subtrees: Vec<Atomic<Entry3>>,
+    subtrees: Box<[Atomic<Entry3>]>,
 
     /// List of idx to subtrees that are not allocated at all
     empty: TicketMutex<Vec<usize>>,
@@ -74,13 +76,20 @@ impl<L: LowerAlloc> fmt::Debug for ArrayLockedAlloc<L> {
         writeln!(f, "    partial_l0: {:?}", self.partial_l0.lock())?;
         writeln!(f, "    partial_l1: {:?}", self.partial_l1.lock())?;
         for (t, local) in self.lower.iter().enumerate() {
-            let pte = local.pte(false);
-            writeln!(f, "    L{t:>2}: L0 {pte:?}")?;
-            let pte = local.pte(true);
-            writeln!(f, "         L1 {pte:?}")?;
+            writeln!(f, "    L{t:>2}: L0 {:?}", local.pte(false))?;
+            writeln!(f, "         L1 {:?}", local.pte(true))?;
         }
         writeln!(f, "}}")?;
         Ok(())
+    }
+}
+
+impl<L: LowerAlloc> Index<usize> for ArrayLockedAlloc<L> {
+    type Output = Atomic<Entry3>;
+
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.subtrees[index]
     }
 }
 
@@ -107,9 +116,9 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
 
         // Array with all pte3
         let pte3_num = Table::num_pts(2, self.lower.pages());
-        self.subtrees = Vec::with_capacity(pte3_num);
-        self.subtrees
-            .resize_with(pte3_num, || Atomic::new(Entry3::new()));
+        let mut subtrees = Vec::with_capacity(pte3_num);
+        subtrees.resize_with(pte3_num, || Atomic::new(Entry3::new()));
+        self.subtrees = subtrees.into();
 
         self.empty = TicketMutex::new(Vec::with_capacity(pte3_num));
         self.partial_l0 = TicketMutex::new(Vec::with_capacity(pte3_num));
@@ -154,7 +163,7 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
         let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
 
         let i = page / Table::span(2);
-        let pte = self.subtrees[i].load();
+        let pte = self[i].load();
         if pte.page() {
             self.put_giant(page)
         } else {
@@ -170,7 +179,7 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {
-            let pte = self.subtrees[i].load();
+            let pte = self[i].load();
             pages -= pte.free();
         }
         // Pages allocated in reserved subtrees
@@ -195,7 +204,7 @@ impl<L: LowerAlloc> Default for ArrayLockedAlloc<L> {
         Self {
             meta: null_mut(),
             lower: L::default(),
-            subtrees: Vec::new(),
+            subtrees: Box::new([]),
             empty: TicketMutex::new(Vec::new()),
             partial_l1: TicketMutex::new(Vec::new()),
             partial_l0: TicketMutex::new(Vec::new()),
@@ -214,13 +223,13 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
 
         let pte3_num = Table::num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
-            self.subtrees[i] = Atomic::new(Entry3::new().with_free(Table::span(2)));
+            self[i].store(Entry3::new().with_free(Table::span(2)));
             empty.push(i);
         }
 
         // The last one may be cut off
         let max = (self.pages() - (pte3_num - 1) * Table::span(2)).min(Table::span(2));
-        self.subtrees[pte3_num - 1] = Atomic::new(Entry3::new().with_free(max));
+        self[pte3_num - 1].store(Entry3::new().with_free(max));
 
         if max == Table::span(2) {
             empty.push(pte3_num - 1);
@@ -241,9 +250,9 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
             let page = i * Table::span(2);
             let (pages, size) = self.lower.recover(page, deep)?;
             if size == Size::L2 {
-                self.subtrees[i].store(Entry3::new_giant());
+                self[i].store(Entry3::new_giant());
             } else {
-                self.subtrees[i].store(Entry3::new_table(pages, size, false));
+                self[i].store(Entry3::new_table(pages, size, false));
 
                 // Add to lists
                 if pages == Table::span(2) {
@@ -271,7 +280,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     fn reserve(&self, huge: bool) -> Result<(usize, Entry3)> {
         while let Some(i) = self.partial(huge).pop() {
             warn!("reserve partial {i}");
-            match self.subtrees[i].update(|v| {
+            match self[i].update(|v| {
                 v.reserve_partial(huge, PTE3_FULL)
                     .map(|v| v.with_idx(Entry3::IDX_MAX))
             }) {
@@ -282,7 +291,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
                 Err(pte) => {
                     // Skip empty entries
                     if !pte.reserved() && pte.free() == Table::span(2) {
-                        let _ = self.subtrees[i].update(|v| Some(v.with_idx(0)));
+                        let _ = self[i].update(|v| Some(v.with_idx(0)));
                         self.empty.lock().push(i);
                     }
                 }
@@ -291,8 +300,8 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
 
         while let Some(i) = self.empty.lock().pop() {
             warn!("reserve empty {i}");
-            if let Ok(pte) = self.subtrees[i]
-                .update(|v| v.reserve_empty(huge).map(|v| v.with_idx(Entry3::IDX_MAX)))
+            if let Ok(pte) =
+                self[i].update(|v| v.reserve_empty(huge).map(|v| v.with_idx(Entry3::IDX_MAX)))
             {
                 let pte = pte.dec(huge).unwrap().with_idx(i);
                 return Ok((i * Table::span(2), pte));
@@ -313,16 +322,16 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
         }
 
         let max = (self.pages() - i * Table::span(2)).min(Table::span(2));
-        if let Ok(v) = self.subtrees[i].update(|v| v.unreserve_add(huge, pte, max)) {
+        if let Ok(v) = self[i].update(|v| v.unreserve_add(huge, pte, max)) {
             // Only if not already in list
             if v.idx() == Entry3::IDX_MAX {
                 // Add to list if new counter is small enough
                 let new_pages = v.free() + pte.free();
                 if new_pages == max {
-                    let _ = self.subtrees[i].update(|v| Some(v.with_idx(0)));
+                    let _ = self[i].update(|v| Some(v.with_idx(0)));
                     self.empty.lock().push(i);
                 } else if new_pages > PTE3_FULL {
-                    let _ = self.subtrees[i].update(|v| Some(v.with_idx(0)));
+                    let _ = self[i].update(|v| Some(v.with_idx(0)));
                     self.partial(huge).push(i);
                 }
             }
@@ -386,14 +395,14 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
         }
 
         // Subtree not owned by us
-        if let Ok(pte) = self.subtrees[i].update(|v| v.inc(huge, max)) {
+        if let Ok(pte) = self[i].update(|v| v.inc(huge, max)) {
             if !pte.reserved() {
                 let new_pages = pte.free() + Table::span(huge as _);
 
                 // check if recent frees also operated in this subtree
                 if new_pages > PTE3_FULL && lower.frees_related(page) {
                     // Try to reserve it for bulk frees
-                    if let Ok(pte) = self.subtrees[i].update(|v| v.reserve(huge)) {
+                    if let Ok(pte) = self[i].update(|v| v.reserve(huge)) {
                         let pte = pte.with_idx(i);
                         // warn!("put reserve {i}");
                         self.swap_reserved(huge, pte, pte_a)?;
@@ -406,7 +415,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
                 // Only if not already in list
                 if pte.idx() == Entry3::IDX_MAX && pte.free() <= PTE3_FULL && new_pages > PTE3_FULL
                 {
-                    let _ = self.subtrees[i].update(|v| Some(v.with_idx(0)));
+                    let _ = self[i].update(|v| Some(v.with_idx(0)));
                     self.partial(huge).push(i);
                 }
             }
@@ -420,7 +429,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     /// Allocate a giant page.
     fn get_giant(&self) -> Result<usize> {
         if let Some(i) = self.empty.lock().pop() {
-            if self.subtrees[i]
+            if self[i]
                 .update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant))
                 .is_ok()
             {
@@ -445,7 +454,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
         }
         self.lower.clear_giant(page);
 
-        if self.subtrees[i]
+        if self[i]
             .compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Table::span(2)))
             .is_ok()
         {

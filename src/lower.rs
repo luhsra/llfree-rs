@@ -26,18 +26,26 @@ pub mod fixed;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug + Deref<Target = [Local]> {
+    /// Create a new lower allocator.
     fn new(cores: usize, memory: &mut [Page]) -> Self;
 
     fn pages(&self) -> usize;
     fn memory(&self) -> Range<*const Page>;
 
+    /// Clear all metadata.
     fn clear(&self);
+    /// Recover the level 2 page table at `start`.
+    /// If deep, the level 1 pts are also traversed and false counters are corrected.
     fn recover(&self, start: usize, deep: bool) -> Result<(usize, Size)>;
 
+    /// Try allocating a new `huge` page at the subtree at `start`.
     fn get(&self, core: usize, huge: bool, start: usize) -> Result<usize>;
+    /// Try freeing a page. Returns if it was huge.
     fn put(&self, page: usize) -> Result<bool>;
 
+    /// Mark the page as giant allocation.
     fn set_giant(&self, page: usize);
+    /// Unmark the page, clearing any affected page tables.
     fn clear_giant(&self, page: usize);
 
     /// Debug function, returning the number of free pages and performing internal checks.
@@ -47,7 +55,7 @@ pub trait LowerAlloc: Default + fmt::Debug + Deref<Target = [Local]> {
 /// Per core data.
 /// # Safety
 /// This should only be accessed from the corresponding (virtual) CPU core!
-#[repr(align(64))]
+#[repr(transparent)]
 pub struct Local(UnsafeCell<Inner>);
 #[repr(align(64))]
 struct Inner {
@@ -98,12 +106,10 @@ mod test {
     use log::warn;
 
     use crate::lower::LowerAlloc;
-    use crate::{
-        stop::{StopRand, Stopper},
-        table::Table,
-        thread,
-        util::{logging, Page},
-    };
+    use crate::stop::{StopRand, Stopper};
+    use crate::table::Table;
+    use crate::thread;
+    use crate::util::{logging, Page};
 
     type Lower = super::fixed::FixedLower;
 

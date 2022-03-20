@@ -10,7 +10,7 @@ use crate::util::Page;
 /// Wrapper for libc malloc.
 #[derive(Default)]
 pub struct MallocAlloc {
-    local: Vec<Local>,
+    local: Box<[Local]>,
 }
 
 #[repr(align(64))]
@@ -44,10 +44,11 @@ impl Alloc for MallocAlloc {
             warn!("This allocator uses its own memory range");
         }
 
-        self.local = Vec::with_capacity(cores);
-        self.local.resize_with(cores, || Local {
+        let mut local = Vec::with_capacity(cores);
+        local.resize_with(cores, || Local {
             counter: AtomicUsize::new(0),
         });
+        self.local = local.into();
 
         Ok(())
     }

@@ -20,7 +20,7 @@ pub struct ListLockedAlloc {
     memory: Range<*const Page>,
     next: TicketMutex<Node>,
     /// CPU local metadata
-    local: Vec<LocalCounter>,
+    local: Box<[LocalCounter]>,
 }
 
 #[repr(align(64))]
@@ -47,7 +47,7 @@ impl Default for ListLockedAlloc {
         Self {
             memory: null()..null(),
             next: TicketMutex::new(Node::new()),
-            local: Vec::new(),
+            local: Box::new([]),
         }
     }
 }
@@ -79,10 +79,11 @@ impl Alloc for ListLockedAlloc {
         self.memory = memory.as_ptr_range();
         self.next = TicketMutex::new(Node(begin as _));
 
-        self.local = Vec::with_capacity(cores);
-        self.local.resize_with(cores, || LocalCounter {
+        let mut local = Vec::with_capacity(cores);
+        local.resize_with(cores, || LocalCounter {
             counter: AtomicUsize::new(0),
         });
+        self.local = local.into();
 
         Ok(())
     }

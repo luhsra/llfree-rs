@@ -4,7 +4,7 @@ use core::mem::size_of;
 use core::ops::Range;
 use core::sync::atomic::{self, AtomicU64, Ordering};
 
-use crate::util::Atomic;
+use crate::atomic::Atomic;
 use crate::Page;
 
 /// Page table with atomic entries

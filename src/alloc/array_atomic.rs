@@ -1,3 +1,4 @@
+use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, mem};
@@ -5,10 +6,11 @@ use core::{fmt, mem};
 use log::{error, warn};
 
 use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use crate::atomic::{AStack, AStackDbg, Atomic};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::table::Table;
-use crate::util::{AStack, AStackDbg, Atomic, Page};
+use crate::util::Page;
 
 const PTE3_FULL: usize = 8 * Table::span(1);
 
@@ -43,7 +45,7 @@ pub struct ArrayAtomicAlloc<L: LowerAlloc> {
     /// Metadata of the lower alloc
     lower: L,
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
-    subtrees: Vec<Atomic<Entry3>>,
+    subtrees: Box<[Atomic<Entry3>]>,
 
     /// List of idx to subtrees that are not allocated at all
     empty: AStack<Entry3>,
@@ -69,18 +71,24 @@ impl<L: LowerAlloc> fmt::Debug for ArrayAtomicAlloc<L> {
             let pte = entry.load();
             writeln!(f, "    {i:>3}: {pte:?}")?;
         }
-        let s = &self.subtrees;
-        writeln!(f, "    empty: {:?}", AStackDbg(&self.empty, s))?;
-        writeln!(f, "    partial_l0: {:?}", AStackDbg(&self.partial_l0, s))?;
-        writeln!(f, "    partial_l1: {:?}", AStackDbg(&self.partial_l1, s))?;
+        writeln!(f, "    empty: {:?}", AStackDbg(&self.empty, self))?;
+        writeln!(f, "    partial_l0: {:?}", AStackDbg(&self.partial_l0, self))?;
+        writeln!(f, "    partial_l1: {:?}", AStackDbg(&self.partial_l1, self))?;
         for (t, local) in self.lower.iter().enumerate() {
-            let pte = local.pte(false);
-            writeln!(f, "    L{t:>2}: L0 {pte:?}")?;
-            let pte = local.pte(true);
-            writeln!(f, "         L1 {pte:?}")?;
+            writeln!(f, "    L{t:>2}: L0 {:?}", local.pte(false))?;
+            writeln!(f, "         L1 {:?}", local.pte(true))?;
         }
         writeln!(f, "}}")?;
         Ok(())
+    }
+}
+
+impl<L: LowerAlloc> Index<usize> for ArrayAtomicAlloc<L> {
+    type Output = Atomic<Entry3>;
+
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.subtrees[index]
     }
 }
 
@@ -107,9 +115,9 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
 
         // Array with all pte3
         let pte3_num = Table::num_pts(2, self.lower.pages());
-        self.subtrees = Vec::with_capacity(pte3_num);
-        self.subtrees
-            .resize_with(pte3_num, || Atomic::new(Entry3::new()));
+        let mut subtrees = Vec::with_capacity(pte3_num);
+        subtrees.resize_with(pte3_num, || Atomic::new(Entry3::new()));
+        self.subtrees = subtrees.into();
 
         self.empty = AStack::default();
         self.partial_l0 = AStack::default();
@@ -154,7 +162,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
         let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
 
         let i = page / Table::span(2);
-        let pte = self.subtrees[i].load();
+        let pte = self[i].load();
         if pte.page() {
             self.put_giant(page)
         } else {
@@ -170,7 +178,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages();
         for i in 0..Table::num_pts(2, self.pages()) {
-            let pte = self.subtrees[i].load();
+            let pte = self[i].load();
             pages -= pte.free();
         }
         // Pages allocated in reserved subtrees
@@ -195,7 +203,7 @@ impl<L: LowerAlloc> Default for ArrayAtomicAlloc<L> {
         Self {
             meta: null_mut(),
             lower: L::default(),
-            subtrees: Vec::new(),
+            subtrees: Box::new([]),
             empty: AStack::default(),
             partial_l1: AStack::default(),
             partial_l0: AStack::default(),
@@ -212,18 +220,18 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         // Add all entries to the empty list
         let pte3_num = Table::num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
-            self.subtrees[i] = Atomic::new(Entry3::new().with_free(Table::span(2)));
-            self.empty.push(&self.subtrees, i);
+            self[i].store(Entry3::new().with_free(Table::span(2)));
+            self.empty.push(self, i);
         }
 
         // The last one may be cut off
         let max = (self.pages() - (pte3_num - 1) * Table::span(2)).min(Table::span(2));
-        self.subtrees[pte3_num - 1] = Atomic::new(Entry3::new().with_free(max));
+        self[pte3_num - 1].store(Entry3::new().with_free(max));
 
         if max == Table::span(2) {
-            self.empty.push(&self.subtrees, pte3_num - 1);
+            self.empty.push(self, pte3_num - 1);
         } else if max > PTE3_FULL {
-            self.partial_l0.push(&self.subtrees, pte3_num - 1);
+            self.partial_l0.push(self, pte3_num - 1);
         }
     }
 
@@ -239,15 +247,15 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             let page = i * Table::span(2);
             let (pages, size) = self.lower.recover(page, deep)?;
             if size == Size::L2 {
-                self.subtrees[i].store(Entry3::new_giant());
+                self[i].store(Entry3::new_giant());
             } else {
-                self.subtrees[i].store(Entry3::new_table(pages, size, false));
+                self[i].store(Entry3::new_table(pages, size, false));
 
                 // Add to lists
                 if pages == Table::span(2) {
-                    self.empty.push(&self.subtrees, i);
+                    self.empty.push(self, i);
                 } else if pages > PTE3_FULL {
-                    self.partial(size == Size::L1).push(&self.subtrees, i);
+                    self.partial(size == Size::L1).push(self, i);
                 }
             }
             total += pages;
@@ -266,9 +274,9 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     /// Reserves a new subtree, prioritizing partially filled subtrees,
     /// and allocates a page from it in one step.
     fn reserve(&self, huge: bool) -> Result<(usize, Entry3)> {
-        while let Some(i) = self.partial(huge).pop(&self.subtrees) {
+        while let Some(i) = self.partial(huge).pop(self) {
             warn!("reserve partial {i}");
-            match self.subtrees[i].update(|v| v.reserve_partial(huge, PTE3_FULL)) {
+            match self[i].update(|v| v.reserve_partial(huge, PTE3_FULL)) {
                 Ok(pte) => {
                     let pte = pte.dec(huge).unwrap().with_idx(i);
                     return Ok((i * Table::span(2), pte));
@@ -276,15 +284,15 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                 Err(pte) => {
                     // Skip empty entries
                     if !pte.reserved() && pte.free() == Table::span(2) {
-                        self.empty.push(&self.subtrees, i);
+                        self.empty.push(self, i);
                     }
                 }
             }
         }
 
-        while let Some(i) = self.empty.pop(&self.subtrees) {
+        while let Some(i) = self.empty.pop(self) {
             warn!("reserve empty {i}");
-            if let Ok(pte) = self.subtrees[i].update(|v| v.reserve_empty(huge)) {
+            if let Ok(pte) = self[i].update(|v| v.reserve_empty(huge)) {
                 let pte = pte.dec(huge).unwrap().with_idx(i);
                 return Ok((i * Table::span(2), pte));
             }
@@ -304,15 +312,15 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         }
 
         let max = (self.pages() - i * Table::span(2)).min(Table::span(2));
-        if let Ok(v) = self.subtrees[i].update(|v| v.unreserve_add(huge, pte, max)) {
+        if let Ok(v) = self[i].update(|v| v.unreserve_add(huge, pte, max)) {
             // Only if not already in list
             if v.idx() == Entry3::IDX_MAX {
                 // Add to list if new counter is small enough
                 let new_pages = v.free() + pte.free();
                 if new_pages == max {
-                    self.empty.push(&self.subtrees, i);
+                    self.empty.push(self, i);
                 } else if new_pages > PTE3_FULL {
-                    self.partial(huge).push(&self.subtrees, i);
+                    self.partial(huge).push(self, i);
                 }
             }
             Ok(())
@@ -375,14 +383,14 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         }
 
         // Subtree not owned by us
-        if let Ok(pte) = self.subtrees[i].update(|v| v.inc(huge, max)) {
+        if let Ok(pte) = self[i].update(|v| v.inc(huge, max)) {
             if !pte.reserved() {
                 let new_pages = pte.free() + Table::span(huge as _);
 
                 // check if recent frees also operated in this subtree
                 if new_pages > PTE3_FULL && lower.frees_related(page) {
                     // Try to reserve it for bulk frees
-                    if let Ok(pte) = self.subtrees[i].update(|v| v.reserve(huge)) {
+                    if let Ok(pte) = self[i].update(|v| v.reserve(huge)) {
                         let pte = pte.with_idx(i);
                         // warn!("put reserve {i}");
                         self.swap_reserved(huge, pte, pte_a)?;
@@ -395,7 +403,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                 // Only if not already in list
                 if pte.idx() == Entry3::IDX_MAX && pte.free() <= PTE3_FULL && new_pages > PTE3_FULL
                 {
-                    self.partial(huge).push(&self.subtrees, i);
+                    self.partial(huge).push(self, i);
                 }
             }
             Ok(())
@@ -407,8 +415,8 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
 
     /// Allocate a giant page.
     fn get_giant(&self) -> Result<usize> {
-        if let Some(i) = self.empty.pop(&self.subtrees) {
-            if self.subtrees[i]
+        if let Some(i) = self.empty.pop(self) {
+            if self[i]
                 .update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant))
                 .is_ok()
             {
@@ -433,12 +441,12 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         }
         self.lower.clear_giant(page);
 
-        if self.subtrees[i]
+        if self[i]
             .compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Table::span(2)))
             .is_ok()
         {
             // Add to empty list
-            self.empty.push(&self.subtrees, i);
+            self.empty.push(self, i);
             Ok(())
         } else {
             error!("CAS invalid i{i}");

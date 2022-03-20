@@ -15,12 +15,11 @@ use super::{Local, LowerAlloc};
 /// ```text
 /// NVRAM: [ Pages | PT1s | PT2s | Meta ]
 /// ```
-#[repr(align(64))]
 #[derive(Default)]
 pub struct FixedLower {
     pub begin: usize,
     pub pages: usize,
-    local: Vec<Local>,
+    local: Box<[Local]>,
 }
 
 impl fmt::Debug for FixedLower {
@@ -49,7 +48,7 @@ impl LowerAlloc for FixedLower {
             begin: memory.as_ptr() as usize,
             // level 1 and 2 tables are stored at the end of the NVM
             pages: memory.len() - Table::num_pts(2, memory.len()) - Table::num_pts(1, memory.len()),
-            local,
+            local: local.into(),
         }
     }
 

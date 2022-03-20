@@ -16,13 +16,12 @@ use super::{Local, LowerAlloc, CAS_RETRIES};
 /// ```text
 /// NVRAM: [ Pages & PT1s | PT2s | Meta ]
 /// ```
-#[repr(align(64))]
 #[derive(Default)]
 pub struct DynamicLower {
     pub begin: usize,
     pub pages: usize,
-    private: Vec<Local>,
-    shared: Vec<Shared>,
+    private: Box<[Local]>,
+    shared: Box<[Shared]>,
 }
 
 #[repr(align(64))]
@@ -62,8 +61,8 @@ impl LowerAlloc for DynamicLower {
             begin: memory.as_ptr() as usize,
             // level 2 tables are stored at the end of the NVM
             pages: memory.len() - Table::num_pts(2, memory.len()),
-            private,
-            shared,
+            private: private.into(),
+            shared: shared.into(),
         }
     }
 

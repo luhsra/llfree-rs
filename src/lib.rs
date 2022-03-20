@@ -8,25 +8,25 @@ pub mod mmap;
 pub mod table;
 pub mod thread;
 pub mod util;
+pub mod atomic;
 
 #[cfg(feature = "stop")]
 pub mod stop;
 
 use core::ffi::c_void;
 use core::sync::atomic::AtomicU64;
-use std::sync::Arc;
 
 use alloc::{Alloc, Error, Size};
 use lower::dynamic::DynamicLower;
 use util::Page;
 
 pub type Allocator = alloc::array_atomic::ArrayAtomicAlloc<DynamicLower>;
-static mut ALLOC: Option<Arc<dyn Alloc>> = None;
+static mut ALLOC: Option<Box<dyn Alloc>> = None;
 
 pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> alloc::Result<()> {
     let mut alloc = Allocator::default();
     alloc.init(cores, memory, overwrite)?;
-    unsafe { ALLOC = Some(Arc::new(alloc)) };
+    unsafe { ALLOC = Some(Box::new(alloc)) };
     Ok(())
 }
 

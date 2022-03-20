@@ -20,7 +20,7 @@ use crate::util::Page;
 pub struct ListLocalAlloc {
     memory: Range<*const Page>,
     /// CPU local metadata
-    local: Vec<UnsafeCell<Local>>,
+    local: Box<[UnsafeCell<Local>]>,
     pages: usize,
 }
 
@@ -43,7 +43,7 @@ impl Default for ListLocalAlloc {
     fn default() -> Self {
         Self {
             memory: null()..null(),
-            local: Vec::new(),
+            local: Box::new([]),
             pages: 0,
         }
     }
@@ -85,7 +85,7 @@ impl Alloc for ListLocalAlloc {
 
         self.pages = p_core * cores;
         self.memory = memory[..p_core * cores].as_ptr_range();
-        self.local = local;
+        self.local = local.into();
         Ok(())
     }
 
@@ -128,7 +128,7 @@ impl Alloc for ListLocalAlloc {
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = 0;
-        for local in &self.local {
+        for local in self.local.iter() {
             let local = unsafe { &*local.get() };
             pages += local.counter;
         }
