@@ -407,10 +407,18 @@ fn filling(
         for _ in 0..fill {
             alloc.get(t, size).unwrap();
         }
+        // Warm up
+        let mut pages = Vec::with_capacity(allocs);
+        for _ in 0..allocs {
+            pages.push(alloc.get(t, size).unwrap());
+        }
+        pages.reverse();
+        for &page in &pages {
+            alloc.put(t, page).unwrap();
+        }
         barrier.wait();
 
         // Operate on filling level.
-        let mut pages = Vec::with_capacity(allocs);
         let t1 = Instant::now();
         for _ in 0..allocs {
             pages.push(alloc.get(t, size).unwrap());
