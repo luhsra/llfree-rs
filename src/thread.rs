@@ -5,16 +5,12 @@ thread_local! {
     pub static PINNED: AtomicUsize = AtomicUsize::new(0);
 }
 
-/// Useful if we only want to operate on a single numa node.
-/// Pin then only selects every n'th cpu.
-pub static mut CPU_STRIDE: usize = 1;
-
 #[cfg(target_os = "linux")]
 pub fn pin(core: usize) {
-    use std::sync::atomic::Ordering;
+    use core::sync::atomic::Ordering;
 
     let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
-    unsafe { libc::CPU_SET(CPU_STRIDE * core, &mut set) };
+    unsafe { libc::CPU_SET(core, &mut set) };
     let ret = unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) };
     if ret != 0 {
         unsafe { libc::perror(b"sched_setaffinity\0" as *const _ as _) };
@@ -110,7 +106,7 @@ mod test {
             "Pinned to {}",
             super::PINNED.with(|v| v.load(Ordering::SeqCst))
         );
-        super::pin((cores - 1) / unsafe { super::CPU_STRIDE });
+        super::pin(cores - 1);
         println!(
             "Pinned to {}",
             super::PINNED.with(|v| v.load(Ordering::SeqCst))

@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, warn};
 
-use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::atomic::{AStack, AStackDbg, Atomic};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
@@ -29,10 +29,12 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 pub struct ArrayUnalignedAlloc<L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
-    /// Metadata of the lower alloc
-    lower: L,
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Box<[Aligned]>,
+    /// CPU local data
+    local: Box<[Local]>,
+    /// Metadata of the lower alloc
+    lower: L,
 
     /// List of idx to subtrees that are not allocated at all
     empty: AStack<Entry3>,
@@ -96,6 +98,10 @@ impl<L: LowerAlloc> Alloc for ArrayUnalignedAlloc<L> {
         let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
         let meta = rem[0].cast_mut::<Meta>();
         self.meta = meta;
+
+        let mut local = Vec::with_capacity(cores);
+        local.resize_with(cores, Local::new);
+        self.local = local.into();
 
         // Create lower allocator
         self.lower = L::new(cores, memory);
@@ -186,8 +192,9 @@ impl<L: LowerAlloc> Default for ArrayUnalignedAlloc<L> {
     fn default() -> Self {
         Self {
             meta: null_mut(),
-            lower: L::default(),
             subtrees: Box::new([]),
+            local: Box::new([]),
+            lower: L::default(),
             empty: AStack::default(),
             partial_l1: AStack::default(),
             partial_l0: AStack::default(),
@@ -281,7 +288,7 @@ impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
 
     /// Allocate a small or huge page from the lower alloc.
     fn get_lower(&self, core: usize, huge: bool) -> Result<usize> {
-        let start_a = self.lower[core].start(huge);
+        let start_a = self.local[core].start(huge);
         let mut start = *start_a;
 
         if start == usize::MAX {

@@ -1,4 +1,3 @@
-use std::any::type_name;
 use std::fs::File;
 use std::io::Write;
 use std::sync::{Arc, Barrier};
@@ -6,14 +5,16 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::alloc::{self, Alloc, Size, MIN_PAGES};
+use nvalloc::alloc::table::TableAlloc;
+use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
 use nvalloc::lower::dynamic::DynamicLower;
+use nvalloc::lower::fixed::FixedLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::thread;
-use nvalloc::util::{logging, Page};
+use nvalloc::util::{logging, Cycles, Page};
 
-type Allocator = alloc::array_atomic::ArrayAtomicAlloc::<DynamicLower>;
+type Allocator = TableAlloc<FixedLower>;
 
 /// Benchmarking an allocator in more detail.
 #[derive(Parser, Debug)]
@@ -29,8 +30,6 @@ struct Args {
     iterations: usize,
     #[clap(short, long, default_value_t = 0)]
     size: usize,
-    #[clap(long, default_value_t = 1)]
-    cpu_stride: usize,
 }
 
 fn main() {
@@ -40,15 +39,12 @@ fn main() {
         dax,
         iterations,
         size,
-        cpu_stride,
     } = Args::parse();
 
     logging();
 
     assert!(threads >= 1);
-    assert!(threads * cpu_stride <= std::thread::available_parallelism().unwrap().get());
-
-    unsafe { thread::CPU_STRIDE = cpu_stride };
+    assert!(threads <= std::thread::available_parallelism().unwrap().get());
 
     let size = match size {
         0 => Size::L0,
@@ -90,9 +86,9 @@ fn main() {
 
             let t_get = &mut times[0..Table::LEN];
             for i in 0..allocs {
-                let timer = Instant::now();
+                let timer = Cycles::now();
                 pages.push(alloc.get(t, size).unwrap());
-                let t = timer.elapsed().as_nanos() as f64;
+                let t = timer.elapsed() as f64;
 
                 let p = &mut t_get[i % Table::LEN];
                 p.avg += t;
@@ -105,9 +101,9 @@ fn main() {
 
             let t_put = &mut times[Table::LEN..];
             for (i, page) in pages.into_iter().enumerate() {
-                let timer = Instant::now();
+                let timer = Cycles::now();
                 alloc.put(t, page).unwrap();
-                let t = timer.elapsed().as_nanos() as f64;
+                let t = timer.elapsed() as f64;
 
                 let p = &mut t_put[i % Table::LEN];
                 p.avg += t;
@@ -147,10 +143,7 @@ fn main() {
         t.std = (t.std / n - t.avg * t.avg).sqrt();
     }
 
-    let name = type_name::<Allocator>();
-    let name = name.rsplit_once(':').map(|s| s.1).unwrap_or(name);
-    let name = name.strip_suffix("Alloc").unwrap_or(name);
-
+    let name = Allocator::default().name();
     let mut outfile = File::create(outfile).unwrap();
     writeln!(outfile, "alloc,threads,op,num,avg,std,min,max").unwrap();
     for (num, Perf { avg, std, min, max }) in times.into_iter().enumerate() {

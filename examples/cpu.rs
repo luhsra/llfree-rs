@@ -32,8 +32,6 @@ fn main() {
         println!("avx512f:  {}", info.has_avx512f());
     }
 
-    unsafe { thread::CPU_STRIDE = 1 };
-
     #[cfg(target_os = "linux")]
     {
         println!("CPU cores");

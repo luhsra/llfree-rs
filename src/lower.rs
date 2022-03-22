@@ -1,11 +1,7 @@
 use core::fmt;
 use core::ops::Range;
-use std::cell::UnsafeCell;
-use std::ops::Deref;
 
 use crate::alloc::{Result, Size};
-use crate::entry::Entry3;
-use crate::table::Table;
 use crate::Page;
 
 const CAS_RETRIES: usize = 4096;
@@ -25,7 +21,7 @@ pub mod dynamic;
 pub mod fixed;
 
 /// Level 2 page allocator.
-pub trait LowerAlloc: Default + fmt::Debug + Deref<Target = [Local]> {
+pub trait LowerAlloc: Default + fmt::Debug {
     /// Create a new lower allocator.
     fn new(cores: usize, memory: &mut [Page]) -> Self;
 
@@ -50,53 +46,6 @@ pub trait LowerAlloc: Default + fmt::Debug + Deref<Target = [Local]> {
 
     /// Debug function, returning the number of free pages and performing internal checks.
     fn dbg_allocated_pages(&self) -> usize;
-}
-
-/// Per core data.
-/// # Safety
-/// This should only be accessed from the corresponding (virtual) CPU core!
-#[repr(transparent)]
-pub struct Local(UnsafeCell<Inner>);
-#[repr(align(64))]
-struct Inner {
-    start: [usize; 2],
-    pte: [Entry3; 2],
-    frees: [usize; 4],
-    frees_i: usize,
-}
-
-unsafe impl Send for Local {}
-unsafe impl Sync for Local {}
-
-impl Local {
-    fn new() -> Self {
-        Self(UnsafeCell::new(Inner {
-            start: [usize::MAX, usize::MAX],
-            pte: [
-                Entry3::new().with_idx(Entry3::IDX_MAX),
-                Entry3::new().with_idx(Entry3::IDX_MAX),
-            ],
-            frees_i: 0,
-            frees: [usize::MAX; 4],
-        }))
-    }
-    fn p(&self) -> &mut Inner {
-        unsafe { &mut *self.0.get() }
-    }
-    pub fn start(&self, huge: bool) -> &mut usize {
-        &mut self.p().start[huge as usize]
-    }
-    pub fn pte(&self, huge: bool) -> &mut Entry3 {
-        &mut self.p().pte[huge as usize]
-    }
-    pub fn frees_push(&self, page: usize) {
-        self.p().frees_i = (self.p().frees_i + 1) % self.p().frees.len();
-        self.p().frees[self.p().frees_i] = page;
-    }
-    pub fn frees_related(&self, page: usize) -> bool {
-        let n = page / Table::span(2);
-        self.p().frees.iter().all(|p| p / Table::span(2) == n)
-    }
 }
 
 #[cfg(all(test, feature = "stop"))]

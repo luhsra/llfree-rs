@@ -5,7 +5,7 @@ use core::{fmt, mem};
 
 use log::{error, info, warn};
 
-use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
 use crate::lower::LowerAlloc;
 use crate::table::Table;
@@ -37,13 +37,15 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 pub struct TableAlloc<L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
-    /// Metadata of the lower alloc
-    lower: L,
     /// Array of the volatile level 3-5 page tables
     /// ```text
     /// DRAM: [ 1*PT5 | n*PT4 | m*PT3 ]
     /// ```
     tables: Box<[Page]>,
+    /// CPU local data
+    local: Box<[Local]>,
+    /// Metadata of the lower alloc
+    lower: L,
 }
 
 unsafe impl<L: LowerAlloc> Send for TableAlloc<L> {}
@@ -85,7 +87,7 @@ impl<L: LowerAlloc> fmt::Debug for TableAlloc<L> {
         }
         dump_rec(self, f, Table::LAYERS, 0)?;
 
-        for (t, local) in self.lower.iter().enumerate() {
+        for (t, local) in self.local.iter().enumerate() {
             writeln!(f, "    L{t:>2}: L0 {:?}", local.pte(false))?;
             writeln!(f, "         L1 {:?}", local.pte(true))?;
         }
@@ -111,6 +113,10 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
         let meta = rem[0].cast_mut::<Meta>();
         self.meta = meta;
+
+        let mut local = Vec::with_capacity(cores);
+        local.resize_with(cores, Local::new);
+        self.local = local.into();
 
         // Create lower allocator
         self.lower = L::new(cores, memory);
@@ -177,7 +183,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.allocated_pages_rec(Table::LAYERS, 0);
         // Pages allocated in reserved subtrees
-        for (_t, local) in self.lower.iter().enumerate() {
+        for (_t, local) in self.local.iter().enumerate() {
             let pte = local.pte(false);
             // warn!("L {t:>2}: L0 {pte:?}");
             pages += pte.free();
@@ -201,8 +207,9 @@ impl<L: LowerAlloc> Default for TableAlloc<L> {
     fn default() -> Self {
         Self {
             meta: null_mut(),
-            lower: L::default(),
             tables: Box::new([]),
+            local: Box::new([]),
+            lower: L::default(),
         }
     }
 }
@@ -503,8 +510,8 @@ impl<L: LowerAlloc> TableAlloc<L> {
     }
 
     fn get_small(&self, core: usize, huge: bool) -> Result<usize> {
-        let pte_a = self.lower[core].pte(huge);
-        let start_a = self.lower[core].start(huge);
+        let pte_a = self.local[core].pte(huge);
+        let start_a = self.local[core].start(huge);
         let mut start = *start_a;
 
         if start == usize::MAX {
@@ -553,7 +560,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
 
         let huge = self.lower.put(page)?;
 
-        let lower = &self.lower[core];
+        let lower = &self.local[core];
         lower.frees_push(page);
 
         let idx = page / Table::span(2);
@@ -620,35 +627,6 @@ impl<L: LowerAlloc> TableAlloc<L> {
                 error!("Invalid {page}");
                 Err(Error::Address)
             }
-        }
-    }
-
-    #[allow(unused)]
-    fn dump(&self) {
-        fn dump_rec<L: LowerAlloc>(this: &TableAlloc<L>, level: usize, start: usize) {
-            if level == 3 {
-                let pt3 = this.pt3(start);
-                for i in Table::range(3, start..this.pages()) {
-                    let pte3 = pt3.get(i);
-                    let l = 3 + (Table::LAYERS - level) * 4;
-                    error!("{i:>l$} {pte3:?}");
-                }
-            } else {
-                let pt = this.pt(level, start);
-                for i in Table::range(level, start..this.pages()) {
-                    let pte = pt.get(i);
-                    let l = 3 + (Table::LAYERS - level) * 4;
-                    error!("{i:>l$} {pte:?}");
-                    this.allocated_pages_rec(level - 1, Table::page(level, start, i));
-                }
-            }
-        }
-
-        for (t, local) in self.lower.iter().enumerate() {
-            let pte = local.pte(false);
-            error!("L {t:>2}: L0 {pte:?}");
-            let pte = local.pte(true);
-            error!("L {t:>2}: L1 {pte:?}");
         }
     }
 }

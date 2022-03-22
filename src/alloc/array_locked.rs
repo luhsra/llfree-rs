@@ -6,7 +6,7 @@ use core::{fmt, mem};
 use log::{error, warn};
 use spin::mutex::{TicketMutex, TicketMutexGuard};
 
-use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES, Local};
 use crate::atomic::Atomic;
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
@@ -43,10 +43,12 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 pub struct ArrayLockedAlloc<L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
-    /// Metadata of the lower alloc
-    lower: L,
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Box<[Atomic<Entry3>]>,
+    /// CPU local data
+    local: Box<[Local]>,
+    /// Metadata of the lower alloc
+    lower: L,
 
     /// List of idx to subtrees that are not allocated at all
     empty: TicketMutex<Vec<usize>>,
@@ -75,7 +77,7 @@ impl<L: LowerAlloc> fmt::Debug for ArrayLockedAlloc<L> {
         writeln!(f, "    empty: {:?}", self.empty.lock())?;
         writeln!(f, "    partial_l0: {:?}", self.partial_l0.lock())?;
         writeln!(f, "    partial_l1: {:?}", self.partial_l1.lock())?;
-        for (t, local) in self.lower.iter().enumerate() {
+        for (t, local) in self.local.iter().enumerate() {
             writeln!(f, "    L{t:>2}: L0 {:?}", local.pte(false))?;
             writeln!(f, "         L1 {:?}", local.pte(true))?;
         }
@@ -110,6 +112,10 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
         let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
         let meta = rem[0].cast_mut::<Meta>();
         self.meta = meta;
+
+        let mut local = Vec::with_capacity(cores);
+        local.resize_with(cores, Local::new);
+        self.local = local.into();
 
         // Create lower allocator
         self.lower = L::new(cores, memory);
@@ -183,7 +189,7 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
             pages -= pte.free();
         }
         // Pages allocated in reserved subtrees
-        for local in self.lower.iter() {
+        for local in self.local.iter() {
             pages -= local.pte(false).free();
             pages -= local.pte(true).free();
         }
@@ -203,8 +209,9 @@ impl<L: LowerAlloc> Default for ArrayLockedAlloc<L> {
     fn default() -> Self {
         Self {
             meta: null_mut(),
-            lower: L::default(),
             subtrees: Box::new([]),
+            local: Box::new([]),
+            lower: L::default(),
             empty: TicketMutex::new(Vec::new()),
             partial_l1: TicketMutex::new(Vec::new()),
             partial_l0: TicketMutex::new(Vec::new()),
@@ -344,8 +351,8 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
 
     /// Allocate a small or huge page from the lower alloc.
     fn get_lower(&self, core: usize, huge: bool) -> Result<usize> {
-        let start_a = self.lower[core].start(huge);
-        let pte_a = self.lower[core].pte(huge);
+        let start_a = self.local[core].start(huge);
+        let pte_a = self.local[core].pte(huge);
         let mut start = *start_a;
 
         if start == usize::MAX {
@@ -384,11 +391,11 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
         let i = page / Table::span(2);
         let huge = self.lower.put(page)?;
 
-        let lower = &self.lower[core];
-        lower.frees_push(page);
+        let local = &self.local[core];
+        local.frees_push(page);
 
         // Try decrement own pte first
-        let pte_a = lower.pte(huge);
+        let pte_a = local.pte(huge);
         if let Some(pte) = pte_a.inc_idx(huge, i, max) {
             *pte_a = pte;
             return Ok(());
@@ -400,13 +407,13 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
                 let new_pages = pte.free() + Table::span(huge as _);
 
                 // check if recent frees also operated in this subtree
-                if new_pages > PTE3_FULL && lower.frees_related(page) {
+                if new_pages > PTE3_FULL && local.frees_related(page) {
                     // Try to reserve it for bulk frees
                     if let Ok(pte) = self[i].update(|v| v.reserve(huge)) {
                         let pte = pte.with_idx(i);
                         // warn!("put reserve {i}");
                         self.swap_reserved(huge, pte, pte_a)?;
-                        *lower.start(huge) = page;
+                        *local.start(huge) = page;
                         return Ok(());
                     }
                 }

@@ -1,6 +1,4 @@
-use core::fmt;
 use core::ops::Range;
-use std::ops::Deref;
 
 use log::{error, info, warn};
 
@@ -9,46 +7,24 @@ use crate::entry::{Entry1, Entry2};
 use crate::table::Table;
 use crate::util::Page;
 
-use super::{Local, LowerAlloc};
+use super::{LowerAlloc};
 
 /// Level 2 page allocator.
 /// ```text
 /// NVRAM: [ Pages | PT1s | PT2s | Meta ]
 /// ```
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct FixedLower {
     pub begin: usize,
     pub pages: usize,
-    local: Box<[Local]>,
-}
-
-impl fmt::Debug for FixedLower {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.dump(0);
-        f.debug_struct("DynamicLower")
-            .field("begin", &self.begin)
-            .field("pages", &self.pages)
-            .finish()
-    }
-}
-
-impl Deref for FixedLower {
-    type Target = [Local];
-
-    fn deref(&self) -> &Self::Target {
-        &self.local
-    }
 }
 
 impl LowerAlloc for FixedLower {
-    fn new(cores: usize, memory: &mut [Page]) -> Self {
-        let mut local = Vec::with_capacity(cores);
-        local.resize_with(cores, Local::new);
+    fn new(_cores: usize, memory: &mut [Page]) -> Self {
         Self {
             begin: memory.as_ptr() as usize,
             // level 1 and 2 tables are stored at the end of the NVM
             pages: memory.len() - Table::num_pts(2, memory.len()) - Table::num_pts(1, memory.len()),
-            local: local.into(),
         }
     }
 

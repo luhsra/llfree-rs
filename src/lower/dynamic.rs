@@ -1,6 +1,5 @@
 use core::fmt;
 use core::ops::Range;
-use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
@@ -10,7 +9,7 @@ use crate::entry::{Entry1, Entry2};
 use crate::table::Table;
 use crate::util::Page;
 
-use super::{Local, LowerAlloc, CAS_RETRIES};
+use super::{LowerAlloc, CAS_RETRIES};
 
 /// Level 2 page allocator.
 /// ```text
@@ -20,7 +19,6 @@ use super::{Local, LowerAlloc, CAS_RETRIES};
 pub struct DynamicLower {
     pub begin: usize,
     pub pages: usize,
-    private: Box<[Local]>,
     shared: Box<[Shared]>,
 }
 
@@ -32,7 +30,6 @@ struct Shared {
 
 impl fmt::Debug for DynamicLower {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.dump(0);
         f.debug_struct("DynamicLower")
             .field("begin", &self.begin)
             .field("pages", &self.pages)
@@ -40,18 +37,8 @@ impl fmt::Debug for DynamicLower {
     }
 }
 
-impl Deref for DynamicLower {
-    type Target = [Local];
-
-    fn deref(&self) -> &Self::Target {
-        &self.private
-    }
-}
-
 impl LowerAlloc for DynamicLower {
     fn new(cores: usize, memory: &mut [Page]) -> Self {
-        let mut private = Vec::with_capacity(cores);
-        private.resize_with(cores, Local::new);
         let mut shared = Vec::with_capacity(cores);
         shared.resize_with(cores, || Shared {
             alloc_pt1: AtomicUsize::new(0),
@@ -61,7 +48,6 @@ impl LowerAlloc for DynamicLower {
             begin: memory.as_ptr() as usize,
             // level 2 tables are stored at the end of the NVM
             pages: memory.len() - Table::num_pts(2, memory.len()),
-            private: private.into(),
             shared: shared.into(),
         }
     }
