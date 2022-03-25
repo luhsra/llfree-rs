@@ -1,7 +1,6 @@
 LINUX_BUILD_DIR ?= /lib/modules/$(shell uname -r)/build
 
-obj-m += allocs.o
-allocs-objs += alloc.o nanorand.o
+obj-m += alloc.o
 
 NUM_ALLOCS ?= '(2 * 512 * 512)'
 CPU_STRIDE ?= 1

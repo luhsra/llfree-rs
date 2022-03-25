@@ -25,8 +25,6 @@ MODULE_AUTHOR("Lars Wrenger");
 
 #ifndef THREADS_MAX
 #define THREADS_MAX 6UL
-#elif THREADS_MAX > 96
-#error "THREADS_MAX cannot be larger then 48"
 #endif
 
 #ifndef ITERATIONS
@@ -158,6 +156,7 @@ __maybe_unused static void bulk(u64 tid) {
     timer = (ktime_get_ns() - timer) / NUM_ALLOCS;
     atomic64_set(&thread_perf[tid].put, timer);
     printk(KERN_INFO MOD "Free %llu\n", timer);
+    kfree(pages);
 }
 
 /// Alloc and free the same page
@@ -191,7 +190,7 @@ __maybe_unused static void repeat(u64 tid) {
 __maybe_unused static void rand(u64 tid) {
     u64 i, j;
     u64 timer;
-    struct nanorand rng = nanorand_new(tid);
+    u64 rng = tid;
 
     struct page **pages =
         kmalloc_array(NUM_ALLOCS, sizeof(struct page *), GFP_KERNEL);
@@ -232,6 +231,7 @@ __maybe_unused static void rand(u64 tid) {
     }
 
     printk(KERN_INFO MOD "Realloc %llu\n", timer);
+    kfree(pages);
 }
 
 static int worker(void *data) {
@@ -243,7 +243,7 @@ static int worker(void *data) {
     bulk(tid);
 #elif BENCH == 1
     repeat(tid);
-#else
+#else // BENCH == 2
     rand(tid);
 #endif
 
@@ -330,8 +330,12 @@ static int alloc_init_module(void) {
             p->get_avg /= threads[i];
             p->put_avg /= threads[i];
 
+            // Cleanup
             reinit_completion(&start_barrier);
             reinit_completion(&mid_barrier);
+            for (t = 0; t < threads[i]; t++) {
+                kthread_stop(tasks[t]);
+            }
         }
     }
 
