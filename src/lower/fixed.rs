@@ -1,13 +1,14 @@
 use core::ops::Range;
+use std::fmt::Write;
 
-use log::{error, info, warn};
+use log::{error, warn};
 
 use crate::alloc::{Error, Result, Size};
 use crate::entry::{Entry1, Entry2};
 use crate::table::Table;
 use crate::util::Page;
 
-use super::{LowerAlloc};
+use super::LowerAlloc;
 
 /// Level 2 page allocator.
 /// ```text
@@ -132,7 +133,7 @@ impl LowerAlloc for FixedLower {
             if !old.giant() && old.free() < Table::LEN {
                 self.put_small(page).map(|_| false)
             } else {
-                error!("Addr {old:?}");
+                error!("Addr {page:x} {old:?}");
                 Err(Error::Address)
             }
         } else {
@@ -272,6 +273,8 @@ impl FixedLower {
 
     #[allow(dead_code)]
     pub fn dump(&self, start: usize) {
+        let mut out = String::new();
+        writeln!(out, "Dumping pt {}", start / Table::span(2)).unwrap();
         let pt2 = self.pt2(start);
         for i2 in 0..Table::LEN {
             let start = Table::page(2, start, i2);
@@ -282,18 +285,9 @@ impl FixedLower {
             let pte2 = pt2.get(i2);
             let indent = (Table::LAYERS - 2) * 4;
             let addr = start * Page::SIZE;
-            info!("{:indent$}l2 i={i2} 0x{addr:x}: {pte2:?}", "");
-            if !pte2.giant() && !pte2.page() && pte2.free() > 0 && pte2.free() < Table::LEN {
-                let pt1 = self.pt1(start);
-                for i1 in 0..Table::LEN {
-                    let page = Table::page(1, start, i1);
-                    let pte1 = pt1.get(i1);
-                    let indent = (Table::LAYERS - 1) * 4;
-                    let addr = page * Page::SIZE;
-                    info!("{:indent$}l1 i={i1} 0x{addr:x}: {pte1:?}", "");
-                }
-            }
+            writeln!(out, "{:indent$}l2 i={i2} 0x{addr:x}: {pte2:?}", "").unwrap();
         }
+        warn!("{out}");
     }
 }
 

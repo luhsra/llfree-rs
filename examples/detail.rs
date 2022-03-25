@@ -7,7 +7,6 @@ use clap::Parser;
 use log::warn;
 use nvalloc::alloc::table::TableAlloc;
 use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
-use nvalloc::lower::dynamic::DynamicLower;
 use nvalloc::lower::fixed::FixedLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;

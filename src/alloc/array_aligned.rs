@@ -329,8 +329,8 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
             .pages()
             .saturating_sub(Table::round(2, page))
             .min(Table::span(2));
-        if pte.free() == max {
-            error!("Not allocated {page}");
+        if pte.free() >= max {
+            error!("Not allocated 0x{page:x}, {:x} >= {max:x}", pte.free());
             return Err(Error::Address);
         }
 

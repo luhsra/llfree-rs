@@ -1,7 +1,7 @@
 use core::any::type_name;
+use core::cell::UnsafeCell;
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
-use core::cell::UnsafeCell;
 
 use log::error;
 
@@ -65,18 +65,22 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     fn dbg_allocated_pages(&self) -> usize;
     #[cold]
     fn name(&self) -> String {
-        let name = type_name::<Self>();
-        // Add first letter of generic type as suffix
-        let (name, suffix) = if let Some((prefix, suffix)) = name.split_once('<') {
-            let suffix = suffix.rsplit_once(':').map(|s| s.1).unwrap_or(suffix);
-            (prefix, &suffix[0..1])
-        } else {
-            (name, "")
-        };
-        // Strip namespaces
-        let name = name.rsplit_once(':').map(|s| s.1).unwrap_or(name);
-        format!("{}{}", name.strip_suffix("Alloc").unwrap_or(name), suffix)
+        name::<Self>()
     }
+}
+
+pub fn name<A: Alloc + ?Sized>() -> String {
+    let name = type_name::<A>();
+    // Add first letter of generic type as suffix
+    let (name, suffix) = if let Some((prefix, suffix)) = name.split_once('<') {
+        let suffix = suffix.rsplit_once(':').map(|s| s.1).unwrap_or(suffix);
+        (prefix, &suffix[0..1])
+    } else {
+        (name, "")
+    };
+    // Strip namespaces
+    let name = name.rsplit_once(':').map(|s| s.1).unwrap_or(name);
+    format!("{}{}", name.strip_suffix("Alloc").unwrap_or(name), suffix)
 }
 
 /// Allocates a new page and writes the value after translation into `dst`.
@@ -147,7 +151,6 @@ impl Local {
         self.p().frees.iter().all(|p| p / Table::span(2) == n)
     }
 }
-
 
 #[cfg(test)]
 mod test {

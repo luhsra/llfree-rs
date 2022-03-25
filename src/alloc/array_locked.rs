@@ -383,7 +383,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
             .pages()
             .saturating_sub(Table::round(2, page))
             .min(Table::span(2));
-        if pte.free() == max {
+        if pte.free() >= max {
             error!("Not allocated {page} (i{})", page / Table::span(2));
             return Err(Error::Address);
         }

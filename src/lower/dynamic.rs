@@ -1,5 +1,6 @@
 use core::fmt;
 use core::ops::Range;
+use std::fmt::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::{error, info, warn};
@@ -179,6 +180,7 @@ impl LowerAlloc for DynamicLower {
             error!("Exceeding retries {} {old:?}", page / Table::span(2));
             Err(Error::CAS)
         } else {
+            error!("Not allocated 0x{page:x} {old:?}");
             Err(Error::Address)
         }
     }
@@ -424,6 +426,9 @@ impl DynamicLower {
 
     #[allow(dead_code)]
     pub fn dump(&self, start: usize) {
+        let mut out = String::new();
+        writeln!(out, "Dumping pt {}", start / Table::span(2)).unwrap();
+
         let pt2 = self.pt2(start);
         for i2 in 0..Table::LEN {
             let start = Table::page(2, start, i2);
@@ -434,18 +439,9 @@ impl DynamicLower {
             let pte2 = pt2.get(i2);
             let indent = (Table::LAYERS - 2) * 4;
             let addr = start * Page::SIZE;
-            info!("{:indent$}l2 i={i2} 0x{addr:x}: {pte2:?}", "");
-            if !pte2.giant() && !pte2.page() && pte2.free() > 0 && pte2.free() < Table::LEN {
-                let pt1 = self.pt1(start, pte2.i1());
-                for i1 in 0..Table::LEN {
-                    let page = Table::page(1, start, i1);
-                    let pte1 = pt1.get(i1);
-                    let indent = (Table::LAYERS - 1) * 4;
-                    let addr = page * Page::SIZE;
-                    info!("{:indent$}l1 i={i1} 0x{addr:x}: {pte1:?}", "");
-                }
-            }
+            writeln!(out, "{:indent$}l2 i={i2} 0x{addr:x}: {pte2:?}", "").unwrap();
         }
+        warn!("{out}");
     }
 }
 

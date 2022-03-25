@@ -553,7 +553,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
         }
 
         let max = (self.pages() - Table::round(2, page)).min(Table::span(2));
-        if pte.free() == max {
+        if pte.free() >= max {
             error!("Invalid address l3 i{i}");
             return Err(Error::Address);
         }

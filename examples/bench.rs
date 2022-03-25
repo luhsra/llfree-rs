@@ -1,7 +1,7 @@
 #![cfg(all(feature = "thread", feature = "logger"))]
 
 use core::fmt;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 use std::iter::FromIterator;
@@ -18,7 +18,7 @@ use nvalloc::alloc::array_unaligned::ArrayUnalignedAlloc;
 use nvalloc::alloc::list_local::ListLocalAlloc;
 use nvalloc::alloc::list_locked::ListLockedAlloc;
 use nvalloc::alloc::table::TableAlloc;
-use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
+use nvalloc::alloc::{self, Alloc, Size, MIN_PAGES};
 use nvalloc::lower::dynamic::DynamicLower;
 use nvalloc::lower::fixed::FixedLower;
 use nvalloc::mmap::MMap;
@@ -33,19 +33,21 @@ struct Args {
     #[clap(arg_enum)]
     bench: Benchmark,
     allocs: Vec<String>,
-    /// Tested number of threads / allocations / filling levels / cpu stride, depending on benchmark.
+    /// Tested number of threads / allocations / filling levels, depending on benchmark.
     #[clap(short, long, default_value = "1")]
     x: Vec<usize>,
     /// Max number of threads
     #[clap(short, long, default_value = "6")]
     threads: usize,
-
+    /// Where to store the benchmark results in csv format.
     #[clap(short, long, default_value = "bench/out/bench.csv")]
     outfile: String,
+    /// DAX file to be used for the allocator.
     #[clap(long)]
     dax: Option<String>,
     #[clap(short, long, default_value_t = 1)]
     iterations: usize,
+    /// Size of the allocated pages: 0 = 4K, 1 = 2M, 2 = 1G
     #[clap(short, long, default_value_t = 0)]
     size: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
@@ -90,49 +92,38 @@ fn main() {
     }
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
-    let allocs: Vec<(usize, Arc<dyn Alloc>)> = vec![
-        (
-            usize::MAX,
-            Arc::new(ArrayAlignedAlloc::<DynamicLower>::default()),
-        ),
-        (
-            usize::MAX,
-            Arc::new(ArrayUnalignedAlloc::<DynamicLower>::default()),
-        ),
-        (
-            usize::MAX,
-            Arc::new(ArrayLockedAlloc::<DynamicLower>::default()),
-        ),
-        (
-            usize::MAX,
-            Arc::new(ArrayAtomicAlloc::<DynamicLower>::default()),
-        ),
-        (usize::MAX, Arc::new(TableAlloc::<DynamicLower>::default())),
-        (
-            usize::MAX,
-            Arc::new(ArrayAlignedAlloc::<FixedLower>::default()),
-        ),
-        (
-            usize::MAX,
-            Arc::new(ArrayUnalignedAlloc::<FixedLower>::default()),
-        ),
-        (
-            usize::MAX,
-            Arc::new(ArrayLockedAlloc::<FixedLower>::default()),
-        ),
-        (
-            usize::MAX,
-            Arc::new(ArrayAtomicAlloc::<FixedLower>::default()),
-        ),
-        (usize::MAX, Arc::new(TableAlloc::<FixedLower>::default())),
-        (usize::MAX, Arc::new(ListLocalAlloc::default())),
-        (16, Arc::new(ListLockedAlloc::default())),
+    type F = FixedLower;
+    type D = DynamicLower;
+    let allocs: [Arc<dyn Alloc>; 12] = [
+        Arc::new(ArrayAlignedAlloc::<F>::default()),
+        Arc::new(ArrayUnalignedAlloc::<F>::default()),
+        Arc::new(ArrayLockedAlloc::<F>::default()),
+        Arc::new(ArrayAtomicAlloc::<F>::default()),
+        Arc::new(TableAlloc::<F>::default()),
+        Arc::new(ArrayAlignedAlloc::<D>::default()),
+        Arc::new(ArrayUnalignedAlloc::<D>::default()),
+        Arc::new(ArrayLockedAlloc::<D>::default()),
+        Arc::new(ArrayAtomicAlloc::<D>::default()),
+        Arc::new(TableAlloc::<D>::default()),
+        Arc::new(ListLocalAlloc::default()),
+        Arc::new(ListLockedAlloc::default()),
     ];
 
+    let mut conditions = HashMap::<String, &'static dyn Fn(usize, Size) -> bool>::new();
+    conditions.insert(alloc::name::<ListLocalAlloc>(), &|_, size| size == Size::L0);
+    conditions.insert(alloc::name::<ListLockedAlloc>(), &|cores, size| {
+        size == Size::L0 && (cores <= 16 || cores == 32)
+    });
+
     for x in x {
-        for (max_threads, alloc) in &allocs {
+        for alloc in &allocs {
             let name = alloc.name();
-            if alloc_names.contains(&name) && bench.threads(threads, x) <= *max_threads {
+            if alloc_names.contains(&name)
+                && conditions
+                    .get(&name)
+                    .map(|f| f(bench.threads(threads, x), size))
+                    .unwrap_or(true)
+            {
                 for i in 0..iterations {
                     let perf = bench.run(
                         alloc.clone(),
@@ -416,6 +407,7 @@ fn filling(
         for &page in &pages {
             alloc.put(t, page).unwrap();
         }
+        pages.clear();
         barrier.wait();
 
         // Operate on filling level.
