@@ -181,12 +181,13 @@ mod test {
 
     use spin::Barrier;
 
-    use crate::thread;
+    use crate::{thread, util::black_box};
 
     use super::{ANode, AStack, AStackDbg, Atomic};
 
     const DATA_V: Atomic<u64> = Atomic(AtomicU64::new(0), PhantomData);
-    static mut DATA: [Atomic<u64>; 16] = [DATA_V; 16];
+    const N: usize = 64;
+    static mut DATA: [Atomic<u64>; N] = [DATA_V; N];
 
     #[test]
     fn atomic_stack() {
@@ -210,20 +211,32 @@ mod test {
         assert_eq!(stack.pop(unsafe { &DATA }), None);
 
         // Stress test
-        let barrier = Arc::new(Barrier::new(4));
+
+        const THREADS: usize = 8;
+        const I: usize = N / THREADS;
+        let barrier = Arc::new(Barrier::new(THREADS));
         let stack = Arc::new(stack);
         let copy = stack.clone();
+        thread::parallel(THREADS, move |t| {
+            thread::pin(t);
+            let mut idx: [usize; I] = [0; I];
+            for i in 0..I {
+                idx[i] = t * I + i;
+            }
+            barrier.wait();
 
-        thread::parallel(4, move |t| {
-            for _ in 0..100 {
-                thread::pin(t);
-
-                barrier.wait();
-                for i in 0..4 {
-                    stack.push(unsafe { &DATA }, t * 4 + i);
+            for _ in 0..1000 {
+                for &i in &idx {
+                    stack.push(unsafe { &DATA }, i);
                 }
-                for _ in 0..4 {
-                    stack.pop(unsafe { &DATA }).unwrap();
+                idx = black_box(idx);
+                for (i, &a) in idx.iter().enumerate() {
+                    for (j, &b) in idx.iter().enumerate() {
+                        assert!(i == j || a != b);
+                    }
+                }
+                for i in &mut idx {
+                    *i = stack.pop(unsafe { &DATA }).unwrap();
                 }
             }
         });

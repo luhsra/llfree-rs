@@ -7,14 +7,12 @@ use std::time::Duration;
 
 use clap::Parser;
 use log::{error, warn};
-use nvalloc::alloc::array_aligned::ArrayAlignedAlloc;
-use nvalloc::alloc::array_atomic::ArrayAtomicAlloc;
-use nvalloc::alloc::array_locked::ArrayLockedAlloc;
-use nvalloc::alloc::array_unaligned::ArrayUnalignedAlloc;
-use nvalloc::alloc::table::TableAlloc;
-use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
-use nvalloc::lower::dynamic::DynamicLower;
-use nvalloc::lower::fixed::FixedLower;
+use nvalloc::alloc::{
+    Alloc, ArrayAlignedAlloc, ArrayAtomicAlloc, ArrayLockedAlloc, ArrayUnalignedAlloc, Size,
+    TableAlloc, MIN_PAGES,
+};
+use nvalloc::lower::DynamicLower;
+use nvalloc::lower::FixedLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::thread;

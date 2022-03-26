@@ -15,8 +15,10 @@ macro_rules! stop {
     () => {};
 }
 
-pub mod dynamic;
-pub mod fixed;
+mod dynamic;
+pub use dynamic::DynamicLower;
+mod fixed;
+pub use fixed::FixedLower;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug {

@@ -9,14 +9,22 @@ use crate::entry::Entry3;
 use crate::table::Table;
 use crate::util::Page;
 
-pub mod array_aligned;
-pub mod array_atomic;
-pub mod array_locked;
-pub mod array_unaligned;
-pub mod list_local;
-pub mod list_locked;
-pub mod malloc;
-pub mod table;
+mod array_aligned;
+pub use array_aligned::ArrayAlignedAlloc;
+mod array_atomic;
+pub use array_atomic::ArrayAtomicAlloc;
+mod array_locked;
+pub use array_locked::ArrayLockedAlloc;
+mod array_unaligned;
+pub use array_unaligned::ArrayUnalignedAlloc;
+mod list_local;
+pub use list_local::ListLocalAlloc;
+mod list_locked;
+pub use list_locked::ListLockedAlloc;
+mod malloc;
+pub use malloc::MallocAlloc;
+mod table;
+pub use table::TableAlloc;
 
 pub const CAS_RETRIES: usize = 4096;
 pub const MAGIC: usize = 0xdeadbeef;
@@ -167,13 +175,14 @@ mod test {
     use super::Error;
     use crate::alloc::Alloc;
     use crate::alloc::MIN_PAGES;
-    use crate::lower::dynamic::DynamicLower;
+    use crate::lower::{DynamicLower, FixedLower};
     use crate::mmap::MMap;
     use crate::table::Table;
+    use crate::util::black_box;
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::table::TableAlloc<DynamicLower>;
+    type Allocator = super::ArrayLockedAlloc<DynamicLower>;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -792,6 +801,49 @@ mod test {
         assert_eq!(
             alloc.dbg_allocated_pages(),
             Table::span(2) + Table::LEN + 2 + Table::LEN * (Table::LEN + 2)
+        );
+    }
+
+    #[test]
+    fn repeat_giant() {
+        logging();
+        const THREADS: usize = 1;
+        const ALLOC_PER_THREAD: usize = 4;
+        const ITERATIONS: usize = 1000;
+
+        let mut mapping = mapping(
+            0x1000_0000_0000,
+            (THREADS * ALLOC_PER_THREAD + 1) * Table::span(2),
+        )
+        .unwrap();
+
+        let alloc = Arc::new({
+            let mut a = Allocator::default();
+            a.init(THREADS, &mut mapping, true).unwrap();
+            a
+        });
+
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let a = alloc.clone();
+        thread::parallel(THREADS, move |t| {
+            thread::pin(t);
+            for _ in 0..(ALLOC_PER_THREAD - 1) {
+                alloc.get(t, Size::L2).unwrap();
+            }
+            barrier.wait();
+            for _ in 0..ITERATIONS {
+                for _ in 0..ALLOC_PER_THREAD {
+                    let page = alloc.get(t, Size::L2).unwrap();
+                    let page = black_box(page);
+                    alloc.put(t, page).unwrap();
+                }
+            }
+        });
+
+        warn!("check");
+        assert_eq!(
+            a.dbg_allocated_pages(),
+            (THREADS * ALLOC_PER_THREAD - THREADS) * Table::span(2)
         );
     }
 }

@@ -79,15 +79,28 @@ pub fn logging() {
         .try_init();
 }
 
+/// Prevents the compiler from optimizing `dummy` away.
+#[inline(always)]
+pub fn black_box<T>(dummy: T) -> T {
+    unsafe {
+        #[cfg(target_arch = "x86_64")]
+        core::arch::asm!("", in("ax") &dummy, options(nostack));
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("", in("r0") &dummy, options(nostack));
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    compile_error!("Unsupported architecture!");
+    dummy
+}
+
 /// Executes CLWB (cache-line write back) for the given address.
 ///
 /// # Safety
 /// Directly executes an asm instruction.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-pub unsafe fn _mm_clwb(addr: *const ()) {
+pub unsafe fn _mm_clwb<T>(addr: *const T) {
     use std::arch::asm;
-
     asm!("clwb [rax]", in("rax") addr);
 }
 
@@ -176,6 +189,7 @@ mod test {
         let mut data = Box::new(43_u64);
         *data = 44;
         unsafe { super::_mm_clwb(data.as_ref() as *const _ as _) };
+        assert!(*data == 44);
     }
 
     #[test]

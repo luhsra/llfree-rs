@@ -423,15 +423,14 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     /// Allocate a giant page.
     fn get_giant(&self) -> Result<usize> {
         if let Some(i) = self.empty.pop(self) {
-            if self[i]
-                .update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant))
-                .is_ok()
+            if let Err(pte) =
+                self[i].update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant))
             {
+                error!("Corruption i{i} {pte:?}");
+                Err(Error::Corruption)
+            } else {
                 self.lower.set_giant(i * Table::span(2));
                 Ok(i * Table::span(2))
-            } else {
-                error!("CAS invalid i{i}");
-                Err(Error::Corruption)
             }
         } else {
             error!("No memory");
@@ -447,17 +446,16 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             return Err(Error::Address);
         }
 
-        if self[i]
-            .compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Table::span(2)))
-            .is_ok()
+        if let Err(pte) =
+            self[i].compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Table::span(2)))
         {
+            error!("Not allocated i{i} {pte:?}");
+            Err(Error::Address)
+        } else {
             self.lower.clear_giant(page);
             // Add to empty list
             self.empty.push(self, i);
             Ok(())
-        } else {
-            error!("CAS invalid i{i}");
-            Err(Error::Address)
         }
     }
 }

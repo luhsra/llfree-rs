@@ -2,13 +2,13 @@
 //!
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
 pub mod alloc;
+pub mod atomic;
 pub mod entry;
 pub mod lower;
 pub mod mmap;
 pub mod table;
 pub mod thread;
 pub mod util;
-pub mod atomic;
 
 #[cfg(feature = "stop")]
 pub mod stop;
@@ -17,10 +17,9 @@ use core::ffi::c_void;
 use core::sync::atomic::AtomicU64;
 
 use alloc::{Alloc, Error, Size};
-use lower::dynamic::DynamicLower;
 use util::Page;
 
-pub type Allocator = alloc::array_atomic::ArrayAtomicAlloc<DynamicLower>;
+pub type Allocator = alloc::ArrayAtomicAlloc<lower::DynamicLower>;
 static mut ALLOC: Option<Box<dyn Alloc>> = None;
 
 pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> alloc::Result<()> {

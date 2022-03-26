@@ -340,15 +340,14 @@ impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
     /// Allocate a giant page.
     fn get_giant(&self) -> Result<usize> {
         if let Some(i) = self.empty.pop(self) {
-            match self[i].update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant)) {
-                Ok(_) => {
-                    self.lower.set_giant(i * Table::span(2));
-                    Ok(i * Table::span(2))
-                }
-                Err(pte3) => {
-                    error!("Corruption i{i} {pte3:?}");
-                    Err(Error::Corruption)
-                }
+            if let Err(pte) =
+                self[i].update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant))
+            {
+                error!("Corruption i{i} {pte:?}");
+                Err(Error::Corruption)
+            } else {
+                self.lower.set_giant(i * Table::span(2));
+                Ok(i * Table::span(2))
             }
         } else {
             error!("No memory");
@@ -364,18 +363,16 @@ impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
             return Err(Error::Address);
         }
 
-        match self[i].compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Table::span(2)))
+        if let Err(pte) =
+            self[i].compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Table::span(2)))
         {
-            Ok(_) => {
-                self.lower.clear_giant(page);
-                // Add to empty list
-                self.empty.push(self, i);
-                Ok(())
-            }
-            Err(_) => {
-                error!("CAS invalid i{i}");
-                Err(Error::Address)
-            }
+            error!("Not allocated i{i} {pte:?}");
+            Err(Error::Address)
+        } else {
+            self.lower.clear_giant(page);
+            // Add to empty list
+            self.empty.push(self, i);
+            Ok(())
         }
     }
 }

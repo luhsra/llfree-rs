@@ -239,7 +239,7 @@ impl Entry3 {
 impl fmt::Debug for Entry3 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry3")
-            .field("pages", &self.free())
+            .field("free", &self.free())
             .field("idx", &self.idx())
             .field("reserved", &self.reserved())
             .field("huge", &self.huge())
@@ -315,10 +315,11 @@ impl Entry2 {
 impl fmt::Debug for Entry2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry2")
-            .field("pages", &self.free())
+            .field("free", &self.free())
             .field("i1", &self.i1())
             .field("page", &self.page())
             .field("giant", &self.giant())
+            .field("page", &self.page())
             .finish()
     }
 }

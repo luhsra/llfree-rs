@@ -5,9 +5,8 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::alloc::table::TableAlloc;
-use nvalloc::alloc::{Alloc, Size, MIN_PAGES};
-use nvalloc::lower::fixed::FixedLower;
+use nvalloc::alloc::{TableAlloc, Alloc, Size, MIN_PAGES};
+use nvalloc::lower::FixedLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::thread;

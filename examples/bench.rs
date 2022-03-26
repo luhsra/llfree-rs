@@ -1,29 +1,24 @@
 #![cfg(all(feature = "thread", feature = "logger"))]
 
 use core::fmt;
+use core::iter::FromIterator;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
-use std::iter::FromIterator;
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
 use clap::{ArgEnum, Parser};
 use log::warn;
 
-use nvalloc::alloc::array_aligned::ArrayAlignedAlloc;
-use nvalloc::alloc::array_atomic::ArrayAtomicAlloc;
-use nvalloc::alloc::array_locked::ArrayLockedAlloc;
-use nvalloc::alloc::array_unaligned::ArrayUnalignedAlloc;
-use nvalloc::alloc::list_local::ListLocalAlloc;
-use nvalloc::alloc::list_locked::ListLockedAlloc;
-use nvalloc::alloc::table::TableAlloc;
-use nvalloc::alloc::{self, Alloc, Size, MIN_PAGES};
-use nvalloc::lower::dynamic::DynamicLower;
-use nvalloc::lower::fixed::FixedLower;
+use nvalloc::alloc::{
+    self, Alloc, ArrayAlignedAlloc, ArrayAtomicAlloc, ArrayLockedAlloc, ArrayUnalignedAlloc,
+    ListLocalAlloc, ListLockedAlloc, Size, TableAlloc, MIN_PAGES,
+};
+use nvalloc::lower::{DynamicLower, FixedLower};
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
-use nvalloc::util::{Page, WyRand};
+use nvalloc::util::{black_box, Page, WyRand};
 use nvalloc::{thread, util};
 
 /// Benchmarking the allocators against each other.
@@ -229,6 +224,7 @@ fn bulk(
         }
         let get = t1.elapsed().as_nanos() / allocs as u128;
         pages.reverse();
+        let pages = black_box(pages);
 
         barrier.wait();
         let t2 = Instant::now();
@@ -283,6 +279,7 @@ fn repeat(
         let timer = Instant::now();
         for _ in 0..allocs {
             let page = alloc.get(t, size).unwrap();
+            let page = black_box(page);
             alloc.put(t, page).unwrap();
         }
 
@@ -343,6 +340,7 @@ fn rand(
             alloc.put(t, pages[i]).unwrap();
             pages[i] = alloc.get(t, size).unwrap();
         }
+        black_box(pages);
 
         let rand = timer.elapsed().as_nanos() / allocs as u128;
         Perf {
@@ -417,6 +415,7 @@ fn filling(
         }
         let get = t1.elapsed().as_nanos() / allocs as u128;
         pages.reverse();
+        let pages = black_box(pages);
 
         barrier.wait();
         let t2 = Instant::now();

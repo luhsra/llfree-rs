@@ -177,7 +177,6 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         let pte = pt.get(i);
 
         if pte.page() {
-            warn!("free giant l3 i{i}");
             return self.put_giant(page);
         }
 
