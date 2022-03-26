@@ -109,7 +109,7 @@ impl Alloc for ListLocalAlloc {
     }
 
     #[inline(never)]
-    fn put(&self, core: usize, addr: u64) -> Result<()> {
+    fn put(&self, core: usize, addr: u64) -> Result<Size> {
         if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) {
             error!("invalid addr");
             return Err(Error::Address);
@@ -118,7 +118,7 @@ impl Alloc for ListLocalAlloc {
         let local = unsafe { &mut *self.local[core].get() };
         local.next.push(unsafe { &mut *(addr as *mut Node) });
         local.counter -= 1;
-        Ok(())
+        Ok(Size::L0)
     }
 
     fn pages(&self) -> usize {

@@ -113,10 +113,12 @@ impl<T: ANode> AStack<T> {
             }
         }
     }
-    /// Poping the first element returning its index.
-    pub fn pop<B>(&self, buf: &B) -> Option<usize>
+
+    /// Poping the first element and updating it in place.
+    pub fn pop_update<B, F>(&self, buf: &B, mut f: F) -> Option<(usize, Result<T, T>)>
     where
         B: Index<usize, Output = Atomic<T>>,
+        F: FnMut(T) -> Option<T>,
     {
         let mut start = self.start.load();
         loop {
@@ -125,12 +127,19 @@ impl<T: ANode> AStack<T> {
             match self.start.compare_exchange(start, start.with_next(next)) {
                 Ok(old) => {
                     let i = old.next()?;
-                    let _ = buf[i].update(|v| Some(v.with_next(None)));
-                    return Some(i);
+                    return Some((i, buf[i].update(|v| f(v).map(|v| v.with_next(None)))));
                 }
                 Err(s) => start = s,
             }
         }
+    }
+
+    /// Poping the first element returning its index.
+    pub fn pop<B>(&self, buf: &B) -> Option<usize>
+    where
+        B: Index<usize, Output = Atomic<T>>,
+    {
+        self.pop_update(buf, |v| Some(v)).map(|v| v.0)
     }
 }
 

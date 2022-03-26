@@ -3,7 +3,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, mem};
 
-use log::{error, info, warn};
+use log::{error, warn};
 
 use super::{Alloc, Error, Local, Result, Size, CAS_RETRIES, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
@@ -165,7 +165,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
     }
 
     #[inline(never)]
-    fn put(&self, core: usize, addr: u64) -> Result<()> {
+    fn put(&self, core: usize, addr: u64) -> Result<Size> {
         if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
             error!("invalid addr");
             return Err(Error::Memory);
@@ -177,7 +177,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         let pte = pt.get(i);
 
         if pte.page() {
-            return self.put_giant(page);
+            return self.put_giant(page).map(|_| Size::L2);
         }
 
         let max = (self.pages() - Table::round(2, page)).min(Table::span(2));
@@ -187,6 +187,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         }
 
         let huge = self.lower.put(page)?;
+        let size = if huge { Size::L1 } else { Size::L0 };
 
         let local = &self.local[core];
         local.frees_push(page);
@@ -196,15 +197,16 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         let pte_a = local.pte(huge);
         if let Some(pte) = pte_a.inc_idx(huge, idx, max) {
             *pte_a = pte;
-            return Ok(());
+            return Ok(size);
         }
         // Fallback to global page table
         if let Ok(pte) = pt.update(i, |v| v.inc(huge, max)) {
             let new_pages = pte.free() + Table::span(huge as _);
             if pte.reserved() {
-                return Ok(());
+                return Ok(size);
             } else if new_pages == Table::span(2) {
-                return self.update_parents(page, Change::p_dec(huge));
+                self.update_parents(page, Change::p_dec(huge))?;
+                return Ok(size);
             }
 
             // Reserve for bulk put
@@ -215,6 +217,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
                         warn!("put reserve {i}");
                         self.swap_reserved(huge, pte.with_idx(i), pte_a)?;
                         *local.start(huge) = page;
+                        return Ok(size);
                     }
                     Err(Error::Memory) => (),
                     Err(e) => return Err(e),
@@ -223,10 +226,9 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
 
             if pte.free() <= PTE3_FULL && new_pages > PTE3_FULL {
                 // Increment parents if exceeding treshold
-                self.update_parents(page, Change::p_inc(huge))
-            } else {
-                Ok(())
+                self.update_parents(page, Change::p_inc(huge))?;
             }
+            Ok(size)
         } else {
             error!("Corruption l3 i{i} {huge}");
             Err(Error::Corruption)
@@ -451,28 +453,27 @@ impl<L: LowerAlloc> TableAlloc<L> {
     /// Try reserving new subtree, prioritizing partially filled ones.
     #[cold]
     fn reserve(&self, huge: bool) -> Result<Entry3> {
-        match self
-            .find_rec(
+        match self.find_rec(
+            Table::LEVELS,
+            0,
+            |v| v.dec_partial(huge),
+            |v| v.reserve_partial(huge, PTE3_FULL),
+        ) {
+            Ok(v) => v.dec(huge).ok_or(Error::Corruption),
+            Err(Error::Memory) => match self.find_rec(
                 Table::LEVELS,
                 0,
-                |v| v.dec_partial(huge),
-                |v| v.reserve_partial(huge, PTE3_FULL),
-            )
-            .or_else(|_| {
-                self.find_rec(
-                    Table::LEVELS,
-                    0,
-                    |v| v.dec_empty(),
-                    |v| v.reserve_empty(huge),
-                )
-            }) {
-            Ok(v) => v.dec(huge).ok_or(Error::Corruption),
-            Err(e) => {
-                if let Error::Memory = e {
+                |v| v.dec_empty(),
+                |v| v.reserve_empty(huge),
+            ) {
+                Ok(v) => v.dec(huge).ok_or(Error::Corruption),
+                Err(Error::Memory) => {
                     error!("No memory {self:?}");
+                    Err(Error::Memory)
                 }
-                Err(e)
-            }
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
         }
     }
 
@@ -601,19 +602,17 @@ impl<L: LowerAlloc> TableAlloc<L> {
             return Err(Error::Address);
         }
 
-        // Clear pt1's & remove pt2 flag
-        self.lower.clear_giant(page);
-
         let pt = self.pt3(page);
         let i = Table::idx(3, page);
-
-        info!("free l3 i{i}");
         match pt.cas(
             i,
             Entry3::new_giant(),
             Entry3::new().with_free(Table::span(2)),
         ) {
-            Ok(_) => self.update_parents(page, Change::IncEmpty),
+            Ok(_) => {
+                self.lower.clear_giant(page);
+                self.update_parents(page, Change::IncEmpty)
+            }
             _ => {
                 error!("Invalid {page}");
                 Err(Error::Address)

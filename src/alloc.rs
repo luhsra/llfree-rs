@@ -65,7 +65,7 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     /// Allocate a new page.
     fn get(&self, core: usize, size: Size) -> Result<u64>;
     /// Free the given page.
-    fn put(&self, core: usize, addr: u64) -> Result<()>;
+    fn put(&self, core: usize, addr: u64) -> Result<Size>;
 
     /// Return the number of pages that can be allocated.
     fn pages(&self) -> usize;
@@ -182,7 +182,7 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::ArrayLockedAlloc<DynamicLower>;
+    type Allocator = super::TableAlloc<FixedLower>;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -809,7 +809,7 @@ mod test {
         logging();
         const THREADS: usize = 1;
         const ALLOC_PER_THREAD: usize = 4;
-        const ITERATIONS: usize = 1000;
+        const ITERATIONS: usize = 100;
 
         let mut mapping = mapping(
             0x1000_0000_0000,

@@ -107,7 +107,7 @@ impl Alloc for ListLockedAlloc {
     }
 
     #[inline(never)]
-    fn put(&self, core: usize, addr: u64) -> Result<()> {
+    fn put(&self, core: usize, addr: u64) -> Result<Size> {
         if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) {
             error!("invalid addr");
             return Err(Error::Address);
@@ -115,7 +115,7 @@ impl Alloc for ListLockedAlloc {
 
         self.next.lock().push(unsafe { &mut *(addr as *mut Node) });
         self.local[core].counter.fetch_sub(1, Ordering::Relaxed);
-        Ok(())
+        Ok(Size::L0)
     }
 
     fn pages(&self) -> usize {

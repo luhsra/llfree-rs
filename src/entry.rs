@@ -115,7 +115,11 @@ impl Entry3 {
     /// Creates a new entry where this is allocated as a single giant page.
     #[inline]
     pub fn new_giant() -> Entry3 {
-        Entry3::new().with_page(true)
+        Entry3::new().with_page(true).with_idx(Self::IDX_MAX)
+    }
+    #[inline]
+    pub fn empty() -> Entry3 {
+        Entry3::new().with_free(Table::span(2))
     }
     /// Creates a new entry referring to a level 2 page table.
     #[inline]

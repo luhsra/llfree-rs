@@ -161,7 +161,7 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
     }
 
     #[inline(never)]
-    fn put(&self, core: usize, addr: u64) -> Result<()> {
+    fn put(&self, core: usize, addr: u64) -> Result<Size> {
         if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
             error!("invalid addr");
             return Err(Error::Memory);
@@ -171,7 +171,7 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
         let i = page / Table::span(2);
         let pte = self[i].load();
         if pte.page() {
-            self.put_giant(page)
+            self.put_giant(page).map(|_| Size::L2)
         } else {
             self.put_lower(core, page, pte)
         }
@@ -230,7 +230,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
 
         let pte3_num = Table::num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
-            self[i].store(Entry3::new().with_free(Table::span(2)));
+            self[i].store(Entry3::empty());
             empty.push(i);
         }
 
@@ -378,7 +378,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     }
 
     /// Free a small or huge page from the lower alloc.
-    fn put_lower(&self, core: usize, page: usize, pte: Entry3) -> Result<()> {
+    fn put_lower(&self, core: usize, page: usize, pte: Entry3) -> Result<Size> {
         let max = self
             .pages()
             .saturating_sub(Table::round(2, page))
@@ -390,6 +390,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
 
         let i = page / Table::span(2);
         let huge = self.lower.put(page)?;
+        let size = if huge { Size::L1 } else { Size::L0 };
 
         let local = &self.local[core];
         local.frees_push(page);
@@ -398,7 +399,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
         let pte_a = local.pte(huge);
         if let Some(pte) = pte_a.inc_idx(huge, i, max) {
             *pte_a = pte;
-            return Ok(());
+            return Ok(size);
         }
 
         // Subtree not owned by us
@@ -414,7 +415,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
                         // warn!("put reserve {i}");
                         self.swap_reserved(huge, pte, pte_a)?;
                         *local.start(huge) = page;
-                        return Ok(());
+                        return Ok(size);
                     }
                 }
 
@@ -426,7 +427,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
                     self.partial(huge).push(i);
                 }
             }
-            Ok(())
+            Ok(size)
         } else {
             error!("Corruption l3 i{i} p=-{huge:?}");
             Err(Error::Corruption)
@@ -466,7 +467,6 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
             Err(Error::Address)
         } else {
             self.lower.clear_giant(page);
-            // Add to empty list
             self.empty.lock().push(i);
             Ok(())
         }

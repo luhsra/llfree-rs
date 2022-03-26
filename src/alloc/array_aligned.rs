@@ -160,7 +160,7 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
     }
 
     #[inline(never)]
-    fn put(&self, _core: usize, addr: u64) -> Result<()> {
+    fn put(&self, _core: usize, addr: u64) -> Result<Size> {
         if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
             error!("invalid addr");
             return Err(Error::Memory);
@@ -170,7 +170,7 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
         let i = page / Table::span(2);
         let pte = self[i].load();
         if pte.page() {
-            self.put_giant(page)
+            self.put_giant(page).map(|_| Size::L2)
         } else {
             self.put_lower(page, pte)
         }
@@ -202,7 +202,6 @@ impl<L: LowerAlloc> Drop for ArrayAlignedAlloc<L> {
 }
 
 impl<L: LowerAlloc> Default for ArrayAlignedAlloc<L> {
-    #[cold]
     fn default() -> Self {
         Self {
             meta: null_mut(),
@@ -225,7 +224,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
         // Add all entries to the empty list
         let pte3_num = Table::num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
-            self[i].store(Entry3::new().with_free(Table::span(2)));
+            self[i].store(Entry3::empty());
             self.empty.push(self, i);
         }
 
@@ -279,20 +278,25 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
     /// Reserves a new subtree, prioritizing partially filled subtrees,
     /// and allocates a page from it in one step.
     fn reserve(&self, huge: bool) -> Result<usize> {
-        while let Some(i) = self.partial(huge).pop(self) {
+        while let Some((i, r)) = self.partial(huge).pop_update(self, |v| {
             // Skip empty entries
-            if self[i].load().free() < Table::span(2) {
+            if v.free() < Table::span(2) {
+                v.dec(huge)
+            } else {
+                None
+            }
+        }) {
+            if r.is_ok() {
                 warn!("reserve partial {i}");
-                self[i].update(|v| v.dec(huge)).unwrap();
                 return Ok(i * Table::span(2));
             } else {
                 self.empty.push(self, i);
             }
         }
 
-        if let Some(i) = self.empty.pop(self) {
+        if let Some((i, r)) = self.empty.pop_update(self, |v| v.dec(huge)) {
+            debug_assert!(r.is_ok());
             warn!("reserve empty {i}");
-            self[i].update(|v| v.dec(huge)).unwrap();
             Ok(i * Table::span(2))
         } else {
             error!("No memory");
@@ -324,7 +328,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
     }
 
     /// Free a small or huge page from the lower alloc.
-    fn put_lower(&self, page: usize, pte: Entry3) -> Result<()> {
+    fn put_lower(&self, page: usize, pte: Entry3) -> Result<Size> {
         let max = self
             .pages()
             .saturating_sub(Table::round(2, page))
@@ -344,7 +348,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
                     self.partial(huge).push(self, i);
                 }
             }
-            Ok(())
+            Ok(if huge { Size::L1 } else { Size::L0 })
         } else {
             error!("Corruption l3 i{i} p=-{huge:?}");
             Err(Error::Corruption)
@@ -353,10 +357,10 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
 
     /// Allocate a giant page.
     fn get_giant(&self) -> Result<usize> {
-        if let Some(i) = self.empty.pop(self) {
-            if let Err(pte) =
-                self[i].update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant))
-            {
+        if let Some((i, r)) = self.empty.pop_update(self, |v| {
+            (v.free() == Table::span(2)).then(Entry3::new_giant)
+        }) {
+            if let Err(pte) = r {
                 error!("Corruption i{i} {pte:?}");
                 Err(Error::Corruption)
             } else {
@@ -384,7 +388,6 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
             Err(Error::Address)
         } else {
             self.lower.clear_giant(page);
-            // Add to empty list
             self.empty.push(self, i);
             Ok(())
         }

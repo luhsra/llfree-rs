@@ -72,12 +72,12 @@ impl Alloc for MallocAlloc {
     }
 
     #[inline(never)]
-    fn put(&self, core: usize, addr: u64) -> Result<()> {
+    fn put(&self, core: usize, addr: u64) -> Result<Size> {
         unsafe { libc::free(addr as *mut _) };
         self.local[core]
             .counter
             .fetch_sub(Table::span(0), Ordering::Relaxed);
-        Ok(())
+        Ok(Size::L0)
     }
 
     fn pages(&self) -> usize {

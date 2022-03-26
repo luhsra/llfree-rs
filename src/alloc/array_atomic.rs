@@ -160,7 +160,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
     }
 
     #[inline(never)]
-    fn put(&self, core: usize, addr: u64) -> Result<()> {
+    fn put(&self, core: usize, addr: u64) -> Result<Size> {
         if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
             error!("invalid addr");
             return Err(Error::Memory);
@@ -170,7 +170,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
         let i = page / Table::span(2);
         let pte = self[i].load();
         if pte.page() {
-            self.put_giant(page)
+            self.put_giant(page).map(|_| Size::L2)
         } else {
             self.put_lower(core, page, pte)
         }
@@ -227,7 +227,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         // Add all entries to the empty list
         let pte3_num = Table::num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
-            self[i].store(Entry3::new().with_free(Table::span(2)));
+            self[i].store(Entry3::empty());
             self.empty.push(self, i);
         }
 
@@ -281,9 +281,12 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     /// Reserves a new subtree, prioritizing partially filled subtrees,
     /// and allocates a page from it in one step.
     fn reserve(&self, huge: bool) -> Result<(usize, Entry3)> {
-        while let Some(i) = self.partial(huge).pop(self) {
+        while let Some((i, r)) = self
+            .partial(huge)
+            .pop_update(self, |v| v.reserve_partial(huge, PTE3_FULL))
+        {
             warn!("reserve partial {i}");
-            match self[i].update(|v| v.reserve_partial(huge, PTE3_FULL)) {
+            match r {
                 Ok(pte) => {
                     let pte = pte.dec(huge).unwrap().with_idx(i);
                     return Ok((i * Table::span(2), pte));
@@ -297,9 +300,9 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             }
         }
 
-        while let Some(i) = self.empty.pop(self) {
+        while let Some((i, r)) = self.empty.pop_update(self, |v| v.reserve_empty(huge)) {
             warn!("reserve empty {i}");
-            if let Ok(pte) = self[i].update(|v| v.reserve_empty(huge)) {
+            if let Ok(pte) = r {
                 let pte = pte.dec(huge).unwrap().with_idx(i);
                 return Ok((i * Table::span(2), pte));
             }
@@ -366,7 +369,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     }
 
     /// Free a small or huge page from the lower alloc.
-    fn put_lower(&self, core: usize, page: usize, pte: Entry3) -> Result<()> {
+    fn put_lower(&self, core: usize, page: usize, pte: Entry3) -> Result<Size> {
         let max = self
             .pages()
             .saturating_sub(Table::round(2, page))
@@ -378,6 +381,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
 
         let i = page / Table::span(2);
         let huge = self.lower.put(page)?;
+        let size = if huge { Size::L1 } else { Size::L0 };
 
         let local = &self.local[core];
         local.frees_push(page);
@@ -386,7 +390,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         let pte_a = local.pte(huge);
         if let Some(pte) = pte_a.inc_idx(huge, i, max) {
             *pte_a = pte;
-            return Ok(());
+            return Ok(size);
         }
 
         // Subtree not owned by us
@@ -402,7 +406,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                         // warn!("put reserve {i}");
                         self.swap_reserved(huge, pte, pte_a)?;
                         *local.start(huge) = page;
-                        return Ok(());
+                        return Ok(size);
                     }
                 }
 
@@ -413,7 +417,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                     self.partial(huge).push(self, i);
                 }
             }
-            Ok(())
+            Ok(size)
         } else {
             error!("Corruption l3 i{i} p=-{huge:?}");
             Err(Error::Corruption)
@@ -422,10 +426,10 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
 
     /// Allocate a giant page.
     fn get_giant(&self) -> Result<usize> {
-        if let Some(i) = self.empty.pop(self) {
-            if let Err(pte) =
-                self[i].update(|v| (v.free() == Table::span(2)).then(Entry3::new_giant))
-            {
+        if let Some((i, r)) = self.empty.pop_update(self, |v| {
+            (v.free() == Table::span(2)).then(Entry3::new_giant)
+        }) {
+            if let Err(pte) = r {
                 error!("Corruption i{i} {pte:?}");
                 Err(Error::Corruption)
             } else {
@@ -453,7 +457,6 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             Err(Error::Address)
         } else {
             self.lower.clear_giant(page);
-            // Add to empty list
             self.empty.push(self, i);
             Ok(())
         }
