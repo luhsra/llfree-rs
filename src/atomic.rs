@@ -7,7 +7,7 @@ use log::error;
 
 use crate::entry::Entry3;
 
-/// Wrapper for 64bit atomic values.
+/// Atomic wrapper for 64bit-sized values.
 #[repr(transparent)]
 pub struct Atomic<T: From<u64> + Into<u64>>(pub AtomicU64, PhantomData<T>);
 
@@ -75,6 +75,8 @@ impl ANode for Entry3 {
 }
 
 /// Simple atomic stack with atomic entries.
+/// It is constructed over an already existing fixed size buffer.
+#[repr(align(64))] // Just to be sure
 pub struct AStack<T: ANode> {
     start: Atomic<T>,
 }
@@ -91,6 +93,7 @@ impl<T: ANode> Default for AStack<T> {
 }
 
 impl<T: ANode> AStack<T> {
+    /// Pushes the element at `idx` to the front of the stack.
     pub fn push<B>(&self, buf: &B, idx: usize)
     where
         B: Index<usize, Output = Atomic<T>>,
@@ -110,6 +113,7 @@ impl<T: ANode> AStack<T> {
             }
         }
     }
+    /// Poping the first element returning its index.
     pub fn pop<B>(&self, buf: &B) -> Option<usize>
     where
         B: Index<usize, Output = Atomic<T>>,
@@ -129,6 +133,7 @@ impl<T: ANode> AStack<T> {
         }
     }
 }
+
 #[allow(dead_code)]
 pub struct AStackDbg<'a, T, B>(pub &'a AStack<T>, pub &'a B)
 where

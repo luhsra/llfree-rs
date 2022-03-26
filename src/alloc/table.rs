@@ -71,21 +71,21 @@ impl<L: LowerAlloc> fmt::Debug for TableAlloc<L> {
                 let pt3 = this.pt3(start);
                 for i in Table::range(3, start..this.pages()) {
                     let pte3 = pt3.get(i);
-                    let l = 7 + (Table::LAYERS - level) * 4;
+                    let l = 7 + (Table::LEVELS - level) * 4;
                     writeln!(f, "{i:>l$} {pte3:?}")?;
                 }
             } else {
                 let pt = this.pt(level, start);
                 for i in Table::range(level, start..this.pages()) {
                     let pte = pt.get(i);
-                    let l = 7 + (Table::LAYERS - level) * 4;
+                    let l = 7 + (Table::LEVELS - level) * 4;
                     writeln!(f, "{i:>l$} {pte:?}")?;
                     dump_rec(this, f, level - 1, Table::page(level, start, i))?;
                 }
             }
             Ok(())
         }
-        dump_rec(self, f, Table::LAYERS, 0)?;
+        dump_rec(self, f, Table::LEVELS, 0)?;
 
         for (t, local) in self.local.iter().enumerate() {
             writeln!(f, "    L{t:>2}: L0 {:?}", local.pte(false))?;
@@ -122,7 +122,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         self.lower = L::new(cores, memory);
 
         let mut num_pt = 0;
-        for level in 3..=Table::LAYERS {
+        for level in 3..=Table::LEVELS {
             num_pt += Table::num_pts(level, self.lower.pages());
         }
 
@@ -137,13 +137,13 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
             if deep {
                 error!("Try recover crashed allocator!");
             }
-            let pages = self.recover_rec(Table::LAYERS, 0, deep)?;
+            let pages = self.recover_rec(Table::LEVELS, 0, deep)?;
             warn!("Recovered {pages:?}");
         } else {
             warn!("Setup allocator state p={}", self.pages());
             self.lower.clear();
 
-            self.setup_rec(Table::LAYERS, 0);
+            self.setup_rec(Table::LEVELS, 0);
 
             meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
@@ -157,8 +157,8 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         // Start at the reserved memory chunk for this thread
         let page = match size {
-            Size::L2 => self.get_giant(Table::LAYERS, 0)?,
-            _ => self.get_small(core, size == Size::L1)?,
+            Size::L2 => self.get_giant(Table::LEVELS, 0)?,
+            _ => self.get_lower(core, size == Size::L1)?,
         };
 
         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
@@ -172,7 +172,66 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         }
         let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
 
-        self.put_rec(core, page)
+        let pt = self.pt3(page);
+        let i = Table::idx(3, page);
+        let pte = pt.get(i);
+
+        if pte.page() {
+            warn!("free giant l3 i{i}");
+            return self.put_giant(page);
+        }
+
+        let max = (self.pages() - Table::round(2, page)).min(Table::span(2));
+        if pte.free() >= max {
+            error!("Invalid address l3 i{i}");
+            return Err(Error::Address);
+        }
+
+        let huge = self.lower.put(page)?;
+
+        let local = &self.local[core];
+        local.frees_push(page);
+
+        // Try updating local copy
+        let idx = page / Table::span(2);
+        let pte_a = local.pte(huge);
+        if let Some(pte) = pte_a.inc_idx(huge, idx, max) {
+            *pte_a = pte;
+            return Ok(());
+        }
+        // Fallback to global page table
+        if let Ok(pte) = pt.update(i, |v| v.inc(huge, max)) {
+            let new_pages = pte.free() + Table::span(huge as _);
+            if pte.reserved() {
+                return Ok(());
+            } else if new_pages == Table::span(2) {
+                return self.update_parents(page, Change::p_dec(huge));
+            }
+
+            // Reserve for bulk put
+            if new_pages > PTE3_FULL && local.frees_related(page) {
+                // Try reserve this subtree
+                match self.reserve_tree(huge, page, pte.free() > PTE3_FULL) {
+                    Ok(pte) => {
+                        warn!("put reserve {i}");
+                        self.swap_reserved(huge, pte.with_idx(i), pte_a)?;
+                        *local.start(huge) = page;
+                    }
+                    Err(Error::Memory) => (),
+                    Err(e) => return Err(e),
+                }
+            }
+
+            if pte.free() <= PTE3_FULL && new_pages > PTE3_FULL {
+                // Increment parents if exceeding treshold
+                self.update_parents(page, Change::p_inc(huge))
+            } else {
+                Ok(())
+            }
+        } else {
+            error!("Corruption l3 i{i} {huge}");
+            Err(Error::Corruption)
+        }
     }
 
     fn pages(&self) -> usize {
@@ -181,7 +240,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
 
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {
-        let mut pages = self.allocated_pages_rec(Table::LAYERS, 0);
+        let mut pages = self.allocated_pages_rec(Table::LEVELS, 0);
         // Pages allocated in reserved subtrees
         for (_t, local) in self.local.iter().enumerate() {
             let pte = local.pte(false);
@@ -233,10 +292,10 @@ impl<L: LowerAlloc> TableAlloc<L> {
 
     /// Returns the page table of the given `level` that contains the `page`.
     fn pt(&self, level: usize, page: usize) -> &Table<Entry> {
-        assert!((4..=Table::LAYERS).contains(&level));
+        assert!((4..=Table::LEVELS).contains(&level));
 
         let i = page >> (Table::LEN_BITS * level);
-        let offset: usize = (level..Table::LAYERS)
+        let offset: usize = (level..Table::LEVELS)
             .map(|i| Table::num_pts(i, self.pages()))
             .sum();
         self.tables[offset + i].cast()
@@ -245,7 +304,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
     /// Returns the page table of the given `level` that contains the `page`.
     fn pt3(&self, page: usize) -> &Table<Entry3> {
         let i = page >> (Table::LEN_BITS * 3);
-        let offset: usize = (3..Table::LAYERS)
+        let offset: usize = (3..Table::LEVELS)
             .map(|i| Table::num_pts(i, self.pages()))
             .sum();
         self.tables[offset + i].cast()
@@ -347,74 +406,105 @@ impl<L: LowerAlloc> TableAlloc<L> {
         Ok((empty, partial_l0, partial_l1))
     }
 
-    /// Try to reserve an empty subtree.
-    #[cold]
-    fn reserve_rec_empty(&self, level: usize, start: usize, huge: bool) -> Result<Entry3> {
+    /// Updates the page tables from top to bottom,
+    /// returning the subtree that was successfully changed.
+    /// The global index is returned as part of the entry (`idx`).
+    fn find_rec<F, G>(&self, level: usize, start: usize, mut fx: F, mut f3: G) -> Result<Entry3>
+    where
+        F: FnMut(Entry) -> Option<Entry>,
+        G: FnMut(Entry3) -> Option<Entry3>,
+    {
         if level == 3 {
-            return self.reserve_l3_empty(start, huge);
+            for page in Table::iterate(3, start) {
+                if page > self.pages() {
+                    continue;
+                }
+                let i = Table::idx(3, page);
+                let pt = self.pt3(start);
+                if let Ok(pte) = pt.update(i, |v| f3(v)) {
+                    return Ok(pte.with_idx(page / Table::span(2)));
+                }
+            }
+        } else {
+            for page in Table::iterate(level, start) {
+                if page > self.pages() {
+                    continue;
+                }
+                let i = Table::idx(level, page);
+                let pt = self.pt(level, start);
+                if pt.update(i, |v| fx(v)).is_ok() {
+                    return self.find_rec(level - 1, page, fx, f3);
+                }
+            }
         }
 
-        for page in Table::iterate(level, start) {
-            if page > self.pages() {
-                continue;
-            }
-            let i = Table::idx(level, page);
-            let pt = self.pt(level, start);
-            if pt.update(i, |v| v.dec_empty()).is_ok() {
-                return self.reserve_rec_empty(level - 1, page, huge);
-            }
+        if level == Table::LEVELS {
+            Err(Error::Memory)
+        } else {
+            error!("Missing l{level}!\n{self:?}");
+            Err(Error::Corruption)
         }
-        error!("No memory l{level}");
-        if level == Table::LAYERS {
-            error!("{self:?}");
-        }
-        Err(Error::Memory)
     }
 
-    fn reserve_l3_empty(&self, start: usize, huge: bool) -> Result<Entry3> {
-        for page in Table::iterate(3, start) {
-            if page > self.pages() {
-                continue;
-            }
-            let i = Table::idx(3, page);
-            let pt = self.pt3(start);
-            if let Ok(pte) = pt.update(i, |v| v.reserve_empty(huge)) {
-                return Ok(pte.dec(huge).unwrap().with_idx(page / Table::span(2)));
-            }
-        }
-        error!("No memory l3");
-        Err(Error::Memory)
-    }
-
-    /// Try to reserve a partially filled subtree.
+    /// Try reserving new subtree, prioritizing partially filled ones.
     #[cold]
-    fn reserve_rec_partial(&self, level: usize, start: usize, huge: bool) -> Result<Entry3> {
-        if level == 3 {
-            return self.reserve_l3_partial(start, huge);
-        }
-
-        for page in Table::iterate(level, start) {
-            if page > self.pages() {
-                continue;
+    fn reserve(&self, huge: bool) -> Result<Entry3> {
+        match self
+            .find_rec(
+                Table::LEVELS,
+                0,
+                |v| v.dec_partial(huge),
+                |v| v.reserve_partial(huge, PTE3_FULL),
+            )
+            .or_else(|_| {
+                self.find_rec(
+                    Table::LEVELS,
+                    0,
+                    |v| v.dec_empty(),
+                    |v| v.reserve_empty(huge),
+                )
+            }) {
+            Ok(v) => v.dec(huge).ok_or(Error::Corruption),
+            Err(e) => {
+                if let Error::Memory = e {
+                    error!("No memory {self:?}");
+                }
+                Err(e)
             }
-            let i = Table::idx(level, page);
-            let pt = self.pt(level, start);
-            if pt.update(i, |v| v.dec_partial(huge)).is_ok() {
-                return self.reserve_rec_partial(level - 1, page, huge);
-            }
         }
-        Err(Error::Memory)
     }
 
-    fn reserve_l3_partial(&self, start: usize, huge: bool) -> Result<Entry3> {
-        for page in Table::iterate(3, start) {
-            if page > self.pages() {
-                continue;
+    /// Try reserving a subtree, if `parents` the parent entries are updated first.
+    /// Any changes to parent entries are reverted if the reservation fails.
+    fn reserve_tree(&self, huge: bool, page: usize, parents: bool) -> Result<Entry3> {
+        // Try reserve top -> bottom
+        if parents {
+            for level in (4..=Table::LEVELS).rev() {
+                let i = Table::idx(level, page);
+                let pt = self.pt(level, page);
+                if pt.update(i, |v| v.dec_partial(huge)).is_err() {
+                    // Undo reservation
+                    for level in level + 1..=Table::LEVELS {
+                        let i = Table::idx(level, page);
+                        let pt = self.pt(level, page);
+                        if pt.update(i, |v| v.change(Change::p_inc(huge))).is_err() {
+                            error!("Unable to undo reservation\n{self:?}");
+                            return Err(Error::Corruption);
+                        }
+                    }
+                    return Err(Error::Memory);
+                }
             }
-            let i = Table::idx(3, page);
-            let pt = self.pt3(start);
-            if let Ok(pte) = pt.update(i, |v| v.reserve_partial(huge, PTE3_FULL)) {
-                return Ok(pte.dec(huge).unwrap().with_idx(page / Table::span(2)));
+        }
+        // Reserve the level 3 entry
+        let i = Table::idx(3, page);
+        let pt = self.pt3(page);
+        if let Ok(pte) = pt.update(i, |v| v.reserve(huge)) {
+            return Ok(pte);
+        } else {
+            if parents {
+                // Undo reservation
+                self.update_parents(page, Change::p_inc(huge))?;
             }
         }
         Err(Error::Memory)
@@ -423,7 +513,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
     /// Propagates counter updates up to the root.
     #[cold]
     fn update_parents(&self, page: usize, change: Change) -> Result<()> {
-        for level in 4..=Table::LAYERS {
+        for level in 4..=Table::LEVELS {
             let pt = self.pt(level, page);
             let i = Table::idx(level, page);
             if pt.update(i, |v| v.change(change)).is_err() {
@@ -462,63 +552,14 @@ impl<L: LowerAlloc> TableAlloc<L> {
         }
     }
 
-    fn get_giant(&self, level: usize, start: usize) -> Result<usize> {
-        if level == 3 {
-            return self.get_giant_l3(start);
-        }
-
-        let pt = self.pt(level, start);
-        for i in 0..Table::LEN {
-            let page = Table::page(level, start, i);
-            if page > self.pages() {
-                break;
-            }
-
-            if let Err(pte) = pt.update(i, |pte| pte.dec_empty()) {
-                warn!("giant update failed {pte:?}");
-                continue;
-            }
-
-            return self.get_giant(level - 1, page);
-        }
-
-        error!("Nothing found l{level} s={start}");
-        Err(Error::Memory)
-    }
-
-    /// Search free page table entry.
-    fn get_giant_l3(&self, start: usize) -> Result<usize> {
-        let pt = self.pt3(start);
-
-        for i in 0..Table::LEN {
-            if pt
-                .cas(
-                    i,
-                    Entry3::new().with_free(Table::span(2)),
-                    Entry3::new_giant(),
-                )
-                .is_ok()
-            {
-                let page = Table::page(3, start, i);
-                info!("allocated l3 i{i} p={page} s={start}");
-                self.lower.set_giant(page);
-                return Ok(page);
-            }
-        }
-        error!("Nothing found l3 s={start}");
-        Err(Error::Memory)
-    }
-
-    fn get_small(&self, core: usize, huge: bool) -> Result<usize> {
+    fn get_lower(&self, core: usize, huge: bool) -> Result<usize> {
         let pte_a = self.local[core].pte(huge);
         let start_a = self.local[core].start(huge);
         let mut start = *start_a;
 
         if start == usize::MAX {
             warn!("try reserve first");
-            let pte = self
-                .reserve_rec_partial(Table::LAYERS, 0, huge)
-                .or_else(|_| self.reserve_rec_empty(Table::LAYERS, 0, huge))?;
+            let pte = self.reserve(huge)?;
             warn!("reserved {}", pte.idx());
             *pte_a = pte;
             start = pte.idx() * Table::span(2);
@@ -528,9 +569,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
                 *pte_a = pte;
             } else {
                 warn!("try reserve next");
-                let pte = self
-                    .reserve_rec_partial(Table::LAYERS, start, huge)
-                    .or_else(|_| self.reserve_rec_empty(Table::LAYERS, start, huge))?;
+                let pte = self.reserve(huge)?;
                 warn!("reserved {}", pte.idx());
                 self.swap_reserved(huge, pte, pte_a)?;
                 start = pte.idx() * Table::span(2);
@@ -542,63 +581,13 @@ impl<L: LowerAlloc> TableAlloc<L> {
         Ok(page)
     }
 
-    fn put_rec(&self, core: usize, page: usize) -> Result<()> {
-        let pt = self.pt3(page);
-        let i = Table::idx(3, page);
-        let pte = pt.get(i);
-
-        if pte.page() {
-            warn!("free giant l3 i{i}");
-            return self.put_giant(page);
-        }
-
-        let max = (self.pages() - Table::round(2, page)).min(Table::span(2));
-        if pte.free() >= max {
-            error!("Invalid address l3 i{i}");
-            return Err(Error::Address);
-        }
-
-        let huge = self.lower.put(page)?;
-
-        let lower = &self.local[core];
-        lower.frees_push(page);
-
-        let idx = page / Table::span(2);
-        let pte_a = lower.pte(huge);
-        if let Some(pte) = pte_a.inc_idx(huge, idx, max) {
-            *pte_a = pte;
-            return Ok(());
-        }
-
-        if let Ok(pte) = pt.update(i, |v| v.inc(huge, max)) {
-            let new_pages = pte.free() + Table::span(huge as _);
-            if pte.reserved() {
-                Ok(())
-            } else if new_pages == Table::span(2) {
-                self.update_parents(page, Change::p_dec(huge))
-            } else if new_pages > PTE3_FULL && lower.frees_related(page) {
-                // Reserve for bulk put
-                if let Ok(pte) = pt.update(i, |v| v.reserve(huge)) {
-                    warn!("put reserve {i}");
-                    self.swap_reserved(huge, pte.with_idx(i), pte_a)?;
-
-                    // Decrement partial counter if previously updated
-                    if pte.free() <= PTE3_FULL {
-                        self.update_parents(page, Change::p_dec(huge))?;
-                    }
-
-                    *lower.start(huge) = page;
-                    Ok(())
-                } else {
-                    self.update_parents(page, Change::p_inc(huge))
-                }
-            } else {
-                Ok(())
-            }
-        } else {
-            error!("Corruption l3 i{i} {huge}");
-            Err(Error::Corruption)
-        }
+    fn get_giant(&self, level: usize, start: usize) -> Result<usize> {
+        let pte = self.find_rec(level, start, Entry::dec_empty, |v| {
+            (v.free() == Table::span(2)).then(|| Entry3::new_giant())
+        })?;
+        let page = pte.idx() * Table::span(2);
+        self.lower.set_giant(page);
+        return Ok(page);
     }
 
     fn put_giant(&self, page: usize) -> Result<()> {

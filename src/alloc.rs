@@ -20,7 +20,7 @@ pub mod table;
 
 pub const MAGIC: usize = 0xdeadbeef;
 pub const MIN_PAGES: usize = 2 * Table::span(2);
-pub const MAX_PAGES: usize = Table::span(Table::LAYERS);
+pub const MAX_PAGES: usize = Table::span(Table::LEVELS);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -166,13 +166,14 @@ mod test {
     use super::Error;
     use crate::alloc::Alloc;
     use crate::alloc::MIN_PAGES;
+    use crate::lower::dynamic::DynamicLower;
     use crate::lower::fixed::FixedLower;
     use crate::mmap::MMap;
     use crate::table::Table;
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::array_atomic::ArrayAtomicAlloc<FixedLower>;
+    type Allocator = super::table::TableAlloc<DynamicLower>;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]

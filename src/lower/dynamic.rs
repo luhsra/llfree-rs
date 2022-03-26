@@ -437,7 +437,7 @@ impl DynamicLower {
             }
 
             let pte2 = pt2.get(i2);
-            let indent = (Table::LAYERS - 2) * 4;
+            let indent = (Table::LEVELS - 2) * 4;
             let addr = start * Page::SIZE;
             writeln!(out, "{:indent$}l2 i={i2} 0x{addr:x}: {pte2:?}", "").unwrap();
         }

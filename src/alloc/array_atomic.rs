@@ -5,7 +5,7 @@ use core::{fmt, mem};
 
 use log::{error, warn};
 
-use super::{Alloc, Error, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES, Local};
+use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::atomic::{AStack, AStackDbg, Atomic};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
@@ -446,12 +446,12 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             error!("Invalid align {page:x}");
             return Err(Error::Address);
         }
-        self.lower.clear_giant(page);
 
         if self[i]
             .compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Table::span(2)))
             .is_ok()
         {
+            self.lower.clear_giant(page);
             // Add to empty list
             self.empty.push(self, i);
             Ok(())

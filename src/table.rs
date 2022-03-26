@@ -24,7 +24,7 @@ impl Table {
     pub const LEN_BITS: usize = Page::SIZE_BITS - Self::PTE_SIZE_BITS;
     pub const LEN: usize = 1 << Self::LEN_BITS;
 
-    pub const LAYERS: usize = 4;
+    pub const LEVELS: usize = 4;
 
     /// Area in bytes that a page table covers
     #[inline]

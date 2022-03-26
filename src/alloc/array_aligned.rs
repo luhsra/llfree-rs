@@ -377,11 +377,11 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
             error!("Invalid align {page:x}");
             return Err(Error::Address);
         }
-        self.lower.clear_giant(page);
 
         match self[i].compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Table::span(2)))
         {
             Ok(_) => {
+                self.lower.clear_giant(page);
                 // Add to empty list
                 self.empty.push(self, i);
                 Ok(())
