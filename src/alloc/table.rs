@@ -5,7 +5,7 @@ use core::{fmt, mem};
 
 use log::{error, info, warn};
 
-use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use super::{Alloc, Error, Local, Result, Size, CAS_RETRIES, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
 use crate::lower::LowerAlloc;
 use crate::table::Table;
@@ -414,36 +414,39 @@ impl<L: LowerAlloc> TableAlloc<L> {
         F: FnMut(Entry) -> Option<Entry>,
         G: FnMut(Entry3) -> Option<Entry3>,
     {
-        if level == 3 {
-            for page in Table::iterate(3, start) {
-                if page > self.pages() {
-                    continue;
+        for _ in 0..CAS_RETRIES {
+            if level == 3 {
+                for page in Table::iterate(3, start) {
+                    if page > self.pages() {
+                        continue;
+                    }
+                    let i = Table::idx(3, page);
+                    let pt = self.pt3(start);
+                    if let Ok(pte) = pt.update(i, |v| f3(v)) {
+                        return Ok(pte.with_idx(page / Table::span(2)));
+                    }
                 }
-                let i = Table::idx(3, page);
-                let pt = self.pt3(start);
-                if let Ok(pte) = pt.update(i, |v| f3(v)) {
-                    return Ok(pte.with_idx(page / Table::span(2)));
+            } else {
+                for page in Table::iterate(level, start) {
+                    if page > self.pages() {
+                        continue;
+                    }
+                    let i = Table::idx(level, page);
+                    let pt = self.pt(level, start);
+                    if pt.update(i, |v| fx(v)).is_ok() {
+                        return self.find_rec(level - 1, page, fx, f3);
+                    }
                 }
             }
-        } else {
-            for page in Table::iterate(level, start) {
-                if page > self.pages() {
-                    continue;
-                }
-                let i = Table::idx(level, page);
-                let pt = self.pt(level, start);
-                if pt.update(i, |v| fx(v)).is_ok() {
-                    return self.find_rec(level - 1, page, fx, f3);
-                }
+
+            if level == Table::LEVELS {
+                return Err(Error::Memory);
             }
+            core::hint::spin_loop(); // pause cpu
         }
 
-        if level == Table::LEVELS {
-            Err(Error::Memory)
-        } else {
-            error!("Missing l{level}!\n{self:?}");
-            Err(Error::Corruption)
-        }
+        error!("Missing l{level}!\n{self:?}");
+        Err(Error::Corruption)
     }
 
     /// Try reserving new subtree, prioritizing partially filled ones.

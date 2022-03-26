@@ -18,6 +18,7 @@ pub mod list_locked;
 pub mod malloc;
 pub mod table;
 
+pub const CAS_RETRIES: usize = 4096;
 pub const MAGIC: usize = 0xdeadbeef;
 pub const MIN_PAGES: usize = 2 * Table::span(2);
 pub const MAX_PAGES: usize = Table::span(Table::LEVELS);
@@ -167,7 +168,6 @@ mod test {
     use crate::alloc::Alloc;
     use crate::alloc::MIN_PAGES;
     use crate::lower::dynamic::DynamicLower;
-    use crate::lower::fixed::FixedLower;
     use crate::mmap::MMap;
     use crate::table::Table;
     use crate::util::{logging, Page, WyRand};

@@ -4,8 +4,6 @@ use core::ops::Range;
 use crate::alloc::{Result, Size};
 use crate::Page;
 
-const CAS_RETRIES: usize = 4096;
-
 #[cfg(all(test, feature = "stop"))]
 macro_rules! stop {
     () => {

@@ -10,7 +10,8 @@ use crate::entry::{Entry1, Entry2};
 use crate::table::Table;
 use crate::util::Page;
 
-use super::{LowerAlloc, CAS_RETRIES};
+use super::LowerAlloc;
+use crate::alloc::CAS_RETRIES;
 
 /// Level 2 page allocator.
 /// ```text
