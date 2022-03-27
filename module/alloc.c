@@ -66,11 +66,11 @@ static ssize_t out_show(struct kobject *kobj, struct kobj_attribute *attr,
     ssize_t len = 0;
 
     if (out_index == 0) {
-        len += sprintf(buf, "alloc,threads,iteration,allocs,get_min,get_avg,"
+        len += sprintf(buf, "alloc,x,iteration,allocs,get_min,get_avg,"
                             "get_max,put_min,put_avg,put_max,init,total\n");
     }
 
-    for (i = out_index; threads[i] <= THREADS_MAX && i < THREADS_LEN; i++) {
+    for (i = out_index; i < THREADS_LEN && threads[i] <= THREADS_MAX; i++) {
         // The output buffer has only the size of a PAGE.
         // If our output is larger we have to output it in multiple steps.
         if (len < PAGE_SIZE - ITERATIONS * 128) {
@@ -78,8 +78,8 @@ static ssize_t out_show(struct kobject *kobj, struct kobj_attribute *attr,
                 p = &perf[i * ITERATIONS + iter];
 
                 len += sprintf(buf + len,
-                               "KernelAlloc,%llu,%lu,%llu,%llu,%llu,%llu,%llu,%"
-                               "llu,%llu,0,0\n",
+                               "Kernel,%llu,%lu,%llu,%llu,%llu,%llu,%llu,"
+                               "%llu,%llu,0,0\n",
                                threads[i], iter, (u64)NUM_ALLOCS, p->get_min,
                                p->get_avg, p->get_max, p->put_min, p->put_avg,
                                p->put_max);
@@ -267,7 +267,7 @@ static int alloc_init_module(void) {
         kobject_put(output);
     }
 
-    for (i = 0; threads[i] <= THREADS_MAX && i < THREADS_LEN; i++) {
+    for (i = 0; i < THREADS_LEN && threads[i] <= THREADS_MAX; i++) {
         for (iter = 0; iter < ITERATIONS; iter++) {
             printk(KERN_INFO MOD "Start threads %llu\n", threads[i]);
             for (t = 0; t < threads[i]; t++) {
