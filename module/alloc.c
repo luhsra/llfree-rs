@@ -16,11 +16,7 @@ MODULE_AUTHOR("Lars Wrenger");
 #define MOD "[" KBUILD_MODNAME "]: "
 
 #ifndef NUM_ALLOCS
-#define NUM_ALLOCS (2 * 512 * 512)
-#endif
-
-#ifndef CPU_STRIDE
-#define CPU_STRIDE 1
+#define NUM_ALLOCS (512 * 512)
 #endif
 
 #ifndef THREADS_MAX
@@ -35,8 +31,8 @@ MODULE_AUTHOR("Lars Wrenger");
 #define BENCH 0
 #endif
 
-static const u64 threads[] = {1,  2,  4,  6,  8,  10, 12, 16, 20, 24, 28,
-                              32, 36, 40, 44, 48, 56, 64, 72, 80, 88, 96};
+static const u64 threads[] = {1,  2,  4,  8,  16, 20, 24,
+                              32, 40, 48, 56, 64, 80, 96};
 #define THREADS_LEN (sizeof(threads) / sizeof(*threads))
 
 static struct task_struct *tasks[THREADS_MAX];
@@ -280,7 +276,7 @@ static int alloc_init_module(void) {
                     printk(KERN_ERR MOD "Unable to init %llu\n", t);
                     return PTR_ERR(tasks[t]);
                 }
-                kthread_bind(tasks[t], CPU_STRIDE * t);
+                kthread_bind(tasks[t], t);
                 init_completion(&barriers[t]);
                 wake_up_process(tasks[t]);
             }
