@@ -103,7 +103,7 @@ fn main() {
         Arc::new(ListLocalAlloc::default()),
         Arc::new(ListLockedAlloc::default()),
     ];
-
+    // Additional constraints
     let mut conditions = HashMap::<String, &'static dyn Fn(usize, Size) -> bool>::new();
     conditions.insert(alloc::name::<ListLocalAlloc>(), &|_, size| size == Size::L0);
     conditions.insert(alloc::name::<ListLockedAlloc>(), &|cores, size| {
@@ -111,13 +111,15 @@ fn main() {
     });
 
     for x in x {
+        let t = bench.threads(threads, x);
+        if t > threads {
+            continue;
+        }
+
         for alloc in &allocs {
             let name = alloc.name();
             if alloc_names.contains(&name)
-                && conditions
-                    .get(&name)
-                    .map(|f| f(bench.threads(threads, x), size))
-                    .unwrap_or(true)
+                && conditions.get(&name).map(|f| f(t, size)).unwrap_or(true)
             {
                 for i in 0..iterations {
                     let perf = bench.run(
