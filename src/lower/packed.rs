@@ -1,21 +1,18 @@
-use core::fmt;
 use core::ops::Range;
 use std::fmt::Write;
-use std::mem::size_of;
-use std::sync::atomic::{self, AtomicU8, Ordering};
 
 use log::{error, warn};
 
 use crate::alloc::{Error, Result, Size, CAS_RETRIES};
 use crate::entry::Entry2;
-use crate::table::Table;
+use crate::table::{Bitfield, Table};
 use crate::util::{align_up, Page};
 
 use super::LowerAlloc;
 
 /// Level 2 page allocator.
 /// ```text
-/// NVRAM: [ Pages | PT1s | PT2s | Meta ]
+/// NVRAM: [ Pages | PT1s + padding | PT2s | Meta ]
 /// ```
 #[derive(Default, Debug)]
 pub struct PackedLower {
@@ -65,11 +62,7 @@ impl LowerAlloc for PackedLower {
             } else {
                 for j in 0..Bitfield::LEN {
                     let page = i * Table::span(1) + j;
-                    if page < self.pages {
-                        pt1.set(j, false);
-                    } else {
-                        pt1.set(j, true);
-                    }
+                    pt1.set(j, page >= self.pages);
                 }
             }
         }
@@ -200,7 +193,7 @@ impl PackedLower {
     fn pt2(&self, page: usize) -> &Table<Entry2> {
         let mut offset = self.begin + self.pages * Page::SIZE;
         offset += Table::num_pts(1, self.pages) * Bitfield::SIZE;
-        offset = align_up(offset, Page::SIZE);
+        offset = align_up(offset, Page::SIZE); // page align
         let i = page >> (Table::LEN_BITS * 2);
         debug_assert!(i < Table::num_pts(2, self.pages));
         offset += i * Page::SIZE;
@@ -248,7 +241,7 @@ impl PackedLower {
         let pt1 = self.pt1(start);
 
         for _ in 0..CAS_RETRIES {
-            if let Ok(i) = pt1.search_set(i) {
+            if let Ok(i) = pt1.set_first_zero(i) {
                 return Ok(Table::page(1, start, i));
             }
             stop!();
@@ -299,104 +292,6 @@ impl PackedLower {
     }
 }
 
-/// Bitfield replacing the level one-page table.
-#[repr(align(64))]
-struct Bitfield {
-    data: [AtomicU8; Table::LEN / Self::ENTRY_BITS],
-}
-
-const _: () = assert!(size_of::<Bitfield>() == Bitfield::SIZE);
-
-impl Default for Bitfield {
-    fn default() -> Self {
-        const D: AtomicU8 = AtomicU8::new(0);
-        Self {
-            data: [D; Table::LEN / Self::ENTRY_BITS],
-        }
-    }
-}
-
-impl fmt::Debug for Bitfield {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Bitfield(")?;
-        for (i, d) in self.data.iter().enumerate() {
-            if i % 4 == 0 && i > 0 {
-                write!(f, " ")?;
-            }
-            write!(f, "{:02x}", d.load(Ordering::Relaxed))?;
-        }
-        write!(f, ")")?;
-        Ok(())
-    }
-}
-
-impl Bitfield {
-    const ENTRY_BITS: usize = 8;
-    const SIZE: usize = Table::LEN / 8;
-    const LEN: usize = Table::LEN;
-
-    fn set(&self, i: usize, v: bool) {
-        let di = i / Self::ENTRY_BITS;
-        let bit = 1 << (i % Self::ENTRY_BITS);
-        if v {
-            self.data[di].fetch_or(bit, Ordering::SeqCst);
-        } else {
-            self.data[di].fetch_and(!bit, Ordering::SeqCst);
-        }
-    }
-
-    fn get(&self, i: usize) -> bool {
-        let di = i / Self::ENTRY_BITS;
-        let bit = 1 << (i % Self::ENTRY_BITS);
-        self.data[di].load(Ordering::SeqCst) & bit != 0
-    }
-
-    fn toggle(&self, i: usize, expected: bool) -> core::result::Result<bool, bool> {
-        let di = i / Self::ENTRY_BITS;
-        let bit = 1 << (i % Self::ENTRY_BITS);
-        match self.data[di].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
-            ((e & bit != 0) == expected).then(|| if !expected { e | bit } else { e & !bit })
-        }) {
-            Ok(e) => Ok(e & bit != 0),
-            Err(e) => Err(e & bit != 0),
-        }
-    }
-
-    /// Set the first 0 bit to 1 returning its bit index.
-    fn search_set(&self, i: usize) -> core::result::Result<usize, ()> {
-        for j in 0..self.data.len() {
-            let i = (j + i) % self.data.len();
-
-            #[cfg(feature = "stop")]
-            {
-                // Skip full entries for the tests
-                if self.data[i].load(Ordering::SeqCst) == u8::MAX {
-                    continue;
-                }
-                stop!();
-            }
-
-            if let Ok(e) = self.data[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
-                let off = e.trailing_ones() as usize;
-                (off < Self::ENTRY_BITS).then(|| e | (1 << off))
-            }) {
-                return Ok(i * Self::ENTRY_BITS + e.trailing_ones() as usize);
-            }
-        }
-        Err(())
-    }
-
-    fn fill(&self, v: bool) {
-        let v = if v { u8::MAX } else { 0 };
-        // cast to raw memory to let the compiler use vector instructions
-        #[allow(clippy::cast_ref_to_mut)]
-        let mem = unsafe { &mut *(&self.data as *const _ as *mut [u8; Self::SIZE]) };
-        mem.fill(v);
-        // memory ordering has to be enforced with a memory barrier
-        atomic::fence(Ordering::SeqCst);
-    }
-}
-
 #[cfg(feature = "stop")]
 #[cfg(test)]
 mod test {
@@ -412,7 +307,6 @@ mod test {
     use crate::util::{logging, Page};
 
     fn count(pt: &Bitfield) -> usize {
-        warn!("{pt:?}");
         let mut pages = 0;
         for i in 0..Bitfield::LEN {
             pages += !pt.get(i) as usize;

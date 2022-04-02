@@ -2,7 +2,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use core::ops::Range;
-use core::sync::atomic::{self, AtomicU64, Ordering};
+use core::sync::atomic::{self, AtomicU64, AtomicU8, Ordering};
 
 use crate::atomic::Atomic;
 use crate::Page;
@@ -129,6 +129,105 @@ impl<T: fmt::Debug + Sized + From<u64> + Into<u64>> fmt::Debug for Table<T> {
             writeln!(f, "    {i:>3}; {:?},", entry.load())?;
         }
         writeln!(f, "}}")
+    }
+}
+
+/// Bitfield replacing the level one-page table.
+#[repr(align(64))]
+pub struct Bitfield {
+    data: [AtomicU8; Self::LEN / Self::ENTRY_BITS],
+}
+
+const _: () = assert!(size_of::<Bitfield>() == Bitfield::SIZE);
+const _: () = assert!(Bitfield::LEN % Bitfield::ENTRY_BITS == 0);
+
+impl Default for Bitfield {
+    fn default() -> Self {
+        const D: AtomicU8 = AtomicU8::new(0);
+        Self {
+            data: [D; Self::LEN / Self::ENTRY_BITS],
+        }
+    }
+}
+
+impl fmt::Debug for Bitfield {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Bitfield(")?;
+        for (i, d) in self.data.iter().enumerate() {
+            if i % 4 == 0 && i > 0 {
+                write!(f, " ")?;
+            }
+            write!(f, "{:02x}", d.load(Ordering::Relaxed))?;
+        }
+        write!(f, ")")?;
+        Ok(())
+    }
+}
+
+impl Bitfield {
+    pub const ENTRY_BITS: usize = 8;
+    pub const LEN: usize = Table::LEN;
+    pub const SIZE: usize = Self::LEN / Self::ENTRY_BITS;
+
+    pub fn set(&self, i: usize, v: bool) {
+        let di = i / Self::ENTRY_BITS;
+        let bit = 1 << (i % Self::ENTRY_BITS);
+        if v {
+            self.data[di].fetch_or(bit, Ordering::SeqCst);
+        } else {
+            self.data[di].fetch_and(!bit, Ordering::SeqCst);
+        }
+    }
+
+    pub fn get(&self, i: usize) -> bool {
+        let di = i / Self::ENTRY_BITS;
+        let bit = 1 << (i % Self::ENTRY_BITS);
+        self.data[di].load(Ordering::SeqCst) & bit != 0
+    }
+
+    pub fn toggle(&self, i: usize, expected: bool) -> core::result::Result<bool, bool> {
+        let di = i / Self::ENTRY_BITS;
+        let bit = 1 << (i % Self::ENTRY_BITS);
+        match self.data[di].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
+            ((e & bit != 0) == expected).then(|| if !expected { e | bit } else { e & !bit })
+        }) {
+            Ok(e) => Ok(e & bit != 0),
+            Err(e) => Err(e & bit != 0),
+        }
+    }
+
+    /// Set the first 0 bit to 1 returning its bit index.
+    pub fn set_first_zero(&self, i: usize) -> core::result::Result<usize, ()> {
+        for j in 0..self.data.len() {
+            let i = (j + i) % self.data.len();
+
+            #[cfg(feature = "stop")]
+            {
+                // Skip full entries for the tests
+                if self.data[i].load(Ordering::SeqCst) == u8::MAX {
+                    continue;
+                }
+                crate::stop::stop().unwrap();
+            }
+
+            if let Ok(e) = self.data[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
+                let off = e.trailing_ones() as usize;
+                (off < Self::ENTRY_BITS).then(|| e | (1 << off))
+            }) {
+                return Ok(i * Self::ENTRY_BITS + e.trailing_ones() as usize);
+            }
+        }
+        Err(())
+    }
+
+    pub fn fill(&self, v: bool) {
+        let v = if v { u8::MAX } else { 0 };
+        // cast to raw memory to let the compiler use vector instructions
+        #[allow(clippy::cast_ref_to_mut)]
+        let mem = unsafe { &mut *(&self.data as *const _ as *mut [u8; Self::SIZE]) };
+        mem.fill(v);
+        // memory ordering has to be enforced with a memory barrier
+        atomic::fence(Ordering::SeqCst);
     }
 }
 

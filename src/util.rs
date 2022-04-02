@@ -37,14 +37,16 @@ pub const fn align_down(v: usize, align: usize) -> usize {
     v & !(align - 1)
 }
 
-#[cfg(any(test, all(feature = "logger", feature = "thread")))]
+#[cfg(any(test, feature = "logger"))]
+#[cfg(any(test, feature = "thread"))]
 fn core() -> usize {
     use crate::thread::PINNED;
     use core::sync::atomic::Ordering;
     PINNED.with(|p| p.load(Ordering::SeqCst))
 }
-#[cfg(not(test))]
-#[cfg(not(all(feature = "logger", feature = "thread")))]
+
+#[cfg(any(test, feature = "logger"))]
+#[cfg(not(any(test, feature = "thread")))]
 fn core() -> usize {
     0
 }
