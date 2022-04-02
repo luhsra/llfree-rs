@@ -3,7 +3,7 @@ use core::ops::Range;
 use core::ptr::{null, null_mut};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use log::{error, warn};
+use log::{error, info};
 use spin::mutex::TicketMutex;
 
 use super::{Alloc, Error, Result, Size, MIN_PAGES};
@@ -55,7 +55,7 @@ impl Default for ListLockedAlloc {
 impl Alloc for ListLockedAlloc {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
-        warn!(
+        info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
             memory.len()

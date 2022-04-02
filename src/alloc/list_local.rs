@@ -3,7 +3,7 @@ use core::ops::Range;
 use core::ptr::{null, null_mut};
 use std::cell::UnsafeCell;
 
-use log::{error, warn};
+use log::{error, info};
 
 use super::{Alloc, Error, Result, Size, MIN_PAGES};
 use crate::util::Page;
@@ -52,7 +52,7 @@ impl Default for ListLocalAlloc {
 impl Alloc for ListLocalAlloc {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
-        warn!(
+        info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
             memory.len()

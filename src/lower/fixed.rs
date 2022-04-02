@@ -3,7 +3,7 @@ use std::fmt::Write;
 
 use log::{error, warn};
 
-use crate::alloc::{Error, Result, Size};
+use crate::alloc::{Error, Result, Size, CAS_RETRIES};
 use crate::entry::{Entry1, Entry2};
 use crate::table::Table;
 use crate::util::Page;
@@ -107,13 +107,15 @@ impl LowerAlloc for FixedLower {
         }
 
         let pt = self.pt2(start);
-        for page in Table::iterate(2, start) {
-            let i = Table::idx(2, page);
-            if pt.update(i, Entry2::mark_huge).is_ok() {
-                return Ok(page);
+        for _ in 0..CAS_RETRIES {
+            for page in Table::iterate(2, start) {
+                let i = Table::idx(2, page);
+                if pt.update(i, Entry2::mark_huge).is_ok() {
+                    return Ok(page);
+                }
             }
         }
-        error!("Exceeding retries {}", start / Table::span(2));
+        error!("Nothing found {}", start / Table::span(2));
         Err(Error::Corruption)
     }
 
@@ -205,23 +207,25 @@ impl FixedLower {
     fn get_small(&self, start: usize) -> Result<usize> {
         let pt2 = self.pt2(start);
 
-        for newstart in Table::iterate(2, start) {
-            let i2 = Table::idx(2, newstart);
+        for _ in 0..CAS_RETRIES {
+            for newstart in Table::iterate(2, start) {
+                let i2 = Table::idx(2, newstart);
 
-            #[cfg(feature = "stop")]
-            {
-                let pte2 = pt2.get(i2);
-                if pte2.page() || pte2.free() == 0 {
-                    continue;
+                #[cfg(feature = "stop")]
+                {
+                    let pte2 = pt2.get(i2);
+                    if pte2.page() || pte2.free() == 0 {
+                        continue;
+                    }
+                    stop!();
                 }
-                stop!();
-            }
 
-            if pt2.update(i2, |v| v.dec(0)).is_ok() {
-                return self.get_table(newstart);
+                if pt2.update(i2, |v| v.dec(0)).is_ok() {
+                    return self.get_table(newstart);
+                }
             }
         }
-        error!("Nothing found {start} {}", start / Table::span(2));
+        error!("Nothing found {}", start / Table::span(2));
         Err(Error::Corruption)
     }
 
@@ -229,23 +233,24 @@ impl FixedLower {
     fn get_table(&self, start: usize) -> Result<usize> {
         let pt1 = self.pt1(start);
 
-        for page in Table::iterate(1, start) {
-            let i = Table::idx(1, page);
+        for _ in 0..CAS_RETRIES {
+            for page in Table::iterate(1, start) {
+                let i = Table::idx(1, page);
 
-            #[cfg(feature = "stop")]
-            {
-                if pt1.get(i) != Entry1::Empty {
-                    continue;
+                #[cfg(feature = "stop")]
+                {
+                    if pt1.get(i) != Entry1::Empty {
+                        continue;
+                    }
+                    stop!();
                 }
-                stop!();
-            }
 
-            if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
-                return Ok(page);
+                if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
+                    return Ok(page);
+                }
             }
         }
-
-        warn!("Nothing found {}", start / Table::span(2));
+        error!("Nothing found {}", start / Table::span(2));
         Err(Error::Corruption)
     }
 

@@ -1,7 +1,7 @@
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use log::{error, warn};
+use log::{error, warn, info};
 
 use super::{Alloc, Error, Result, Size};
 use crate::table::Table;
@@ -35,7 +35,7 @@ impl fmt::Debug for MallocAlloc {
 impl Alloc for MallocAlloc {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
-        warn!(
+        info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
             memory.len()

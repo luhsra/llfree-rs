@@ -3,7 +3,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, mem};
 
-use log::{error, warn};
+use log::{error, warn, info};
 
 use super::{Alloc, Error, Local, Result, Size, CAS_RETRIES, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
@@ -99,7 +99,7 @@ impl<L: LowerAlloc> fmt::Debug for TableAlloc<L> {
 impl<L: LowerAlloc> Alloc for TableAlloc<L> {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
-        warn!(
+        info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
             memory.len()
@@ -132,15 +132,14 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
             && meta.pages.load(Ordering::SeqCst) == self.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
         {
-            warn!("Recover allocator state p={}", self.pages());
+            info!("Recover allocator state p={}", self.pages());
             let deep = meta.active.load(Ordering::SeqCst) != 0;
             if deep {
-                error!("Try recover crashed allocator!");
+                warn!("Try recover crashed allocator!");
             }
-            let pages = self.recover_rec(Table::LEVELS, 0, deep)?;
-            warn!("Recovered {pages:?}");
+            self.recover_rec(Table::LEVELS, 0, deep)?;
         } else {
-            warn!("Setup allocator state p={}", self.pages());
+            info!("Setup allocator state p={}", self.pages());
             self.lower.clear();
 
             self.setup_rec(Table::LEVELS, 0);
@@ -214,7 +213,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
                 // Try reserve this subtree
                 match self.reserve_tree(huge, page, pte.free() > PTE3_FULL) {
                     Ok(pte) => {
-                        warn!("put reserve {i}");
+                        info!("put reserve {i}");
                         self.swap_reserved(huge, pte.with_idx(i), pte_a)?;
                         *local.start(huge) = page;
                         return Ok(size);
@@ -561,9 +560,8 @@ impl<L: LowerAlloc> TableAlloc<L> {
         let mut start = *start_a;
 
         if start == usize::MAX {
-            warn!("try reserve first");
             let pte = self.reserve(huge)?;
-            warn!("reserved {}", pte.idx());
+            info!("reserved {}", pte.idx());
             *pte_a = pte;
             start = pte.idx() * Table::span(2);
         } else {
@@ -571,9 +569,8 @@ impl<L: LowerAlloc> TableAlloc<L> {
             if let Some(pte) = pte_a.dec(huge) {
                 *pte_a = pte;
             } else {
-                warn!("try reserve next");
                 let pte = self.reserve(huge)?;
-                warn!("reserved {}", pte.idx());
+                info!("reserved {}", pte.idx());
                 self.swap_reserved(huge, pte, pte_a)?;
                 start = pte.idx() * Table::span(2);
             }

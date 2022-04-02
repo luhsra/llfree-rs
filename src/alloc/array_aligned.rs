@@ -3,7 +3,7 @@ use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use log::{error, warn};
+use log::{error, warn, info};
 
 use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::atomic::{AStack, AStackDbg, Atomic};
@@ -97,7 +97,7 @@ impl<L: LowerAlloc> fmt::Debug for ArrayAlignedAlloc<L> {
 impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
-        warn!(
+        info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
             memory.len()
@@ -129,17 +129,15 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
         self.partial_l0 = AStack::default();
         self.partial_l1 = AStack::default();
 
-        warn!("init");
         if !overwrite
             && meta.pages.load(Ordering::SeqCst) == self.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
         {
-            warn!("Recover allocator state p={}", self.pages());
+            info!("Recover allocator state p={}", self.pages());
             let deep = meta.active.load(Ordering::SeqCst) != 0;
-            let pages = self.recover(deep)?;
-            warn!("Recovered pages {pages}");
+            self.recover(deep)?;
         } else {
-            warn!("Setup allocator state p={}", self.pages());
+            info!("Setup allocator state p={}", self.pages());
             self.setup();
 
             meta.pages.store(self.pages(), Ordering::SeqCst);
@@ -244,7 +242,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
     #[cold]
     fn recover(&self, deep: bool) -> Result<usize> {
         if deep {
-            error!("Try recover crashed allocator!");
+            warn!("Try recover crashed allocator!");
         }
         let mut total = 0;
         for i in 0..Table::num_pts(2, self.pages()) {
@@ -287,7 +285,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
             }
         }) {
             if r.is_ok() {
-                warn!("reserve partial {i}");
+                info!("reserve partial {i}");
                 return Ok(i * Table::span(2));
             } else {
                 self.empty.push(self, i);
@@ -296,7 +294,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
 
         if let Some((i, r)) = self.empty.pop_update(self, |v| v.dec(huge)) {
             debug_assert!(r.is_ok());
-            warn!("reserve empty {i}");
+            info!("reserve empty {i}");
             Ok(i * Table::span(2))
         } else {
             error!("No memory");
@@ -310,7 +308,6 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
         let mut start = *start_a;
 
         if start == usize::MAX {
-            warn!("Try reserve first");
             start = self.reserve(huge)?;
         } else {
             let i = start / Table::span(2);

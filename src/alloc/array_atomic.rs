@@ -3,7 +3,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, mem};
 
-use log::{error, warn};
+use log::{error, info, warn};
 
 use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::atomic::{AStack, AStackDbg, Atomic};
@@ -97,7 +97,7 @@ impl<L: LowerAlloc> Index<usize> for ArrayAtomicAlloc<L> {
 impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
-        warn!(
+        info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
             memory.len()
@@ -129,17 +129,15 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
         self.partial_l0 = AStack::default();
         self.partial_l1 = AStack::default();
 
-        warn!("init");
         if !overwrite
             && meta.pages.load(Ordering::SeqCst) == self.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
         {
-            warn!("Recover allocator state p={}", self.pages());
+            info!("Recover allocator state p={}", self.pages());
             let deep = meta.active.load(Ordering::SeqCst) != 0;
-            let pages = self.recover(deep)?;
-            warn!("Recovered pages {pages}");
+            self.recover(deep)?;
         } else {
-            warn!("Setup allocator state p={}", self.pages());
+            info!("Setup allocator state p={}", self.pages());
             self.setup();
 
             meta.pages.store(self.pages(), Ordering::SeqCst);
@@ -247,7 +245,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     #[cold]
     fn recover(&self, deep: bool) -> Result<usize> {
         if deep {
-            error!("Try recover crashed allocator!");
+            warn!("Try recover crashed allocator!");
         }
         let mut total = 0;
         for i in 0..Table::num_pts(2, self.pages()) {
@@ -285,7 +283,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             .partial(huge)
             .pop_update(self, |v| v.reserve_partial(huge, PTE3_FULL))
         {
-            warn!("reserve partial {i}");
+            info!("reserve partial {i}");
             match r {
                 Ok(pte) => {
                     let pte = pte.dec(huge).unwrap().with_idx(i);
@@ -301,7 +299,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         }
 
         while let Some((i, r)) = self.empty.pop_update(self, |v| v.reserve_empty(huge)) {
-            warn!("reserve empty {i}");
+            info!("reserve empty {i}");
             if let Ok(pte) = r {
                 let pte = pte.dec(huge).unwrap().with_idx(i);
                 return Ok((i * Table::span(2), pte));
@@ -347,7 +345,6 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         let mut start = *start_a;
 
         if start == usize::MAX {
-            warn!("Try reserve first");
             let (s, pte) = self.reserve(huge)?;
             *pte_a = pte;
             start = s
@@ -356,7 +353,6 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             if let Some(pte) = pte_a.dec(huge) {
                 *pte_a = pte;
             } else {
-                warn!("Try reserve next");
                 let (s, new_pte) = self.reserve(huge)?;
                 self.swap_reserved(huge, new_pte, pte_a)?;
                 start = s;

@@ -19,6 +19,8 @@ mod dynamic;
 pub use dynamic::DynamicLower;
 mod fixed;
 pub use fixed::FixedLower;
+mod packed;
+pub use packed::PackedLower;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug {

@@ -15,7 +15,7 @@ use nvalloc::alloc::{
     self, Alloc, ArrayAlignedAlloc, ArrayAtomicAlloc, ArrayLockedAlloc, ArrayUnalignedAlloc,
     ListLocalAlloc, ListLockedAlloc, Size, TableAlloc, MIN_PAGES,
 };
-use nvalloc::lower::{DynamicLower, FixedLower};
+use nvalloc::lower::{DynamicLower, FixedLower, PackedLower};
 use nvalloc::mmap::MMap;
 use nvalloc::table::Table;
 use nvalloc::util::{black_box, Page, WyRand};
@@ -89,7 +89,8 @@ fn main() {
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
     type F = FixedLower;
     type D = DynamicLower;
-    let allocs: [Arc<dyn Alloc>; 12] = [
+    type P = PackedLower;
+    let allocs: [Arc<dyn Alloc>; 17] = [
         Arc::new(ArrayAlignedAlloc::<F>::default()),
         Arc::new(ArrayUnalignedAlloc::<F>::default()),
         Arc::new(ArrayLockedAlloc::<F>::default()),
@@ -100,6 +101,11 @@ fn main() {
         Arc::new(ArrayLockedAlloc::<D>::default()),
         Arc::new(ArrayAtomicAlloc::<D>::default()),
         Arc::new(TableAlloc::<D>::default()),
+        Arc::new(ArrayAlignedAlloc::<P>::default()),
+        Arc::new(ArrayUnalignedAlloc::<P>::default()),
+        Arc::new(ArrayLockedAlloc::<P>::default()),
+        Arc::new(ArrayAtomicAlloc::<P>::default()),
+        Arc::new(TableAlloc::<P>::default()),
         Arc::new(ListLocalAlloc::default()),
         Arc::new(ListLockedAlloc::default()),
     ];
