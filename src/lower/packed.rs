@@ -211,7 +211,7 @@ impl PackedLower {
         let pt = self.pt1(start);
         let mut pages = 0;
         for i in Table::range(1, start..self.pages) {
-            pages += pt.get(i) as usize;
+            pages += !pt.get(i) as usize;
         }
         Ok(pages)
     }
@@ -338,9 +338,11 @@ impl Bitfield {
     fn set(&self, i: usize, v: bool) {
         let di = i / Self::ENTRY_BITS;
         let bit = 1 << (i % Self::ENTRY_BITS);
-        let _ = self.data[di].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
-            Some(if v { e | bit } else { e & !bit })
-        });
+        if v {
+            self.data[di].fetch_or(bit, Ordering::SeqCst);
+        } else {
+            self.data[di].fetch_and(!bit, Ordering::SeqCst);
+        }
     }
 
     fn get(&self, i: usize) -> bool {

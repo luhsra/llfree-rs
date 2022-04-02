@@ -175,14 +175,14 @@ mod test {
     use super::Error;
     use crate::alloc::Alloc;
     use crate::alloc::MIN_PAGES;
-    use crate::lower::{DynamicLower, FixedLower};
+    use crate::lower::*;
     use crate::mmap::MMap;
     use crate::table::Table;
     use crate::util::black_box;
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::TableAlloc<FixedLower>;
+    type Allocator = super::TableAlloc<PackedLower>;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -239,7 +239,6 @@ mod test {
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
-            info!("addr {i}={p1:x}");
             assert!(mapping.as_ptr_range().contains(&(p1 as _)));
             assert!(p1 != p2);
         }
@@ -302,7 +301,6 @@ mod test {
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
-            info!("addr {i}={p1:x}");
             assert!(mapping.as_ptr_range().contains(&(p1 as _)));
             assert!(p1 != p2);
         }
@@ -324,7 +322,6 @@ mod test {
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
-            info!("addr {i}={p1:x}");
             assert!(mapping.as_ptr_range().contains(&(p1 as _)));
             assert!(p1 != p2);
         }
@@ -455,7 +452,6 @@ mod test {
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
-            info!("addr {i}={p1:x}");
             assert!(mapping.as_ptr_range().contains(&(p1 as _)));
             assert!(p1 != p2);
         }
