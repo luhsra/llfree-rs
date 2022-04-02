@@ -193,7 +193,7 @@ impl Benchmark {
         threads: usize,
         x: usize,
     ) -> Perf {
-        warn!("\n\n>>> bench {self:?} x={x} {size:?} {}\n", alloc.name());
+        warn!(">>> bench {self:?} x={x} {size:?} {}\n", alloc.name());
 
         match self {
             Benchmark::Bulk => bulk(alloc, mapping, size, threads, x),
@@ -217,7 +217,6 @@ fn bulk(
         .init(threads, &mut mapping[..pages], true)
         .unwrap();
     let init = timer.elapsed().as_millis();
-    warn!("init time {init}ms");
 
     let allocs = alloc.pages() / threads / 2 / Table::span(size as _);
     let barrier = Arc::new(Barrier::new(threads));
@@ -255,7 +254,6 @@ fn bulk(
     assert_eq!(a.dbg_allocated_pages(), 0);
 
     perf.init = init;
-    warn!("{perf:#?}");
     perf
 }
 
@@ -272,7 +270,6 @@ fn repeat(
         .init(threads, &mut mapping[..pages], true)
         .unwrap();
     let init = timer.elapsed().as_millis();
-    warn!("init time {init}ms");
 
     let allocs = alloc.pages() / threads / 2 / Table::span(size as _);
     let barrier = Arc::new(Barrier::new(threads));
@@ -309,7 +306,6 @@ fn repeat(
     );
 
     perf.init = init;
-    warn!("{perf:#?}");
     perf
 }
 
@@ -326,7 +322,6 @@ fn rand(
         .init(threads, &mut mapping[..pages], true)
         .unwrap();
     let init = timer.elapsed().as_millis();
-    warn!("init time {init}ms");
 
     let allocs = alloc.pages() / threads / 2 / Table::span(size as _);
     let barrier = Arc::new(Barrier::new(threads));
@@ -368,7 +363,6 @@ fn rand(
     );
 
     perf.init = init;
-    warn!("{perf:#?}");
     perf
 }
 
@@ -386,8 +380,6 @@ fn filling(
         .init(threads, mapping, true)
         .unwrap();
     let init = timer.elapsed().as_millis();
-    warn!("init time {init}ms");
-
     let allocs = alloc.pages() / threads / Table::span(size as _);
 
     // Allocate to filling level
@@ -449,7 +441,6 @@ fn filling(
     );
 
     perf.init = init;
-    warn!("{perf:#?}");
     perf
 }
 
