@@ -1,0 +1,5 @@
+alloc,x,iteration,pages,get_min,get_avg,get_max,put_min,put_avg,put_max,init,total
+ArrayAlignedP,4,0,1572864,171,296,654,171,296,654,0,0
+ArrayAlignedP,4,1,1572864,112,132,178,112,132,178,0,0
+ArrayAlignedP,4,2,1572864,197,205,216,197,205,216,0,0
+ArrayAlignedP,4,3,1572864,122,162,183,122,162,183,0,0
