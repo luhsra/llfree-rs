@@ -27,7 +27,7 @@ mod table;
 pub use table::TableAlloc;
 
 pub const CAS_RETRIES: usize = 4096;
-pub const MAGIC: usize = 0xdeadbeef;
+pub const MAGIC: usize = 0xdead_beef;
 pub const MIN_PAGES: usize = 2 * Table::span(2);
 pub const MAX_PAGES: usize = Table::span(Table::LEVELS);
 
@@ -78,18 +78,20 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     }
 }
 
+#[must_use]
 pub fn name<A: Alloc + ?Sized>() -> String {
     let name = type_name::<A>();
     // Add first letter of generic type as suffix
     let (name, suffix) = if let Some((prefix, suffix)) = name.split_once('<') {
-        let suffix = suffix.rsplit_once(':').map(|s| s.1).unwrap_or(suffix);
+        let suffix = suffix.rsplit_once(':').map_or(suffix, |s| s.1);
         (prefix, &suffix[0..1])
     } else {
         (name, "")
     };
     // Strip namespaces
-    let name = name.rsplit_once(':').map(|s| s.1).unwrap_or(name);
-    format!("{}{}", name.strip_suffix("Alloc").unwrap_or(name), suffix)
+    let name = name.rsplit_once(':').map_or(name, |s| s.1);
+    let name = name.strip_suffix("Alloc").unwrap_or(name);
+    format!("{name}{suffix}")
 }
 
 /// Allocates a new page and writes the value after translation into `dst`.
@@ -104,13 +106,12 @@ pub fn get_cas<F: FnOnce(u64) -> u64>(
 ) -> Result<()> {
     let page = alloc.get(core, size)?;
     let new = translate(page);
-    match dst.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            error!("CAS");
-            alloc.put(core, page).unwrap();
-            Err(Error::CAS)
-        }
+    if let Err(_) = dst.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
+        error!("CAS");
+        alloc.put(core, page).unwrap();
+        Err(Error::CAS)
+    } else {
+        Ok(())
     }
 }
 
@@ -142,12 +143,15 @@ impl Local {
             frees: [usize::MAX; 4],
         }))
     }
+    #[allow(clippy::mut_from_ref)]
     fn p(&self) -> &mut Inner {
         unsafe { &mut *self.0.get() }
     }
+    #[allow(clippy::mut_from_ref)]
     pub fn start(&self, huge: bool) -> &mut usize {
         &mut self.p().start[huge as usize]
     }
+    #[allow(clippy::mut_from_ref)]
     pub fn pte(&self, huge: bool) -> &mut Entry3 {
         &mut self.p().pte[huge as usize]
     }

@@ -2,6 +2,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use core::ops::Range;
+use core::ptr::addr_of;
 use core::sync::atomic::{self, AtomicU64, AtomicU8, Ordering};
 
 use crate::atomic::Atomic;
@@ -189,7 +190,7 @@ impl Bitfield {
         let di = i / Self::ENTRY_BITS;
         let bit = 1 << (i % Self::ENTRY_BITS);
         match self.data[di].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
-            ((e & bit != 0) == expected).then(|| if !expected { e | bit } else { e & !bit })
+            ((e & bit != 0) == expected).then(|| if expected { e & !bit } else { e | bit })
         }) {
             Ok(e) => Ok(e & bit != 0),
             Err(e) => Err(e & bit != 0),
@@ -224,7 +225,7 @@ impl Bitfield {
         let v = if v { u8::MAX } else { 0 };
         // cast to raw memory to let the compiler use vector instructions
         #[allow(clippy::cast_ref_to_mut)]
-        let mem = unsafe { &mut *(&self.data as *const _ as *mut [u8; Self::SIZE]) };
+        let mem = unsafe { &mut *(addr_of!(self.data) as *mut [u8; Self::SIZE]) };
         mem.fill(v);
         // memory ordering has to be enforced with a memory barrier
         atomic::fence(Ordering::SeqCst);

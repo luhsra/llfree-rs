@@ -287,9 +287,8 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
             if r.is_ok() {
                 info!("reserve partial {i}");
                 return Ok(i * Table::span(2));
-            } else {
-                self.empty.push(self, i);
             }
+            self.empty.push(self, i);
         }
 
         if let Some((i, r)) = self.empty.pop_update(self, |v| v.dec(huge)) {
@@ -314,7 +313,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
             if self[i].update(|v| v.dec(huge)).is_err() {
                 start = self.reserve(huge)?;
                 if self[i].update(Entry3::unreserve).is_err() {
-                    panic!("Unreserve failed")
+                    panic!("Unreserve failed");
                 }
             }
         }

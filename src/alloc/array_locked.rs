@@ -356,7 +356,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
         if start == usize::MAX {
             let (s, pte) = self.reserve(huge)?;
             *pte_a = pte;
-            start = s
+            start = s;
         } else {
             // Incremet or clear (atomic sync with put dec)
             if let Some(pte) = pte_a.dec(huge) {

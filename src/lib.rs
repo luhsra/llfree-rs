@@ -43,7 +43,7 @@ pub fn uninit() {
 /// If `overwrite` is nonzero no existing allocator state is recovered.
 #[no_mangle]
 pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwrite: u32) -> i64 {
-    let memory = unsafe { std::slice::from_raw_parts_mut(addr as *mut Page, pages as _) };
+    let memory = unsafe { std::slice::from_raw_parts_mut(addr.cast(), pages as _) };
     match init(cores as _, memory, overwrite != 0) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
@@ -89,7 +89,7 @@ pub extern "C" fn nvalloc_get_cas(
         _ => return -(Error::Memory as usize as i64),
     };
 
-    let dst = unsafe { &*(dst as *const AtomicU64) };
+    let dst = unsafe { &*dst.cast::<AtomicU64>() };
 
     match alloc::get_cas(instance(), core as _, size, dst, |p| translate(p), expected) {
         Ok(_) => 0,

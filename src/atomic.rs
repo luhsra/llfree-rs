@@ -47,7 +47,7 @@ impl<T: From<u64> + Into<u64>> Atomic<T> {
     }
     #[inline]
     pub fn store(&self, v: T) {
-        self.0.store(v.into(), Ordering::SeqCst)
+        self.0.store(v.into(), Ordering::SeqCst);
     }
     #[inline]
     pub fn swap(&self, v: T) -> T {

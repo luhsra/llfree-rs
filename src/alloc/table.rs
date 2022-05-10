@@ -3,7 +3,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, mem};
 
-use log::{error, warn, info};
+use log::{error, info, warn};
 
 use super::{Alloc, Error, Local, Result, Size, CAS_RETRIES, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
@@ -53,14 +53,6 @@ unsafe impl<L: LowerAlloc> Sync for TableAlloc<L> {}
 
 impl<L: LowerAlloc> fmt::Debug for TableAlloc<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{} {{", self.name())?;
-        writeln!(
-            f,
-            "    memory: {:?} ({})",
-            self.lower.memory(),
-            self.lower.pages()
-        )?;
-
         fn dump_rec<L: LowerAlloc>(
             this: &TableAlloc<L>,
             f: &mut fmt::Formatter<'_>,
@@ -85,6 +77,15 @@ impl<L: LowerAlloc> fmt::Debug for TableAlloc<L> {
             }
             Ok(())
         }
+
+        writeln!(f, "{} {{", self.name())?;
+        writeln!(
+            f,
+            "    memory: {:?} ({})",
+            self.lower.memory(),
+            self.lower.pages()
+        )?;
+
         dump_rec(self, f, Table::LEVELS, 0)?;
 
         for (t, local) in self.local.iter().enumerate() {
@@ -503,12 +504,11 @@ impl<L: LowerAlloc> TableAlloc<L> {
         let pt = self.pt3(page);
         if let Ok(pte) = pt.update(i, |v| v.reserve(huge)) {
             return Ok(pte);
-        } else {
-            if parents {
-                // Undo reservation
-                self.update_parents(page, Change::p_inc(huge))?;
-            }
+        } else if parents {
+            // Undo reservation
+            self.update_parents(page, Change::p_inc(huge))?;
         }
+
         Err(Error::Memory)
     }
 
@@ -583,11 +583,11 @@ impl<L: LowerAlloc> TableAlloc<L> {
 
     fn get_giant(&self, level: usize, start: usize) -> Result<usize> {
         let pte = self.find_rec(level, start, Entry::dec_empty, |v| {
-            (v.free() == Table::span(2)).then(|| Entry3::new_giant())
+            (v.free() == Table::span(2)).then(Entry3::new_giant)
         })?;
         let page = pte.idx() * Table::span(2);
         self.lower.set_giant(page);
-        return Ok(page);
+        Ok(page)
     }
 
     fn put_giant(&self, page: usize) -> Result<()> {
@@ -601,19 +601,16 @@ impl<L: LowerAlloc> TableAlloc<L> {
 
         let pt = self.pt3(page);
         let i = Table::idx(3, page);
-        match pt.cas(
+        if let Ok(_) = pt.cas(
             i,
             Entry3::new_giant(),
             Entry3::new().with_free(Table::span(2)),
         ) {
-            Ok(_) => {
-                self.lower.clear_giant(page);
-                self.update_parents(page, Change::IncEmpty)
-            }
-            _ => {
-                error!("Invalid {page}");
-                Err(Error::Address)
-            }
+            self.lower.clear_giant(page);
+            self.update_parents(page, Change::IncEmpty)
+        } else {
+            error!("Invalid {page}");
+            Err(Error::Address)
         }
     }
 }

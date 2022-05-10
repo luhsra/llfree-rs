@@ -85,7 +85,7 @@ impl LowerAlloc for PackedLower {
             } else if pte.page() {
                 size = Size::L1;
             } else if deep && pte.free() > 0 && size == Size::L0 {
-                let p = self.recover_l1(start)?;
+                let p = self.recover_l1(start);
                 if pte.free() != p {
                     warn!("Invalid PTE2 start=0x{start:x} i{i}: {} != {p}", pte.free());
                     pt.set(i, pte.with_free(p));
@@ -200,13 +200,13 @@ impl PackedLower {
         unsafe { &*(offset as *mut Table<Entry2>) }
     }
 
-    fn recover_l1(&self, start: usize) -> Result<usize> {
+    fn recover_l1(&self, start: usize) -> usize {
         let pt = self.pt1(start);
         let mut pages = 0;
         for i in Table::range(1, start..self.pages) {
             pages += !pt.get(i) as usize;
         }
-        Ok(pages)
+        pages
     }
 
     /// Allocate a single page
@@ -264,7 +264,7 @@ impl PackedLower {
 
         let pt2 = self.pt2(page);
         let i2 = Table::idx(2, page);
-        if let Err(pte2) = pt2.update(i2, |pte| pte.inc()) {
+        if let Err(pte2) = pt2.update(i2, Entry2::inc) {
             error!("Invalid Addr l1 i{i1} p={page} {pte2:?}");
             return Err(Error::Address);
         }

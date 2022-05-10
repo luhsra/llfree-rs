@@ -163,12 +163,11 @@ impl LowerAlloc for DynamicLower {
             let pt1 = self.pt1(page, 0);
             pt1.fill(Entry1::Empty);
 
-            match pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
-                Ok(_) => Ok(true),
-                Err(_) => {
-                    error!("Corruption l2 i{i2}");
-                    Err(Error::Corruption)
-                }
+            if let Ok(_) = pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
+                Ok(true)
+            } else {
+                error!("Corruption l2 i{i2}");
+                Err(Error::Corruption)
             }
         } else if !old.giant() && old.free() < Table::LEN {
             for _ in 0..CAS_RETRIES {

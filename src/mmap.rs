@@ -30,11 +30,11 @@ impl<T> MMap<T> {
         };
         if addr != libc::MAP_FAILED {
             Ok(MMap {
-                slice: unsafe { std::slice::from_raw_parts_mut(addr as _, len) },
+                slice: unsafe { std::slice::from_raw_parts_mut(addr.cast(), len) },
                 fd: Some(fd),
             })
         } else {
-            unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
+            unsafe { libc::perror(b"mmap failed\0".as_ptr().cast()) };
             Err(())
         }
     }
@@ -60,7 +60,7 @@ impl<T> MMap<T> {
                 fd: Some(fd),
             })
         } else {
-            unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
+            unsafe { libc::perror(b"mmap failed\0".as_ptr().cast()) };
             Err(())
         }
     }
@@ -89,7 +89,7 @@ impl<T> MMap<T> {
                 fd: None,
             })
         } else {
-            unsafe { libc::perror(b"mmap failed\0" as *const _ as _) };
+            unsafe { libc::perror(b"mmap failed\0".as_ptr().cast()) };
             Err(())
         }
     }
@@ -98,7 +98,7 @@ impl<T> MMap<T> {
         unsafe {
             if let Some(fd) = self.fd {
                 if libc::fsync(fd) != 0 {
-                    libc::perror(b"fsync failed\0" as *const _ as _);
+                    libc::perror(b"fsync failed\0".as_ptr().cast());
                 }
             }
         }
@@ -113,7 +113,7 @@ pub fn m_async<T>(slice: &mut [T]) {
             libc::MS_ASYNC,
         ) != 0
         {
-            libc::perror(b"fsync failed\0" as *const _ as _);
+            libc::perror(b"fsync failed\0".as_ptr().cast());
         }
     }
 }
@@ -141,7 +141,7 @@ impl<T> Drop for MMap<T> {
                 )
             };
             if ret != 0 {
-                unsafe { libc::perror(b"munmap failed\0" as *const _ as _) };
+                unsafe { libc::perror(b"munmap failed\0".as_ptr().cast()) };
                 panic!(
                     "{:?} l={} (0x{:x})",
                     self.slice.as_ptr(),
