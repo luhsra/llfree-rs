@@ -1,62 +1,125 @@
 use core::fmt;
-use std::marker::PhantomData;
-use std::ops::Index;
-use std::sync::atomic::{AtomicU64, Ordering};
+use core::ops::Index;
+use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use log::error;
 
 use crate::entry::Entry3;
 
-/// Atomic wrapper for 64bit-sized values.
+/// Atomic wrapper for the different integer sizes.
 #[repr(transparent)]
-pub struct Atomic<T: From<u64> + Into<u64>>(pub AtomicU64, PhantomData<T>);
+pub struct Atomic<T: AtomicValue>(pub <<T as AtomicValue>::V as AtomicT>::A);
 
 const _: () = assert!(std::mem::size_of::<Atomic<u64>>() == 8);
 
-impl<T: From<u64> + Into<u64>> Atomic<T> {
+impl<T: AtomicValue> Atomic<T> {
     #[inline]
     pub fn new(v: T) -> Self {
-        Self(AtomicU64::new(v.into()), PhantomData)
+        Self(T::V::atomic(v.into()))
     }
     #[inline]
     pub fn compare_exchange(&self, current: T, new: T) -> Result<T, T> {
-        match self.0.compare_exchange(
-            current.into(),
-            new.into(),
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
+        match T::V::atomic_compare_exchange(&self.0, current.into(), new.into()) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
     }
     #[inline]
     pub fn update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
-        match self
-            .0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                f(v.into()).map(T::into)
-            }) {
+        match T::V::atomic_update(&self.0, |v| f(v.into()).map(T::into)) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
     }
     #[inline]
     pub fn load(&self) -> T {
-        self.0.load(Ordering::SeqCst).into()
+        T::V::atomic_load(&self.0).into()
     }
     #[inline]
     pub fn store(&self, v: T) {
-        self.0.store(v.into(), Ordering::SeqCst);
+        T::V::atomic_store(&self.0, v.into());
     }
     #[inline]
     pub fn swap(&self, v: T) -> T {
-        self.0.swap(v.into(), Ordering::SeqCst).into()
+        T::V::atomic_swap(&self.0, v.into()).into()
     }
 }
 
+pub trait AtomicValue: From<Self::V> + Into<Self::V> + Clone + Copy {
+    type V: AtomicT;
+}
+
+impl AtomicValue for u64 {
+    type V = u64;
+}
+impl AtomicValue for u32 {
+    type V = u32;
+}
+impl AtomicValue for u16 {
+    type V = u16;
+}
+impl AtomicValue for u8 {
+    type V = u8;
+}
+
+pub trait AtomicT: Sized + Clone + Copy {
+    type A;
+    const ORDER: Ordering = Ordering::SeqCst;
+
+    fn atomic(v: Self) -> Self::A;
+    fn atomic_compare_exchange(atomic: &Self::A, current: Self, new: Self) -> Result<Self, Self>;
+    fn atomic_update<F: FnMut(Self) -> Option<Self>>(atomic: &Self::A, f: F) -> Result<Self, Self>;
+    fn atomic_load(atomic: &Self::A) -> Self;
+    fn atomic_store(atomic: &Self::A, v: Self);
+    fn atomic_swap(atomic: &Self::A, v: Self) -> Self;
+}
+
+macro_rules! impl_atomic {
+    ($value:ident, $atomic:ident) => {
+        impl AtomicT for $value {
+            type A = $atomic;
+
+            fn atomic(v: Self) -> Self::A {
+                Self::A::new(v)
+            }
+
+            fn atomic_compare_exchange(
+                atomic: &Self::A,
+                current: Self,
+                new: Self,
+            ) -> Result<Self, Self> {
+                Self::A::compare_exchange(atomic, current, new, Self::ORDER, Self::ORDER)
+            }
+
+            fn atomic_update<F: FnMut(Self) -> Option<Self>>(
+                atomic: &Self::A,
+                f: F,
+            ) -> Result<Self, Self> {
+                Self::A::fetch_update(atomic, Self::ORDER, Self::ORDER, f)
+            }
+
+            fn atomic_load(atomic: &Self::A) -> Self {
+                Self::A::load(atomic, Self::ORDER)
+            }
+
+            fn atomic_store(atomic: &Self::A, v: Self) {
+                Self::A::store(atomic, v, Self::ORDER)
+            }
+
+            fn atomic_swap(atomic: &Self::A, v: Self) -> Self {
+                Self::A::swap(atomic, v, Self::ORDER)
+            }
+        }
+    };
+}
+
+impl_atomic!(u64, AtomicU64);
+impl_atomic!(u32, AtomicU32);
+impl_atomic!(u16, AtomicU16);
+impl_atomic!(u8, AtomicU8);
+
 /// Node of an atomic stack
-pub trait ANode: Copy + From<u64> + Into<u64> {
+pub trait ANode: AtomicValue + Default {
     fn next(self) -> Option<usize>;
     fn with_next(self, next: Option<usize>) -> Self;
 }
@@ -87,7 +150,7 @@ unsafe impl<T: ANode> Sync for AStack<T> {}
 impl<T: ANode> Default for AStack<T> {
     fn default() -> Self {
         Self {
-            start: Atomic::new(T::from(0).with_next(None)),
+            start: Atomic::new(T::default().with_next(None)),
         }
     }
 }
@@ -184,7 +247,6 @@ where
 
 #[cfg(test)]
 mod test {
-    use core::marker::PhantomData;
     use core::sync::atomic::AtomicU64;
     use std::sync::Arc;
 
@@ -194,7 +256,7 @@ mod test {
 
     use super::{ANode, AStack, AStackDbg, Atomic};
 
-    const DATA_V: Atomic<u64> = Atomic(AtomicU64::new(0), PhantomData);
+    const DATA_V: Atomic<u64> = Atomic(AtomicU64::new(0));
     const N: usize = 64;
     static mut DATA: [Atomic<u64>; N] = [DATA_V; N];
 

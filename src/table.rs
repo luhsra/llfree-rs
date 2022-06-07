@@ -1,29 +1,25 @@
 use core::fmt;
-use core::marker::PhantomData;
 use core::mem::size_of;
 use core::ops::Range;
 use core::ptr::addr_of;
 use core::sync::atomic::{self, AtomicU64, AtomicU8, Ordering};
 
-use crate::atomic::Atomic;
+use crate::atomic::{Atomic, AtomicValue};
 use crate::Page;
 
 /// Page table with atomic entries
 #[repr(align(0x1000))]
-pub struct Table<T: Sized + From<u64> + Into<u64> = u64> {
+pub struct Table<T: AtomicValue = u64, const LEN: usize = {512}> {
     entries: [Atomic<T>; Table::LEN],
-    phantom: PhantomData<T>,
 }
 
 const _: () = assert!(size_of::<AtomicU64>() == Table::PTE_SIZE);
-const _: () = assert!(size_of::<Table>() == Page::SIZE);
-const _: () = assert!(size_of::<usize>() == size_of::<u64>());
+const _: () = assert!(size_of::<Table<u64>>() == Page::SIZE);
 
 impl Table {
     pub const PTE_SIZE_BITS: usize = 3; // 2^3 => 8B => 64b
     pub const PTE_SIZE: usize = 1 << Self::PTE_SIZE_BITS;
     pub const LEN_BITS: usize = Page::SIZE_BITS - Self::PTE_SIZE_BITS;
-    pub const LEN: usize = 1 << Self::LEN_BITS;
 
     pub const LEVELS: usize = 4;
 
@@ -90,11 +86,10 @@ impl Table {
     }
 }
 
-impl<T: Sized + From<u64> + Into<u64> + Clone> Table<T> {
+impl<T: AtomicValue> Table<T> {
     pub fn empty() -> Self {
         Self {
             entries: unsafe { std::mem::zeroed() },
-            phantom: PhantomData,
         }
     }
     pub fn fill(&self, e: T) {
@@ -123,7 +118,7 @@ impl<T: Sized + From<u64> + Into<u64> + Clone> Table<T> {
     }
 }
 
-impl<T: fmt::Debug + Sized + From<u64> + Into<u64>> fmt::Debug for Table<T> {
+impl<T: AtomicValue + fmt::Debug> fmt::Debug for Table<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Table {{")?;
         for (i, entry) in self.entries.iter().enumerate() {

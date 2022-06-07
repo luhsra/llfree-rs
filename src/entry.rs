@@ -4,6 +4,7 @@ use core::fmt;
 use bitfield_struct::bitfield;
 use log::error;
 
+use crate::atomic::AtomicValue;
 use crate::table::Table;
 use crate::Size;
 
@@ -20,6 +21,10 @@ pub struct Entry {
     pub partial_l1: usize,
     #[bits(4)]
     _p: usize,
+}
+
+impl AtomicValue for Entry {
+    type V = u64;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +113,16 @@ pub struct Entry3 {
     pub huge: bool,
     /// If this subtree is allocated as giant page.
     pub page: bool,
+}
+
+impl Default for Entry3 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AtomicValue for Entry3 {
+    type V = u64;
 }
 
 impl Entry3 {
@@ -268,6 +283,10 @@ pub struct Entry2 {
     pub page: bool,
 }
 
+impl AtomicValue for Entry2 {
+    type V = u64;
+}
+
 impl Entry2 {
     /// Creates a new entry referencing a level one page table.
     #[inline]
@@ -316,6 +335,70 @@ impl Entry2 {
     }
 }
 
+#[bitfield(u16)]
+pub struct PEntry2 {
+    /// Number of free pages.
+    #[bits(10)]
+    pub free: usize,
+    #[bits(4)]
+    _p: u16,
+    /// If the whole page table area is allocated as giant page.
+    pub giant: bool,
+    /// If this is allocated as large page.
+    pub page: bool,
+}
+
+impl AtomicValue for PEntry2 {
+    type V = u16;
+}
+
+impl PEntry2 {
+    /// Creates a new entry referencing a level one page table.
+    #[inline]
+    pub fn new_table(pages: usize) -> Self {
+        Self::new().with_free(pages)
+    }
+    #[inline]
+    pub fn mark_huge(self) -> Option<Self> {
+        if !self.giant() && !self.page() && self.free() == Table::span(Size::L1 as _) {
+            Some(Self::new().with_page(true))
+        } else {
+            None
+        }
+    }
+    /// Decrement the free pages counter.
+    #[inline]
+    pub fn dec(self) -> Option<Self> {
+        if !self.page() && !self.giant() && self.free() > 0 {
+            Some(self.with_free(self.free() - 1))
+        } else {
+            None
+        }
+    }
+    /// Increments the free pages counter.
+    #[inline]
+    pub fn inc_partial(self) -> Option<Self> {
+        if !self.giant()
+            && !self.page()
+            && self.free() > 0 // is the child pt already initialized?
+            && self.free() < Table::LEN
+        {
+            Some(self.with_free(self.free() + 1))
+        } else {
+            None
+        }
+    }
+    /// Increments the free pages counter.
+    #[inline]
+    pub fn inc(self) -> Option<Self> {
+        if !self.giant() && !self.page() && self.free() < Table::LEN {
+            Some(self.with_free(self.free() + 1))
+        } else {
+            None
+        }
+    }
+}
+
 impl fmt::Debug for Entry2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry2")
@@ -334,6 +417,10 @@ impl fmt::Debug for Entry2 {
 pub enum Entry1 {
     Empty = 0,
     Page = 1,
+}
+
+impl AtomicValue for Entry1 {
+    type V = u64;
 }
 
 impl From<u64> for Entry1 {
