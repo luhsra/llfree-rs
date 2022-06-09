@@ -6,5 +6,9 @@ Cargo.lock
 memfile
 .vscode
 /test/
-/bench/out_*
-/bench/remote_*
+
+/bench/*
+!/bench/remote_ma/
+!/bench/keep/
+!/bench/*.ipynb
+!/bench/remote.sh
