@@ -14,7 +14,7 @@ use nvalloc::alloc::{
 use nvalloc::lower::DynamicLower;
 use nvalloc::lower::FixedLower;
 use nvalloc::mmap::MMap;
-use nvalloc::table::Table;
+use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::util::{self, align_up, Page, WyRand};
 
@@ -46,7 +46,7 @@ fn main() {
 
     util::logging();
 
-    let pages = memory * Table::span(2);
+    let pages = memory * PT_LEN * PT_LEN;
     assert!(pages >= MIN_PAGES * threads);
 
     let size = match size {
@@ -70,7 +70,7 @@ fn main() {
     ];
     for a in allocs {
         if a.name() == alloc {
-            let allocs = pages / threads / 2 / Table::span(size as _);
+            let allocs = pages / threads / 2 / a.span(size as _);
             let out_size = align_up(allocs + 2, Page::SIZE) * threads;
             // Shared memory where the allocated pages are backupped
             // Layout: [ ( idx | repeat | pages... ) for each thread ]
@@ -250,6 +250,7 @@ fn monitor(
     warn!("Ok");
 }
 
+#[allow(unused)]
 fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {

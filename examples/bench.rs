@@ -17,7 +17,7 @@ use nvalloc::alloc::{
 };
 use nvalloc::lower::{DynamicLower, FixedLower, PackedLower};
 use nvalloc::mmap::MMap;
-use nvalloc::table::Table;
+use nvalloc::table::PT_LEN;
 use nvalloc::util::{black_box, Page, WyRand};
 use nvalloc::{thread, util};
 
@@ -65,8 +65,8 @@ fn main() {
 
     util::logging();
 
-    let pages = (memory * Table::span(2)) / threads;
-    assert!(pages >= MIN_PAGES);
+    let pages = (memory * PT_LEN * PT_LEN) / threads;
+    assert!(pages >= MIN_PAGES, "{} > {}", pages, MIN_PAGES);
 
     let mut out = File::create(outfile).unwrap();
     writeln!(out, "alloc,x,iteration,pages,{}", Perf::header()).unwrap();
@@ -79,7 +79,7 @@ fn main() {
     };
     warn!("Allocating size {size:?}");
 
-    let mut mapping = mapping(0x1000_0000_0000, memory * Table::span(2), dax).unwrap();
+    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
 
     // Warmup
     for page in &mut mapping[..] {
@@ -144,6 +144,7 @@ fn main() {
     drop(allocs); // drop first
 }
 
+#[allow(unused)]
 fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {
@@ -218,7 +219,7 @@ fn bulk(
         .unwrap();
     let init = timer.elapsed().as_millis();
 
-    let allocs = alloc.pages() / threads / 2 / Table::span(size as _);
+    let allocs = alloc.pages() / threads / 2 / alloc.span(size as _);
     let barrier = Arc::new(Barrier::new(threads));
     let a = alloc.clone();
     let mut perf = Perf::avg(thread::parallel(threads, move |t| {
@@ -271,7 +272,8 @@ fn repeat(
         .unwrap();
     let init = timer.elapsed().as_millis();
 
-    let allocs = alloc.pages() / threads / 2 / Table::span(size as _);
+    let allocs = alloc.pages() / threads / 2 / alloc.span(size as _);
+    let expected_pages = allocs * threads * alloc.span(size as _);
     let barrier = Arc::new(Barrier::new(threads));
     let a = alloc.clone();
     let mut perf = Perf::avg(thread::parallel(threads, move |t| {
@@ -300,10 +302,7 @@ fn repeat(
             total: timer.elapsed().as_millis(),
         }
     }));
-    assert_eq!(
-        a.dbg_allocated_pages(),
-        allocs * threads * Table::span(size as _)
-    );
+    assert_eq!(a.dbg_allocated_pages(), expected_pages);
 
     perf.init = init;
     perf
@@ -323,7 +322,8 @@ fn rand(
         .unwrap();
     let init = timer.elapsed().as_millis();
 
-    let allocs = alloc.pages() / threads / 2 / Table::span(size as _);
+    let allocs = alloc.pages() / threads / 2 / alloc.span(size as _);
+    let expected_pages = allocs * threads * alloc.span(size as _);
     let barrier = Arc::new(Barrier::new(threads));
     let a = alloc.clone();
     let mut perf = Perf::avg(thread::parallel(threads, move |t| {
@@ -357,10 +357,7 @@ fn rand(
             total: timer.elapsed().as_millis(),
         }
     }));
-    assert_eq!(
-        a.dbg_allocated_pages(),
-        allocs * threads * Table::span(size as _)
-    );
+    assert_eq!(a.dbg_allocated_pages(), expected_pages);
 
     perf.init = init;
     perf
@@ -380,11 +377,12 @@ fn filling(
         .init(threads, mapping, true)
         .unwrap();
     let init = timer.elapsed().as_millis();
-    let allocs = alloc.pages() / threads / Table::span(size as _);
+    let allocs = alloc.pages() / threads / alloc.span(size as _);
 
     // Allocate to filling level
     let fill = (allocs as f64 * (x as f64 / 100.0)) as usize;
     let allocs = allocs / 10;
+    let expected_pages = fill * threads * alloc.span(size as _);
     warn!("fill={fill} allocs={allocs}");
 
     assert!((fill + allocs) * threads < alloc.pages());
@@ -435,10 +433,7 @@ fn filling(
             total: t1.elapsed().as_millis(),
         }
     }));
-    assert_eq!(
-        a.dbg_allocated_pages(),
-        fill * threads * Table::span(size as _)
-    );
+    assert_eq!(a.dbg_allocated_pages(), expected_pages);
 
     perf.init = init;
     perf

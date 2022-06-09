@@ -186,6 +186,10 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
         }
         pages
     }
+
+    fn span(&self, size: Size) -> usize {
+        Self::MAPPING.span(size as _)
+    }
 }
 
 impl<L: LowerAlloc> Drop for ArrayAlignedAlloc<L> {

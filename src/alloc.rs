@@ -76,6 +76,7 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     fn name(&self) -> String {
         name::<Self>()
     }
+    fn span(&self, size: Size) -> usize;
 }
 
 #[must_use]

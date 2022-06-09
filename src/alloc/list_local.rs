@@ -134,6 +134,10 @@ impl Alloc for ListLocalAlloc {
         }
         pages
     }
+
+    fn span(&self, _size: Size) -> usize {
+        1
+    }
 }
 
 #[repr(align(64))]
