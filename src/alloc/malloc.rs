@@ -1,10 +1,9 @@
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use log::{error, warn, info};
+use log::{error, info, warn};
 
 use super::{Alloc, Error, Result, Size};
-use crate::table::Table;
 use crate::util::Page;
 
 /// Wrapper for libc malloc.
@@ -60,11 +59,9 @@ impl Alloc for MallocAlloc {
             return Err(Error::Memory);
         }
 
-        let ptr = unsafe { libc::malloc(Table::m_span(0)) };
+        let ptr = unsafe { libc::malloc(Page::SIZE) };
         if !ptr.is_null() {
-            self.local[core]
-                .counter
-                .fetch_add(Table::span(0), Ordering::Relaxed);
+            self.local[core].counter.fetch_add(1, Ordering::Relaxed);
             Ok(ptr as u64)
         } else {
             Err(Error::Memory)
@@ -74,9 +71,7 @@ impl Alloc for MallocAlloc {
     #[inline(never)]
     fn put(&self, core: usize, addr: u64) -> Result<Size> {
         unsafe { libc::free(addr as *mut _) };
-        self.local[core]
-            .counter
-            .fetch_sub(Table::span(0), Ordering::Relaxed);
+        self.local[core].counter.fetch_sub(1, Ordering::Relaxed);
         Ok(Size::L0)
     }
 

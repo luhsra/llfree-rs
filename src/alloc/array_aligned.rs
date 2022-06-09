@@ -3,16 +3,14 @@ use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use log::{error, warn, info};
+use log::{error, info, warn};
 
 use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::atomic::{AStack, AStackDbg, Atomic};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
-use crate::table::Table;
+use crate::table::Mapping;
 use crate::util::Page;
-
-const PTE3_FULL: usize = 8 * Table::span(1);
 
 /// Non-Volatile global metadata
 struct Meta {
@@ -120,7 +118,7 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
         self.lower = L::new(cores, memory);
 
         // Array with all pte3
-        let pte3_num = Table::num_pts(2, self.lower.pages());
+        let pte3_num = Self::MAPPING.num_pts(2, self.lower.pages());
         let mut subtrees = Vec::with_capacity(pte3_num);
         subtrees.resize_with(pte3_num, || Aligned(Atomic::new(Entry3::new())));
         self.subtrees = subtrees.into();
@@ -165,7 +163,7 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
         }
         let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
 
-        let i = page / Table::span(2);
+        let i = page / Self::MAPPING.span(2);
         let pte = self[i].load();
         if pte.page() {
             self.put_giant(page).map(|_| Size::L2)
@@ -181,7 +179,7 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages();
-        for i in 0..Table::num_pts(2, self.pages()) {
+        for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
             let pte = self[i].load();
             // warn!("{i:>3}: {pte:?}");
             pages -= pte.free();
@@ -214,25 +212,29 @@ impl<L: LowerAlloc> Default for ArrayAlignedAlloc<L> {
 }
 
 impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
+    const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
+    const PTE3_FULL: usize = 8 * Self::MAPPING.span(1);
+
     /// Setup a new allocator.
     #[cold]
     fn setup(&mut self) {
         self.lower.clear();
 
         // Add all entries to the empty list
-        let pte3_num = Table::num_pts(2, self.pages());
+        let pte3_num = Self::MAPPING.num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
-            self[i].store(Entry3::empty());
+            self[i].store(Entry3::empty(Self::MAPPING.span(2)));
             self.empty.push(self, i);
         }
 
         // The last one may be cut off
-        let max = (self.pages() - (pte3_num - 1) * Table::span(2)).min(Table::span(2));
+        let max =
+            (self.pages() - (pte3_num - 1) * Self::MAPPING.span(2)).min(Self::MAPPING.span(2));
         self[pte3_num - 1].store(Entry3::new().with_free(max));
 
-        if max == Table::span(2) {
+        if max == Self::MAPPING.span(2) {
             self.empty.push(self, pte3_num - 1);
-        } else if max > PTE3_FULL {
+        } else if max > Self::PTE3_FULL {
             self.partial_l0.push(self, pte3_num - 1);
         }
     }
@@ -245,8 +247,8 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
             warn!("Try recover crashed allocator!");
         }
         let mut total = 0;
-        for i in 0..Table::num_pts(2, self.pages()) {
-            let page = i * Table::span(2);
+        for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
+            let page = i * Self::MAPPING.span(2);
             let (pages, size) = self.lower.recover(page, deep)?;
             if size == Size::L2 {
                 self[i].store(Entry3::new_giant());
@@ -254,9 +256,9 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
                 self[i].store(Entry3::new_table(pages, size, false));
 
                 // Add to lists
-                if pages == Table::span(2) {
+                if pages == Self::MAPPING.span(2) {
                     self.empty.push(self, i);
-                } else if pages > PTE3_FULL {
+                } else if pages > Self::PTE3_FULL {
                     self.partial(size == Size::L1).push(self, i);
                 }
             }
@@ -278,23 +280,25 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
     fn reserve(&self, huge: bool) -> Result<usize> {
         while let Some((i, r)) = self.partial(huge).pop_update(self, |v| {
             // Skip empty entries
-            if v.free() < Table::span(2) {
-                v.dec(huge)
+            if v.free() < Self::MAPPING.span(2) {
+                v.dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
             } else {
                 None
             }
         }) {
             if r.is_ok() {
                 info!("reserve partial {i}");
-                return Ok(i * Table::span(2));
+                return Ok(i * Self::MAPPING.span(2));
             }
             self.empty.push(self, i);
         }
 
-        if let Some((i, r)) = self.empty.pop_update(self, |v| v.dec(huge)) {
+        if let Some((i, r)) = self.empty.pop_update(self, |v| {
+            v.dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
+        }) {
             debug_assert!(r.is_ok());
             info!("reserve empty {i}");
-            Ok(i * Table::span(2))
+            Ok(i * Self::MAPPING.span(2))
         } else {
             error!("No memory");
             Err(Error::Memory)
@@ -309,8 +313,11 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
         if start == usize::MAX {
             start = self.reserve(huge)?;
         } else {
-            let i = start / Table::span(2);
-            if self[i].update(|v| v.dec(huge)).is_err() {
+            let i = start / Self::MAPPING.span(2);
+            if self[i]
+                .update(|v| v.dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2)))
+                .is_err()
+            {
                 start = self.reserve(huge)?;
                 if self[i].update(Entry3::unreserve).is_err() {
                     panic!("Unreserve failed");
@@ -327,19 +334,19 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
     fn put_lower(&self, page: usize, pte: Entry3) -> Result<Size> {
         let max = self
             .pages()
-            .saturating_sub(Table::round(2, page))
-            .min(Table::span(2));
+            .saturating_sub(Self::MAPPING.round(2, page))
+            .min(Self::MAPPING.span(2));
         if pte.free() >= max {
             error!("Not allocated 0x{page:x}, {:x} >= {max:x}", pte.free());
             return Err(Error::Address);
         }
 
-        let i = page / Table::span(2);
+        let i = page / Self::MAPPING.span(2);
         let huge = self.lower.put(page)?;
-        if let Ok(pte3) = self[i].update(|v| v.inc(huge, max)) {
+        if let Ok(pte3) = self[i].update(|v| v.inc(Self::MAPPING.span(huge as _), max)) {
             if !pte3.reserved() {
-                let new_pages = pte3.free() + Table::span(huge as _);
-                if pte3.free() <= PTE3_FULL && new_pages > PTE3_FULL {
+                let new_pages = pte3.free() + Self::MAPPING.span(huge as _);
+                if pte3.free() <= Self::PTE3_FULL && new_pages > Self::PTE3_FULL {
                     // Add back to partial
                     self.partial(huge).push(self, i);
                 }
@@ -354,14 +361,14 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
     /// Allocate a giant page.
     fn get_giant(&self) -> Result<usize> {
         if let Some((i, r)) = self.empty.pop_update(self, |v| {
-            (v.free() == Table::span(2)).then(Entry3::new_giant)
+            (v.free() == Self::MAPPING.span(2)).then(Entry3::new_giant)
         }) {
             if let Err(pte) = r {
                 error!("Corruption i{i} {pte:?}");
                 Err(Error::Corruption)
             } else {
-                self.lower.set_giant(i * Table::span(2));
-                Ok(i * Table::span(2))
+                self.lower.set_giant(i * Self::MAPPING.span(2));
+                Ok(i * Self::MAPPING.span(2))
             }
         } else {
             error!("No memory");
@@ -371,15 +378,16 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
 
     /// Free a giant page.
     fn put_giant(&self, page: usize) -> Result<()> {
-        let i = page / Table::span(2);
-        if page % Table::span(2) != 0 {
+        let i = page / Self::MAPPING.span(2);
+        if page % Self::MAPPING.span(2) != 0 {
             error!("Invalid align {page:x}");
             return Err(Error::Address);
         }
 
-        if let Err(pte) =
-            self[i].compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Table::span(2)))
-        {
+        if let Err(pte) = self[i].compare_exchange(
+            Entry3::new_giant(),
+            Entry3::new().with_free(Self::MAPPING.span(2)),
+        ) {
             error!("Not allocated i{i} {pte:?}");
             Err(Error::Address)
         } else {

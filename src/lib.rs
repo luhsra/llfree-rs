@@ -1,6 +1,8 @@
 //! # Persistent non-volatile memory allocator
 //!
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
+#![feature(generic_const_exprs)]
+
 pub mod alloc;
 pub mod atomic;
 pub mod entry;
@@ -113,7 +115,7 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::table::Table;
+    use crate::table::PT_LEN;
     use crate::thread::parallel;
     use crate::util::logging;
     use crate::{alloc, init, instance, uninit};
@@ -124,8 +126,9 @@ mod test {
         logging();
 
         const THREADS: usize = 8;
+        const PAGES: usize = 2 * THREADS * PT_LEN;
 
-        let mut mapping: MMap<Page> = MMap::anon(0x1000_0000_0000_u64 as _, 20 << 18).unwrap();
+        let mut mapping: MMap<Page> = MMap::anon(0x1000_0000_0000_u64 as _, PAGES * Page::SIZE).unwrap();
 
         info!("mmap {} bytes", mapping.len());
 
@@ -136,7 +139,7 @@ mod test {
         init(THREADS, &mut mapping[..], true).unwrap();
 
         parallel(THREADS, |t| {
-            let pages = [DEFAULT; Table::LEN];
+            let pages = [DEFAULT; PT_LEN];
             for addr in &pages {
                 alloc::get_cas(instance(), t, Size::L0, addr, |v| v, 0).unwrap();
             }

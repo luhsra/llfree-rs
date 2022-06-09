@@ -3,6 +3,7 @@ use core::ops::Range;
 
 use crate::alloc::{Result, Size};
 use crate::Page;
+use crate::table::Mapping;
 
 #[cfg(all(test, feature = "stop"))]
 macro_rules! stop {
@@ -15,6 +16,8 @@ macro_rules! stop {
     () => {};
 }
 
+// mod dense;
+// pub use dense::DenseLower;
 mod dynamic;
 pub use dynamic::DynamicLower;
 mod fixed;
@@ -24,6 +27,8 @@ pub use packed::PackedLower;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug {
+    const MAPPING: Mapping<2>;
+
     /// Create a new lower allocator.
     fn new(cores: usize, memory: &mut [Page]) -> Self;
 
@@ -58,7 +63,7 @@ mod test {
 
     use crate::lower::LowerAlloc;
     use crate::stop::{StopRand, Stopper};
-    use crate::table::Table;
+    use crate::table::PT_LEN;
     use crate::thread;
     use crate::util::{logging, Page};
 
@@ -69,7 +74,7 @@ mod test {
         logging();
 
         const THREADS: usize = 12;
-        let mut buffer = vec![Page::new(); 2 * THREADS * Table::span(2)];
+        let mut buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
         for _ in 0..32 {
             let seed = unsafe { libc::rand() } as u64;
@@ -103,8 +108,8 @@ mod test {
         logging();
 
         const THREADS: usize = 12;
-        let mut pages = [0; Table::LEN];
-        let mut buffer = vec![Page::new(); 2 * THREADS * Table::span(2)];
+        let mut pages = [0; PT_LEN];
+        let mut buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
         for _ in 0..32 {
             let seed = unsafe { libc::rand() } as u64;
@@ -114,7 +119,7 @@ mod test {
             lower.clear();
             assert_eq!(lower.dbg_allocated_pages(), 0);
 
-            for page in &mut pages[..Table::LEN - 3] {
+            for page in &mut pages[..PT_LEN - 3] {
                 *page = lower.get(0, false, 0).unwrap();
             }
 
@@ -130,7 +135,7 @@ mod test {
                 }
             });
 
-            assert_eq!(lower.dbg_allocated_pages(), Table::LEN - 3);
+            assert_eq!(lower.dbg_allocated_pages(), PT_LEN - 3);
         }
     }
 }

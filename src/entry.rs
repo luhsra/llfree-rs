@@ -5,7 +5,6 @@ use bitfield_struct::bitfield;
 use log::error;
 
 use crate::atomic::AtomicValue;
-use crate::table::Table;
 use crate::Size;
 
 #[bitfield(u64)]
@@ -133,8 +132,8 @@ impl Entry3 {
         Entry3::new().with_page(true).with_idx(Self::IDX_MAX)
     }
     #[inline]
-    pub fn empty() -> Entry3 {
-        Entry3::new().with_free(Table::span(2))
+    pub fn empty(span: usize) -> Entry3 {
+        Entry3::new().with_free(span)
     }
     /// Creates a new entry referring to a level 2 page table.
     #[inline]
@@ -146,14 +145,11 @@ impl Entry3 {
     }
     /// Decrements the free pages counter.
     #[inline]
-    pub fn dec(self, huge: bool) -> Option<Entry3> {
-        let sub = Table::span(huge as _);
-        if !self.page()
-            && (self.huge() == huge || self.free() == Table::span(2))
-            && self.free() >= sub
-        {
+    pub fn dec(self, page_span: usize, span: usize) -> Option<Entry3> {
+        let huge = page_span > 1;
+        if !self.page() && (self.huge() == huge || self.free() == span) && self.free() >= page_span {
             Some(
-                self.with_free(self.free() - sub)
+                self.with_free(self.free() - page_span)
                     .with_huge(huge)
                     .with_reserved(true),
             )
@@ -163,11 +159,12 @@ impl Entry3 {
     }
     /// Increments the free pages counter.
     #[inline]
-    pub fn inc(self, huge: bool, max: usize) -> Option<Entry3> {
+    pub fn inc(self, page_span: usize, max: usize) -> Option<Entry3> {
+        let huge = page_span > 1;
         if self.page() || self.huge() != huge {
             return None;
         }
-        let pages = self.free() + Table::span(huge as _);
+        let pages = self.free() + page_span;
         match pages.cmp(&max) {
             Ordering::Greater => None,
             Ordering::Equal => Some(self.with_free(max).with_huge(false)),
@@ -176,11 +173,12 @@ impl Entry3 {
     }
     /// Increments the free pages counter and checks for `idx` to match.
     #[inline]
-    pub fn inc_idx(self, huge: bool, idx: usize, max: usize) -> Option<Entry3> {
+    pub fn inc_idx(self, page_span: usize, idx: usize, max: usize) -> Option<Entry3> {
+        let huge = page_span > 1;
         if self.page() || self.huge() != huge || self.idx() != idx {
             return None;
         }
-        let pages = self.free() + Table::span(huge as _);
+        let pages = self.free() + page_span;
         match pages.cmp(&max) {
             Ordering::Greater => None,
             Ordering::Equal => Some(self.with_free(max).with_huge(false)),
@@ -189,11 +187,12 @@ impl Entry3 {
     }
     /// Reserves this entry.
     #[inline]
-    pub fn reserve(self, huge: bool) -> Option<Entry3> {
+    pub fn reserve(self, page_span: usize, span: usize) -> Option<Entry3> {
+        let huge = page_span > 1;
         if !self.page()
             && !self.reserved()
-            && (self.free() == Table::span(2) || self.huge() == huge)
-            && self.free() >= Table::span(huge as _)
+            && (self.free() >= span || self.huge() == huge)
+            && self.free() >= page_span
         {
             Some(self.with_free(0).with_huge(huge).with_reserved(true))
         } else {
@@ -202,11 +201,11 @@ impl Entry3 {
     }
     /// Reserves this entry if it is partially filled.
     #[inline]
-    pub fn reserve_partial(self, huge: bool, min: usize) -> Option<Entry3> {
+    pub fn reserve_partial(self, huge: bool, min: usize, span: usize) -> Option<Entry3> {
         if !self.page()
             && !self.reserved()
             && self.free() > min
-            && self.free() < Table::span(2)
+            && self.free() < span
             && self.huge() == huge
         {
             Some(self.with_huge(huge).with_reserved(true).with_free(0))
@@ -216,8 +215,8 @@ impl Entry3 {
     }
     /// Reserves this entry if it is completely empty.
     #[inline]
-    pub fn reserve_empty(self, huge: bool) -> Option<Entry3> {
-        if !self.page() && !self.reserved() && self.free() == Table::span(2) {
+    pub fn reserve_empty(self, huge: bool, span: usize) -> Option<Entry3> {
+        if !self.page() && !self.reserved() && self.free() == span {
             Some(self.with_huge(huge).with_reserved(true).with_free(0))
         } else {
             None
@@ -235,13 +234,19 @@ impl Entry3 {
     /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
     #[inline]
-    pub fn unreserve_add(self, huge: bool, other: Entry3, max: usize) -> Option<Entry3> {
+    pub fn unreserve_add(
+        self,
+        huge: bool,
+        other: Entry3,
+        max: usize,
+        span: usize,
+    ) -> Option<Entry3> {
         let pages = self.free() + other.free();
         if !self.page()
             && self.reserved()
             && pages <= max
-            && (self.huge() == huge || self.free() == Table::span(2))
-            && (other.huge() == huge || other.free() == Table::span(2))
+            && (self.huge() == huge || self.free() == span)
+            && (other.huge() == huge || other.free() == span)
         {
             Some(
                 self.with_free(pages)
@@ -294,8 +299,8 @@ impl Entry2 {
         Self::new().with_free(pages).with_i1(i1)
     }
     #[inline]
-    pub fn mark_huge(self) -> Option<Self> {
-        if !self.giant() && !self.page() && self.free() == Table::span(Size::L1 as _) {
+    pub fn mark_huge(self, span: usize) -> Option<Self> {
+        if !self.giant() && !self.page() && self.free() == span {
             Some(Entry2::new().with_page(true))
         } else {
             None
@@ -312,12 +317,12 @@ impl Entry2 {
     }
     /// Increments the free pages counter.
     #[inline]
-    pub fn inc_partial(self, i1: usize) -> Option<Self> {
+    pub fn inc_partial(self, i1: usize, span: usize) -> Option<Self> {
         if !self.giant()
             && !self.page()
             && i1 == self.i1()
             && self.free() > 0 // is the child pt already initialized?
-            && self.free() < Table::LEN
+            && self.free() < span
         {
             Some(self.with_free(self.free() + 1))
         } else {
@@ -326,8 +331,8 @@ impl Entry2 {
     }
     /// Increments the free pages counter.
     #[inline]
-    pub fn inc(self) -> Option<Self> {
-        if !self.giant() && !self.page() && self.free() < Table::LEN {
+    pub fn inc(self, span: usize) -> Option<Self> {
+        if !self.giant() && !self.page() && self.free() < span {
             Some(self.with_free(self.free() + 1))
         } else {
             None
@@ -335,8 +340,20 @@ impl Entry2 {
     }
 }
 
+impl fmt::Debug for Entry2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Entry2")
+            .field("free", &self.free())
+            .field("i1", &self.i1())
+            .field("page", &self.page())
+            .field("giant", &self.giant())
+            .field("page", &self.page())
+            .finish()
+    }
+}
+
 #[bitfield(u16)]
-pub struct PEntry2 {
+pub struct SmallEntry2 {
     /// Number of free pages.
     #[bits(10)]
     pub free: usize,
@@ -348,19 +365,19 @@ pub struct PEntry2 {
     pub page: bool,
 }
 
-impl AtomicValue for PEntry2 {
+impl AtomicValue for SmallEntry2 {
     type V = u16;
 }
 
-impl PEntry2 {
+impl SmallEntry2 {
     /// Creates a new entry referencing a level one page table.
     #[inline]
     pub fn new_table(pages: usize) -> Self {
         Self::new().with_free(pages)
     }
     #[inline]
-    pub fn mark_huge(self) -> Option<Self> {
-        if !self.giant() && !self.page() && self.free() == Table::span(Size::L1 as _) {
+    pub fn mark_huge(self, span: usize) -> Option<Self> {
+        if !self.giant() && !self.page() && self.free() == span {
             Some(Self::new().with_page(true))
         } else {
             None
@@ -377,11 +394,11 @@ impl PEntry2 {
     }
     /// Increments the free pages counter.
     #[inline]
-    pub fn inc_partial(self) -> Option<Self> {
+    pub fn inc_partial(self, span: usize) -> Option<Self> {
         if !self.giant()
             && !self.page()
             && self.free() > 0 // is the child pt already initialized?
-            && self.free() < Table::LEN
+            && self.free() < span
         {
             Some(self.with_free(self.free() + 1))
         } else {
@@ -390,8 +407,8 @@ impl PEntry2 {
     }
     /// Increments the free pages counter.
     #[inline]
-    pub fn inc(self) -> Option<Self> {
-        if !self.giant() && !self.page() && self.free() < Table::LEN {
+    pub fn inc(self, span: usize) -> Option<Self> {
+        if !self.giant() && !self.page() && self.free() < span {
             Some(self.with_free(self.free() + 1))
         } else {
             None
@@ -399,11 +416,10 @@ impl PEntry2 {
     }
 }
 
-impl fmt::Debug for Entry2 {
+impl fmt::Debug for SmallEntry2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry2")
             .field("free", &self.free())
-            .field("i1", &self.i1())
             .field("page", &self.page())
             .field("giant", &self.giant())
             .field("page", &self.page())
@@ -440,11 +456,13 @@ impl From<Entry1> for u64 {
 
 #[cfg(test)]
 mod test {
-    use crate::table::Table;
+    use crate::table::{AtomicTable, PT_LEN};
 
     #[test]
     fn pt() {
-        let pt: Table<u64> = Table::empty();
+        type Table = AtomicTable<u64, PT_LEN>;
+
+        let pt: Table = Table::empty();
         pt.cas(0, 0, 42).unwrap();
         pt.update(0, |v| Some(v + 1)).unwrap();
         assert_eq!(pt.get(0), 43);

@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use log::error;
 
 use crate::entry::Entry3;
-use crate::table::Table;
+use crate::table::{Mapping, PT_LEN};
 use crate::util::Page;
 
 mod array_aligned;
@@ -28,8 +28,8 @@ pub use table::TableAlloc;
 
 pub const CAS_RETRIES: usize = 4096;
 pub const MAGIC: usize = 0xdead_beef;
-pub const MIN_PAGES: usize = 2 * Table::span(2);
-pub const MAX_PAGES: usize = Table::span(Table::LEVELS);
+pub const MIN_PAGES: usize = 2 * PT_LEN * PT_LEN;
+pub const MAX_PAGES: usize = Mapping([512; 4]).span(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -155,13 +155,12 @@ impl Local {
     pub fn pte(&self, huge: bool) -> &mut Entry3 {
         &mut self.p().pte[huge as usize]
     }
-    pub fn frees_push(&self, page: usize) {
+    pub fn frees_push(&self, chunk: usize) {
         self.p().frees_i = (self.p().frees_i + 1) % self.p().frees.len();
-        self.p().frees[self.p().frees_i] = page;
+        self.p().frees[self.p().frees_i] = chunk;
     }
-    pub fn frees_related(&self, page: usize) -> bool {
-        let n = page / Table::span(2);
-        self.p().frees.iter().all(|p| p / Table::span(2) == n)
+    pub fn frees_related(&self, chunk: usize) -> bool {
+        self.p().frees.iter().all(|p| *p == chunk)
     }
 }
 
@@ -181,12 +180,12 @@ mod test {
     use crate::alloc::MIN_PAGES;
     use crate::lower::*;
     use crate::mmap::MMap;
-    use crate::table::Table;
+    use crate::table::PT_LEN;
     use crate::util::black_box;
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::TableAlloc<PackedLower>;
+    type Allocator = super::ArrayAtomicAlloc<FixedLower>;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -250,17 +249,17 @@ mod test {
         warn!("realloc...");
 
         // Free some
-        for page in &pages[..Table::span(2) - 10] {
+        for page in &pages[..PT_LEN * PT_LEN - 10] {
             alloc.put(0, *page).unwrap();
         }
 
         assert_eq!(
             alloc.dbg_allocated_pages(),
-            1 + pages.len() - Table::span(2) + 10
+            1 + pages.len() - PT_LEN * PT_LEN + 10
         );
 
         // Realloc
-        for page in &mut pages[..Table::span(2) - 10] {
+        for page in &mut pages[..PT_LEN * PT_LEN - 10] {
             *page = alloc.get(0, Size::L0).unwrap();
         }
 
@@ -432,13 +431,16 @@ mod test {
         let huge = alloc.get(0, Size::L1).unwrap();
         let giant = alloc.get(0, Size::L2).unwrap();
 
-        assert_eq!(alloc.dbg_allocated_pages(), 1 + Table::LEN + Table::span(2));
+        assert_eq!(
+            alloc.dbg_allocated_pages(),
+            1 + PT_LEN + PT_LEN * PT_LEN
+        );
         assert!(small != huge && small != giant && huge != giant);
 
         warn!("start stress test");
 
         // Stress test
-        let mut pages = vec![0; Table::LEN * Table::LEN];
+        let mut pages = vec![0; PT_LEN * PT_LEN];
         for page in &mut pages {
             *page = alloc.get(0, Size::L0).unwrap();
         }
@@ -447,7 +449,7 @@ mod test {
 
         assert_eq!(
             alloc.dbg_allocated_pages(),
-            1 + Table::LEN + Table::span(2) + pages.len()
+            1 + PT_LEN + PT_LEN * PT_LEN + pages.len()
         );
 
         pages.sort_unstable();
@@ -463,7 +465,7 @@ mod test {
         warn!("free some...");
 
         // Free some
-        for page in &pages[10..Table::LEN + 10] {
+        for page in &pages[10..PT_LEN + 10] {
             alloc.put(0, *page).unwrap();
         }
 
@@ -476,7 +478,7 @@ mod test {
         warn!("realloc...");
 
         // Realloc
-        for page in &mut pages[10..Table::LEN + 10] {
+        for page in &mut pages[10..PT_LEN + 10] {
             *page = alloc.get(0, Size::L0).unwrap();
         }
 
@@ -495,8 +497,8 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 2 * THREADS);
-        const PAGES: usize = 2 * THREADS * Table::span(2);
+        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
+        const PAGES: usize = 2 * THREADS * PT_LEN * PT_LEN;
 
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
 
@@ -542,7 +544,7 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = Table::LEN - 1;
+        const ALLOC_PER_THREAD: usize = PT_LEN - 1;
         const PAGES: usize = THREADS * MIN_PAGES;
 
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
@@ -571,7 +573,7 @@ mod test {
         });
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        assert_eq!(alloc.dbg_allocated_pages(), pages.len() * Table::span(1));
+        assert_eq!(alloc.dbg_allocated_pages(), pages.len() * PT_LEN);
         warn!("allocated pages: {}", pages.len());
 
         // Check that the same page was not allocated twice
@@ -590,7 +592,7 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 2 * THREADS);
+        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -628,7 +630,7 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 2 * THREADS);
+        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -674,8 +676,8 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 2 * THREADS);
-        const MEM_SIZE: usize = 2 * THREADS * Table::m_span(2);
+        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
+        const MEM_SIZE: usize = 2 * THREADS * PT_LEN * PT_LEN * Page::SIZE;
 
         let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
@@ -715,9 +717,9 @@ mod test {
     fn alloc_free() {
         logging();
         const THREADS: usize = 2;
-        const ALLOC_PER_THREAD: usize = Table::LEN * (Table::LEN - 10) / 2;
+        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 10) / 2;
 
-        let mut mapping = mapping(0x1000_0000_0000, 4 * Table::span(2)).unwrap();
+        let mut mapping = mapping(0x1000_0000_0000, 4 * PT_LEN * PT_LEN).unwrap();
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
@@ -776,7 +778,7 @@ mod test {
                 a
             });
 
-            for _ in 0..Table::LEN + 2 {
+            for _ in 0..PT_LEN + 2 {
                 alloc.get(0, Size::L0).unwrap();
                 alloc.get(0, Size::L1).unwrap();
             }
@@ -785,7 +787,7 @@ mod test {
 
             assert_eq!(
                 alloc.dbg_allocated_pages(),
-                Table::span(2) + Table::LEN + 2 + Table::LEN * (Table::LEN + 2)
+                PT_LEN * PT_LEN + PT_LEN + 2 + PT_LEN * (PT_LEN + 2)
             );
 
             // leak
@@ -800,7 +802,7 @@ mod test {
 
         assert_eq!(
             alloc.dbg_allocated_pages(),
-            Table::span(2) + Table::LEN + 2 + Table::LEN * (Table::LEN + 2)
+            PT_LEN * PT_LEN + PT_LEN + 2 + PT_LEN * (PT_LEN + 2)
         );
     }
 
@@ -813,7 +815,7 @@ mod test {
 
         let mut mapping = mapping(
             0x1000_0000_0000,
-            (THREADS * ALLOC_PER_THREAD + 1) * Table::span(2),
+            (THREADS * ALLOC_PER_THREAD + 1) * PT_LEN * PT_LEN,
         )
         .unwrap();
 
@@ -843,7 +845,7 @@ mod test {
         warn!("check");
         assert_eq!(
             a.dbg_allocated_pages(),
-            (THREADS * ALLOC_PER_THREAD - THREADS) * Table::span(2)
+            (THREADS * ALLOC_PER_THREAD - THREADS) * PT_LEN * PT_LEN
         );
     }
 }

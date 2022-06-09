@@ -7,7 +7,7 @@ use log::{error, info, warn};
 
 use crate::alloc::{Error, Result, Size};
 use crate::entry::{Entry1, Entry2};
-use crate::table::Table;
+use crate::table::{AtomicTable, Mapping};
 use crate::util::Page;
 
 use super::LowerAlloc;
@@ -40,6 +40,8 @@ impl fmt::Debug for DynamicLower {
 }
 
 impl LowerAlloc for DynamicLower {
+    const MAPPING: Mapping<2> = Mapping([512; 2]);
+
     fn new(cores: usize, memory: &mut [Page]) -> Self {
         let mut shared = Vec::with_capacity(cores);
         shared.resize_with(cores, || Shared {
@@ -49,7 +51,7 @@ impl LowerAlloc for DynamicLower {
         Self {
             begin: memory.as_ptr() as usize,
             // level 2 tables are stored at the end of the NVM
-            pages: memory.len() - Table::num_pts(2, memory.len()),
+            pages: memory.len() - Self::MAPPING.num_pts(2, memory.len()),
             shared: shared.into(),
         }
     }
@@ -64,28 +66,30 @@ impl LowerAlloc for DynamicLower {
 
     fn clear(&self) {
         // Init pt2
-        for i in 0..Table::num_pts(2, self.pages) {
-            let pt2 = self.pt2(i * Table::span(2));
-            if i + 1 < Table::num_pts(2, self.pages) {
-                pt2.fill(Entry2::new().with_free(Table::span(1)));
+        for i in 0..Self::MAPPING.num_pts(2, self.pages) {
+            let pt2 = self.pt2(i * Self::MAPPING.span(2));
+            if i + 1 < Self::MAPPING.num_pts(2, self.pages) {
+                pt2.fill(Entry2::new().with_free(Self::MAPPING.span(1)));
             } else {
-                for j in 0..Table::LEN {
-                    let page = i * Table::span(2) + j * Table::span(1);
-                    let max = Table::span(1).min(self.pages.saturating_sub(page));
+                for j in 0..Self::MAPPING.len(2) {
+                    let page = i * Self::MAPPING.span(2) + j * Self::MAPPING.span(1);
+                    let max = Self::MAPPING.span(1).min(self.pages.saturating_sub(page));
                     pt2.set(j, Entry2::new().with_free(max));
                 }
             }
         }
         // Init pt1
-        for i in 0..Table::num_pts(1, self.pages) {
+        for i in 0..Self::MAPPING.num_pts(1, self.pages) {
             // Within first page of own area
-            let pt1 = unsafe { &*((self.begin + i * Table::m_span(1)) as *const Table<Entry1>) };
+            let pt1 = unsafe {
+                &*((self.begin + i * Self::MAPPING.m_span(1)) as *const AtomicTable<Entry1>)
+            };
 
-            if i + 1 < Table::num_pts(1, self.pages) {
+            if i + 1 < Self::MAPPING.num_pts(1, self.pages) {
                 pt1.fill(Entry1::Empty);
             } else {
-                for j in 0..Table::LEN {
-                    let page = i * Table::span(1) + j;
+                for j in 0..Self::MAPPING.len(1) {
+                    let page = i * Self::MAPPING.span(1) + j;
                     if page < self.pages {
                         pt1.set(j, Entry1::Empty);
                     } else {
@@ -101,8 +105,8 @@ impl LowerAlloc for DynamicLower {
         let mut size = Size::L0;
 
         let pt = self.pt2(start);
-        for i in 0..Table::LEN {
-            let start = Table::page(2, start, i);
+        for i in 0..Self::MAPPING.len(2) {
+            let start = Self::MAPPING.page(2, start, i);
             if start > self.pages {
                 pt.set(i, Entry2::new());
             }
@@ -134,28 +138,28 @@ impl LowerAlloc for DynamicLower {
 
         let pt = self.pt2(start);
         for _ in 0..CAS_RETRIES {
-            for page in Table::iterate(2, start) {
-                let i = Table::idx(2, page);
-                if pt.update(i, Entry2::mark_huge).is_ok() {
+            for page in Self::MAPPING.iterate(2, start) {
+                let i = Self::MAPPING.idx(2, page);
+                if pt.update(i, |v| v.mark_huge(Self::MAPPING.span(1))).is_ok() {
                     return Ok(page);
                 }
             }
         }
-        error!("Exceeding retries {}", start / Table::span(2));
+        error!("Exceeding retries {}", start / Self::MAPPING.span(2));
         Err(Error::Corruption)
     }
 
     /// Free single page and returns if the page was huge
     fn put(&self, page: usize) -> Result<bool> {
         let pt2 = self.pt2(page);
-        let i2 = Table::idx(2, page);
+        let i2 = Self::MAPPING.idx(2, page);
 
         stop!();
 
         let mut old = pt2.get(i2);
         if old.page() {
             // Free huge page
-            if page % Table::span(Size::L1 as _) != 0 {
+            if page % Self::MAPPING.span(Size::L1 as _) != 0 {
                 error!("Invalid address {page}");
                 return Err(Error::Address);
             }
@@ -163,13 +167,13 @@ impl LowerAlloc for DynamicLower {
             let pt1 = self.pt1(page, 0);
             pt1.fill(Entry1::Empty);
 
-            if let Ok(_) = pt2.cas(i2, old, Entry2::new_table(Table::LEN, 0)) {
+            if let Ok(_) = pt2.cas(i2, old, Entry2::new_table(Self::MAPPING.span(1), 0)) {
                 Ok(true)
             } else {
                 error!("Corruption l2 i{i2}");
                 Err(Error::Corruption)
             }
-        } else if !old.giant() && old.free() < Table::LEN {
+        } else if !old.giant() && old.free() < Self::MAPPING.span(1) {
             for _ in 0..CAS_RETRIES {
                 match self.put_small(old, page) {
                     Err(Error::CAS) => old = pt2.get(i2),
@@ -177,7 +181,7 @@ impl LowerAlloc for DynamicLower {
                     Ok(_) => return Ok(false),
                 }
             }
-            error!("Exceeding retries {} {old:?}", page / Table::span(2));
+            error!("Exceeding retries {} {old:?}", page / Self::MAPPING.span(2));
             Err(Error::CAS)
         } else {
             error!("Not allocated 0x{page:x} {old:?}");
@@ -190,34 +194,35 @@ impl LowerAlloc for DynamicLower {
     }
     fn clear_giant(&self, page: usize) {
         // Clear all level 1 page tables in this area
-        for i in Table::range(2, page..self.pages) {
-            let start = Table::page(2, page, i);
+        for i in Self::MAPPING.range(2, page..self.pages) {
+            let start = Self::MAPPING.page(2, page, i);
 
             // i1 is initially 0
             let pt1 = self.pt1(start, 0);
             pt1.fill(Entry1::Empty);
         }
         // Clear the persist flag
-        self.pt2(page).set(0, Entry2::new_table(Table::LEN, 0));
+        self.pt2(page)
+            .set(0, Entry2::new_table(Self::MAPPING.span(1), 0));
     }
 
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages;
-        for i in 0..Table::num_pts(2, self.pages) {
-            let start = i * Table::span(2);
+        for i in 0..Self::MAPPING.num_pts(2, self.pages) {
+            let start = i * Self::MAPPING.span(2);
             let pt2 = self.pt2(start);
-            for i2 in Table::range(2, start..self.pages) {
-                let start = Table::page(2, start, i2);
+            for i2 in Self::MAPPING.range(2, start..self.pages) {
+                let start = Self::MAPPING.page(2, start, i2);
                 let pte2 = pt2.get(i2);
 
                 assert!(!pte2.giant());
 
                 pages -= if pte2.page() {
-                    Table::span(1)
+                    Self::MAPPING.span(1)
                 } else {
                     let pt1 = self.pt1(start, pte2.i1());
                     let mut child_pages = 0;
-                    for i1 in Table::range(1, start..self.pages) {
+                    for i1 in Self::MAPPING.range(1, start..self.pages) {
                         child_pages += (pt1.get(i1) == Entry1::Empty) as usize;
                     }
                     assert_eq!(child_pages, pte2.free());
@@ -231,25 +236,25 @@ impl LowerAlloc for DynamicLower {
 
 impl DynamicLower {
     /// Returns the l1 page table that contains the `page`.
-    fn pt1(&self, page: usize, i1: usize) -> &Table<Entry1> {
-        let page = Table::page(1, page, i1);
-        unsafe { &*((self.begin + page * Page::SIZE) as *const Table<Entry1>) }
+    fn pt1(&self, page: usize, i1: usize) -> &AtomicTable<Entry1> {
+        let page = Self::MAPPING.page(1, page, i1);
+        unsafe { &*((self.begin + page * Page::SIZE) as *const AtomicTable<Entry1>) }
     }
 
     /// Returns the l2 page table that contains the `page`.
     /// ```text
     /// NVRAM: [ Pages & PT1s | PT2s | Meta ]
     /// ```
-    fn pt2(&self, page: usize) -> &Table<Entry2> {
-        let i = page >> (Table::LEN_BITS * 2);
-        unsafe { &*((self.begin + (self.pages + i) * Page::SIZE) as *mut Table<Entry2>) }
+    fn pt2(&self, page: usize) -> &AtomicTable<Entry2> {
+        let i = page / Self::MAPPING.span(2);
+        unsafe { &*((self.begin + (self.pages + i) * Page::SIZE) as *mut AtomicTable<Entry2>) }
     }
 
     fn recover_l1(&self, start: usize, pte2: Entry2) -> Result<usize> {
         let pt = self.pt1(start, pte2.i1());
         let mut pages = 0;
-        for i in 0..Table::LEN {
-            if Table::page(1, start, i) > self.pages {
+        for i in 0..Self::MAPPING.len(1) {
+            if Self::MAPPING.page(1, start, i) > self.pages {
                 break;
             }
 
@@ -269,8 +274,8 @@ impl DynamicLower {
         let pt2 = self.pt2(start);
 
         for _ in 0..CAS_RETRIES {
-            for newstart in Table::iterate(2, start) {
-                let i2 = Table::idx(2, newstart);
+            for newstart in Self::MAPPING.iterate(2, start) {
+                let i2 = Self::MAPPING.idx(2, newstart);
 
                 stop!();
 
@@ -282,7 +287,7 @@ impl DynamicLower {
 
                 self.shared[core]
                     .alloc_pt1
-                    .store(!Table::page(1, start, pte2.i1()), Ordering::SeqCst);
+                    .store(!Self::MAPPING.page(1, start, pte2.i1()), Ordering::SeqCst);
 
                 stop!();
 
@@ -298,7 +303,10 @@ impl DynamicLower {
                 self.shared[core].alloc_pt1.store(0, Ordering::SeqCst);
             }
         }
-        error!("Exceeding retries {start} {}", start / Table::span(2));
+        error!(
+            "Exceeding retries {start} {}",
+            start / Self::MAPPING.span(2)
+        );
         Err(Error::Corruption)
     }
 
@@ -307,8 +315,8 @@ impl DynamicLower {
         let pt1 = self.pt1(start, pte2.i1());
 
         for _ in 0..CAS_RETRIES {
-            for page in Table::iterate(1, start) {
-                let i = Table::idx(1, page);
+            for page in Self::MAPPING.iterate(1, start) {
+                let i = Self::MAPPING.idx(1, page);
                 if i == pte2.i1() {
                     continue;
                 }
@@ -325,10 +333,13 @@ impl DynamicLower {
                 }
             }
 
-            warn!("Nothing found, retry {}", start / Table::span(2));
+            warn!("Nothing found, retry {}", start / Self::MAPPING.span(2));
             stop!();
         }
-        error!("Exceeding retries {} {pte2:?}", start / Table::span(2));
+        error!(
+            "Exceeding retries {} {pte2:?}",
+            start / Self::MAPPING.span(2)
+        );
         Err(Error::Corruption)
     }
 
@@ -337,7 +348,7 @@ impl DynamicLower {
         stop!();
 
         let pt1 = self.pt1(start, pte2.i1());
-        let alloc_p1 = !Table::page(1, start, pte2.i1());
+        let alloc_p1 = !Self::MAPPING.page(1, start, pte2.i1());
 
         // Wait for others to finish
         for (i, shared) in self.shared.iter().enumerate() {
@@ -355,12 +366,12 @@ impl DynamicLower {
             return Err(Error::Corruption);
         }
 
-        Ok(Table::page(1, start, pte2.i1()))
+        Ok(Self::MAPPING.page(1, start, pte2.i1()))
     }
 
     fn put_small(&self, pte2: Entry2, page: usize) -> Result<()> {
         let pt2 = self.pt2(page);
-        let i2 = Table::idx(2, page);
+        let i2 = Self::MAPPING.idx(2, page);
 
         if pte2.free() == 0 {
             return self.put_full(pte2, page);
@@ -369,7 +380,7 @@ impl DynamicLower {
         stop!();
 
         let pt1 = self.pt1(page, pte2.i1());
-        let i1 = Table::idx(1, page);
+        let i1 = Self::MAPPING.idx(1, page);
         let pte1 = pt1.get(i1);
 
         if pte1 != Entry1::Page {
@@ -380,8 +391,8 @@ impl DynamicLower {
         stop!();
 
         // Update pt2 first, to avoid write in freed pt1
-        if let Err(pte2) = pt2.update(i2, |pte| pte.inc_partial(pte2.i1())) {
-            return if pte2.free() == Table::LEN {
+        if let Err(pte2) = pt2.update(i2, |pte| pte.inc_partial(pte2.i1(), Self::MAPPING.span(1))) {
+            return if pte2.free() == Self::MAPPING.span(1) {
                 error!("Invalid Addr l1 i{i1} p={page}");
                 Err(Error::Address)
             } else {
@@ -402,8 +413,8 @@ impl DynamicLower {
     /// Free last page & rebuild pt1 in it
     fn put_full(&self, pte2: Entry2, page: usize) -> Result<()> {
         let pt2 = self.pt2(page);
-        let i2 = Table::idx(2, page);
-        let i1 = Table::idx(1, page);
+        let i2 = Self::MAPPING.idx(2, page);
+        let i1 = Self::MAPPING.idx(1, page);
 
         stop!();
 
@@ -426,17 +437,17 @@ impl DynamicLower {
     #[allow(dead_code)]
     pub fn dump(&self, start: usize) {
         let mut out = String::new();
-        writeln!(out, "Dumping pt {}", start / Table::span(2)).unwrap();
+        writeln!(out, "Dumping pt {}", start / Self::MAPPING.span(2)).unwrap();
 
         let pt2 = self.pt2(start);
-        for i2 in 0..Table::LEN {
-            let start = Table::page(2, start, i2);
+        for i2 in 0..Self::MAPPING.len(2) {
+            let start = Self::MAPPING.page(2, start, i2);
             if start > self.pages {
                 return;
             }
 
             let pte2 = pt2.get(i2);
-            let indent = (Table::LEVELS - 2) * 4;
+            let indent = (Self::MAPPING.levels() - 2) * 4;
             let addr = start * Page::SIZE;
             writeln!(out, "{:indent$}l2 i={i2} 0x{addr:x}: {pte2:?}", "").unwrap();
         }
@@ -455,13 +466,15 @@ mod test {
     use crate::entry::Entry1;
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
-    use crate::table::Table;
+    use crate::table::{AtomicTable, Mapping};
     use crate::thread;
     use crate::util::{logging, Page};
 
-    fn count(pt: &Table<Entry1>) -> usize {
+    const MAPPING: Mapping<2> = Mapping([512; 2]);
+
+    fn count(pt: &AtomicTable<Entry1>) -> usize {
         let mut pages = 0;
-        for i in 0..Table::LEN {
+        for i in 0..MAPPING.len(1) {
             pages += (pt.get(i) == Entry1::Empty) as usize;
         }
         pages
@@ -478,7 +491,7 @@ mod test {
             vec![1, 0, 1, 0, 1, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
+        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
@@ -498,10 +511,10 @@ mod test {
                 assert!(page != 0);
             });
 
-            assert_eq!(lower.pt2(0).get(0).free(), Table::LEN - 3);
+            assert_eq!(lower.pt2(0).get(0).free(), MAPPING.len(1) - 3);
             assert_eq!(
                 count(lower.pt1(0, lower.pt2(0).get(0).i1())),
-                Table::LEN - 3
+                MAPPING.span(1) - 3
             );
         }
     }
@@ -517,7 +530,7 @@ mod test {
             vec![0, 1, 1, 1, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
+        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
@@ -534,8 +547,8 @@ mod test {
             });
 
             let pte2 = lower.pt2(0).get(0);
-            assert_eq!(pte2.free(), Table::LEN - 2);
-            assert_eq!(count(lower.pt1(0, pte2.i1())), Table::LEN - 2);
+            assert_eq!(pte2.free(), MAPPING.span(1) - 2);
+            assert_eq!(count(lower.pt1(0, pte2.i1())), MAPPING.span(1) - 2);
         }
     }
 
@@ -550,14 +563,14 @@ mod test {
             vec![1, 1, 0, 1, 0, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
+        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
             let lower = Arc::new(DynamicLower::new(2, &mut buffer));
             lower.clear();
 
-            for _ in 0..Table::LEN - 1 {
+            for _ in 0..MAPPING.span(1) - 1 {
                 lower.get(0, false, 0).unwrap();
             }
 
@@ -572,10 +585,10 @@ mod test {
 
             let pt2 = lower.pt2(0);
             assert_eq!(pt2.get(0).free(), 0);
-            assert_eq!(pt2.get(1).free(), Table::LEN - 1);
+            assert_eq!(pt2.get(1).free(), MAPPING.span(1) - 1);
             assert_eq!(
-                count(lower.pt1(Table::LEN, pt2.get(1).i1())),
-                Table::LEN - 1
+                count(lower.pt1(MAPPING.span(1), pt2.get(1).i1())),
+                MAPPING.span(1) - 1
             );
         }
     }
@@ -591,7 +604,7 @@ mod test {
         ];
 
         let mut pages = [0; 2];
-        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
+        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
@@ -612,7 +625,7 @@ mod test {
                 }
             });
 
-            assert_eq!(lower.pt2(0).get(0).free(), Table::LEN);
+            assert_eq!(lower.pt2(0).get(0).free(), MAPPING.span(1));
         }
     }
 
@@ -626,8 +639,8 @@ mod test {
             vec![0, 1, 1, 0, 0, 0, 0], // 0 fails cas
         ];
 
-        let mut pages = [0; Table::LEN];
-        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
+        let mut pages = [0; MAPPING.span(1)];
+        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
@@ -665,15 +678,15 @@ mod test {
             vec![0, 0, 0, 1, 1, 0, 1, 1], // nothing found & retry
         ];
 
-        let mut pages = [0; Table::LEN];
-        let mut buffer = vec![Page::new(); 4 * Table::span(2)];
+        let mut pages = [0; MAPPING.span(1)];
+        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
             warn!("order: {:?}", order);
             let lower = Arc::new(DynamicLower::new(2, &mut buffer));
             lower.clear();
 
-            for page in &mut pages[..Table::LEN - 1] {
+            for page in &mut pages[..MAPPING.span(1) - 1] {
                 *page = lower.get(0, false, 0).unwrap();
             }
             let stop = StopVec::new(2, order);
@@ -703,10 +716,10 @@ mod test {
                 // Table entry skipped
                 assert_eq!(pt2.get(0).free(), 2);
                 assert_eq!(count(lower.pt1(0, pt2.get(0).i1())), 2);
-                assert_eq!(pt2.get(1).free(), Table::LEN - 1);
+                assert_eq!(pt2.get(1).free(), MAPPING.span(1) - 1);
                 assert_eq!(
-                    count(lower.pt1(Table::LEN, pt2.get(1).i1())),
-                    Table::LEN - 1
+                    count(lower.pt1(MAPPING.span(1), pt2.get(1).i1())),
+                    MAPPING.span(1) - 1
                 );
             }
         }

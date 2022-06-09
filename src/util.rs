@@ -1,22 +1,21 @@
-use core::alloc::Layout;
 use core::fmt::Debug;
-use core::mem::size_of;
+use core::mem::{align_of, size_of};
 use core::ops::Range;
 
 /// Correctly sized and aligned page.
 #[derive(Clone)]
 #[repr(align(0x1000))]
 pub struct Page {
-    _data: [u8; Page::SIZE],
+    _data: [u8; Self::SIZE],
 }
-const _: () = assert!(Layout::new::<Page>().size() == Page::SIZE);
-const _: () = assert!(Layout::new::<Page>().align() == Page::SIZE);
+const _: () = assert!(size_of::<Page>() == Page::SIZE);
+const _: () = assert!(align_of::<Page>() == Page::SIZE);
 impl Page {
-    pub const SIZE_BITS: usize = 12; // 2^12 => 4KiB
-    pub const SIZE: usize = 1 << Page::SIZE_BITS;
+    pub const SIZE: usize = 0x1000;
+    pub const SIZE_BITS: usize = log2(Self::SIZE);
     pub const fn new() -> Self {
         Self {
-            _data: [0; Page::SIZE],
+            _data: [0; Self::SIZE],
         }
     }
     pub fn cast<T>(&self) -> &T {
@@ -27,6 +26,36 @@ impl Page {
         debug_assert!(size_of::<T>() <= size_of::<Self>());
         unsafe { std::mem::transmute(self) }
     }
+}
+
+#[derive(Clone)]
+#[repr(align(64))]
+pub struct CacheLine {
+    _data: [u8; Self::SIZE],
+}
+const _: () = assert!(size_of::<CacheLine>() == CacheLine::SIZE);
+const _: () = assert!(align_of::<CacheLine>() == CacheLine::SIZE);
+impl CacheLine {
+    pub const SIZE: usize = 64;
+    pub const SIZE_BITS: usize = log2(Self::SIZE);
+    pub const fn new() -> Self {
+        Self {
+            _data: [0; Self::SIZE],
+        }
+    }
+    pub fn cast<T>(&self) -> &T {
+        debug_assert!(size_of::<T>() <= size_of::<Self>());
+        unsafe { std::mem::transmute(self) }
+    }
+    pub fn cast_mut<T>(&mut self) -> &mut T {
+        debug_assert!(size_of::<T>() <= size_of::<Self>());
+        unsafe { std::mem::transmute(self) }
+    }
+}
+
+/// Computes the logarithm dualis of `v` rounded down.
+pub const fn log2(v: usize) -> usize {
+    (usize::BITS - v.leading_zeros() - 1) as usize
 }
 
 pub const fn align_up(v: usize, align: usize) -> usize {
