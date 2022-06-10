@@ -456,11 +456,11 @@ impl From<Entry1> for u64 {
 
 #[cfg(test)]
 mod test {
-    use crate::table::{AtomicTable, PT_LEN};
+    use crate::table::{ATable, PT_LEN};
 
     #[test]
     fn pt() {
-        type Table = AtomicTable<u64, PT_LEN>;
+        type Table = ATable<u64, PT_LEN>;
 
         let pt: Table = Table::empty();
         pt.cas(0, 0, 42).unwrap();

@@ -5,7 +5,7 @@ use log::{error, warn};
 
 use crate::alloc::{Error, Result, Size, CAS_RETRIES};
 use crate::entry::Entry2;
-use crate::table::{AtomicTable, Bitfield, Mapping};
+use crate::table::{ATable, Bitfield, Mapping};
 use crate::util::{align_up, Page};
 
 use super::LowerAlloc;
@@ -20,8 +20,11 @@ pub struct PackedLower {
     pub pages: usize,
 }
 
+type Table1 = Bitfield;
+type Table2 = ATable<Entry2>;
+
 impl LowerAlloc for PackedLower {
-    const MAPPING: Mapping<2> = Mapping([512; 2]);
+    const MAPPING: Mapping<2> = Mapping([Table1::LEN, Table2::LEN]);
 
     fn new(_cores: usize, memory: &mut [Page]) -> Self {
         let n2_pages =
@@ -181,26 +184,28 @@ impl LowerAlloc for PackedLower {
 
 impl PackedLower {
     /// Returns the l1 page table that contains the `page`.
-    fn pt1(&self, page: usize) -> &Bitfield {
+    fn pt1(&self, page: usize) -> &Table1 {
         let mut offset = self.begin + self.pages * Page::SIZE;
+
         let i = page / Self::MAPPING.span(1);
         debug_assert!(i < Self::MAPPING.num_pts(1, self.pages));
-        offset += i * Bitfield::SIZE;
-        unsafe { &*(offset as *const Bitfield) }
+        offset += i * Table1::SIZE;
+        unsafe { &*(offset as *const Table1) }
     }
 
     /// Returns the l2 page table that contains the `page`.
     /// ```text
     /// NVRAM: [ Pages | PT1s | PT2s | Meta ]
     /// ```
-    fn pt2(&self, page: usize) -> &AtomicTable<Entry2> {
+    fn pt2(&self, page: usize) -> &Table2 {
         let mut offset = self.begin + self.pages * Page::SIZE;
-        offset += Self::MAPPING.num_pts(1, self.pages) * Bitfield::SIZE;
+        offset += Self::MAPPING.num_pts(1, self.pages) * Table1::SIZE;
         offset = align_up(offset, Page::SIZE); // page align
+
         let i = page / Self::MAPPING.span(2);
         debug_assert!(i < Self::MAPPING.num_pts(2, self.pages));
         offset += i * Page::SIZE;
-        unsafe { &*(offset as *mut AtomicTable<Entry2>) }
+        unsafe { &*(offset as *mut Table2) }
     }
 
     fn recover_l1(&self, start: usize) -> usize {
@@ -302,18 +307,18 @@ mod test {
 
     use log::warn;
 
-    use super::{Bitfield, PackedLower};
+    use super::{PackedLower, Table1};
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
     use crate::table::Mapping;
     use crate::thread;
     use crate::util::{logging, Page};
 
-    const MAPPING: Mapping<2> = Mapping([512; 2]);
+    const MAPPING: Mapping<2> = PackedLower::MAPPING;
 
-    fn count(pt: &Bitfield) -> usize {
+    fn count(pt: &Table1) -> usize {
         let mut pages = 0;
-        for i in 0..Bitfield::LEN {
+        for i in 0..Table1::LEN {
             pages += !pt.get(i) as usize;
         }
         pages

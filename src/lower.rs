@@ -16,8 +16,8 @@ macro_rules! stop {
     () => {};
 }
 
-// mod dense;
-// pub use dense::DenseLower;
+mod cache;
+pub use cache::CacheLower;
 mod dynamic;
 pub use dynamic::DynamicLower;
 mod fixed;

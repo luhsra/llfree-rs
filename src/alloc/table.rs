@@ -8,7 +8,7 @@ use log::{error, info, warn};
 use super::{Alloc, Error, Local, Result, Size, CAS_RETRIES, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::entry::{Change, Entry, Entry3};
 use crate::lower::LowerAlloc;
-use crate::table::{AtomicTable, Mapping};
+use crate::table::{ATable, Mapping};
 use crate::util::Page;
 
 /// Non-Volatile global metadata
@@ -283,7 +283,7 @@ impl<L: LowerAlloc> Default for TableAlloc<L> {
 
 impl<L: LowerAlloc> TableAlloc<L> {
     const MAPPING: Mapping<4> = Mapping([512; 2]).with_lower(&L::MAPPING);
-    const ALMOST_FULL: usize = 8 * Self::MAPPING.span(1);
+    const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
 
     fn allocated_pages_rec(&self, level: usize, start: usize) -> usize {
         let mut pages = 0;
@@ -302,7 +302,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
     }
 
     /// Returns the page table of the given `level` that contains the `page`.
-    fn pt(&self, level: usize, page: usize) -> &AtomicTable<Entry> {
+    fn pt(&self, level: usize, page: usize) -> &ATable<Entry> {
         assert!((4..=Self::MAPPING.levels()).contains(&level));
 
         let i = page / Self::MAPPING.span(level);
@@ -313,7 +313,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
     }
 
     /// Returns the page table of the given `level` that contains the `page`.
-    fn pt3(&self, page: usize) -> &AtomicTable<Entry3> {
+    fn pt3(&self, page: usize) -> &ATable<Entry3> {
         let i = page / Self::MAPPING.span(3);
         let offset: usize = (3..Self::MAPPING.levels())
             .map(|i| Self::MAPPING.num_pts(i, self.pages()))

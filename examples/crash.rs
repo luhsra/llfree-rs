@@ -250,7 +250,7 @@ fn monitor(
     warn!("Ok");
 }
 
-#[allow(unused)]
+#[allow(unused_variables)]
 fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {

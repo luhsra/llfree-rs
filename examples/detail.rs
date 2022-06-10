@@ -5,10 +5,10 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::alloc::{TableAlloc, Alloc, Size, MIN_PAGES};
+use nvalloc::alloc::{Alloc, Size, TableAlloc, MIN_PAGES};
 use nvalloc::lower::FixedLower;
 use nvalloc::mmap::MMap;
-use nvalloc::table::Table;
+use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::util::{logging, Cycles, Page};
 
@@ -53,12 +53,8 @@ fn main() {
     let mem_pages = 2 * threads * MIN_PAGES;
     let mut mapping = mapping(0x1000_0000_0000, mem_pages, dax).unwrap();
 
-    // Allocate half the memory
-    let allocs = mapping.len() / threads / 2 / Table::span(size as _);
-    assert!(allocs % Table::LEN == 0);
-    warn!("\n\n>>> bench t={threads} {size:?} {allocs}\n");
 
-    let mut times = vec![Perf::default(); 2 * Table::LEN];
+    let mut times = vec![Perf::default(); 2 * PT_LEN];
 
     // Warmup
     for page in &mut mapping[..] {
@@ -72,6 +68,10 @@ fn main() {
             a
         });
         warn!("init time {}ms", timer.elapsed().as_millis());
+        // Allocate half the memory
+        let allocs = mapping.len() / threads / 2 / alloc.span(size as _);
+        assert!(allocs % PT_LEN == 0);
+        warn!("\n\n>>> bench t={threads} {size:?} {allocs}\n");
 
         let barrier = Arc::new(Barrier::new(threads));
         let a = alloc.clone();
@@ -80,15 +80,15 @@ fn main() {
             barrier.wait();
             let timer = Instant::now();
             let mut pages = Vec::new();
-            let mut times = vec![Perf::default(); 2 * Table::LEN];
+            let mut times = vec![Perf::default(); 2 * PT_LEN];
 
-            let t_get = &mut times[0..Table::LEN];
+            let t_get = &mut times[0..PT_LEN];
             for i in 0..allocs {
                 let timer = Cycles::now();
                 pages.push(alloc.get(t, size).unwrap());
                 let t = timer.elapsed() as f64;
 
-                let p = &mut t_get[i % Table::LEN];
+                let p = &mut t_get[i % PT_LEN];
                 p.avg += t;
                 p.std += t * t;
                 p.min = p.min.min(t);
@@ -97,20 +97,20 @@ fn main() {
 
             barrier.wait();
 
-            let t_put = &mut times[Table::LEN..];
+            let t_put = &mut times[PT_LEN..];
             for (i, page) in pages.into_iter().enumerate() {
                 let timer = Cycles::now();
                 alloc.put(t, page).unwrap();
                 let t = timer.elapsed() as f64;
 
-                let p = &mut t_put[i % Table::LEN];
+                let p = &mut t_put[i % PT_LEN];
                 p.avg += t;
                 p.std += t * t;
                 p.min = p.min.min(t);
                 p.max = p.max.max(t);
             }
 
-            let n = (allocs / Table::LEN) as f64;
+            let n = (allocs / PT_LEN) as f64;
             for t in &mut times {
                 t.avg /= n;
                 t.std /= n;
@@ -124,7 +124,7 @@ fn main() {
         drop(a);
 
         for t in t_times {
-            for i in 0..2 * Table::LEN {
+            for i in 0..2 * PT_LEN {
                 times[i].avg += t[i].avg / threads as f64;
                 times[i].std += t[i].std / threads as f64;
                 times[i].min = times[i].min.min(t[i].min);
@@ -181,6 +181,7 @@ impl Default for Perf {
     }
 }
 
+#[allow(unused_variables)]
 fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {

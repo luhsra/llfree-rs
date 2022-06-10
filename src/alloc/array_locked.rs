@@ -221,7 +221,7 @@ impl<L: LowerAlloc> Default for ArrayLockedAlloc<L> {
 
 impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
-    const ALMOST_FULL: usize = 8 * Self::MAPPING.span(1);
+    const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
 
     /// Setup a new allocator.
     #[cold]

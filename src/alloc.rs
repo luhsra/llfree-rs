@@ -189,7 +189,7 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::ArrayAtomicAlloc<FixedLower>;
+    type Allocator = super::ArrayAtomicAlloc<CacheLower>;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -244,7 +244,7 @@ mod test {
         warn!("start alloc...");
         let small = alloc.get(0, Size::L0).unwrap();
 
-        assert_eq!(alloc.dbg_allocated_pages(), 1);
+        assert_eq!(alloc.dbg_allocated_pages(), alloc.span(Size::L0));
 
         // Stress test
         let mut pages = Vec::new();
@@ -274,17 +274,15 @@ mod test {
         warn!("realloc...");
 
         // Free some
-        for page in &pages[..PT_LEN * PT_LEN - 10] {
+        const FREE_NUM: usize = PT_LEN * PT_LEN - 10;
+        for page in &pages[..FREE_NUM] {
             alloc.put(0, *page).unwrap();
         }
 
-        assert_eq!(
-            alloc.dbg_allocated_pages(),
-            1 + pages.len() - PT_LEN * PT_LEN + 10
-        );
+        assert_eq!(alloc.dbg_allocated_pages(), 1 + pages.len() - FREE_NUM);
 
         // Realloc
-        for page in &mut pages[..PT_LEN * PT_LEN - 10] {
+        for page in &mut pages[..FREE_NUM] {
             *page = alloc.get(0, Size::L0).unwrap();
         }
 
@@ -456,7 +454,8 @@ mod test {
         let huge = alloc.get(0, Size::L1).unwrap();
         let giant = alloc.get(0, Size::L2).unwrap();
 
-        assert_eq!(alloc.dbg_allocated_pages(), 1 + PT_LEN + PT_LEN * PT_LEN);
+        let expected_pages = alloc.span(Size::L0) + alloc.span(Size::L1) + alloc.span(Size::L2);
+        assert_eq!(alloc.dbg_allocated_pages(), expected_pages);
         assert!(small != huge && small != giant && huge != giant);
 
         warn!("start stress test");
@@ -469,10 +468,7 @@ mod test {
 
         warn!("check");
 
-        assert_eq!(
-            alloc.dbg_allocated_pages(),
-            1 + PT_LEN + PT_LEN * PT_LEN + pages.len()
-        );
+        assert_eq!(alloc.dbg_allocated_pages(), expected_pages + pages.len());
 
         pages.sort_unstable();
 
@@ -793,6 +789,9 @@ mod test {
         let mut mapping = mapping(0x1000_0000_0000, 8 << 18).unwrap();
         thread::pin(0);
 
+        let expected_pages =
+            |a: &Allocator| (PT_LEN + 2) * (a.span(Size::L0) + a.span(Size::L1)) + a.span(Size::L2);
+
         {
             let alloc = Arc::new({
                 let mut a = Allocator::default();
@@ -807,10 +806,7 @@ mod test {
 
             alloc.get(0, Size::L2).unwrap();
 
-            assert_eq!(
-                alloc.dbg_allocated_pages(),
-                PT_LEN * PT_LEN + PT_LEN + 2 + PT_LEN * (PT_LEN + 2)
-            );
+            assert_eq!(alloc.dbg_allocated_pages(), expected_pages(&alloc));
 
             // leak
             let _ = Arc::into_raw(alloc);
@@ -822,10 +818,7 @@ mod test {
             a
         });
 
-        assert_eq!(
-            alloc.dbg_allocated_pages(),
-            PT_LEN * PT_LEN + PT_LEN + 2 + PT_LEN * (PT_LEN + 2)
-        );
+        assert_eq!(alloc.dbg_allocated_pages(), expected_pages(&alloc));
     }
 
     #[test]
@@ -867,7 +860,7 @@ mod test {
         warn!("check");
         assert_eq!(
             a.dbg_allocated_pages(),
-            (THREADS * ALLOC_PER_THREAD - THREADS) * PT_LEN * PT_LEN
+            (THREADS * ALLOC_PER_THREAD - THREADS) * a.span(Size::L2)
         );
     }
 }

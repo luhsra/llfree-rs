@@ -15,7 +15,7 @@ use nvalloc::alloc::{
     self, Alloc, ArrayAlignedAlloc, ArrayAtomicAlloc, ArrayLockedAlloc, ArrayUnalignedAlloc,
     ListLocalAlloc, ListLockedAlloc, Size, TableAlloc, MIN_PAGES,
 };
-use nvalloc::lower::{DynamicLower, FixedLower, PackedLower};
+use nvalloc::lower::{DynamicLower, FixedLower, PackedLower, CacheLower};
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::util::{black_box, Page, WyRand};
@@ -90,7 +90,8 @@ fn main() {
     type F = FixedLower;
     type D = DynamicLower;
     type P = PackedLower;
-    let allocs: [Arc<dyn Alloc>; 17] = [
+    type C = CacheLower;
+    let allocs: [Arc<dyn Alloc>; 19] = [
         Arc::new(ArrayAlignedAlloc::<F>::default()),
         Arc::new(ArrayUnalignedAlloc::<F>::default()),
         Arc::new(ArrayLockedAlloc::<F>::default()),
@@ -106,6 +107,8 @@ fn main() {
         Arc::new(ArrayLockedAlloc::<P>::default()),
         Arc::new(ArrayAtomicAlloc::<P>::default()),
         Arc::new(TableAlloc::<P>::default()),
+        Arc::new(ArrayAlignedAlloc::<C>::default()),
+        Arc::new(ArrayAtomicAlloc::<C>::default()),
         Arc::new(ListLocalAlloc::default()),
         Arc::new(ListLockedAlloc::default()),
     ];
@@ -144,7 +147,7 @@ fn main() {
     drop(allocs); // drop first
 }
 
-#[allow(unused)]
+#[allow(unused_variables)]
 fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {

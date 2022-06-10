@@ -7,7 +7,7 @@ use log::{error, info, warn};
 
 use crate::alloc::{Error, Result, Size};
 use crate::entry::{Entry1, Entry2};
-use crate::table::{AtomicTable, Mapping};
+use crate::table::{ATable, Mapping};
 use crate::util::Page;
 
 use super::LowerAlloc;
@@ -23,6 +23,9 @@ pub struct DynamicLower {
     pub pages: usize,
     shared: Box<[Shared]>,
 }
+
+type Table1 = ATable<Entry1>;
+type Table2 = ATable<Entry2>;
 
 #[repr(align(64))]
 struct Shared {
@@ -40,7 +43,7 @@ impl fmt::Debug for DynamicLower {
 }
 
 impl LowerAlloc for DynamicLower {
-    const MAPPING: Mapping<2> = Mapping([512; 2]);
+    const MAPPING: Mapping<2> = Mapping([Table1::LEN, Table2::LEN]);
 
     fn new(cores: usize, memory: &mut [Page]) -> Self {
         let mut shared = Vec::with_capacity(cores);
@@ -81,9 +84,8 @@ impl LowerAlloc for DynamicLower {
         // Init pt1
         for i in 0..Self::MAPPING.num_pts(1, self.pages) {
             // Within first page of own area
-            let pt1 = unsafe {
-                &*((self.begin + i * Self::MAPPING.m_span(1)) as *const AtomicTable<Entry1>)
-            };
+            let pt1 =
+                unsafe { &*((self.begin + i * Self::MAPPING.m_span(1)) as *const Table1) };
 
             if i + 1 < Self::MAPPING.num_pts(1, self.pages) {
                 pt1.fill(Entry1::Empty);
@@ -236,18 +238,18 @@ impl LowerAlloc for DynamicLower {
 
 impl DynamicLower {
     /// Returns the l1 page table that contains the `page`.
-    fn pt1(&self, page: usize, i1: usize) -> &AtomicTable<Entry1> {
+    fn pt1(&self, page: usize, i1: usize) -> &Table1 {
         let page = Self::MAPPING.page(1, page, i1);
-        unsafe { &*((self.begin + page * Page::SIZE) as *const AtomicTable<Entry1>) }
+        unsafe { &*((self.begin + page * Page::SIZE) as *const Table1) }
     }
 
     /// Returns the l2 page table that contains the `page`.
     /// ```text
     /// NVRAM: [ Pages & PT1s | PT2s | Meta ]
     /// ```
-    fn pt2(&self, page: usize) -> &AtomicTable<Entry2> {
+    fn pt2(&self, page: usize) -> &Table2 {
         let i = page / Self::MAPPING.span(2);
-        unsafe { &*((self.begin + (self.pages + i) * Page::SIZE) as *mut AtomicTable<Entry2>) }
+        unsafe { &*((self.begin + (self.pages + i) * Page::SIZE) as *mut Table2) }
     }
 
     fn recover_l1(&self, start: usize, pte2: Entry2) -> Result<usize> {
@@ -462,17 +464,17 @@ mod test {
 
     use log::warn;
 
-    use super::DynamicLower;
+    use super::{DynamicLower, Table1};
     use crate::entry::Entry1;
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
-    use crate::table::{AtomicTable, Mapping};
+    use crate::table::Mapping;
     use crate::thread;
     use crate::util::{logging, Page};
 
-    const MAPPING: Mapping<2> = Mapping([512; 2]);
+    const MAPPING: Mapping<2> = DynamicLower::MAPPING;
 
-    fn count(pt: &AtomicTable<Entry1>) -> usize {
+    fn count(pt: &Table1) -> usize {
         let mut pages = 0;
         for i in 0..MAPPING.len(1) {
             pages += (pt.get(i) == Entry1::Empty) as usize;

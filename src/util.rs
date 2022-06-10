@@ -58,6 +58,10 @@ pub const fn log2(v: usize) -> usize {
     (usize::BITS - v.leading_zeros() - 1) as usize
 }
 
+pub const fn div_ceil(v: usize, d: usize) -> usize {
+    (v + d - 1) / d
+}
+
 pub const fn align_up(v: usize, align: usize) -> usize {
     (v + align - 1) & !(align - 1)
 }

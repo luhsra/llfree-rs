@@ -1,38 +1,40 @@
+use core::fmt::Write;
 use core::ops::Range;
-use std::fmt::Write;
 
 use log::{error, warn};
 
 use crate::alloc::{Error, Result, Size, CAS_RETRIES};
-use crate::entry::{Entry1, Entry2};
-use crate::table::{ATable, Mapping};
-use crate::util::Page;
+use crate::entry::SmallEntry2 as Entry2;
+use crate::table::{ATable, Bitfield, Mapping};
+use crate::util::{align_up, div_ceil, Page};
 
 use super::LowerAlloc;
 
 /// Level 2 page allocator.
 /// ```text
-/// NVRAM: [ Pages | PT1s | PT2s | Meta ]
+/// NVRAM: [ Pages | PT1s + padding | PT2s | Meta ]
 /// ```
 #[derive(Default, Debug)]
-pub struct FixedLower {
+pub struct CacheLower {
     pub begin: usize,
     pub pages: usize,
 }
 
-type Table1 = ATable<Entry1>;
-type Table2 = ATable<Entry2>;
+type Table1 = Bitfield;
+type Table2 = ATable<Entry2, 64>;
 
-impl LowerAlloc for FixedLower {
+impl LowerAlloc for CacheLower {
     const MAPPING: Mapping<2> = Mapping([Table1::LEN, Table2::LEN]);
 
     fn new(_cores: usize, memory: &mut [Page]) -> Self {
+        let s1 = Self::MAPPING.num_pts(1, memory.len()) * Table1::SIZE;
+        let s1 = align_up(s1, Table2::SIZE); // correct alignment
+        let s2 = Self::MAPPING.num_pts(2, memory.len()) * Table2::SIZE;
+        let pages = div_ceil(s1 + s2, Page::SIZE);
         Self {
             begin: memory.as_ptr() as usize,
             // level 1 and 2 tables are stored at the end of the NVM
-            pages: memory.len()
-                - Self::MAPPING.num_pts(2, memory.len())
-                - Self::MAPPING.num_pts(1, memory.len()),
+            pages: memory.len() - pages,
         }
     }
 
@@ -63,15 +65,11 @@ impl LowerAlloc for FixedLower {
             let pt1 = self.pt1(i * Self::MAPPING.span(1));
 
             if i + 1 < Self::MAPPING.num_pts(1, self.pages) {
-                pt1.fill(Entry1::Empty);
+                pt1.fill(false);
             } else {
-                for j in 0..Self::MAPPING.len(1) {
+                for j in 0..Table1::LEN {
                     let page = i * Self::MAPPING.span(1) + j;
-                    if page < self.pages {
-                        pt1.set(j, Entry1::Empty);
-                    } else {
-                        pt1.set(j, Entry1::Page);
-                    }
+                    pt1.set(j, page >= self.pages);
                 }
             }
         }
@@ -137,7 +135,7 @@ impl LowerAlloc for FixedLower {
         if let Err(old) = pt2.cas(
             i2,
             Entry2::new().with_page(true),
-            Entry2::new_table(Self::MAPPING.span(1), 0),
+            Entry2::new_table(Self::MAPPING.span(1)),
         ) {
             if !old.giant() && old.free() < Self::MAPPING.span(1) {
                 self.put_small(page).map(|_| false)
@@ -155,7 +153,7 @@ impl LowerAlloc for FixedLower {
     }
     fn clear_giant(&self, page: usize) {
         self.pt2(page)
-            .set(0, Entry2::new_table(Self::MAPPING.span(1), 0));
+            .set(0, Entry2::new_table(Self::MAPPING.span(1)));
     }
 
     fn dbg_allocated_pages(&self) -> usize {
@@ -175,7 +173,7 @@ impl LowerAlloc for FixedLower {
                     let pt1 = self.pt1(start);
                     let mut child_pages = 0;
                     for i1 in Self::MAPPING.range(1, start..self.pages) {
-                        child_pages += (pt1.get(i1) == Entry1::Empty) as usize;
+                        child_pages += !pt1.get(i1) as usize;
                     }
                     assert_eq!(child_pages, pte2.free());
                     child_pages
@@ -186,27 +184,39 @@ impl LowerAlloc for FixedLower {
     }
 }
 
-impl FixedLower {
+impl CacheLower {
     /// Returns the l1 page table that contains the `page`.
+    /// ```text
+    /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
+    /// ```
     fn pt1(&self, page: usize) -> &Table1 {
+        let mut offset = self.begin + self.pages * Page::SIZE;
         let i = page / Self::MAPPING.span(1);
-        unsafe { &*((self.begin + (self.pages + i) * Page::SIZE) as *const Table1) }
+        debug_assert!(i < Self::MAPPING.num_pts(1, self.pages));
+        offset += i * Table1::SIZE;
+        unsafe { &*(offset as *const Table1) }
     }
 
     /// Returns the l2 page table that contains the `page`.
     /// ```text
-    /// NVRAM: [ Pages | PT1s | PT2s | Meta ]
+    /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
     /// ```
     fn pt2(&self, page: usize) -> &Table2 {
-        let i = (page / Self::MAPPING.span(2)) + Self::MAPPING.num_pts(1, self.pages);
-        unsafe { &*((self.begin + (self.pages + i) * Page::SIZE) as *mut Table2) }
+        let mut offset = self.begin + self.pages * Page::SIZE;
+        offset += Self::MAPPING.num_pts(1, self.pages) * Table1::SIZE;
+        offset = align_up(offset, Table1::SIZE); // correct alignment
+
+        let i = page / Self::MAPPING.span(2);
+        debug_assert!(i < Self::MAPPING.num_pts(2, self.pages));
+        offset += i * Table2::SIZE;
+        unsafe { &*(offset as *mut Table2) }
     }
 
     fn recover_l1(&self, start: usize) -> usize {
         let pt = self.pt1(start);
         let mut pages = 0;
         for i in Self::MAPPING.range(1, start..self.pages) {
-            pages += (pt.get(i) == Entry1::Empty) as usize;
+            pages += !pt.get(i) as usize;
         }
         pages
     }
@@ -228,7 +238,7 @@ impl FixedLower {
                     stop!();
                 }
 
-                if pt2.update(i2, |v| v.dec(0)).is_ok() {
+                if pt2.update(i2, |v| v.dec()).is_ok() {
                     return self.get_table(newstart);
                 }
             }
@@ -239,24 +249,14 @@ impl FixedLower {
 
     /// Search free page table entry.
     fn get_table(&self, start: usize) -> Result<usize> {
+        let i = Self::MAPPING.idx(1, start);
         let pt1 = self.pt1(start);
 
         for _ in 0..CAS_RETRIES {
-            for page in Self::MAPPING.iterate(1, start) {
-                let i = Self::MAPPING.idx(1, page);
-
-                #[cfg(feature = "stop")]
-                {
-                    if pt1.get(i) != Entry1::Empty {
-                        continue;
-                    }
-                    stop!();
-                }
-
-                if pt1.cas(i, Entry1::Empty, Entry1::Page).is_ok() {
-                    return Ok(page);
-                }
+            if let Ok(i) = pt1.set_first_zero(i) {
+                return Ok(Self::MAPPING.page(1, start, i));
             }
+            stop!();
         }
         error!("Nothing found {}", start / Self::MAPPING.span(2));
         Err(Error::Corruption)
@@ -267,7 +267,7 @@ impl FixedLower {
 
         let pt1 = self.pt1(page);
         let i1 = Self::MAPPING.idx(1, page);
-        if pt1.cas(i1, Entry1::Page, Entry1::Empty).is_err() {
+        if pt1.toggle(i1, true).is_err() {
             error!("Invalid Addr l1 i{i1} p={page}");
             return Err(Error::Address);
         }
@@ -311,20 +311,19 @@ mod test {
 
     use log::warn;
 
-    use super::{FixedLower, Table1};
-    use crate::entry::Entry1;
+    use super::{CacheLower, Table1};
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
     use crate::table::Mapping;
     use crate::thread;
     use crate::util::{logging, Page};
 
-    const MAPPING: Mapping<2> = FixedLower::MAPPING;
+    const MAPPING: Mapping<2> = CacheLower::MAPPING;
 
     fn count(pt: &Table1) -> usize {
         let mut pages = 0;
-        for i in 0..MAPPING.len(1) {
-            pages += (pt.get(i) == Entry1::Empty) as usize;
+        for i in 0..Table1::LEN {
+            pages += !pt.get(i) as usize;
         }
         pages
     }
@@ -344,8 +343,8 @@ mod test {
         let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
-            warn!("order: {:?}", order);
-            let lower = Arc::new(FixedLower::new(2, &mut buffer));
+            warn!("order: {order:?}");
+            let lower = Arc::new(CacheLower::new(2, &mut buffer));
             lower.clear();
             lower.get(0, false, 0).unwrap();
 
@@ -380,8 +379,8 @@ mod test {
         let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
-            warn!("order: {:?}", order);
-            let lower = Arc::new(FixedLower::new(2, &mut buffer));
+            warn!("order: {order:?}");
+            let lower = Arc::new(CacheLower::new(2, &mut buffer));
             lower.clear();
 
             let stop = StopVec::new(2, order);
@@ -413,8 +412,8 @@ mod test {
         let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
-            warn!("order: {:?}", order);
-            let lower = Arc::new(FixedLower::new(2, &mut buffer));
+            warn!("order: {order:?}");
+            let lower = Arc::new(CacheLower::new(2, &mut buffer));
             lower.clear();
 
             for _ in 0..MAPPING.span(1) - 1 {
@@ -452,7 +451,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(FixedLower::new(2, &mut buffer));
+            let lower = Arc::new(CacheLower::new(2, &mut buffer));
             lower.clear();
 
             pages[0] = lower.get(0, false, 0).unwrap();
@@ -488,7 +487,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(FixedLower::new(2, &mut buffer));
+            let lower = Arc::new(CacheLower::new(2, &mut buffer));
             lower.clear();
 
             for page in &mut pages {
@@ -529,7 +528,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(FixedLower::new(2, &mut buffer));
+            let lower = Arc::new(CacheLower::new(2, &mut buffer));
             lower.clear();
 
             for page in &mut pages[..MAPPING.span(1) - 1] {

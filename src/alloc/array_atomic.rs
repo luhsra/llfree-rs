@@ -220,7 +220,7 @@ impl<L: LowerAlloc> Default for ArrayAtomicAlloc<L> {
 
 impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
-    const ALMOST_FULL: usize = 8 * Self::MAPPING.span(1);
+    const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
 
     /// Setup a new allocator.
     #[cold]
@@ -480,12 +480,13 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
 
 #[cfg(test)]
 mod test {
-    use crate::lower::FixedLower;
+    use crate::lower::{FixedLower, CacheLower};
 
     use super::ArrayAtomicAlloc;
 
     #[test]
     fn correct_sizes() {
         assert_eq!(ArrayAtomicAlloc::<FixedLower>::ALMOST_FULL, 8 * 512);
+        assert_eq!(ArrayAtomicAlloc::<CacheLower>::ALMOST_FULL, 1 * 512);
     }
 }

@@ -1,5 +1,5 @@
 use core::fmt;
-use core::mem::size_of;
+use core::mem::{align_of, size_of};
 use core::ops::Range;
 use core::ptr::addr_of;
 use core::sync::atomic::{self, AtomicU8, Ordering};
@@ -11,20 +11,25 @@ use crate::Page;
 pub const PT_LEN: usize = 512;
 
 /// Page table with atomic entries
-#[repr(align(0x1000))]
-pub struct AtomicTable<T: AtomicValue, const LEN: usize = { PT_LEN }> {
+#[repr(align(64))]
+pub struct ATable<T: AtomicValue, const LEN: usize = { PT_LEN }> {
     entries: [Atomic<T>; LEN],
 }
 
-const _: () = assert!(size_of::<u64>() == AtomicTable::<u64, PT_LEN>::PTE_SIZE);
-const _: () = assert!(size_of::<AtomicTable<u64, PT_LEN>>() == Page::SIZE);
-const _: () = assert!(AtomicTable::<u64, PT_LEN>::LEN == 512);
-const _: () = assert!(AtomicTable::<u16, 128>::PTE_SIZE == size_of::<u16>());
-const _: () = assert!(AtomicTable::<u16, 128>::PTE_SIZE == size_of::<u16>());
+// Sanity checks
+const _: () = assert!(size_of::<u64>() == ATable::<u64, PT_LEN>::PTE_SIZE);
+const _: () = assert!(size_of::<ATable<u64, PT_LEN>>() == Page::SIZE);
+const _: () = assert!(ATable::<u64, PT_LEN>::SIZE == Page::SIZE);
+const _: () = assert!(ATable::<u64, PT_LEN>::LEN == 512);
+const _: () = assert!(align_of::<ATable<u64, PT_LEN>>() == CacheLine::SIZE);
 
-impl<T: AtomicValue, const LEN: usize> AtomicTable<T, LEN> {
+const _: () = assert!(ATable::<u16, 64>::PTE_SIZE == size_of::<u16>());
+const _: () = assert!(ATable::<u16, 64>::SIZE == 128);
+
+impl<T: AtomicValue, const LEN: usize> ATable<T, LEN> {
     pub const LEN: usize = LEN;
     pub const PTE_SIZE: usize = size_of::<T>();
+    pub const SIZE: usize = LEN * Self::PTE_SIZE;
 
     pub fn empty() -> Self {
         Self {
@@ -57,7 +62,7 @@ impl<T: AtomicValue, const LEN: usize> AtomicTable<T, LEN> {
     }
 }
 
-impl<T: AtomicValue + fmt::Debug, const LEN: usize> fmt::Debug for AtomicTable<T, LEN> {
+impl<T: AtomicValue + fmt::Debug, const LEN: usize> fmt::Debug for ATable<T, LEN> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Table {{")?;
         for (i, entry) in self.entries.iter().enumerate() {
