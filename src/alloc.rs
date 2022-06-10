@@ -156,10 +156,12 @@ impl Local {
     pub fn pte(&self, huge: bool) -> &mut Entry3 {
         &mut self.p().pte[huge as usize]
     }
+    /// Add a chunk (subtree) id to the history of chunks.
     pub fn frees_push(&self, chunk: usize) {
         self.p().frees_i = (self.p().frees_i + 1) % self.p().frees.len();
         self.p().frees[self.p().frees_i] = chunk;
     }
+    /// Checks if the previous frees were in the given chunk.
     pub fn frees_related(&self, chunk: usize) -> bool {
         self.p().frees.iter().all(|p| *p == chunk)
     }
@@ -177,6 +179,7 @@ mod test {
     use log::{info, warn};
 
     use super::Error;
+    use super::Local;
     use crate::alloc::Alloc;
     use crate::alloc::MIN_PAGES;
     use crate::lower::*;
@@ -200,6 +203,27 @@ mod test {
             return MMap::dax(begin, length, f);
         }
         MMap::anon(begin, length)
+    }
+
+    /// Testing the related pages heuristic for frees
+    #[test]
+    fn related_pages() {
+        let local = Local::new();
+        let page1 = 43;
+        let i1 = page1 / (512 * 512);
+        assert!(!local.frees_related(i1));
+        local.frees_push(i1);
+        local.frees_push(i1);
+        local.frees_push(i1);
+        assert!(!local.frees_related(i1));
+        local.frees_push(i1);
+        assert!(local.frees_related(i1));
+        let page2 = 512 * 512 + 43;
+        let i2 = page2 / (512 * 512);
+        assert_ne!(i1, i2);
+        local.frees_push(i2);
+        assert!(!local.frees_related(i1));
+        assert!(!local.frees_related(i2));
     }
 
     #[test]
@@ -432,10 +456,7 @@ mod test {
         let huge = alloc.get(0, Size::L1).unwrap();
         let giant = alloc.get(0, Size::L2).unwrap();
 
-        assert_eq!(
-            alloc.dbg_allocated_pages(),
-            1 + PT_LEN + PT_LEN * PT_LEN
-        );
+        assert_eq!(alloc.dbg_allocated_pages(), 1 + PT_LEN + PT_LEN * PT_LEN);
         assert!(small != huge && small != giant && huge != giant);
 
         warn!("start stress test");

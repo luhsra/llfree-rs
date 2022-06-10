@@ -221,7 +221,7 @@ impl<L: LowerAlloc> Default for ArrayLockedAlloc<L> {
 
 impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
-    const PTE3_FULL: usize = 8 * Self::MAPPING.span(1);
+    const ALMOST_FULL: usize = 8 * Self::MAPPING.span(1);
 
     /// Setup a new allocator.
     #[cold]
@@ -244,7 +244,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
 
         if max == Self::MAPPING.span(2) {
             empty.push(pte3_num - 1);
-        } else if max > Self::PTE3_FULL {
+        } else if max > Self::ALMOST_FULL {
             self.partial_l0.lock().push(pte3_num - 1);
         }
     }
@@ -268,7 +268,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
                 // Add to lists
                 if pages == Self::MAPPING.span(2) {
                     self.empty.lock().push(i);
-                } else if pages > Self::PTE3_FULL {
+                } else if pages > Self::ALMOST_FULL {
                     self.partial(size == Size::L1).push(i);
                 }
             }
@@ -292,7 +292,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
         while let Some(i) = self.partial(huge).pop() {
             info!("reserve partial {i}");
             match self[i].update(|v| {
-                v.reserve_partial(huge, Self::PTE3_FULL, Self::MAPPING.span(2))
+                v.reserve_partial(huge, Self::ALMOST_FULL, Self::MAPPING.span(2))
                     .map(|v| v.with_idx(Entry3::IDX_MAX))
             }) {
                 Ok(pte) => {
@@ -348,7 +348,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
                 if new_pages == max {
                     let _ = self[i].update(|v| Some(v.with_idx(0)));
                     self.empty.lock().push(i);
-                } else if new_pages > Self::PTE3_FULL {
+                } else if new_pages > Self::ALMOST_FULL {
                     let _ = self[i].update(|v| Some(v.with_idx(0)));
                     self.partial(huge).push(i);
                 }
@@ -402,7 +402,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
         let size = if huge { Size::L1 } else { Size::L0 };
 
         let local = &self.local[core];
-        local.frees_push(page);
+        local.frees_push(i);
 
         // Try decrement own pte first
         let pte_a = local.pte(huge);
@@ -417,7 +417,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
                 let new_pages = pte.free() + Self::MAPPING.span(huge as _);
 
                 // check if recent frees also operated in this subtree
-                if new_pages > Self::PTE3_FULL && local.frees_related(page) {
+                if new_pages > Self::ALMOST_FULL && local.frees_related(i) {
                     // Try to reserve it for bulk frees
                     if let Ok(pte) = self[i]
                         .update(|v| v.reserve(Self::MAPPING.span(huge as _), Self::MAPPING.span(2)))
@@ -433,8 +433,8 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
                 // Add to partially free list
                 // Only if not already in list
                 if pte.idx() == Entry3::IDX_MAX
-                    && pte.free() <= Self::PTE3_FULL
-                    && new_pages > Self::PTE3_FULL
+                    && pte.free() <= Self::ALMOST_FULL
+                    && new_pages > Self::ALMOST_FULL
                 {
                     let _ = self[i].update(|v| Some(v.with_idx(0)));
                     self.partial(huge).push(i);

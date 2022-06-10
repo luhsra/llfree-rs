@@ -193,10 +193,10 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         let size = if huge { Size::L1 } else { Size::L0 };
 
         let local = &self.local[core];
-        local.frees_push(page);
 
         // Try updating local copy
         let idx = page / Self::MAPPING.span(2);
+        local.frees_push(idx);
         let pte_a = local.pte(huge);
         if let Some(pte) = pte_a.inc_idx(Self::MAPPING.span(huge as _), idx, max) {
             *pte_a = pte;
@@ -213,9 +213,9 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
             }
 
             // Reserve for bulk put
-            if new_pages > Self::PTE3_FULL && local.frees_related(page) {
+            if new_pages > Self::ALMOST_FULL && local.frees_related(idx) {
                 // Try reserve this subtree
-                match self.reserve_tree(huge, page, pte.free() > Self::PTE3_FULL) {
+                match self.reserve_tree(huge, page, pte.free() > Self::ALMOST_FULL) {
                     Ok(pte) => {
                         info!("put reserve {i}");
                         self.swap_reserved(huge, pte.with_idx(i), pte_a)?;
@@ -227,7 +227,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
                 }
             }
 
-            if pte.free() <= Self::PTE3_FULL && new_pages > Self::PTE3_FULL {
+            if pte.free() <= Self::ALMOST_FULL && new_pages > Self::ALMOST_FULL {
                 // Increment parents if exceeding treshold
                 self.update_parents(page, Change::p_inc(huge))?;
             }
@@ -283,7 +283,7 @@ impl<L: LowerAlloc> Default for TableAlloc<L> {
 
 impl<L: LowerAlloc> TableAlloc<L> {
     const MAPPING: Mapping<4> = Mapping([512; 2]).with_lower(&L::MAPPING);
-    const PTE3_FULL: usize = 8 * Self::MAPPING.span(1);
+    const ALMOST_FULL: usize = 8 * Self::MAPPING.span(1);
 
     fn allocated_pages_rec(&self, level: usize, start: usize) -> usize {
         let mut pages = 0;
@@ -339,7 +339,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
                 let max = (self.pages() - page).min(Self::MAPPING.span(level));
                 let empty = max / Self::MAPPING.span(2);
 
-                if max - empty * Self::MAPPING.span(2) > Self::PTE3_FULL {
+                if max - empty * Self::MAPPING.span(2) > Self::ALMOST_FULL {
                     pt.set(i, Entry::new().with_empty(empty).with_partial_l0(1));
                 } else {
                     pt.set(i, Entry::new().with_empty(empty));
@@ -403,7 +403,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
                 pt.set(i, Entry3::new_table(pages, size, false));
                 if pages == Self::MAPPING.span(2) {
                     empty += 1;
-                } else if pages > Self::PTE3_FULL {
+                } else if pages > Self::ALMOST_FULL {
                     if size == Size::L0 {
                         partial_l0 += 1;
                     } else {
@@ -467,7 +467,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
             Self::MAPPING.levels(),
             0,
             |v| v.dec_partial(huge),
-            |v| v.reserve_partial(huge, Self::PTE3_FULL, Self::MAPPING.span(2)),
+            |v| v.reserve_partial(huge, Self::ALMOST_FULL, Self::MAPPING.span(2)),
         ) {
             Ok(v) => v
                 .dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
@@ -561,7 +561,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
             let new_pages = old.free() + pte.free();
             if new_pages == Self::MAPPING.span(2) {
                 self.update_parents(start, Change::IncEmpty)
-            } else if new_pages > Self::PTE3_FULL {
+            } else if new_pages > Self::ALMOST_FULL {
                 self.update_parents(start, Change::p_inc(huge))
             } else {
                 Ok(())

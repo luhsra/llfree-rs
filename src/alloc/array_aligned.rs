@@ -217,7 +217,7 @@ impl<L: LowerAlloc> Default for ArrayAlignedAlloc<L> {
 
 impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
     const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
-    const PTE3_FULL: usize = 8 * Self::MAPPING.span(1);
+    const ALMOST_FULL: usize = 8 * Self::MAPPING.span(1);
 
     /// Setup a new allocator.
     #[cold]
@@ -238,7 +238,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
 
         if max == Self::MAPPING.span(2) {
             self.empty.push(self, pte3_num - 1);
-        } else if max > Self::PTE3_FULL {
+        } else if max > Self::ALMOST_FULL {
             self.partial_l0.push(self, pte3_num - 1);
         }
     }
@@ -262,7 +262,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
                 // Add to lists
                 if pages == Self::MAPPING.span(2) {
                     self.empty.push(self, i);
-                } else if pages > Self::PTE3_FULL {
+                } else if pages > Self::ALMOST_FULL {
                     self.partial(size == Size::L1).push(self, i);
                 }
             }
@@ -350,7 +350,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
         if let Ok(pte3) = self[i].update(|v| v.inc(Self::MAPPING.span(huge as _), max)) {
             if !pte3.reserved() {
                 let new_pages = pte3.free() + Self::MAPPING.span(huge as _);
-                if pte3.free() <= Self::PTE3_FULL && new_pages > Self::PTE3_FULL {
+                if pte3.free() <= Self::ALMOST_FULL && new_pages > Self::ALMOST_FULL {
                     // Add back to partial
                     self.partial(huge).push(self, i);
                 }

@@ -220,7 +220,7 @@ impl<L: LowerAlloc> Default for ArrayAtomicAlloc<L> {
 
 impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
-    const PTE3_FULL: usize = 8 * Self::MAPPING.span(1);
+    const ALMOST_FULL: usize = 8 * Self::MAPPING.span(1);
 
     /// Setup a new allocator.
     #[cold]
@@ -241,7 +241,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
 
         if max == Self::MAPPING.span(2) {
             self.empty.push(self, pte3_num - 1);
-        } else if max > Self::PTE3_FULL {
+        } else if max > Self::ALMOST_FULL {
             self.partial_l0.push(self, pte3_num - 1);
         }
     }
@@ -265,7 +265,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                 // Add to lists
                 if pages == Self::MAPPING.span(2) {
                     self.empty.push(self, i);
-                } else if pages > Self::PTE3_FULL {
+                } else if pages > Self::ALMOST_FULL {
                     self.partial(size == Size::L1).push(self, i);
                 }
             }
@@ -286,7 +286,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     /// and allocates a page from it in one step.
     fn reserve(&self, huge: bool) -> Result<(usize, Entry3)> {
         while let Some((i, r)) = self.partial(huge).pop_update(self, |v| {
-            v.reserve_partial(huge, Self::PTE3_FULL, Self::MAPPING.span(2))
+            v.reserve_partial(huge, Self::ALMOST_FULL, Self::MAPPING.span(2))
         }) {
             info!("reserve partial {i}");
             match r {
@@ -341,7 +341,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                 let new_pages = v.free() + pte.free();
                 if new_pages == max {
                     self.empty.push(self, i);
-                } else if new_pages > Self::PTE3_FULL {
+                } else if new_pages > Self::ALMOST_FULL {
                     self.partial(huge).push(self, i);
                 }
             }
@@ -394,9 +394,9 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         let size = if huge { Size::L1 } else { Size::L0 };
 
         let local = &self.local[core];
-        local.frees_push(page);
+        local.frees_push(i);
 
-        // Try decrement own pte first
+        // Try decrement own subtree first
         let pte_a = local.pte(huge);
         if let Some(pte) = pte_a.inc_idx(Self::MAPPING.span(huge as _), i, max) {
             *pte_a = pte;
@@ -409,7 +409,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                 let new_pages = pte.free() + Self::MAPPING.span(huge as _);
 
                 // check if recent frees also operated in this subtree
-                if new_pages > Self::PTE3_FULL && local.frees_related(page) {
+                if new_pages > Self::ALMOST_FULL && local.frees_related(i) {
                     // Try to reserve it for bulk frees
                     if let Ok(pte) = self[i]
                         .update(|v| v.reserve(Self::MAPPING.span(huge as _), Self::MAPPING.span(2)))
@@ -425,8 +425,8 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                 // Add to partially free list
                 // Only if not already in list
                 if pte.idx() == Entry3::IDX_MAX
-                    && pte.free() <= Self::PTE3_FULL
-                    && new_pages > Self::PTE3_FULL
+                    && pte.free() <= Self::ALMOST_FULL
+                    && new_pages > Self::ALMOST_FULL
                 {
                     self.partial(huge).push(self, i);
                 }
@@ -475,5 +475,17 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             self.empty.push(self, i);
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::lower::FixedLower;
+
+    use super::ArrayAtomicAlloc;
+
+    #[test]
+    fn correct_sizes() {
+        assert_eq!(ArrayAtomicAlloc::<FixedLower>::ALMOST_FULL, 8 * 512);
     }
 }
