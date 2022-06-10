@@ -487,6 +487,6 @@ mod test {
     #[test]
     fn correct_sizes() {
         assert_eq!(ArrayAtomicAlloc::<FixedLower>::ALMOST_FULL, 8 * 512);
-        assert_eq!(ArrayAtomicAlloc::<CacheLower>::ALMOST_FULL, 1 * 512);
+        assert_eq!(ArrayAtomicAlloc::<CacheLower>::ALMOST_FULL, 8 * 512);
     }
 }

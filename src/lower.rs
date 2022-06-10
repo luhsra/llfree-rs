@@ -67,13 +67,13 @@ mod test {
     use crate::thread;
     use crate::util::{logging, Page};
 
-    type Lower = super::fixed::FixedLower;
+    type Lower = super::cache::CacheLower;
 
     #[test]
     fn rand_realloc_first() {
         logging();
 
-        const THREADS: usize = 12;
+        const THREADS: usize = 6;
         let mut buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
         for _ in 0..32 {
@@ -107,7 +107,7 @@ mod test {
     fn rand_realloc_last() {
         logging();
 
-        const THREADS: usize = 12;
+        const THREADS: usize = 6;
         let mut pages = [0; PT_LEN];
         let mut buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
 

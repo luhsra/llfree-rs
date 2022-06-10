@@ -6,7 +6,7 @@ use log::{error, warn};
 use crate::alloc::{Error, Result, Size, CAS_RETRIES};
 use crate::entry::Entry2;
 use crate::table::{ATable, Bitfield, Mapping};
-use crate::util::{align_up, Page};
+use crate::util::{align_up, div_ceil, Page};
 
 use super::LowerAlloc;
 
@@ -27,12 +27,14 @@ impl LowerAlloc for PackedLower {
     const MAPPING: Mapping<2> = Mapping([Table1::LEN, Table2::LEN]);
 
     fn new(_cores: usize, memory: &mut [Page]) -> Self {
-        let n2_pages =
-            (Self::MAPPING.num_pts(2, memory.len()) * Bitfield::SIZE + Page::SIZE - 1) / Page::SIZE;
+        let s1 = Self::MAPPING.num_pts(1, memory.len()) * Table1::SIZE;
+        let s1 = align_up(s1, Table2::SIZE); // correct alignment
+        let s2 = Self::MAPPING.num_pts(2, memory.len()) * Table2::SIZE;
+        let pages = div_ceil(s1 + s2, Page::SIZE);
         Self {
             begin: memory.as_ptr() as usize,
             // level 1 and 2 tables are stored at the end of the NVM
-            pages: memory.len() - n2_pages - Self::MAPPING.num_pts(1, memory.len()),
+            pages: memory.len() - pages,
         }
     }
 
@@ -65,7 +67,7 @@ impl LowerAlloc for PackedLower {
             if i + 1 < Self::MAPPING.num_pts(1, self.pages) {
                 pt1.fill(false);
             } else {
-                for j in 0..Bitfield::LEN {
+                for j in 0..Table1::LEN {
                     let page = i * Self::MAPPING.span(1) + j;
                     pt1.set(j, page >= self.pages);
                 }
@@ -184,6 +186,9 @@ impl LowerAlloc for PackedLower {
 
 impl PackedLower {
     /// Returns the l1 page table that contains the `page`.
+    /// ```text
+    /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
+    /// ```
     fn pt1(&self, page: usize) -> &Table1 {
         let mut offset = self.begin + self.pages * Page::SIZE;
 
@@ -195,16 +200,16 @@ impl PackedLower {
 
     /// Returns the l2 page table that contains the `page`.
     /// ```text
-    /// NVRAM: [ Pages | PT1s | PT2s | Meta ]
+    /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
     /// ```
     fn pt2(&self, page: usize) -> &Table2 {
         let mut offset = self.begin + self.pages * Page::SIZE;
         offset += Self::MAPPING.num_pts(1, self.pages) * Table1::SIZE;
-        offset = align_up(offset, Page::SIZE); // page align
+        offset = align_up(offset, Table1::SIZE); // correct alignment
 
         let i = page / Self::MAPPING.span(2);
         debug_assert!(i < Self::MAPPING.num_pts(2, self.pages));
-        offset += i * Page::SIZE;
+        offset += i * Table2::SIZE;
         unsafe { &*(offset as *mut Table2) }
     }
 

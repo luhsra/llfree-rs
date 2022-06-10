@@ -283,7 +283,7 @@ mod test {
 
         // Stress test
 
-        const THREADS: usize = 8;
+        const THREADS: usize = 6;
         const I: usize = N / THREADS;
         let barrier = Arc::new(Barrier::new(THREADS));
         let stack = Arc::new(stack);

@@ -4,7 +4,7 @@ use core::ops::Range;
 use log::{error, warn};
 
 use crate::alloc::{Error, Result, Size, CAS_RETRIES};
-use crate::entry::SmallEntry2 as Entry2;
+use crate::entry::SmallEntry2;
 use crate::table::{ATable, Bitfield, Mapping};
 use crate::util::{align_up, div_ceil, Page};
 
@@ -21,7 +21,7 @@ pub struct CacheLower {
 }
 
 type Table1 = Bitfield;
-type Table2 = ATable<Entry2, 64>;
+type Table2 = ATable<SmallEntry2, 512>;
 
 impl LowerAlloc for CacheLower {
     const MAPPING: Mapping<2> = Mapping([Table1::LEN, Table2::LEN]);
@@ -51,12 +51,12 @@ impl LowerAlloc for CacheLower {
         for i in 0..Self::MAPPING.num_pts(2, self.pages) {
             let pt2 = self.pt2(i * Self::MAPPING.span(2));
             if i + 1 < Self::MAPPING.num_pts(2, self.pages) {
-                pt2.fill(Entry2::new().with_free(Self::MAPPING.span(1)));
+                pt2.fill(SmallEntry2::new().with_free(Self::MAPPING.span(1)));
             } else {
                 for j in 0..Self::MAPPING.len(2) {
                     let page = i * Self::MAPPING.span(2) + j * Self::MAPPING.span(1);
                     let max = Self::MAPPING.span(1).min(self.pages.saturating_sub(page));
-                    pt2.set(j, Entry2::new().with_free(max));
+                    pt2.set(j, SmallEntry2::new().with_free(max));
                 }
             }
         }
@@ -83,7 +83,7 @@ impl LowerAlloc for CacheLower {
         for i in 0..Self::MAPPING.len(2) {
             let start = Self::MAPPING.page(2, start, i);
             if start > self.pages {
-                pt.set(i, Entry2::new());
+                pt.set(i, SmallEntry2::new());
             }
 
             let pte = pt.get(i);
@@ -134,8 +134,8 @@ impl LowerAlloc for CacheLower {
         // try free huge
         if let Err(old) = pt2.cas(
             i2,
-            Entry2::new().with_page(true),
-            Entry2::new_table(Self::MAPPING.span(1)),
+            SmallEntry2::new().with_page(true),
+            SmallEntry2::new_table(Self::MAPPING.span(1)),
         ) {
             if !old.giant() && old.free() < Self::MAPPING.span(1) {
                 self.put_small(page).map(|_| false)
@@ -149,11 +149,11 @@ impl LowerAlloc for CacheLower {
     }
 
     fn set_giant(&self, page: usize) {
-        self.pt2(page).set(0, Entry2::new().with_giant(true));
+        self.pt2(page).set(0, SmallEntry2::new().with_giant(true));
     }
     fn clear_giant(&self, page: usize) {
         self.pt2(page)
-            .set(0, Entry2::new_table(Self::MAPPING.span(1)));
+            .set(0, SmallEntry2::new_table(Self::MAPPING.span(1)));
     }
 
     fn dbg_allocated_pages(&self) -> usize {
@@ -191,6 +191,7 @@ impl CacheLower {
     /// ```
     fn pt1(&self, page: usize) -> &Table1 {
         let mut offset = self.begin + self.pages * Page::SIZE;
+
         let i = page / Self::MAPPING.span(1);
         debug_assert!(i < Self::MAPPING.num_pts(1, self.pages));
         offset += i * Table1::SIZE;
