@@ -64,7 +64,7 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
             if i + 1 < Self::MAPPING.num_pts(1, self.pages) {
                 pt1.fill(false);
             } else {
-                for j in 0..ATable::<SmallEntry2, T2N>::LEN {
+                for j in 0..Self::MAPPING.len(1) {
                     let page = i * Self::MAPPING.span(1) + j;
                     pt1.set(j, page >= self.pages);
                 }
@@ -201,7 +201,7 @@ impl<const T2N: usize> CacheLower<T2N> {
     /// ```
     fn pt2(&self, page: usize) -> &ATable<SmallEntry2, T2N> {
         let mut offset = self.begin + self.pages * Page::SIZE;
-        offset += Self::MAPPING.num_pts(1, self.pages) * ATable::<SmallEntry2, T2N>::SIZE;
+        offset += Self::MAPPING.num_pts(1, self.pages) * Bitfield::SIZE;
         offset = align_up(offset, ATable::<SmallEntry2, T2N>::SIZE); // correct alignment
 
         let i = page / Self::MAPPING.span(2);
