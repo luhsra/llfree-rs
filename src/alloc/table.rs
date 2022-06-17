@@ -1,4 +1,3 @@
-//! Simple reduced non-volatile memory allocator.
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, mem};
@@ -10,6 +9,8 @@ use crate::entry::{Change, Entry, Entry3};
 use crate::lower::LowerAlloc;
 use crate::table::{ATable, Mapping};
 use crate::util::Page;
+
+const PUTS_RESERVE: usize = 4;
 
 /// Non-Volatile global metadata
 struct Meta {
@@ -41,7 +42,7 @@ pub struct TableAlloc<L: LowerAlloc> {
     /// ```
     tables: Box<[Page]>,
     /// CPU local data
-    local: Box<[Local]>,
+    local: Box<[Local<PUTS_RESERVE>]>,
     /// Metadata of the lower alloc
     lower: L,
 }
@@ -196,7 +197,8 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
 
         // Try updating local copy
         let idx = page / Self::MAPPING.span(2);
-        local.frees_push(idx);
+        let _push = local.frees_push_on_drop(idx);
+
         let pte_a = local.pte(huge);
         if let Some(pte) = pte_a.inc_idx(Self::MAPPING.span(huge as _), idx, max) {
             *pte_a = pte;

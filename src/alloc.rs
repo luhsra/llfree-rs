@@ -85,14 +85,19 @@ pub fn name<A: Alloc + ?Sized>() -> String {
     // Add first letter of generic type as suffix
     let (name, suffix) = if let Some((prefix, suffix)) = name.split_once('<') {
         let suffix = suffix.rsplit_once(':').map_or(suffix, |s| s.1);
-        (prefix, &suffix[0..1])
+        (prefix, suffix)
     } else {
         (name, "")
     };
+    let size = suffix
+        .split_once('<')
+        .map(|(_, s)| s.split_once('>').map_or(s, |s| s.0))
+        .unwrap_or_default();
+
     // Strip namespaces
     let name = name.rsplit_once(':').map_or(name, |s| s.1);
     let name = name.strip_suffix("Alloc").unwrap_or(name);
-    format!("{name}{suffix}")
+    format!("{name}{}{size}", &suffix[0..1])
 }
 
 /// Allocates a new page and writes the value after translation into `dst`.
@@ -120,19 +125,19 @@ pub fn get_cas<F: FnOnce(u64) -> u64>(
 /// # Safety
 /// This should only be accessed from the corresponding (virtual) CPU core!
 #[repr(transparent)]
-pub struct Local(UnsafeCell<Inner>);
+pub struct Local<const L: usize>(UnsafeCell<Inner<L>>);
 #[repr(align(64))]
-struct Inner {
+struct Inner<const L: usize> {
     start: [usize; 2],
     pte: [Entry3; 2],
-    frees: [usize; 4],
+    frees: [usize; L],
     frees_i: usize,
 }
 
-unsafe impl Send for Local {}
-unsafe impl Sync for Local {}
+unsafe impl<const L: usize> Send for Local<L> {}
+unsafe impl<const L: usize> Sync for Local<L> {}
 
-impl Local {
+impl<const L: usize> Local<L> {
     fn new() -> Self {
         Self(UnsafeCell::new(Inner {
             start: [usize::MAX, usize::MAX],
@@ -141,11 +146,11 @@ impl Local {
                 Entry3::new().with_idx(Entry3::IDX_MAX),
             ],
             frees_i: 0,
-            frees: [usize::MAX; 4],
+            frees: [usize::MAX; L],
         }))
     }
     #[allow(clippy::mut_from_ref)]
-    fn p(&self) -> &mut Inner {
+    fn p(&self) -> &mut Inner<L> {
         unsafe { &mut *self.0.get() }
     }
     #[allow(clippy::mut_from_ref)]
@@ -161,9 +166,20 @@ impl Local {
         self.p().frees_i = (self.p().frees_i + 1) % self.p().frees.len();
         self.p().frees[self.p().frees_i] = chunk;
     }
+    /// Calls frees_push on exiting scope. WARN: bin the return value to a variable!
+    pub fn frees_push_on_drop<'a>(&'a self, chunk: usize) -> LocalFreePush<'a, L> {
+        LocalFreePush(self, chunk)
+    }
     /// Checks if the previous frees were in the given chunk.
     pub fn frees_related(&self, chunk: usize) -> bool {
         self.p().frees.iter().all(|p| *p == chunk)
+    }
+}
+
+pub struct LocalFreePush<'a, const L: usize>(&'a Local<L>, usize);
+impl<'a, const L: usize> Drop for LocalFreePush<'a, L> {
+    fn drop(&mut self) {
+        self.0.frees_push(self.1);
     }
 }
 
@@ -189,7 +205,7 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
-    type Allocator = super::ArrayAtomicAlloc<CacheLower>;
+    type Allocator = super::TableAlloc<CacheLower<512>>;
 
     fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -208,7 +224,7 @@ mod test {
     /// Testing the related pages heuristic for frees
     #[test]
     fn related_pages() {
-        let local = Local::new();
+        let local = Local::<4>::new();
         let page1 = 43;
         let i1 = page1 / (512 * 512);
         assert!(!local.frees_related(i1));
@@ -224,6 +240,15 @@ mod test {
         local.frees_push(i2);
         assert!(!local.frees_related(i1));
         assert!(!local.frees_related(i2));
+
+        {
+            let _push1 = local.frees_push_on_drop(i1);
+            local.frees_push(i1);
+            local.frees_push(i1);
+            let _push2 = local.frees_push_on_drop(i1);
+            assert!(!local.frees_related(i1));
+        };
+        assert!(local.frees_related(i1));
     }
 
     #[test]

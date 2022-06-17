@@ -15,21 +15,18 @@ use super::LowerAlloc;
 /// NVRAM: [ Pages | PT1s + padding | PT2s | Meta ]
 /// ```
 #[derive(Default, Debug)]
-pub struct CacheLower {
+pub struct CacheLower<const T2N: usize> {
     pub begin: usize,
     pub pages: usize,
 }
 
-type Table1 = Bitfield;
-type Table2 = ATable<SmallEntry2, 512>;
-
-impl LowerAlloc for CacheLower {
-    const MAPPING: Mapping<2> = Mapping([Table1::LEN, Table2::LEN]);
+impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
+    const MAPPING: Mapping<2> = Mapping([Bitfield::LEN, ATable::<SmallEntry2, T2N>::LEN]);
 
     fn new(_cores: usize, memory: &mut [Page]) -> Self {
-        let s1 = Self::MAPPING.num_pts(1, memory.len()) * Table1::SIZE;
-        let s1 = align_up(s1, Table2::SIZE); // correct alignment
-        let s2 = Self::MAPPING.num_pts(2, memory.len()) * Table2::SIZE;
+        let s1 = Self::MAPPING.num_pts(1, memory.len()) * Bitfield::SIZE;
+        let s1 = align_up(s1, ATable::<SmallEntry2, T2N>::SIZE); // correct alignment
+        let s2 = Self::MAPPING.num_pts(2, memory.len()) * ATable::<SmallEntry2, T2N>::SIZE;
         let pages = div_ceil(s1 + s2, Page::SIZE);
         Self {
             begin: memory.as_ptr() as usize,
@@ -67,7 +64,7 @@ impl LowerAlloc for CacheLower {
             if i + 1 < Self::MAPPING.num_pts(1, self.pages) {
                 pt1.fill(false);
             } else {
-                for j in 0..Table1::LEN {
+                for j in 0..ATable::<SmallEntry2, T2N>::LEN {
                     let page = i * Self::MAPPING.span(1) + j;
                     pt1.set(j, page >= self.pages);
                 }
@@ -184,33 +181,33 @@ impl LowerAlloc for CacheLower {
     }
 }
 
-impl CacheLower {
+impl<const T2N: usize> CacheLower<T2N> {
     /// Returns the l1 page table that contains the `page`.
     /// ```text
     /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
     /// ```
-    fn pt1(&self, page: usize) -> &Table1 {
+    fn pt1(&self, page: usize) -> &Bitfield {
         let mut offset = self.begin + self.pages * Page::SIZE;
 
         let i = page / Self::MAPPING.span(1);
         debug_assert!(i < Self::MAPPING.num_pts(1, self.pages));
-        offset += i * Table1::SIZE;
-        unsafe { &*(offset as *const Table1) }
+        offset += i * Bitfield::SIZE;
+        unsafe { &*(offset as *const Bitfield) }
     }
 
     /// Returns the l2 page table that contains the `page`.
     /// ```text
     /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
     /// ```
-    fn pt2(&self, page: usize) -> &Table2 {
+    fn pt2(&self, page: usize) -> &ATable<SmallEntry2, T2N> {
         let mut offset = self.begin + self.pages * Page::SIZE;
-        offset += Self::MAPPING.num_pts(1, self.pages) * Table1::SIZE;
-        offset = align_up(offset, Table1::SIZE); // correct alignment
+        offset += Self::MAPPING.num_pts(1, self.pages) * ATable::<SmallEntry2, T2N>::SIZE;
+        offset = align_up(offset, ATable::<SmallEntry2, T2N>::SIZE); // correct alignment
 
         let i = page / Self::MAPPING.span(2);
         debug_assert!(i < Self::MAPPING.num_pts(2, self.pages));
-        offset += i * Table2::SIZE;
-        unsafe { &*(offset as *mut Table2) }
+        offset += i * ATable::<SmallEntry2, T2N>::SIZE;
+        unsafe { &*(offset as *mut ATable<SmallEntry2, T2N>) }
     }
 
     fn recover_l1(&self, start: usize) -> usize {
@@ -312,18 +309,19 @@ mod test {
 
     use log::warn;
 
-    use super::{CacheLower, Table1};
+    use super::CacheLower;
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
-    use crate::table::Mapping;
+    use crate::table::{Bitfield, Mapping};
     use crate::thread;
     use crate::util::{logging, Page};
 
-    const MAPPING: Mapping<2> = CacheLower::MAPPING;
+    const T2N: usize = 512;
+    const MAPPING: Mapping<2> = CacheLower::<T2N>::MAPPING;
 
-    fn count(pt: &Table1) -> usize {
+    fn count(pt: &Bitfield) -> usize {
         let mut pages = 0;
-        for i in 0..Table1::LEN {
+        for i in 0..Bitfield::LEN {
             pages += !pt.get(i) as usize;
         }
         pages
@@ -345,7 +343,7 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::new(2, &mut buffer));
+            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
             lower.get(0, false, 0).unwrap();
 
@@ -381,7 +379,7 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::new(2, &mut buffer));
+            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
             let stop = StopVec::new(2, order);
@@ -414,7 +412,7 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::new(2, &mut buffer));
+            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
             for _ in 0..MAPPING.span(1) - 1 {
@@ -452,7 +450,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(CacheLower::new(2, &mut buffer));
+            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
             pages[0] = lower.get(0, false, 0).unwrap();
@@ -488,7 +486,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(CacheLower::new(2, &mut buffer));
+            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
             for page in &mut pages {
@@ -529,7 +527,7 @@ mod test {
 
         for order in orders {
             warn!("order: {:?}", order);
-            let lower = Arc::new(CacheLower::new(2, &mut buffer));
+            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
             for page in &mut pages[..MAPPING.span(1) - 1] {

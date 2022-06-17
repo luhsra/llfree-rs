@@ -13,6 +13,8 @@ use crate::lower::LowerAlloc;
 use crate::table::Mapping;
 use crate::util::Page;
 
+const PUTS_RESERVE: usize = 4;
+
 /// Non-Volatile global metadata
 struct Meta {
     magic: AtomicUsize,
@@ -44,7 +46,7 @@ pub struct ArrayLockedAlloc<L: LowerAlloc> {
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Box<[Atomic<Entry3>]>,
     /// CPU local data
-    local: Box<[Local]>,
+    local: Box<[Local<PUTS_RESERVE>]>,
     /// Metadata of the lower alloc
     lower: L,
 
@@ -402,7 +404,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
         let size = if huge { Size::L1 } else { Size::L0 };
 
         let local = &self.local[core];
-        local.frees_push(i);
+        let _push = local.frees_push_on_drop(i);
 
         // Try decrement own pte first
         let pte_a = local.pte(huge);

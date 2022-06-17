@@ -12,6 +12,8 @@ use crate::lower::LowerAlloc;
 use crate::table::Mapping;
 use crate::util::Page;
 
+const PUTS_RESERVE: usize = 4;
+
 /// Non-Volatile global metadata
 struct Meta {
     magic: AtomicUsize,
@@ -43,7 +45,7 @@ pub struct ArrayAlignedAlloc<L: LowerAlloc> {
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Box<[Aligned]>,
     /// CPU local data
-    local: Box<[Local]>,
+    local: Box<[Local<PUTS_RESERVE>]>,
     /// Metadata of the lower alloc
     lower: L,
 

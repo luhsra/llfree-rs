@@ -88,27 +88,30 @@ fn main() {
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
     type F = FixedLower;
-    type D = DynamicLower;
     type P = PackedLower;
-    type C = CacheLower;
-    let allocs: [Arc<dyn Alloc>; 19] = [
+    type C512 = CacheLower<512>;
+    type C256 = CacheLower<256>;
+    type C64 = CacheLower<64>;
+    let allocs: [Arc<dyn Alloc>; 21] = [
         Arc::new(ArrayAlignedAlloc::<F>::default()),
         Arc::new(ArrayUnalignedAlloc::<F>::default()),
         Arc::new(ArrayLockedAlloc::<F>::default()),
         Arc::new(ArrayAtomicAlloc::<F>::default()),
         Arc::new(TableAlloc::<F>::default()),
-        Arc::new(ArrayAlignedAlloc::<D>::default()),
-        Arc::new(ArrayUnalignedAlloc::<D>::default()),
-        Arc::new(ArrayLockedAlloc::<D>::default()),
-        Arc::new(ArrayAtomicAlloc::<D>::default()),
-        Arc::new(TableAlloc::<D>::default()),
         Arc::new(ArrayAlignedAlloc::<P>::default()),
         Arc::new(ArrayUnalignedAlloc::<P>::default()),
         Arc::new(ArrayLockedAlloc::<P>::default()),
         Arc::new(ArrayAtomicAlloc::<P>::default()),
         Arc::new(TableAlloc::<P>::default()),
-        Arc::new(ArrayAlignedAlloc::<C>::default()),
-        Arc::new(ArrayAtomicAlloc::<C>::default()),
+        Arc::new(ArrayAlignedAlloc::<C512>::default()),
+        Arc::new(ArrayAtomicAlloc::<C512>::default()),
+        Arc::new(TableAlloc::<C512>::default()),
+        Arc::new(ArrayAlignedAlloc::<C256>::default()),
+        Arc::new(ArrayAtomicAlloc::<C256>::default()),
+        Arc::new(TableAlloc::<C256>::default()),
+        Arc::new(ArrayAlignedAlloc::<C64>::default()),
+        Arc::new(ArrayAtomicAlloc::<C64>::default()),
+        Arc::new(TableAlloc::<C64>::default()),
         Arc::new(ListLocalAlloc::default()),
         Arc::new(ListLockedAlloc::default()),
     ];

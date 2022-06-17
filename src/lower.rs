@@ -67,7 +67,7 @@ mod test {
     use crate::thread;
     use crate::util::{logging, Page};
 
-    type Lower = super::cache::CacheLower;
+    type Lower = super::cache::CacheLower<512>;
 
     #[test]
     fn rand_realloc_first() {

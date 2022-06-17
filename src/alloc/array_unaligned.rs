@@ -3,7 +3,7 @@ use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use log::{error, warn, info};
+use log::{error, info, warn};
 
 use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
 use crate::atomic::{AStack, AStackDbg, Atomic};
@@ -12,6 +12,7 @@ use crate::lower::LowerAlloc;
 use crate::table::Mapping;
 use crate::util::Page;
 
+const PUTS_RESERVE: usize = 4;
 
 /// Non-Volatile global metadata
 struct Meta {
@@ -31,7 +32,7 @@ pub struct ArrayUnalignedAlloc<L: LowerAlloc> {
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Box<[Aligned]>,
     /// CPU local data
-    local: Box<[Local]>,
+    local: Box<[Local<PUTS_RESERVE>]>,
     /// Metadata of the lower alloc
     lower: L,
 
@@ -220,7 +221,8 @@ impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
         }
 
         // The last one may be cut off
-        let max = (self.pages() - (pte3_num - 1) * Self::MAPPING.span(2)).min(Self::MAPPING.span(2));
+        let max =
+            (self.pages() - (pte3_num - 1) * Self::MAPPING.span(2)).min(Self::MAPPING.span(2));
         self[pte3_num - 1].store(Entry3::new().with_free(max));
 
         if max == Self::MAPPING.span(2) {
@@ -284,7 +286,9 @@ impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
             self.empty.push(self, i);
         }
 
-        if let Some((i, r)) = self.empty.pop_update(self, |v| v.dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))) {
+        if let Some((i, r)) = self.empty.pop_update(self, |v| {
+            v.dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
+        }) {
             debug_assert!(r.is_ok());
             info!("reserve empty {i}");
             Ok(i * Self::MAPPING.span(2))
@@ -303,7 +307,10 @@ impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
             start = self.reserve(huge)?;
         } else {
             let i = start / Self::MAPPING.span(2);
-            if self[i].update(|v| v.dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))).is_err() {
+            if self[i]
+                .update(|v| v.dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2)))
+                .is_err()
+            {
                 start = self.reserve(huge)?;
                 if self[i].update(Entry3::unreserve).is_err() {
                     panic!("Unreserve failed");
@@ -370,9 +377,10 @@ impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
             return Err(Error::Address);
         }
 
-        if let Err(pte) =
-            self[i].compare_exchange(Entry3::new_giant(), Entry3::new().with_free(Self::MAPPING.span(2)))
-        {
+        if let Err(pte) = self[i].compare_exchange(
+            Entry3::new_giant(),
+            Entry3::new().with_free(Self::MAPPING.span(2)),
+        ) {
             error!("Not allocated i{i} {pte:?}");
             Err(Error::Address)
         } else {
