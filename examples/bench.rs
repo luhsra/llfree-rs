@@ -15,7 +15,7 @@ use nvalloc::alloc::{
     self, Alloc, ArrayAlignedAlloc, ArrayAtomicAlloc, ArrayLockedAlloc, ArrayUnalignedAlloc,
     ListLocalAlloc, ListLockedAlloc, Size, TableAlloc, MIN_PAGES,
 };
-use nvalloc::lower::{DynamicLower, FixedLower, PackedLower, CacheLower};
+use nvalloc::lower::{FixedLower, PackedLower, CacheLower};
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::util::{black_box, Page, WyRand};

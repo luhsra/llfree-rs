@@ -83,21 +83,21 @@ pub trait Alloc: Sync + Send + fmt::Debug {
 pub fn name<A: Alloc + ?Sized>() -> String {
     let name = type_name::<A>();
     // Add first letter of generic type as suffix
-    let (name, suffix) = if let Some((prefix, suffix)) = name.split_once('<') {
+    let (name, suffix, size) = if let Some((prefix, suffix)) = name.split_once('<') {
         let suffix = suffix.rsplit_once(':').map_or(suffix, |s| s.1);
-        (prefix, suffix)
+        let size = suffix
+            .split_once('<')
+            .map(|(_, s)| s.split_once('>').map_or(s, |s| s.0))
+            .unwrap_or_default();
+        (prefix, &suffix[0..1], size)
     } else {
-        (name, "")
+        (name, "", "")
     };
-    let size = suffix
-        .split_once('<')
-        .map(|(_, s)| s.split_once('>').map_or(s, |s| s.0))
-        .unwrap_or_default();
 
     // Strip namespaces
     let name = name.rsplit_once(':').map_or(name, |s| s.1);
     let name = name.strip_suffix("Alloc").unwrap_or(name);
-    format!("{name}{}{size}", &suffix[0..1])
+    format!("{name}{suffix}{size}")
 }
 
 /// Allocates a new page and writes the value after translation into `dst`.
