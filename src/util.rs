@@ -1,4 +1,5 @@
 use core::fmt::Debug;
+use core::mem::transmute;
 use core::mem::{align_of, size_of};
 use core::ops::Range;
 
@@ -20,11 +21,11 @@ impl Page {
     }
     pub fn cast<T>(&self) -> &T {
         debug_assert!(size_of::<T>() <= size_of::<Self>());
-        unsafe { std::mem::transmute(self) }
+        unsafe { transmute(self) }
     }
     pub fn cast_mut<T>(&mut self) -> &mut T {
         debug_assert!(size_of::<T>() <= size_of::<Self>());
-        unsafe { std::mem::transmute(self) }
+        unsafe { transmute(self) }
     }
 }
 
@@ -45,11 +46,11 @@ impl CacheLine {
     }
     pub fn cast<T>(&self) -> &T {
         debug_assert!(size_of::<T>() <= size_of::<Self>());
-        unsafe { std::mem::transmute(self) }
+        unsafe { transmute(self) }
     }
     pub fn cast_mut<T>(&mut self) -> &mut T {
         debug_assert!(size_of::<T>() <= size_of::<Self>());
-        unsafe { std::mem::transmute(self) }
+        unsafe { transmute(self) }
     }
 }
 
@@ -104,7 +105,7 @@ pub fn logging() {
                 "{}[{:5} {:02?}@{:02?} {}:{}] {}\x1b[0m",
                 color,
                 record.level(),
-                unsafe { std::mem::transmute::<ThreadId, u64>(std::thread::current().id()) },
+                unsafe { transmute::<ThreadId, u64>(std::thread::current().id()) },
                 core(),
                 record.file().unwrap_or_default(),
                 record.line().unwrap_or_default(),

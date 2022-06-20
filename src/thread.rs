@@ -26,11 +26,9 @@ pub fn pin(core: usize) {
 pub fn pin(core: usize) {
     #![allow(non_camel_case_types)]
 
-    use std::{
-        mem,
-        os::raw::{c_int, c_uint},
-        sync::atomic::Ordering,
-    };
+    use core::mem;
+    use core::sync::atomic::Ordering;
+    use std::os::raw::{c_int, c_uint};
 
     type kern_return_t = c_int;
     type thread_t = c_uint;
@@ -93,7 +91,7 @@ pub fn parallel<T: Send + 'static, F: FnOnce(usize) -> T + Clone + Send + 'stati
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::Ordering;
+    use core::sync::atomic::Ordering;
 
     #[test]
     fn pinning() {

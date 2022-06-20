@@ -45,7 +45,7 @@ pub fn uninit() {
 /// If `overwrite` is nonzero no existing allocator state is recovered.
 #[no_mangle]
 pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwrite: u32) -> i64 {
-    let memory = unsafe { std::slice::from_raw_parts_mut(addr.cast(), pages as _) };
+    let memory = unsafe { core::slice::from_raw_parts_mut(addr.cast(), pages as _) };
     match init(cores as _, memory, overwrite != 0) {
         Ok(_) => 0,
         Err(e) => -(e as usize as i64),
@@ -110,7 +110,7 @@ pub extern "C" fn nvalloc_put(core: u32, addr: u64) -> i64 {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicU64, Ordering};
 
     use log::info;
 
