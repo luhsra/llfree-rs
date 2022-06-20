@@ -54,7 +54,7 @@ impl CacheLine {
     }
 }
 
-/// Computes the logarithm dualis of `v` rounded down.
+/// Computes the binary logarithm of `v` rounded down.
 pub const fn log2(v: usize) -> usize {
     (usize::BITS - v.leading_zeros() - 1) as usize
 }

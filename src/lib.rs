@@ -21,8 +21,8 @@ use core::sync::atomic::AtomicU64;
 use alloc::{Alloc, Error, Size};
 use util::Page;
 
-pub type Allocator = alloc::ArrayAtomicAlloc<lower::DynamicLower>;
-static mut ALLOC: Option<Box<dyn Alloc>> = None;
+pub type Allocator = alloc::ArrayAtomicAlloc<lower::PackedLower>;
+static mut ALLOC: Option<Box<Allocator>> = None;
 
 pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> alloc::Result<()> {
     let mut alloc = Allocator::default();
