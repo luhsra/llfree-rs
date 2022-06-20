@@ -129,10 +129,6 @@ impl Alloc for ListLockedAlloc {
             .map(|c| c.counter.load(Ordering::SeqCst))
             .sum()
     }
-
-    fn span(&self, _size: Size) -> usize {
-        1
-    }
 }
 
 struct Node(*mut Node);

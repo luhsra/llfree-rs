@@ -64,7 +64,6 @@ pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
     let size = match size {
         0 => Size::L0,
         1 => Size::L1,
-        2 => Size::L2,
         _ => return -(Error::Memory as usize as i64),
     };
 
@@ -87,7 +86,6 @@ pub extern "C" fn nvalloc_get_cas(
     let size = match size {
         0 => Size::L0,
         1 => Size::L1,
-        2 => Size::L2,
         _ => return -(Error::Memory as usize as i64),
     };
 

@@ -104,14 +104,12 @@ pub struct Entry3 {
     #[bits(20)]
     pub free: usize,
     /// Metadata for the higher level allocators.
-    #[bits(41)]
+    #[bits(42)]
     pub idx: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
     /// If this subtree contains allocated huge pages.
     pub huge: bool,
-    /// If this subtree is allocated as giant page.
-    pub page: bool,
 }
 
 impl Default for Entry3 {
@@ -126,11 +124,7 @@ impl AtomicValue for Entry3 {
 
 impl Entry3 {
     pub const IDX_MAX: usize = (1 << 41) - 1;
-    /// Creates a new entry where this is allocated as a single giant page.
-    #[inline]
-    pub fn new_giant() -> Entry3 {
-        Entry3::new().with_page(true).with_idx(Self::IDX_MAX)
-    }
+
     #[inline]
     pub fn empty(span: usize) -> Entry3 {
         Entry3::new().with_free(span)
@@ -147,7 +141,8 @@ impl Entry3 {
     #[inline]
     pub fn dec(self, page_span: usize, span: usize) -> Option<Entry3> {
         let huge = page_span > 1;
-        if !self.page() && (self.huge() == huge || self.free() == span) && self.free() >= page_span {
+        if (self.huge() == huge || self.free() == span) && self.free() >= page_span
+        {
             Some(
                 self.with_free(self.free() - page_span)
                     .with_huge(huge)
@@ -161,7 +156,7 @@ impl Entry3 {
     #[inline]
     pub fn inc(self, page_span: usize, max: usize) -> Option<Entry3> {
         let huge = page_span > 1;
-        if self.page() || self.huge() != huge {
+        if self.huge() != huge {
             return None;
         }
         let pages = self.free() + page_span;
@@ -175,7 +170,7 @@ impl Entry3 {
     #[inline]
     pub fn inc_idx(self, page_span: usize, idx: usize, max: usize) -> Option<Entry3> {
         let huge = page_span > 1;
-        if self.page() || self.huge() != huge || self.idx() != idx {
+        if self.huge() != huge || self.idx() != idx {
             return None;
         }
         let pages = self.free() + page_span;
@@ -189,8 +184,7 @@ impl Entry3 {
     #[inline]
     pub fn reserve(self, page_span: usize, span: usize) -> Option<Entry3> {
         let huge = page_span > 1;
-        if !self.page()
-            && !self.reserved()
+        if !self.reserved()
             && (self.free() >= span || self.huge() == huge)
             && self.free() >= page_span
         {
@@ -202,8 +196,7 @@ impl Entry3 {
     /// Reserves this entry if it is partially filled.
     #[inline]
     pub fn reserve_partial(self, huge: bool, min: usize, span: usize) -> Option<Entry3> {
-        if !self.page()
-            && !self.reserved()
+        if !self.reserved()
             && self.free() > min
             && self.free() < span
             && self.huge() == huge
@@ -216,7 +209,7 @@ impl Entry3 {
     /// Reserves this entry if it is completely empty.
     #[inline]
     pub fn reserve_empty(self, huge: bool, span: usize) -> Option<Entry3> {
-        if !self.page() && !self.reserved() && self.free() == span {
+        if !self.reserved() && self.free() == span {
             Some(self.with_huge(huge).with_reserved(true).with_free(0))
         } else {
             None
@@ -225,7 +218,7 @@ impl Entry3 {
     /// Clears the reserve flag of this entry.
     #[inline]
     pub fn unreserve(self) -> Option<Entry3> {
-        if !self.page() && self.reserved() {
+        if self.reserved() {
             Some(self.with_reserved(false))
         } else {
             None
@@ -242,8 +235,7 @@ impl Entry3 {
         span: usize,
     ) -> Option<Entry3> {
         let pages = self.free() + other.free();
-        if !self.page()
-            && self.reserved()
+        if self.reserved()
             && pages <= max
             && (self.huge() == huge || self.free() == span)
             && (other.huge() == huge || other.free() == span)
@@ -267,7 +259,6 @@ impl fmt::Debug for Entry3 {
             .field("idx", &self.idx())
             .field("reserved", &self.reserved())
             .field("huge", &self.huge())
-            .field("page", &self.page())
             .finish()
     }
 }
@@ -275,15 +266,11 @@ impl fmt::Debug for Entry3 {
 #[bitfield(u64)]
 pub struct Entry2 {
     /// Number of free pages.
-    #[bits(10)]
+    #[bits(54)]
     pub free: usize,
     /// Index of the level one page table.
     #[bits(9)]
     pub i1: usize,
-    #[bits(43)]
-    _p: u64,
-    /// If the whole page table area is allocated as giant page.
-    pub giant: bool,
     /// If this is allocated as large page.
     pub page: bool,
 }
@@ -300,7 +287,7 @@ impl Entry2 {
     }
     #[inline]
     pub fn mark_huge(self, span: usize) -> Option<Self> {
-        if !self.giant() && !self.page() && self.free() == span {
+        if !self.page() && self.free() == span {
             Some(Entry2::new().with_page(true))
         } else {
             None
@@ -309,7 +296,7 @@ impl Entry2 {
     /// Decrement the free pages counter.
     #[inline]
     pub fn dec(self, i1: usize) -> Option<Self> {
-        if !self.page() && !self.giant() && self.i1() == i1 && self.free() > 0 {
+        if !self.page() && self.i1() == i1 && self.free() > 0 {
             Some(self.with_free(self.free() - 1))
         } else {
             None
@@ -318,8 +305,7 @@ impl Entry2 {
     /// Increments the free pages counter.
     #[inline]
     pub fn inc_partial(self, i1: usize, span: usize) -> Option<Self> {
-        if !self.giant()
-            && !self.page()
+        if !self.page()
             && i1 == self.i1()
             && self.free() > 0 // is the child pt already initialized?
             && self.free() < span
@@ -332,7 +318,7 @@ impl Entry2 {
     /// Increments the free pages counter.
     #[inline]
     pub fn inc(self, span: usize) -> Option<Self> {
-        if !self.giant() && !self.page() && self.free() < span {
+        if !self.page() && self.free() < span {
             Some(self.with_free(self.free() + 1))
         } else {
             None
@@ -346,8 +332,6 @@ impl fmt::Debug for Entry2 {
             .field("free", &self.free())
             .field("i1", &self.i1())
             .field("page", &self.page())
-            .field("giant", &self.giant())
-            .field("page", &self.page())
             .finish()
     }
 }
@@ -355,12 +339,8 @@ impl fmt::Debug for Entry2 {
 #[bitfield(u16)]
 pub struct SmallEntry2 {
     /// Number of free pages.
-    #[bits(10)]
+    #[bits(15)]
     pub free: usize,
-    #[bits(4)]
-    _p: u16,
-    /// If the whole page table area is allocated as giant page.
-    pub giant: bool,
     /// If this is allocated as large page.
     pub page: bool,
 }
@@ -377,7 +357,7 @@ impl SmallEntry2 {
     }
     #[inline]
     pub fn mark_huge(self, span: usize) -> Option<Self> {
-        if !self.giant() && !self.page() && self.free() == span {
+        if !self.page() && self.free() == span {
             Some(Self::new().with_page(true))
         } else {
             None
@@ -386,7 +366,7 @@ impl SmallEntry2 {
     /// Decrement the free pages counter.
     #[inline]
     pub fn dec(self) -> Option<Self> {
-        if !self.page() && !self.giant() && self.free() > 0 {
+        if !self.page() && self.free() > 0 {
             Some(self.with_free(self.free() - 1))
         } else {
             None
@@ -395,8 +375,7 @@ impl SmallEntry2 {
     /// Increments the free pages counter.
     #[inline]
     pub fn inc_partial(self, span: usize) -> Option<Self> {
-        if !self.giant()
-            && !self.page()
+        if !self.page()
             && self.free() > 0 // is the child pt already initialized?
             && self.free() < span
         {
@@ -408,7 +387,7 @@ impl SmallEntry2 {
     /// Increments the free pages counter.
     #[inline]
     pub fn inc(self, span: usize) -> Option<Self> {
-        if !self.giant() && !self.page() && self.free() < span {
+        if !self.page() && self.free() < span {
             Some(self.with_free(self.free() + 1))
         } else {
             None
@@ -420,8 +399,6 @@ impl fmt::Debug for SmallEntry2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry2")
             .field("free", &self.free())
-            .field("page", &self.page())
-            .field("giant", &self.giant())
             .field("page", &self.page())
             .finish()
     }

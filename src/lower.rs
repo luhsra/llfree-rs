@@ -46,12 +46,7 @@ pub trait LowerAlloc: Default + fmt::Debug {
     /// Try freeing a page. Returns if it was huge.
     fn put(&self, page: usize) -> Result<bool>;
 
-    /// Mark the page as giant allocation.
-    fn set_giant(&self, page: usize);
-    /// Unmark the page, clearing any affected page tables.
-    fn clear_giant(&self, page: usize);
-
-    /// Debug function, returning the number of free pages and performing internal checks.
+    /// Debug function, returning the number of allocated pages and performing internal checks.
     fn dbg_allocated_pages(&self) -> usize;
 }
 

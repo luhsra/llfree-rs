@@ -137,11 +137,8 @@ impl<L: LowerAlloc> Alloc for ArrayUnalignedAlloc<L> {
 
     #[inline(never)]
     fn get(&self, core: usize, size: Size) -> Result<u64> {
-        match size {
-            Size::L2 => self.get_giant(),
-            _ => self.get_lower(core, size == Size::L1),
-        }
-        .map(|p| unsafe { self.lower.memory().start.add(p as _) } as u64)
+        self.get_lower(core, size == Size::L1)
+            .map(|p| unsafe { self.lower.memory().start.add(p as _) } as u64)
     }
 
     #[inline(never)]
@@ -154,11 +151,7 @@ impl<L: LowerAlloc> Alloc for ArrayUnalignedAlloc<L> {
 
         let i = page / Self::MAPPING.span(2);
         let pte = self[i].load();
-        if pte.page() {
-            self.put_giant(page).map(|_| Size::L2)
-        } else {
-            self.put_lower(page, pte)
-        }
+        self.put_lower(page, pte)
     }
 
     fn pages(&self) -> usize {
@@ -174,10 +167,6 @@ impl<L: LowerAlloc> Alloc for ArrayUnalignedAlloc<L> {
             pages -= pte.free();
         }
         pages
-    }
-
-    fn span(&self, size: Size) -> usize {
-        Self::MAPPING.span(size as _)
     }
 }
 
@@ -243,17 +232,14 @@ impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
         for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
             let page = i * Self::MAPPING.span(2);
             let (pages, size) = self.lower.recover(page, deep)?;
-            if size == Size::L2 {
-                self[i].store(Entry3::new_giant());
-            } else {
-                self[i].store(Entry3::new_table(pages, size, false));
 
-                // Add to lists
-                if pages == Self::MAPPING.span(2) {
-                    self.empty.push(self, i);
-                } else if pages > Self::PTE3_FULL {
-                    self.partial(size == Size::L1).push(self, i);
-                }
+            self[i].store(Entry3::new_table(pages, size, false));
+
+            // Add to lists
+            if pages == Self::MAPPING.span(2) {
+                self.empty.push(self, i);
+            } else if pages > Self::PTE3_FULL {
+                self.partial(size == Size::L1).push(self, i);
             }
             total += pages;
         }
@@ -348,45 +334,6 @@ impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
         } else {
             error!("Corruption l3 i{i} p=-{huge:?}");
             Err(Error::Corruption)
-        }
-    }
-
-    /// Allocate a giant page.
-    fn get_giant(&self) -> Result<usize> {
-        if let Some((i, r)) = self.empty.pop_update(self, |v| {
-            (v.free() == Self::MAPPING.span(2)).then(Entry3::new_giant)
-        }) {
-            if let Err(pte) = r {
-                error!("Corruption i{i} {pte:?}");
-                Err(Error::Corruption)
-            } else {
-                self.lower.set_giant(i * Self::MAPPING.span(2));
-                Ok(i * Self::MAPPING.span(2))
-            }
-        } else {
-            error!("No memory");
-            Err(Error::Memory)
-        }
-    }
-
-    /// Free a giant page.
-    fn put_giant(&self, page: usize) -> Result<()> {
-        let i = page / Self::MAPPING.span(2);
-        if page % Self::MAPPING.span(2) != 0 {
-            error!("Invalid align {page:x}");
-            return Err(Error::Address);
-        }
-
-        if let Err(pte) = self[i].compare_exchange(
-            Entry3::new_giant(),
-            Entry3::new().with_free(Self::MAPPING.span(2)),
-        ) {
-            error!("Not allocated i{i} {pte:?}");
-            Err(Error::Address)
-        } else {
-            self.lower.clear_giant(page);
-            self.empty.push(self, i);
-            Ok(())
         }
     }
 }

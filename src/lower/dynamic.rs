@@ -84,8 +84,7 @@ impl LowerAlloc for DynamicLower {
         // Init pt1
         for i in 0..Self::MAPPING.num_pts(1, self.pages) {
             // Within first page of own area
-            let pt1 =
-                unsafe { &*((self.begin + i * Self::MAPPING.m_span(1)) as *const Table1) };
+            let pt1 = unsafe { &*((self.begin + i * Self::MAPPING.m_span(1)) as *const Table1) };
 
             if i + 1 < Self::MAPPING.num_pts(1, self.pages) {
                 pt1.fill(Entry1::Empty);
@@ -114,9 +113,7 @@ impl LowerAlloc for DynamicLower {
             }
 
             let pte = pt.get(i);
-            if pte.giant() {
-                return Ok((0, Size::L2));
-            } else if pte.page() {
+            if pte.page() {
                 size = Size::L1;
             } else if deep && pte.free() > 0 && size == Size::L0 {
                 let p = self.recover_l1(start, pte)?;
@@ -175,7 +172,7 @@ impl LowerAlloc for DynamicLower {
                 error!("Corruption l2 i{i2}");
                 Err(Error::Corruption)
             }
-        } else if !old.giant() && old.free() < Self::MAPPING.span(1) {
+        } else if old.free() < Self::MAPPING.span(1) {
             for _ in 0..CAS_RETRIES {
                 match self.put_small(old, page) {
                     Err(Error::CAS) => old = pt2.get(i2),
@@ -191,23 +188,6 @@ impl LowerAlloc for DynamicLower {
         }
     }
 
-    fn set_giant(&self, page: usize) {
-        self.pt2(page).set(0, Entry2::new().with_giant(true));
-    }
-    fn clear_giant(&self, page: usize) {
-        // Clear all level 1 page tables in this area
-        for i in Self::MAPPING.range(2, page..self.pages) {
-            let start = Self::MAPPING.page(2, page, i);
-
-            // i1 is initially 0
-            let pt1 = self.pt1(start, 0);
-            pt1.fill(Entry1::Empty);
-        }
-        // Clear the persist flag
-        self.pt2(page)
-            .set(0, Entry2::new_table(Self::MAPPING.span(1), 0));
-    }
-
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages;
         for i in 0..Self::MAPPING.num_pts(2, self.pages) {
@@ -216,8 +196,6 @@ impl LowerAlloc for DynamicLower {
             for i2 in Self::MAPPING.range(2, start..self.pages) {
                 let start = Self::MAPPING.page(2, start, i2);
                 let pte2 = pt2.get(i2);
-
-                assert!(!pte2.giant());
 
                 pages -= if pte2.page() {
                     Self::MAPPING.span(1)

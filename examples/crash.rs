@@ -7,10 +7,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use log::{error, warn};
-use nvalloc::alloc::{
-    Alloc, ArrayAlignedAlloc, ArrayAtomicAlloc, ArrayLockedAlloc, ArrayUnalignedAlloc, Size,
-    TableAlloc, MIN_PAGES,
-};
+use nvalloc::alloc::*;
 use nvalloc::lower::DynamicLower;
 use nvalloc::lower::FixedLower;
 use nvalloc::mmap::MMap;
@@ -52,7 +49,6 @@ fn main() {
     let size = match size {
         0 => Size::L0,
         1 => Size::L1,
-        2 => Size::L2,
         _ => panic!("`size` has to be 0, 1 or 2"),
     };
 
@@ -70,7 +66,7 @@ fn main() {
     ];
     for a in allocs {
         if a.name() == alloc {
-            let allocs = pages / threads / 2 / a.span(size as _);
+            let allocs = pages / threads / 2 / size.span();
             let out_size = align_up(allocs + 2, Page::SIZE) * threads;
             // Shared memory where the allocated pages are backupped
             // Layout: [ ( idx | repeat | pages... ) for each thread ]
@@ -251,7 +247,11 @@ fn monitor(
 }
 
 #[allow(unused_variables)]
-fn mapping<'a>(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page>, ()> {
+fn mapping<'a>(
+    begin: usize,
+    length: usize,
+    dax: Option<String>,
+) -> core::result::Result<MMap<Page>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {
         if let Some(file) = dax {

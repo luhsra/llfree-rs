@@ -84,9 +84,7 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
             }
 
             let pte = pt.get(i);
-            if pte.giant() {
-                return Ok((0, Size::L2));
-            } else if pte.page() {
+            if pte.page() {
                 size = Size::L1;
             } else if deep && pte.free() > 0 && size == Size::L0 {
                 let p = self.recover_l1(start);
@@ -134,7 +132,7 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
             SmallEntry2::new().with_page(true),
             SmallEntry2::new_table(Self::MAPPING.span(1)),
         ) {
-            if !old.giant() && old.free() < Self::MAPPING.span(1) {
+            if old.free() < Self::MAPPING.span(1) {
                 self.put_small(page).map(|_| false)
             } else {
                 error!("Addr {page:x} {old:?}");
@@ -145,14 +143,6 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
         }
     }
 
-    fn set_giant(&self, page: usize) {
-        self.pt2(page).set(0, SmallEntry2::new().with_giant(true));
-    }
-    fn clear_giant(&self, page: usize) {
-        self.pt2(page)
-            .set(0, SmallEntry2::new_table(Self::MAPPING.span(1)));
-    }
-
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages;
         for i in 0..Self::MAPPING.num_pts(2, self.pages) {
@@ -161,8 +151,6 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
             for i2 in Self::MAPPING.range(2, start..self.pages) {
                 let start = Self::MAPPING.page(2, start, i2);
                 let pte2 = pt2.get(i2);
-
-                assert!(!pte2.giant());
 
                 pages -= if pte2.page() {
                     Self::MAPPING.span(1)

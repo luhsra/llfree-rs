@@ -86,8 +86,4 @@ impl Alloc for MallocAlloc {
             .map(|l| l.counter.load(Ordering::Relaxed))
             .sum()
     }
-
-    fn span(&self, _size: Size) -> usize {
-        1
-    }
 }

@@ -69,7 +69,7 @@ fn main() {
         });
         warn!("init time {}ms", timer.elapsed().as_millis());
         // Allocate half the memory
-        let allocs = mapping.len() / threads / 2 / alloc.span(size as _);
+        let allocs = mapping.len() / threads / 2 / size.span();
         assert!(allocs % PT_LEN == 0);
         warn!("\n\n>>> bench t={threads} {size:?} {allocs}\n");
 

@@ -160,10 +160,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
     #[inline(never)]
     fn get(&self, core: usize, size: Size) -> Result<u64> {
         // Start at the reserved memory chunk for this thread
-        let page = match size {
-            Size::L2 => self.get_giant(Self::MAPPING.levels(), 0)?,
-            _ => self.get_lower(core, size == Size::L1)?,
-        };
+        let page = self.get_lower(core, size == Size::L1)?;
 
         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
     }
@@ -179,10 +176,6 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         let pt = self.pt3(page);
         let i = Self::MAPPING.idx(3, page);
         let pte = pt.get(i);
-
-        if pte.page() {
-            return self.put_giant(page).map(|_| Size::L2);
-        }
 
         let max = (self.pages() - Self::MAPPING.round(2, page)).min(Self::MAPPING.span(2));
         if pte.free() >= max {
@@ -257,10 +250,6 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
             pages += pte.free();
         }
         self.pages() - pages
-    }
-
-    fn span(&self, size: Size) -> usize {
-        Self::MAPPING.span(size as _)
     }
 }
 
@@ -399,9 +388,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
             }
 
             let (pages, size) = self.lower.recover(page, deep)?;
-            if size == Size::L2 {
-                pt.set(i, Entry3::new_giant());
-            } else if pages > 0 {
+            if pages > 0 {
                 pt.set(i, Entry3::new_table(pages, size, false));
                 if pages == Self::MAPPING.span(2) {
                     empty += 1;
@@ -599,38 +586,5 @@ impl<L: LowerAlloc> TableAlloc<L> {
         let page = self.lower.get(core, huge, start)?;
         *start_a = page;
         Ok(page)
-    }
-
-    fn get_giant(&self, level: usize, start: usize) -> Result<usize> {
-        let pte = self.find_rec(level, start, Entry::dec_empty, |v| {
-            (v.free() == Self::MAPPING.span(2)).then(Entry3::new_giant)
-        })?;
-        let page = pte.idx() * Self::MAPPING.span(2);
-        self.lower.set_giant(page);
-        Ok(page)
-    }
-
-    fn put_giant(&self, page: usize) -> Result<()> {
-        if (page % Self::MAPPING.span(Size::L2 as _)) != 0 {
-            error!(
-                "Invalid alignment p={page:x} a={:x}",
-                Self::MAPPING.span(Size::L2 as _)
-            );
-            return Err(Error::Address);
-        }
-
-        let pt = self.pt3(page);
-        let i = Self::MAPPING.idx(3, page);
-        if let Ok(_) = pt.cas(
-            i,
-            Entry3::new_giant(),
-            Entry3::new().with_free(Self::MAPPING.span(2)),
-        ) {
-            self.lower.clear_giant(page);
-            self.update_parents(page, Change::IncEmpty)
-        } else {
-            error!("Invalid {page}");
-            Err(Error::Address)
-        }
     }
 }
