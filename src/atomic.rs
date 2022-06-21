@@ -25,6 +25,13 @@ impl<T: AtomicValue> Atomic<T> {
         }
     }
     #[inline]
+    pub fn compare_exchange_weak(&self, current: T, new: T) -> Result<T, T> {
+        match T::V::atomic_compare_exchange_weak(&self.0, current.into(), new.into()) {
+            Ok(v) => Ok(v.into()),
+            Err(v) => Err(v.into()),
+        }
+    }
+    #[inline]
     pub fn update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
         match T::V::atomic_update(&self.0, |v| f(v.into()).map(T::into)) {
             Ok(v) => Ok(v.into()),
@@ -68,6 +75,11 @@ pub trait AtomicT: Sized + Clone + Copy {
 
     fn atomic(v: Self) -> Self::A;
     fn atomic_compare_exchange(atomic: &Self::A, current: Self, new: Self) -> Result<Self, Self>;
+    fn atomic_compare_exchange_weak(
+        atomic: &Self::A,
+        current: Self,
+        new: Self,
+    ) -> Result<Self, Self>;
     fn atomic_update<F: FnMut(Self) -> Option<Self>>(atomic: &Self::A, f: F) -> Result<Self, Self>;
     fn atomic_load(atomic: &Self::A) -> Self;
     fn atomic_store(atomic: &Self::A, v: Self);
@@ -89,6 +101,14 @@ macro_rules! impl_atomic {
                 new: Self,
             ) -> Result<Self, Self> {
                 Self::A::compare_exchange(atomic, current, new, Self::ORDER, Self::ORDER)
+            }
+
+            fn atomic_compare_exchange_weak(
+                atomic: &Self::A,
+                current: Self,
+                new: Self,
+            ) -> Result<Self, Self> {
+                Self::A::compare_exchange_weak(atomic, current, new, Self::ORDER, Self::ORDER)
             }
 
             fn atomic_update<F: FnMut(Self) -> Option<Self>>(
@@ -161,20 +181,19 @@ impl<T: ANode> AStack<T> {
     where
         B: Index<usize, Output = Atomic<T>>,
     {
-        let mut start = self.start.load();
+        let mut prev = self.start.load();
         let elem = &buf[idx];
         loop {
-            if elem.update(|v| Some(v.with_next(start.next()))).is_err() {
+            if elem.update(|v| Some(v.with_next(prev.next()))).is_err() {
                 panic!();
             }
             match self
                 .start
-                .compare_exchange(start, start.with_next(Some(idx)))
+                .compare_exchange_weak(prev, prev.with_next(Some(idx)))
             {
                 Ok(_) => return,
-                Err(s) => start = s,
+                Err(s) => prev = s,
             }
-            core::hint::spin_loop();
         }
     }
 
@@ -184,18 +203,17 @@ impl<T: ANode> AStack<T> {
         B: Index<usize, Output = Atomic<T>>,
         F: FnMut(T) -> Option<T>,
     {
-        let mut start = self.start.load();
+        let mut prev = self.start.load();
         loop {
-            let idx = start.next()?;
+            let idx = prev.next()?;
             let next = buf[idx].load().next();
-            match self.start.compare_exchange(start, start.with_next(next)) {
+            match self.start.compare_exchange_weak(prev, prev.with_next(next)) {
                 Ok(old) => {
                     let i = old.next()?;
                     return Some((i, buf[i].update(|v| f(v).map(|v| v.with_next(None)))));
                 }
-                Err(s) => start = s,
+                Err(s) => prev = s,
             }
-            core::hint::spin_loop();
         }
     }
 
