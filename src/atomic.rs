@@ -174,6 +174,7 @@ impl<T: ANode> AStack<T> {
                 Ok(_) => return,
                 Err(s) => start = s,
             }
+            core::hint::spin_loop();
         }
     }
 
@@ -194,6 +195,7 @@ impl<T: ANode> AStack<T> {
                 }
                 Err(s) => start = s,
             }
+            core::hint::spin_loop();
         }
     }
 
