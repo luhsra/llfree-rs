@@ -9,18 +9,26 @@ thread_local! {
 
 #[cfg(target_os = "linux")]
 pub fn pin(core: usize) {
-    let core = core * STRIDE.load(Ordering::Relaxed);
+    use core::mem::{size_of, zeroed};
 
-    let max = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    let max = unsafe {
+        let mut set: libc::cpu_set_t = unsafe { zeroed() };
+        assert!(
+            libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut set) == 0,
+            "sched_getaffinity"
+        );
+        libc::CPU_COUNT(&set) as usize
+    };
+
     assert!(max > 0, "sysconf");
     assert!(core < max as usize, "not enough cores");
 
     let core = core * STRIDE.load(Ordering::Relaxed);
     let core = (core / max as usize) + (core % max as usize); // wrap around
 
-    let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
+    let mut set = unsafe { zeroed::<libc::cpu_set_t>() };
     unsafe { libc::CPU_SET(core, &mut set) };
-    let ret = unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) };
+    let ret = unsafe { libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set) };
     if ret != 0 {
         unsafe { libc::perror(b"sched_setaffinity\0" as *const _ as _) };
         panic!("sched_setaffinity failed");
