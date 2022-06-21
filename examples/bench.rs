@@ -1,7 +1,7 @@
 #![cfg(all(feature = "thread", feature = "logger"))]
 
-use core::fmt;
 use core::iter::FromIterator;
+use core::{fmt, slice};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
@@ -307,6 +307,7 @@ fn repeat(
     assert_eq!(a.dbg_allocated_pages(), allocs * threads * size.span());
 
     perf.init = init;
+    perf.allocs = allocs;
     perf
 }
 
@@ -326,20 +327,37 @@ fn rand(
     let allocs = alloc.pages() / max_threads / 2 / size.span();
     let barrier = Arc::new(Barrier::new(threads));
     let a = alloc.clone();
+
+    let mut all_pages = vec![0u64; allocs * threads];
+    let all_pages_ptr = all_pages.as_mut_ptr() as usize;
+    let pages_ptr = all_pages
+        .chunks_mut(allocs)
+        .map(|c| c.as_ptr() as usize)
+        .collect::<Vec<_>>();
+
     let mut perf = Perf::avg(thread::parallel(threads, move |t| {
         thread::pin(t);
-        let mut pages = Vec::with_capacity(allocs);
-        for _ in 0..allocs {
-            pages.push(alloc.get(t, size).unwrap());
+        let pages = unsafe { slice::from_raw_parts_mut(pages_ptr[t] as *mut u64, allocs) };
+
+        for i in 0..allocs {
+            pages[i] = alloc.get(t, size).unwrap();
         }
 
         let mut rng = WyRand::new(t as _);
 
         barrier.wait();
+        if t == 0 {
+            // Shuffle between all cores
+            let pages =
+                unsafe { slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads) };
+            rng.shuffle(pages);
+        }
+        barrier.wait();
+
         let timer = Instant::now();
 
         for _ in 0..allocs {
-            let i = rng.range(0..pages.len() as _) as usize;
+            let i = rng.range(0..allocs as u64) as usize;
             alloc.put(t, pages[i]).unwrap();
             pages[i] = alloc.get(t, size).unwrap();
         }

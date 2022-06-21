@@ -157,7 +157,7 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
     #[inline(never)]
     fn put(&self, _core: usize, addr: u64) -> Result<Size> {
         if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
-            error!("invalid addr");
+            error!("invalid addr {addr:x}");
             return Err(Error::Memory);
         }
         let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
