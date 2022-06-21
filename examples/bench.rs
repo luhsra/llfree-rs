@@ -5,6 +5,7 @@ use core::{fmt, slice};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
@@ -45,6 +46,8 @@ struct Args {
     /// Max amount of memory in GiB. Is by the max thread count.
     #[clap(short, long, default_value_t = 16)]
     memory: usize,
+    #[clap(long, default_value_t = 1)]
+    stride: usize,
 }
 
 fn main() {
@@ -58,9 +61,14 @@ fn main() {
         iterations,
         size,
         memory,
+        stride,
     } = Args::parse();
 
     util::logging();
+
+    if stride > 1 {
+        thread::STRIDE.store(stride, Ordering::Relaxed);
+    }
 
     let ppt = (memory * PT_LEN * PT_LEN) / threads;
     assert!(ppt >= MIN_PAGES, "{} > {}", ppt, MIN_PAGES);

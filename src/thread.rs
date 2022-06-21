@@ -1,5 +1,7 @@
 #![cfg(any(test, feature = "thread"))]
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+pub static STRIDE: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
     pub static PINNED: AtomicUsize = AtomicUsize::new(0);
@@ -7,7 +9,14 @@ thread_local! {
 
 #[cfg(target_os = "linux")]
 pub fn pin(core: usize) {
-    use core::sync::atomic::Ordering;
+    let core = core * STRIDE.load(Ordering::Relaxed);
+
+    let max = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    assert!(max > 0, "sysconf");
+    assert!(core < max as usize, "not enough cores");
+
+    let core = core * STRIDE.load(Ordering::Relaxed);
+    let core = (core / max as usize) + (core % max as usize); // wrap around
 
     let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
     unsafe { libc::CPU_SET(core, &mut set) };
@@ -26,8 +35,7 @@ pub fn pin(core: usize) {
 pub fn pin(core: usize) {
     #![allow(non_camel_case_types)]
 
-    use core::mem;
-    use core::sync::atomic::Ordering;
+    use std::mem::size_of;
     use std::os::raw::{c_int, c_uint};
 
     type kern_return_t = c_int;
@@ -53,9 +61,17 @@ pub fn pin(core: usize) {
             count: mach_msg_type_number_t,
         ) -> kern_return_t;
     }
+
+    let max = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    assert!(max > 0, "sysconf");
+    assert!(core < max as usize, "not enough cores");
+
+    let core = core * STRIDE.load(Ordering::Relaxed);
+    let core = (core / max as usize) + (core % max as usize); // wrap around
+
     let thread_affinity_policy_count: mach_msg_type_number_t =
-        mem::size_of::<thread_affinity_policy_data_t>() as mach_msg_type_number_t
-            / mem::size_of::<c_int>() as mach_msg_type_number_t;
+        size_of::<thread_affinity_policy_data_t>() as mach_msg_type_number_t
+            / size_of::<c_int>() as mach_msg_type_number_t;
 
     let mut info = thread_affinity_policy_data_t {
         affinity_tag: core as c_int,
@@ -93,6 +109,8 @@ pub fn parallel<T: Send + 'static, F: FnOnce(usize) -> T + Clone + Send + 'stati
 mod test {
     use core::sync::atomic::Ordering;
 
+    use crate::thread::STRIDE;
+
     #[test]
     fn pinning() {
         let cores = std::thread::available_parallelism().unwrap().get();
@@ -109,5 +127,27 @@ mod test {
             "Pinned to {}",
             super::PINNED.with(|v| v.load(Ordering::SeqCst))
         );
+    }
+
+    #[test]
+    fn stride() {
+        let old = STRIDE.swap(2, Ordering::Relaxed);
+
+        let cores = std::thread::available_parallelism().unwrap().get();
+
+        println!("max cores: {cores}");
+
+        super::pin(0);
+        println!(
+            "Pinned to {}",
+            super::PINNED.with(|v| v.load(Ordering::SeqCst))
+        );
+        super::pin(cores / 2);
+        println!(
+            "Pinned to {}",
+            super::PINNED.with(|v| v.load(Ordering::SeqCst))
+        );
+
+        STRIDE.store(old, Ordering::Relaxed);
     }
 }

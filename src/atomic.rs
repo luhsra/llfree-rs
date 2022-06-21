@@ -187,6 +187,7 @@ impl<T: ANode> AStack<T> {
             if elem.update(|v| Some(v.with_next(prev.next()))).is_err() {
                 panic!();
             }
+            // CAS weak is important for fetch-update!
             match self
                 .start
                 .compare_exchange_weak(prev, prev.with_next(Some(idx)))
@@ -207,6 +208,7 @@ impl<T: ANode> AStack<T> {
         loop {
             let idx = prev.next()?;
             let next = buf[idx].load().next();
+            // CAS weak is important for fetch-update!
             match self.start.compare_exchange_weak(prev, prev.with_next(next)) {
                 Ok(old) => {
                     let i = old.next()?;
