@@ -7,20 +7,36 @@ thread_local! {
     pub static PINNED: AtomicUsize = AtomicUsize::new(0);
 }
 
+/// Returns the number of virtual cores.
 #[cfg(target_os = "linux")]
-pub fn pin(core: usize) {
+pub fn cores() -> usize {
     use core::mem::{size_of, zeroed};
 
-    let max = unsafe {
-        let mut set: libc::cpu_set_t = unsafe { zeroed() };
+    unsafe {
+        let mut set: libc::cpu_set_t = zeroed();
         assert!(
             libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut set) == 0,
             "sched_getaffinity"
         );
         libc::CPU_COUNT(&set) as usize
-    };
+    }
+}
 
-    assert!(max > 0, "sysconf");
+/// Returns the number of virtual cores.
+#[cfg(target_os = "macos")]
+pub fn cores() -> usize {
+    // FIXME: Intel hyperthreading?
+    let cores = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as usize };
+    assert!(cores > 0, "sysconf");
+    cores
+}
+
+/// Pins the current thread to the given virtual core
+#[cfg(target_os = "linux")]
+pub fn pin(core: usize) {
+    use core::mem::{size_of, zeroed};
+
+    let max = cores();
     assert!(core < max as usize, "not enough cores");
 
     let core = core * STRIDE.load(Ordering::Relaxed);
@@ -39,6 +55,7 @@ pub fn pin(core: usize) {
     });
 }
 
+/// Pins the current thread to the given virtual core
 #[cfg(target_os = "macos")]
 pub fn pin(core: usize) {
     #![allow(non_camel_case_types)]
@@ -70,8 +87,7 @@ pub fn pin(core: usize) {
         ) -> kern_return_t;
     }
 
-    let max = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-    assert!(max > 0, "sysconf");
+    let max = cores();
     assert!(core < max as usize, "not enough cores");
 
     let core = core * STRIDE.load(Ordering::Relaxed);
@@ -99,10 +115,12 @@ pub fn pin(core: usize) {
     });
 }
 
-pub fn parallel<T: Send + 'static, F: FnOnce(usize) -> T + Clone + Send + 'static>(
-    n: usize,
-    f: F,
-) -> Vec<T> {
+/// Executed `f` on `n` parallel threads.
+pub fn parallel<T, F>(n: usize, f: F) -> Vec<T>
+where
+    T: Send + 'static,
+    F: FnOnce(usize) -> T + Clone + Send + 'static,
+{
     let handles = (0..n)
         .into_iter()
         .map(|t| {
@@ -157,5 +175,17 @@ mod test {
         );
 
         STRIDE.store(old, Ordering::Relaxed);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn cores() {
+        println!("cores {}", super::cores());
+        println!("nproc conf {}", unsafe {
+            libc::sysconf(libc::_SC_NPROCESSORS_CONF)
+        });
+        println!("nproc onln {}", unsafe {
+            libc::sysconf(libc::_SC_NPROCESSORS_ONLN)
+        });
     }
 }
