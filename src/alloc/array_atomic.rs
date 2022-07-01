@@ -382,7 +382,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         let size = if huge { Size::L1 } else { Size::L0 };
 
         let local = &self.local[core];
-        let _push = local.frees_push_on_drop(i);
+        let _push = local.defer_frees_push(i);
 
         // Try decrement own subtree first
         let pte_a = local.pte(huge);

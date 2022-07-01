@@ -190,7 +190,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
 
         // Try updating local copy
         let idx = page / Self::MAPPING.span(2);
-        let _push = local.frees_push_on_drop(idx);
+        let _push = local.defer_frees_push(idx);
 
         let pte_a = local.pte(huge);
         if let Some(pte) = pte_a.inc_idx(Self::MAPPING.span(huge as _), idx, max) {

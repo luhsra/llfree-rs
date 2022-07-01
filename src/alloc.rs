@@ -172,8 +172,9 @@ impl<const L: usize> Local<L> {
         self.p().frees_i = (self.p().frees_i + 1) % self.p().frees.len();
         self.p().frees[self.p().frees_i] = chunk;
     }
-    /// Calls frees_push on exiting scope. WARN: bin the return value to a variable!
-    pub fn frees_push_on_drop<'a>(&'a self, chunk: usize) -> LocalFreePush<'a, L> {
+    /// Calls frees_push on exiting scope.
+    /// NOTE: Bind the return value to a variable!
+    pub fn defer_frees_push(&self, chunk: usize) -> LocalFreePush<'_, L> {
         LocalFreePush(self, chunk)
     }
     /// Checks if the previous frees were in the given chunk.
@@ -182,6 +183,7 @@ impl<const L: usize> Local<L> {
     }
 }
 
+/// Calls `frees_push` on drop.
 pub struct LocalFreePush<'a, const L: usize>(&'a Local<L>, usize);
 impl<'a, const L: usize> Drop for LocalFreePush<'a, L> {
     fn drop(&mut self) {
@@ -253,10 +255,10 @@ mod test {
         assert!(!local.frees_related(i2));
 
         {
-            let _push1 = local.frees_push_on_drop(i1);
+            let _push1 = local.defer_frees_push(i1);
             local.frees_push(i1);
             local.frees_push(i1);
-            let _push2 = local.frees_push_on_drop(i1);
+            let _push2 = local.defer_frees_push(i1);
             assert!(!local.frees_related(i1));
         };
         assert!(local.frees_related(i1));
