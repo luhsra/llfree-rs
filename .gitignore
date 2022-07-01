@@ -3,6 +3,7 @@
 Cargo.lock
 
 # misc
+.DS_Store
 memfile
 .vscode
 /test/
