@@ -8,22 +8,7 @@ thread_local! {
 }
 
 /// Returns the number of virtual cores.
-#[cfg(target_os = "linux")]
-pub fn cores() -> usize {
-    use core::mem::{size_of, zeroed};
-
-    unsafe {
-        let mut set: libc::cpu_set_t = zeroed();
-        assert!(
-            libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut set) == 0,
-            "sched_getaffinity"
-        );
-        libc::CPU_COUNT(&set) as usize
-    }
-}
-
-/// Returns the number of virtual cores.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn cores() -> usize {
     // FIXME: Intel hyperthreading?
     let cores = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as usize };
@@ -37,7 +22,7 @@ pub fn pin(core: usize) {
     use core::mem::{size_of, zeroed};
 
     let max = cores();
-    assert!(core < max as usize, "not enough cores");
+    assert!(core < max as usize, "not enough cores {core} < {max}");
 
     let core = core * STRIDE.load(Ordering::Relaxed);
     let core = (core / max as usize) + (core % max as usize); // wrap around
@@ -139,7 +124,7 @@ mod test {
 
     #[test]
     fn pinning() {
-        let cores = std::thread::available_parallelism().unwrap().get();
+        let cores = super::cores();
 
         println!("max cores: {cores}");
 
@@ -159,7 +144,7 @@ mod test {
     fn stride() {
         let old = STRIDE.swap(2, Ordering::Relaxed);
 
-        let cores = std::thread::available_parallelism().unwrap().get();
+        let cores = super::cores();
 
         println!("max cores: {cores}");
 

@@ -124,9 +124,9 @@ mod test {
         logging();
 
         const THREADS: usize = 8;
-        const PAGES: usize = 2 * THREADS * PT_LEN;
+        const PAGES: usize = 2 * THREADS * PT_LEN * PT_LEN;
 
-        let mut mapping: MMap<Page> = MMap::anon(0x1000_0000_0000_u64 as _, PAGES * Page::SIZE).unwrap();
+        let mut mapping: MMap<Page> = MMap::anon(0x0000_1000_0000_0000, PAGES).unwrap();
 
         info!("mmap {} bytes", mapping.len());
 
