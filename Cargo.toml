@@ -3,9 +3,6 @@ name = "nvalloc"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-crate-type = ["staticlib"]
-
 [profile.release]
 lto = "thin"
 opt-level = 3
@@ -28,14 +25,13 @@ libc = "0.2"
 clap = { version = "3.1", default-features = false, features = ["std", "derive"] }
 
 [features]
-std = ["log/std", "libc"]
+std = ["log/std", "libc", "env_logger"]
 log_debug = ["log/max_level_debug"]
 log_info = ["log/max_level_info"]
 log_warn = ["log/max_level_warn"]
 log_error = ["log/max_level_error"]
 stop = ["std"]
 thread = ["std"]
-logger = ["env_logger"]
 
 # The examples / benchmarks
 
@@ -44,19 +40,19 @@ raw-cpuid = "10.3"
 
 [[example]]
 name = "bench"
-required-features = ["std", "logger", "thread"]
+required-features = ["thread"]
 
 [[example]]
 name = "crash"
-required-features = ["std", "logger", "thread"]
+required-features = ["thread"]
 
 [[example]]
 name = "detail"
-required-features = ["std", "logger", "thread"]
+required-features = ["thread"]
 
 [[example]]
 name = "cpu"
-required-features = ["std", "thread"]
+required-features = ["thread"]
 
 [[example]]
 name = "mmap"

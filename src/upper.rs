@@ -214,7 +214,6 @@ mod test {
     use crate::mmap::MMap;
     use crate::table::PT_LEN;
     use crate::upper::Alloc;
-    use crate::upper::MIN_PAGES;
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 

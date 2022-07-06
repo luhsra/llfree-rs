@@ -1,4 +1,4 @@
-#![cfg(all(feature = "thread", feature = "logger"))]
+#![cfg(all(feature = "thread"))]
 
 use std::slice;
 use std::sync::Arc;

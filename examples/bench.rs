@@ -1,4 +1,4 @@
-#![cfg(all(feature = "thread", feature = "logger"))]
+#![cfg(all(feature = "thread"))]
 
 use core::iter::FromIterator;
 use core::{fmt, slice};

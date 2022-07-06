@@ -71,20 +71,20 @@ pub const fn align_down(v: usize, align: usize) -> usize {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(any(test, all(feature = "logger", feature = "thread")))] {
+    if #[cfg(any(test, feature = "thread"))] {
         fn core() -> usize {
             use crate::thread::PINNED;
             use core::sync::atomic::Ordering;
             PINNED.with(|p| p.load(Ordering::SeqCst))
         }
-    } else if #[cfg(any(test, feature = "logger"))] {
+    } else if #[cfg(any(test, feature = "std"))] {
         fn core() -> usize {
             0
         }
     }
 }
 
-#[cfg(any(test, feature = "logger"))]
+#[cfg(any(test, feature = "std"))]
 pub fn logging() {
     use std::io::Write;
     use std::thread::ThreadId;

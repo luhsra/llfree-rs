@@ -49,10 +49,34 @@ To execute the benchmark on NVM, use the `--dax` flag to specify a DAX file to b
 The allocators can be compiled into a static library that can be linked against a non-std target like the Linux Kernel.
 
 ```
-cargo build --release --target x86_64-unknown-none -Zbuild-std=core,alloc,compiler_builtins
+cargo build -r --config crate-type='"staticlib"' --target x86_64-unknown-none -Zbuild-std=core,alloc,compiler_builtins
 ```
 
 For linking, the `nvalloc_linux_alloc` and `nvalloc_linux_free` [functions](src/linux.rs) have to be implemented.
+
+### Support for printk
+
+The exported function `rust_fmt_argument` is a custom formatter for the rust print formatting.
+It has to be called in `lib/vsprintf.c:pointer` for the `%pA` format argument:
+
+```c
+char *pointer(const char *fmt, char *buf, char *end, void *ptr,
+	      struct printf_spec spec)
+{
+    switch(*fmt) {
+// ...
+    case 'A':
+        if (!IS_ENABLED(CONFIG_RUST)) {
+            WARN_ONCE(1, "Please remove %%pA from non-Rust code\n");
+            return error_string(buf, end, "(%pA?)", spec);
+        }
+        return rust_fmt_argument(buf, end, ptr);
+// ...
+    }
+}
+```
+
+Logging can be initialized by calling `nvalloc_init_logging`.
 
 ## Profiling
 

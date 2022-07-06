@@ -3,6 +3,7 @@
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
 #![no_std]
 #![feature(generic_const_exprs)]
+#![feature(core_ffi_c)]
 
 // Custom out of memory handler
 #![cfg_attr(not(feature = "std"), feature(alloc_error_handler))]
@@ -27,7 +28,7 @@ pub mod upper;
 pub mod util;
 
 #[cfg(feature = "stop")]
-pub mod stop;
+mod stop;
 
 #[cfg(not(any(test, feature = "std")))]
 mod linux;
