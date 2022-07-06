@@ -1,6 +1,8 @@
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use log::{error, info, warn};
 
 use super::{Alloc, Error, Result, Size};

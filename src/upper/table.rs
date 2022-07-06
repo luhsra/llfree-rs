@@ -2,6 +2,8 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, mem};
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use log::{error, info, warn};
 
 use super::{Alloc, Error, Local, Result, Size, CAS_RETRIES, MAGIC, MAX_PAGES, MIN_PAGES};

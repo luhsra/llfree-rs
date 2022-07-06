@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use log::{error, warn};
-use nvalloc::alloc::*;
+use nvalloc::upper::*;
 use nvalloc::lower::DynamicLower;
 use nvalloc::lower::FixedLower;
 use nvalloc::mmap::MMap;

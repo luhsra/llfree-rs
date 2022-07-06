@@ -1,30 +1,47 @@
 //! # Persistent non-volatile memory allocator
 //!
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
+#![no_std]
 #![feature(generic_const_exprs)]
 
-pub mod alloc;
+// Custom out of memory handler
+#![cfg_attr(not(feature = "std"), feature(alloc_error_handler))]
+
+#[cfg(any(test, feature = "std"))]
+#[macro_use]
+extern crate std;
+
+#[macro_use]
+extern crate alloc;
+
+#[cfg(any(test, feature = "std"))]
+pub mod mmap;
+#[cfg(any(test, feature = "thread"))]
+pub mod thread;
+
 pub mod atomic;
 pub mod entry;
 pub mod lower;
-pub mod mmap;
 pub mod table;
-pub mod thread;
+pub mod upper;
 pub mod util;
 
 #[cfg(feature = "stop")]
 pub mod stop;
 
-use core::ffi::c_void;
-use core::sync::atomic::AtomicU64;
+#[cfg(not(feature = "std"))]
+mod linux;
 
-use alloc::{Alloc, Error, Size};
+use core::ffi::c_void;
+
+use alloc::boxed::Box;
+use upper::{Alloc, Error, Size};
 use util::Page;
 
-pub type Allocator = alloc::ArrayAtomicAlloc<lower::PackedLower>;
+pub type Allocator = upper::ArrayAtomicAlloc<lower::PackedLower>;
 static mut ALLOC: Option<Box<Allocator>> = None;
 
-pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> alloc::Result<()> {
+pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> upper::Result<()> {
     let mut alloc = Allocator::default();
     alloc.init(cores, memory, overwrite)?;
     unsafe { ALLOC = Some(Box::new(alloc)) };
@@ -73,30 +90,6 @@ pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
     }
 }
 
-/// Allocate and atomically insert the page into the given `dst`.
-/// Returns an error if the allocation or the CAS operation fail.
-#[no_mangle]
-pub extern "C" fn nvalloc_get_cas(
-    core: u32,
-    size: u32,
-    dst: *const u64,
-    translate: extern "C" fn(u64) -> u64,
-    expected: u64,
-) -> i64 {
-    let size = match size {
-        0 => Size::L0,
-        1 => Size::L1,
-        _ => return -(Error::Memory as usize as i64),
-    };
-
-    let dst = unsafe { &*dst.cast::<AtomicU64>() };
-
-    match alloc::get_cas(instance(), core as _, size, dst, |p| translate(p), expected) {
-        Ok(_) => 0,
-        Err(e) => -(e as usize as i64),
-    }
-}
-
 /// Frees the given page.
 #[no_mangle]
 pub extern "C" fn nvalloc_put(core: u32, addr: u64) -> i64 {
@@ -116,7 +109,7 @@ mod test {
     use crate::table::PT_LEN;
     use crate::thread::parallel;
     use crate::util::logging;
-    use crate::{alloc, init, instance, uninit};
+    use crate::{init, instance, uninit};
     use crate::{Page, Size};
 
     #[test]
@@ -139,7 +132,7 @@ mod test {
         parallel(THREADS, |t| {
             let pages = [DEFAULT; PT_LEN];
             for addr in &pages {
-                alloc::get_cas(instance(), t, Size::L0, addr, |v| v, 0).unwrap();
+                addr.store(instance().get(t, Size::L0).unwrap(), Ordering::SeqCst);
             }
 
             for addr in &pages {

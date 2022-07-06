@@ -3,6 +3,7 @@ use core::cell::UnsafeCell;
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use alloc::string::String;
 use log::error;
 
 use crate::entry::Entry3;
@@ -21,8 +22,12 @@ mod list_local;
 pub use list_local::ListLocalAlloc;
 mod list_locked;
 pub use list_locked::ListLockedAlloc;
+
+#[cfg(any(test, feature = "std"))]
 mod malloc;
+#[cfg(any(test, feature = "std"))]
 pub use malloc::MallocAlloc;
+
 mod table;
 pub use table::TableAlloc;
 
@@ -45,7 +50,7 @@ pub enum Error {
     Corruption = 5,
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Size {
@@ -198,14 +203,15 @@ mod test {
     use std::sync::Arc;
     use std::time::Instant;
 
+    use alloc::vec::Vec;
     use spin::Barrier;
 
     use log::{info, warn};
 
     use super::Error;
     use super::Local;
-    use crate::alloc::Alloc;
-    use crate::alloc::MIN_PAGES;
+    use crate::upper::Alloc;
+    use crate::upper::MIN_PAGES;
     use crate::lower::*;
     use crate::mmap::MMap;
     use crate::table::PT_LEN;

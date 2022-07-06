@@ -3,6 +3,8 @@ use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use log::{error, info, warn};
 
 use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
@@ -22,24 +24,11 @@ struct Meta {
 }
 const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
-/// This allocator splits its memory range into 1G chunks.
-/// Giant pages are directly allocated in it.
-/// For smaller pages, however, the 1G chunk is handed over to the
-/// lower allocator, managing these smaller allocations.
-/// These 1G chunks are, due to the inner workins of the lower allocator,
-/// called 1G *subtrees*.
-///
-/// This allocator uses a cache-line aligned array to store the subtrees
-/// (level 3 entries).
-/// The subtree reservation is speed up using free lists for
-/// empty and partially empty subtrees.
-/// These free lists are implemented as atomic linked lists with their next
-/// pointers stored inside the level 3 entries.
-///
-/// This volatile shared metadata is rebuild on boot from
-/// the persistent metadata of the lower allocator.
+/// This allocator is equivalent to the `ArrayAligned` allocator,
+/// except for the entry array not beeing cache-line aligned.
+/// It sole purpose is to show the effect of false-sharing on this array.
 #[repr(align(64))]
-pub struct ArrayAlignedAlloc<L: LowerAlloc> {
+pub struct ArrayUnalignedAlloc<L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
@@ -57,11 +46,11 @@ pub struct ArrayAlignedAlloc<L: LowerAlloc> {
     partial_l0: AStack<Entry3>,
 }
 
-/// Cache line aligned entries to prevent false-sharing.
-#[repr(align(64))]
+/// *Not* cache-line aligned, to test false-sharing
+#[repr(transparent)]
 struct Aligned(Atomic<Entry3>);
 
-impl<L: LowerAlloc> Index<usize> for ArrayAlignedAlloc<L> {
+impl<L: LowerAlloc> Index<usize> for ArrayUnalignedAlloc<L> {
     type Output = Atomic<Entry3>;
 
     #[inline]
@@ -70,10 +59,10 @@ impl<L: LowerAlloc> Index<usize> for ArrayAlignedAlloc<L> {
     }
 }
 
-unsafe impl<L: LowerAlloc> Send for ArrayAlignedAlloc<L> {}
-unsafe impl<L: LowerAlloc> Sync for ArrayAlignedAlloc<L> {}
+unsafe impl<L: LowerAlloc> Send for ArrayUnalignedAlloc<L> {}
+unsafe impl<L: LowerAlloc> Sync for ArrayUnalignedAlloc<L> {}
 
-impl<L: LowerAlloc> fmt::Debug for ArrayAlignedAlloc<L> {
+impl<L: LowerAlloc> fmt::Debug for ArrayUnalignedAlloc<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
         writeln!(
@@ -94,7 +83,7 @@ impl<L: LowerAlloc> fmt::Debug for ArrayAlignedAlloc<L> {
     }
 }
 
-impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
+impl<L: LowerAlloc> Alloc for ArrayUnalignedAlloc<L> {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
         info!(
@@ -157,7 +146,7 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
     #[inline(never)]
     fn put(&self, _core: usize, addr: u64) -> Result<Size> {
         if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
-            error!("invalid addr {addr:x}");
+            error!("invalid addr");
             return Err(Error::Memory);
         }
         let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
@@ -183,7 +172,7 @@ impl<L: LowerAlloc> Alloc for ArrayAlignedAlloc<L> {
     }
 }
 
-impl<L: LowerAlloc> Drop for ArrayAlignedAlloc<L> {
+impl<L: LowerAlloc> Drop for ArrayUnalignedAlloc<L> {
     fn drop(&mut self) {
         if !self.meta.is_null() {
             let meta = unsafe { &*self.meta };
@@ -192,7 +181,7 @@ impl<L: LowerAlloc> Drop for ArrayAlignedAlloc<L> {
     }
 }
 
-impl<L: LowerAlloc> Default for ArrayAlignedAlloc<L> {
+impl<L: LowerAlloc> Default for ArrayUnalignedAlloc<L> {
     fn default() -> Self {
         Self {
             meta: null_mut(),
@@ -206,9 +195,9 @@ impl<L: LowerAlloc> Default for ArrayAlignedAlloc<L> {
     }
 }
 
-impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
-    const MAPPING: Mapping<2> = L::MAPPING;
-    const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
+impl<L: LowerAlloc> ArrayUnalignedAlloc<L> {
+    const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
+    const PTE3_FULL: usize = 8 * Self::MAPPING.span(1);
 
     /// Setup a new allocator.
     #[cold]
@@ -229,7 +218,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
 
         if max == Self::MAPPING.span(2) {
             self.empty.push(self, pte3_num - 1);
-        } else if max > Self::ALMOST_FULL {
+        } else if max > Self::PTE3_FULL {
             self.partial_l0.push(self, pte3_num - 1);
         }
     }
@@ -251,7 +240,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
             // Add to lists
             if pages == Self::MAPPING.span(2) {
                 self.empty.push(self, i);
-            } else if pages > Self::ALMOST_FULL {
+            } else if pages > Self::PTE3_FULL {
                 self.partial(size == Size::L1).push(self, i);
             }
             total += pages;
@@ -338,7 +327,7 @@ impl<L: LowerAlloc> ArrayAlignedAlloc<L> {
         if let Ok(pte3) = self[i].update(|v| v.inc(Self::MAPPING.span(huge as _), max)) {
             if !pte3.reserved() {
                 let new_pages = pte3.free() + Self::MAPPING.span(huge as _);
-                if pte3.free() <= Self::ALMOST_FULL && new_pages > Self::ALMOST_FULL {
+                if pte3.free() <= Self::PTE3_FULL && new_pages > Self::PTE3_FULL {
                     // Add back to partial
                     self.partial(huge).push(self, i);
                 }

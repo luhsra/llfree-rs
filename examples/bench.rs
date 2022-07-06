@@ -12,7 +12,7 @@ use std::time::Instant;
 use clap::{ArgEnum, Parser};
 use log::warn;
 
-use nvalloc::alloc::*;
+use nvalloc::upper::*;
 use nvalloc::lower::*;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;

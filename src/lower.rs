@@ -1,7 +1,7 @@
 use core::fmt;
 use core::ops::Range;
 
-use crate::alloc::{Result, Size};
+use crate::upper::{Result, Size};
 use crate::Page;
 use crate::table::Mapping;
 

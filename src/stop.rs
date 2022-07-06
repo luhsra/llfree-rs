@@ -2,6 +2,7 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use alloc::vec::Vec;
 use spin::Barrier;
 
 use crate::util::WyRand;
@@ -12,7 +13,7 @@ pub enum Error {
     OverflowOrdering,
     WakeSuspended,
 }
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = core::result::Result<T, Error>;
 
 struct StopData {
     tid: usize,

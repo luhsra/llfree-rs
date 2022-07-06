@@ -1,3 +1,5 @@
+#![cfg(feature = "std")]
+
 use std::env::args;
 use std::fs::metadata;
 

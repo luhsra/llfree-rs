@@ -1,9 +1,10 @@
 use core::fmt::Write;
 use core::ops::Range;
 
+use alloc::string::String;
 use log::{error, warn};
 
-use crate::alloc::{Error, Result, Size, CAS_RETRIES};
+use crate::upper::{Error, Result, Size, CAS_RETRIES};
 use crate::entry::SmallEntry2;
 use crate::table::{ATable, Bitfield, Mapping};
 use crate::util::{align_up, div_ceil, Page};

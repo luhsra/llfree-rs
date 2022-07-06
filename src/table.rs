@@ -33,7 +33,7 @@ impl<T: AtomicValue, const LEN: usize> ATable<T, LEN> {
 
     pub fn empty() -> Self {
         Self {
-            entries: unsafe { std::mem::zeroed() },
+            entries: unsafe { core::mem::zeroed() },
         }
     }
     pub fn fill(&self, e: T) {
@@ -292,7 +292,7 @@ impl<const L: usize> Mapping<L> {
         let span = self.span(level);
         let rounded = self.round(level, start);
         let offset = self.round(level - 1, start - rounded);
-        std::iter::once(start).chain(
+        core::iter::once(start).chain(
             (1..self.0[level - 1])
                 .into_iter()
                 .map(move |v| rounded + (v * span_m1 + offset) % span),

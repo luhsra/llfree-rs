@@ -1,58 +1,57 @@
 use core::fmt;
 use core::ops::Range;
 use core::ptr::{null, null_mut};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::cell::UnsafeCell;
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use log::{error, info};
-use spin::mutex::TicketMutex;
 
 use super::{Alloc, Error, Result, Size, MIN_PAGES};
 use crate::util::Page;
 
-/// Simple volatile 4K page allocator that uses a single shared linked lists
-/// protected by a ticked lock.
-/// The linked list is build directly within the pages,
+/// Simple volatile 4K page allocator that uses CPU-local linked lists.
+/// During initialization allocators memory is split into pages
+/// and evenly distributed to the cores.
+/// The linked lists are build directly within the pages,
 /// storing the next pointers at the beginning of the free pages.
 ///
-/// As expected the contention on the ticket lock is very high.
+/// No extra load balancing is made, if a core runs out of memory,
+/// the allocation fails.
 #[repr(align(64))]
-pub struct ListLockedAlloc {
+pub struct ListLocalAlloc {
     memory: Range<*const Page>,
-    next: TicketMutex<Node>,
     /// CPU local metadata
-    local: Box<[LocalCounter]>,
+    local: Box<[UnsafeCell<Local>]>,
+    pages: usize,
 }
 
-#[repr(align(64))]
-struct LocalCounter {
-    counter: AtomicUsize,
-}
+unsafe impl Send for ListLocalAlloc {}
+unsafe impl Sync for ListLocalAlloc {}
 
-unsafe impl Send for ListLockedAlloc {}
-unsafe impl Sync for ListLockedAlloc {}
-
-impl fmt::Debug for ListLockedAlloc {
+impl fmt::Debug for ListLocalAlloc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
         for (t, l) in self.local.iter().enumerate() {
-            writeln!(f, "    L {t:>2} C={}", l.counter.load(Ordering::Relaxed))?;
+            let local = unsafe { &mut *l.get() };
+            writeln!(f, "    L {t:>2} C={}", local.counter)?;
         }
         writeln!(f, "}}")?;
         Ok(())
     }
 }
 
-impl Default for ListLockedAlloc {
+impl Default for ListLocalAlloc {
     fn default() -> Self {
         Self {
             memory: null()..null(),
-            next: TicketMutex::new(Node::new()),
             local: Box::new([]),
+            pages: 0,
         }
     }
 }
 
-impl Alloc for ListLockedAlloc {
+impl Alloc for ListLocalAlloc {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
         info!(
@@ -68,23 +67,27 @@ impl Alloc for ListLockedAlloc {
         let begin = memory.as_ptr() as usize;
         let pages = memory.len();
 
-        // build free lists
-        for i in 1..pages {
-            memory[i - 1]
-                .cast_mut::<Node>()
-                .set((begin + i * Page::SIZE) as *mut _);
-        }
-        memory[pages - 1].cast_mut::<Node>().set(null_mut());
-
-        self.memory = memory.as_ptr_range();
-        self.next = TicketMutex::new(Node(begin as _));
-
+        // build core local free lists
         let mut local = Vec::with_capacity(cores);
-        local.resize_with(cores, || LocalCounter {
-            counter: AtomicUsize::new(0),
-        });
-        self.local = local.into();
+        let p_core = pages / cores;
+        for core in 0..cores {
+            let mut l = Local::default();
+            // build linked list
+            for i in core * p_core + 1..(core + 1) * p_core {
+                memory[i - 1]
+                    .cast_mut::<Node>()
+                    .set((begin + i * Page::SIZE) as *mut _);
+            }
+            memory[(core + 1) * p_core - 1]
+                .cast_mut::<Node>()
+                .set(null_mut());
+            l.next.set((begin + core * p_core * Page::SIZE) as *mut _);
+            local.push(UnsafeCell::new(l));
+        }
 
+        self.pages = p_core * cores;
+        self.memory = memory[..p_core * cores].as_ptr_range();
+        self.local = local.into();
         Ok(())
     }
 
@@ -95,10 +98,11 @@ impl Alloc for ListLockedAlloc {
             return Err(Error::Memory);
         }
 
-        if let Some(node) = self.next.lock().pop() {
-            self.local[core].counter.fetch_add(1, Ordering::Relaxed);
+        let local = unsafe { &mut *self.local[core].get() };
+        if let Some(node) = local.next.pop() {
+            local.counter += 1;
             let addr = node as *mut _ as u64;
-            debug_assert!(addr % Page::SIZE as u64 == 0 && self.memory.contains(&(addr as _)),);
+            debug_assert!(addr % Page::SIZE as u64 == 0 && self.memory.contains(&(addr as _)));
             Ok(addr)
         } else {
             error!("No memory");
@@ -113,21 +117,39 @@ impl Alloc for ListLockedAlloc {
             return Err(Error::Address);
         }
 
-        self.next.lock().push(unsafe { &mut *(addr as *mut Node) });
-        self.local[core].counter.fetch_sub(1, Ordering::Relaxed);
+        let local = unsafe { &mut *self.local[core].get() };
+        local.next.push(unsafe { &mut *(addr as *mut Node) });
+        local.counter -= 1;
         Ok(Size::L0)
     }
 
     fn pages(&self) -> usize {
-        unsafe { self.memory.end.offset_from(self.memory.start) as usize }
+        self.pages
     }
 
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {
-        self.local
-            .iter()
-            .map(|c| c.counter.load(Ordering::SeqCst))
-            .sum()
+        let mut pages = 0;
+        for local in self.local.iter() {
+            let local = unsafe { &*local.get() };
+            pages += local.counter;
+        }
+        pages
+    }
+}
+
+#[repr(align(64))]
+struct Local {
+    next: Node,
+    counter: usize,
+}
+
+impl Default for Local {
+    fn default() -> Self {
+        Self {
+            next: Node::new(),
+            counter: 0,
+        }
     }
 }
 

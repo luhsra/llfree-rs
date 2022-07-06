@@ -1,4 +1,3 @@
-use core::fmt::Debug;
 use core::mem::transmute;
 use core::mem::{align_of, size_of};
 use core::ops::Range;
@@ -71,18 +70,18 @@ pub const fn align_down(v: usize, align: usize) -> usize {
     v & !(align - 1)
 }
 
-#[cfg(any(test, feature = "logger"))]
-#[cfg(any(test, feature = "thread"))]
-fn core() -> usize {
-    use crate::thread::PINNED;
-    use core::sync::atomic::Ordering;
-    PINNED.with(|p| p.load(Ordering::SeqCst))
-}
-
-#[cfg(any(test, feature = "logger"))]
-#[cfg(not(any(test, feature = "thread")))]
-fn core() -> usize {
-    0
+cfg_if::cfg_if! {
+    if #[cfg(any(test, all(feature = "logger", feature = "thread")))] {
+        fn core() -> usize {
+            use crate::thread::PINNED;
+            use core::sync::atomic::Ordering;
+            PINNED.with(|p| p.load(Ordering::SeqCst))
+        }
+    } else if #[cfg(any(test, feature = "logger"))] {
+        fn core() -> usize {
+            0
+        }
+    }
 }
 
 #[cfg(any(test, feature = "logger"))]
@@ -129,60 +128,58 @@ pub fn black_box<T>(dummy: T) -> T {
     dummy
 }
 
-/// Executes CLWB (cache-line write back) for the given address.
-///
-/// # Safety
-/// Directly executes an asm instruction.
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-pub unsafe fn _mm_clwb<T>(addr: *const T) {
-    use std::arch::asm;
-    asm!("clwb [rax]", in("rax") addr);
-}
+cfg_if::cfg_if! {
+    if #[cfg(target_arch = "x86_64")] {
+        /// Executes CLWB (cache-line write back) for the given address.
+        ///
+        /// # Safety
+        /// Directly executes an asm instruction.
+        #[inline(always)]
+        pub unsafe fn _mm_clwb<T>(addr: *const T) {
+            use std::arch::asm;
+            asm!("clwb [rax]", in("rax") addr);
+        }
 
-/// Executes RDTSC (read time-stamp counter) and returns the current cycle count.
-///
-/// # Safety
-/// Directly executes an asm instruction.
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-unsafe fn time_stamp_counter() -> u64 {
-    use std::arch::asm;
+        /// Executes RDTSC (read time-stamp counter) and returns the current cycle count.
+        ///
+        /// # Safety
+        /// Directly executes an asm instruction.
+        #[inline(always)]
+        unsafe fn time_stamp_counter() -> u64 {
+            use std::arch::asm;
 
-    let mut lo: u32;
-    let mut hi: u32;
-    asm!("rdtsc", out("eax") lo, out("edx") hi);
-    lo as u64 | (hi as u64) << 32
-}
+            let mut lo: u32;
+            let mut hi: u32;
+            asm!("rdtsc", out("eax") lo, out("edx") hi);
+            lo as u64 | (hi as u64) << 32
+        }
 
-/// x86 cycle timer.
-#[cfg(target_arch = "x86_64")]
-#[derive(Debug, Clone, Copy)]
-#[repr(transparent)]
-pub struct Cycles(u64);
+        /// x86 cycle timer.
+        #[derive(Debug, Clone, Copy)]
+        #[repr(transparent)]
+        pub struct Cycles(u64);
 
-#[cfg(target_arch = "x86_64")]
-impl Cycles {
-    pub fn now() -> Self {
-        Self(unsafe { time_stamp_counter() })
-    }
-    pub fn elapsed(self) -> u64 {
-        unsafe { time_stamp_counter() }.wrapping_sub(self.0)
-    }
-}
+        impl Cycles {
+            pub fn now() -> Self {
+                Self(unsafe { time_stamp_counter() })
+            }
+            pub fn elapsed(self) -> u64 {
+                unsafe { time_stamp_counter() }.wrapping_sub(self.0)
+            }
+        }
+    } else if #[cfg(any(test, feature = "std"))] {
+        /// Fallback to default ns timer.
+        #[derive(Debug, Clone, Copy)]
+        pub struct Cycles(std::time::Instant);
 
-/// Fallback to default ns timer.
-#[cfg(not(target_arch = "x86_64"))]
-#[derive(Debug, Clone, Copy)]
-pub struct Cycles(std::time::Instant);
-
-#[cfg(not(target_arch = "x86_64"))]
-impl Cycles {
-    pub fn now() -> Self {
-        Self(std::time::Instant::now())
-    }
-    pub fn elapsed(self) -> u64 {
-        self.0.elapsed().as_nanos() as _
+        impl Cycles {
+            pub fn now() -> Self {
+                Self(std::time::Instant::now())
+            }
+            pub fn elapsed(self) -> u64 {
+                self.0.elapsed().as_nanos() as _
+            }
+        }
     }
 }
 

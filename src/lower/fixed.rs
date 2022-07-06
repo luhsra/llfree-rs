@@ -1,9 +1,10 @@
 use core::ops::Range;
-use std::fmt::Write;
+use core::fmt::Write;
 
+use alloc::string::String;
 use log::{error, warn};
 
-use crate::alloc::{Error, Result, Size, CAS_RETRIES};
+use crate::upper::{Error, Result, Size, CAS_RETRIES};
 use crate::entry::{Entry1, Entry2};
 use crate::table::{ATable, Mapping};
 use crate::util::Page;

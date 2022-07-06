@@ -10,7 +10,7 @@ use crate::entry::Entry3;
 #[repr(transparent)]
 pub struct Atomic<T: AtomicValue>(pub <<T as AtomicValue>::V as AtomicT>::A);
 
-const _: () = assert!(std::mem::size_of::<Atomic<u64>>() == 8);
+const _: () = assert!(core::mem::size_of::<Atomic<u64>>() == 8);
 
 impl<T: AtomicValue> Atomic<T> {
     #[inline]
@@ -239,7 +239,7 @@ where
     T: ANode,
     B: Index<usize, Output = Atomic<T>>,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut dbg = f.debug_list();
 
         match self.0.start.load().next() {

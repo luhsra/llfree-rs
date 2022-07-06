@@ -8,40 +8,49 @@ lto = "thin"
 opt-level = 3
 
 [dependencies]
-log = "0.4"
-libc = "0.2"
+cfg-if = "1.0"
+log = { version = "0.4", default-features = false }
+libc = { version = "0.2", optional = true }
 bitfield-struct = "0.1.7"
 env_logger = { version = "0.9", default-features = false, optional = true }
 spin = { version = "0.9.3", default-features = false, features = ["use_ticket_mutex", "barrier"] }
 
 [dev-dependencies]
 env_logger = { version = "0.9", default-features = false }
+libc = "0.2"
 clap = { version = "3.1", default-features = false, features = ["std", "derive"] }
 
 [features]
-stop = []
+std = ["log/std", "libc"]
 log_debug = ["log/max_level_debug"]
 log_info = ["log/max_level_info"]
 log_warn = ["log/max_level_warn"]
 log_error = ["log/max_level_error"]
-thread = []
+stop = ["std"]
+thread = ["std"]
 logger = ["env_logger"]
 
-[target.'cfg(target_arch = "x86_64")'.dependencies]
+# The examples / benchmarks
+
+[target.'cfg(target_arch = "x86_64")'.dev-dependencies]
 raw-cpuid = "10.3"
 
 [[example]]
 name = "bench"
-required-features = ["logger", "thread"]
+required-features = ["std", "logger", "thread"]
 
 [[example]]
 name = "crash"
-required-features = ["logger", "thread"]
+required-features = ["std", "logger", "thread"]
 
 [[example]]
 name = "detail"
-required-features = ["logger", "thread"]
+required-features = ["std", "logger", "thread"]
 
 [[example]]
 name = "cpu"
-required-features = ["thread"]
+required-features = ["std", "thread"]
+
+[[example]]
+name = "mmap"
+required-features = ["std"]

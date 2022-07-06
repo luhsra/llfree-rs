@@ -1,17 +1,19 @@
 use core::fmt;
 use core::ops::Range;
-use std::fmt::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use core::fmt::Write;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 use log::{error, info, warn};
 
-use crate::alloc::{Error, Result, Size};
+use crate::upper::{Error, Result, Size, CAS_RETRIES};
 use crate::entry::{Entry1, Entry2};
 use crate::table::{ATable, Mapping};
 use crate::util::Page;
 
 use super::LowerAlloc;
-use crate::alloc::CAS_RETRIES;
 
 /// Level 2 page allocator.
 /// ```text

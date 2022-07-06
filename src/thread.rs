@@ -1,5 +1,6 @@
-#![cfg(any(test, feature = "thread"))]
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+use alloc::vec::Vec;
 
 pub static STRIDE: AtomicUsize = AtomicUsize::new(1);
 

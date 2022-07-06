@@ -3,10 +3,13 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{fmt, mem};
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use log::{error, info, warn};
+use spin::mutex::{TicketMutex, TicketMutexGuard};
 
 use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
-use crate::atomic::{AStack, AStackDbg, Atomic};
+use crate::atomic::Atomic;
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::table::Mapping;
@@ -33,13 +36,13 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// packed array.
 /// The subtree reservation is speed up using free lists for
 /// empty and partially empty subtrees.
-/// These free lists are implemented as atomic linked lists with their next
-/// pointers stored inside the level 3 entries.
+/// These free lists are implemented as array based stacks protected by
+/// ticket locks.
 ///
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
 #[repr(align(64))]
-pub struct ArrayAtomicAlloc<L: LowerAlloc> {
+pub struct ArrayLockedAlloc<L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
@@ -50,17 +53,17 @@ pub struct ArrayAtomicAlloc<L: LowerAlloc> {
     lower: L,
 
     /// List of idx to subtrees that are not allocated at all
-    empty: AStack<Entry3>,
+    empty: TicketMutex<Vec<usize>>,
     /// List of idx to subtrees that are partially allocated with small pages
-    partial_l1: AStack<Entry3>,
+    partial_l0: TicketMutex<Vec<usize>>,
     /// List of idx to subtrees that are partially allocated with huge pages
-    partial_l0: AStack<Entry3>,
+    partial_l1: TicketMutex<Vec<usize>>,
 }
 
-unsafe impl<L: LowerAlloc> Send for ArrayAtomicAlloc<L> {}
-unsafe impl<L: LowerAlloc> Sync for ArrayAtomicAlloc<L> {}
+unsafe impl<L: LowerAlloc> Send for ArrayLockedAlloc<L> {}
+unsafe impl<L: LowerAlloc> Sync for ArrayLockedAlloc<L> {}
 
-impl<L: LowerAlloc> fmt::Debug for ArrayAtomicAlloc<L> {
+impl<L: LowerAlloc> fmt::Debug for ArrayLockedAlloc<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
         writeln!(
@@ -73,9 +76,9 @@ impl<L: LowerAlloc> fmt::Debug for ArrayAtomicAlloc<L> {
             let pte = entry.load();
             writeln!(f, "    {i:>3}: {pte:?}")?;
         }
-        writeln!(f, "    empty: {:?}", AStackDbg(&self.empty, self))?;
-        writeln!(f, "    partial_l0: {:?}", AStackDbg(&self.partial_l0, self))?;
-        writeln!(f, "    partial_l1: {:?}", AStackDbg(&self.partial_l1, self))?;
+        writeln!(f, "    empty: {:?}", self.empty.lock())?;
+        writeln!(f, "    partial_l0: {:?}", self.partial_l0.lock())?;
+        writeln!(f, "    partial_l1: {:?}", self.partial_l1.lock())?;
         for (t, local) in self.local.iter().enumerate() {
             writeln!(f, "    L{t:>2}: L0 {:?}", local.pte(false))?;
             writeln!(f, "         L1 {:?}", local.pte(true))?;
@@ -85,7 +88,7 @@ impl<L: LowerAlloc> fmt::Debug for ArrayAtomicAlloc<L> {
     }
 }
 
-impl<L: LowerAlloc> Index<usize> for ArrayAtomicAlloc<L> {
+impl<L: LowerAlloc> Index<usize> for ArrayLockedAlloc<L> {
     type Output = Atomic<Entry3>;
 
     #[inline]
@@ -94,7 +97,7 @@ impl<L: LowerAlloc> Index<usize> for ArrayAtomicAlloc<L> {
     }
 }
 
-impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
+impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
         info!(
@@ -125,9 +128,9 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
         subtrees.resize_with(pte3_num, || Atomic::new(Entry3::new()));
         self.subtrees = subtrees.into();
 
-        self.empty = AStack::default();
-        self.partial_l0 = AStack::default();
-        self.partial_l1 = AStack::default();
+        self.empty = TicketMutex::new(Vec::with_capacity(pte3_num));
+        self.partial_l0 = TicketMutex::new(Vec::with_capacity(pte3_num));
+        self.partial_l1 = TicketMutex::new(Vec::with_capacity(pte3_num));
 
         if !overwrite
             && meta.pages.load(Ordering::SeqCst) == self.pages()
@@ -187,7 +190,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
     }
 }
 
-impl<L: LowerAlloc> Drop for ArrayAtomicAlloc<L> {
+impl<L: LowerAlloc> Drop for ArrayLockedAlloc<L> {
     fn drop(&mut self) {
         if !self.meta.is_null() {
             let meta = unsafe { &*self.meta };
@@ -195,21 +198,21 @@ impl<L: LowerAlloc> Drop for ArrayAtomicAlloc<L> {
         }
     }
 }
-impl<L: LowerAlloc> Default for ArrayAtomicAlloc<L> {
+impl<L: LowerAlloc> Default for ArrayLockedAlloc<L> {
     fn default() -> Self {
         Self {
             meta: null_mut(),
             subtrees: Box::new([]),
             local: Box::new([]),
             lower: L::default(),
-            empty: AStack::default(),
-            partial_l1: AStack::default(),
-            partial_l0: AStack::default(),
+            empty: TicketMutex::new(Vec::new()),
+            partial_l1: TicketMutex::new(Vec::new()),
+            partial_l0: TicketMutex::new(Vec::new()),
         }
     }
 }
 
-impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
+impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
     const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
 
@@ -219,10 +222,12 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         self.lower.clear();
 
         // Add all entries to the empty list
+        let mut empty = self.empty.lock();
+
         let pte3_num = Self::MAPPING.num_pts(2, self.pages());
         for i in 0..pte3_num - 1 {
             self[i].store(Entry3::empty(Self::MAPPING.span(2)));
-            self.empty.push(self, i);
+            empty.push(i);
         }
 
         // The last one may be cut off
@@ -231,9 +236,9 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         self[pte3_num - 1].store(Entry3::new().with_free(max));
 
         if max == Self::MAPPING.span(2) {
-            self.empty.push(self, pte3_num - 1);
+            empty.push(pte3_num - 1);
         } else if max > Self::ALMOST_FULL {
-            self.partial_l0.push(self, pte3_num - 1);
+            self.partial_l0.lock().push(pte3_num - 1);
         }
     }
 
@@ -253,31 +258,34 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
 
             // Add to lists
             if pages == Self::MAPPING.span(2) {
-                self.empty.push(self, i);
+                self.empty.lock().push(i);
             } else if pages > Self::ALMOST_FULL {
-                self.partial(size == Size::L1).push(self, i);
+                self.partial(size == Size::L1).push(i);
             }
+
             total += pages;
         }
         Ok(total)
     }
 
-    fn partial(&self, huge: bool) -> &AStack<Entry3> {
+    fn partial<'a, 'b: 'a>(&'b self, huge: bool) -> TicketMutexGuard<'a, Vec<usize>> {
         if huge {
             &self.partial_l1
         } else {
             &self.partial_l0
         }
+        .lock()
     }
 
     /// Reserves a new subtree, prioritizing partially filled subtrees,
     /// and allocates a page from it in one step.
     fn reserve(&self, huge: bool) -> Result<(usize, Entry3)> {
-        while let Some((i, r)) = self.partial(huge).pop_update(self, |v| {
-            v.reserve_partial(huge, Self::ALMOST_FULL, Self::MAPPING.span(2))
-        }) {
+        while let Some(i) = self.partial(huge).pop() {
             info!("reserve partial {i}");
-            match r {
+            match self[i].update(|v| {
+                v.reserve_partial(huge, Self::ALMOST_FULL, Self::MAPPING.span(2))
+                    .map(|v| v.with_idx(Entry3::IDX_MAX))
+            }) {
                 Ok(pte) => {
                     let pte = pte
                         .dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
@@ -288,18 +296,19 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                 Err(pte) => {
                     // Skip empty entries
                     if !pte.reserved() && pte.free() == Self::MAPPING.span(2) {
-                        self.empty.push(self, i);
+                        let _ = self[i].update(|v| Some(v.with_idx(0)));
+                        self.empty.lock().push(i);
                     }
                 }
             }
         }
 
-        while let Some((i, r)) = self
-            .empty
-            .pop_update(self, |v| v.reserve_empty(huge, Self::MAPPING.span(2)))
-        {
+        while let Some(i) = self.empty.lock().pop() {
             info!("reserve empty {i}");
-            if let Ok(pte) = r {
+            if let Ok(pte) = self[i].update(|v| {
+                v.reserve_empty(huge, Self::MAPPING.span(2))
+                    .map(|v| v.with_idx(Entry3::IDX_MAX))
+            }) {
                 let pte = pte
                     .dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
                     .unwrap()
@@ -328,9 +337,11 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                 // Add to list if new counter is small enough
                 let new_pages = v.free() + pte.free();
                 if new_pages == max {
-                    self.empty.push(self, i);
+                    let _ = self[i].update(|v| Some(v.with_idx(0)));
+                    self.empty.lock().push(i);
                 } else if new_pages > Self::ALMOST_FULL {
-                    self.partial(huge).push(self, i);
+                    let _ = self[i].update(|v| Some(v.with_idx(0)));
+                    self.partial(huge).push(i);
                 }
             }
             Ok(())
@@ -384,7 +395,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         let local = &self.local[core];
         let _push = local.defer_frees_push(i);
 
-        // Try decrement own subtree first
+        // Try decrement own pte first
         let pte_a = local.pte(huge);
         if let Some(pte) = pte_a.inc_idx(Self::MAPPING.span(huge as _), i, max) {
             *pte_a = pte;
@@ -416,7 +427,8 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
                     && pte.free() <= Self::ALMOST_FULL
                     && new_pages > Self::ALMOST_FULL
                 {
-                    self.partial(huge).push(self, i);
+                    let _ = self[i].update(|v| Some(v.with_idx(0)));
+                    self.partial(huge).push(i);
                 }
             }
             Ok(size)
@@ -424,18 +436,5 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             error!("Corruption l3 i{i} p=-{huge:?}");
             Err(Error::Corruption)
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::lower::{CacheLower, FixedLower};
-
-    use super::ArrayAtomicAlloc;
-
-    #[test]
-    fn correct_sizes() {
-        assert_eq!(ArrayAtomicAlloc::<FixedLower>::ALMOST_FULL, 8 * 512);
-        assert_eq!(ArrayAtomicAlloc::<CacheLower<512>>::ALMOST_FULL, 8 * 512);
     }
 }
