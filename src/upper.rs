@@ -33,7 +33,7 @@ pub use table::TableAlloc;
 
 pub const CAS_RETRIES: usize = 4096;
 pub const MAGIC: usize = 0xdead_beef;
-pub const MIN_PAGES: usize = 2 * PT_LEN * PT_LEN;
+pub const MIN_PAGES: usize = 1 * PT_LEN * PT_LEN;
 pub const MAX_PAGES: usize = Mapping([512; 4]).span(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,11 +210,11 @@ mod test {
 
     use super::Error;
     use super::Local;
-    use crate::upper::Alloc;
-    use crate::upper::MIN_PAGES;
     use crate::lower::*;
     use crate::mmap::MMap;
     use crate::table::PT_LEN;
+    use crate::upper::Alloc;
+    use crate::upper::MIN_PAGES;
     use crate::util::{logging, Page, WyRand};
     use crate::{thread, Size};
 
@@ -605,7 +605,8 @@ mod test {
 
         const THREADS: usize = 4;
         const ALLOC_PER_THREAD: usize = PT_LEN - 1;
-        const PAGES: usize = THREADS * MIN_PAGES;
+        // additional space for the allocators metadata
+        const PAGES: usize = THREADS * (ALLOC_PER_THREAD + 1) * Lower::MAPPING.span(2);
 
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
 

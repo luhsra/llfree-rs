@@ -15,12 +15,12 @@ The version `1.59.0` (or newer) is required to have access to inline assembly.
 
 ## Project structure
 
-The [src/alloc](src/alloc/) directory contains the different allocator variants.
-The general interface is defined in [src/alloc.rs](src/alloc.rs), together with various unit tests and stress tests.
+The [src/upper](src/upper/) directory contains the different allocator variants.
+The general interface is defined in [src/upper.rs](src/upper.rs), together with various unit tests and stress tests.
 
 The persistent lower allocator can be found in [src/lower_alloc.rs](src/lower_alloc.rs).
 It is responsible for managing the level one and level two-page tables that are persisted on the non-volatile memory.
-Most of the upper allocators in [src/alloc](src/alloc/) use the lower allocator and focus only on managing the higher level 1G subtrees using volatile data structures.
+Most of the upper allocators in [src/upper](src/upper/) use the lower allocator and focus only on managing the higher level 1G subtrees using volatile data structures.
 
 The lower allocator is heavily tested for race conditions using synchronization points (`stop`) to control the execution order of parallel threads.
 They are similar to barriers where, on every synchronization point, the next running CPU is chosen either by a previously defined order or in a pseudo-randomized manner.
@@ -43,6 +43,16 @@ This runs the `bulk` benchmark for 1, 2, and 4 threads on 24G DRAM and stores th
 To execute the benchmark on NVM, use the `--dax` flag to specify a DAX file to be mmaped.
 
 > The debug output can be suppressed with setting `RUST_LOG=error`.
+
+## Compiling for Linux
+
+The allocators can be compiled into a static library that can be linked against a non-std target like the Linux Kernel.
+
+```
+cargo build --release --target x86_64-unknown-none -Zbuild-std=core,alloc,compiler_builtins
+```
+
+For linking, the `nvalloc_linux_alloc` and `nvalloc_linux_free` [functions](src/linux.rs) have to be implemented.
 
 ## Profiling
 

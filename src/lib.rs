@@ -29,7 +29,7 @@ pub mod util;
 #[cfg(feature = "stop")]
 pub mod stop;
 
-#[cfg(not(feature = "std"))]
+#[cfg(not(any(test, feature = "std")))]
 mod linux;
 
 use core::ffi::c_void;
@@ -38,7 +38,7 @@ use alloc::boxed::Box;
 use upper::{Alloc, Error, Size};
 use util::Page;
 
-pub type Allocator = upper::ArrayAtomicAlloc<lower::PackedLower>;
+pub type Allocator = upper::ArrayAtomicAlloc<lower::CacheLower<128>>;
 static mut ALLOC: Option<Box<Allocator>> = None;
 
 pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> upper::Result<()> {

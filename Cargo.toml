@@ -3,9 +3,16 @@ name = "nvalloc"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["staticlib"]
+
 [profile.release]
 lto = "thin"
 opt-level = 3
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
 
 [dependencies]
 cfg-if = "1.0"

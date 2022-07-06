@@ -104,7 +104,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
             memory.as_ptr_range(),
             memory.len()
         );
-        if memory.len() < MIN_PAGES * cores {
+        if memory.len() < Self::MAPPING.span(2) * cores {
             error!("memory {} < {}", memory.len(), MIN_PAGES * cores);
             return Err(Error::Memory);
         }

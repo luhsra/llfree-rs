@@ -136,7 +136,7 @@ cfg_if::cfg_if! {
         /// Directly executes an asm instruction.
         #[inline(always)]
         pub unsafe fn _mm_clwb<T>(addr: *const T) {
-            use std::arch::asm;
+            use core::arch::asm;
             asm!("clwb [rax]", in("rax") addr);
         }
 
@@ -146,7 +146,7 @@ cfg_if::cfg_if! {
         /// Directly executes an asm instruction.
         #[inline(always)]
         unsafe fn time_stamp_counter() -> u64 {
-            use std::arch::asm;
+            use core::arch::asm;
 
             let mut lo: u32;
             let mut hi: u32;

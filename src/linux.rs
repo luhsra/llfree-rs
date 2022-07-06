@@ -1,4 +1,6 @@
-use core::alloc::GlobalAlloc;
+use core::alloc::{GlobalAlloc, Layout};
+use core::panic::PanicInfo;
+use core::sync::atomic::{self, Ordering};
 
 extern "C" {
     // Linux provided alloc function
@@ -20,3 +22,19 @@ unsafe impl GlobalAlloc for LinuxAlloc {
 
 #[global_allocator]
 static LINUX_ALLOC: LinuxAlloc = LinuxAlloc;
+
+
+#[alloc_error_handler]
+fn on_oom(_layout: Layout) -> ! {
+    loop {
+        atomic::compiler_fence(Ordering::SeqCst);
+    }
+}
+
+#[inline(never)]
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {
+        atomic::compiler_fence(Ordering::SeqCst);
+    }
+}
