@@ -8,16 +8,16 @@
 // Custom out of memory handler
 #![cfg_attr(not(feature = "std"), feature(alloc_error_handler))]
 
-#[cfg(any(test, feature = "std"))]
+#[cfg(feature = "std")]
 #[macro_use]
 extern crate std;
 
 #[macro_use]
 extern crate alloc;
 
-#[cfg(any(test, feature = "std"))]
+#[cfg(feature = "std")]
 pub mod mmap;
-#[cfg(any(test, feature = "thread"))]
+#[cfg(feature = "thread")]
 pub mod thread;
 
 pub mod atomic;
@@ -30,7 +30,7 @@ pub mod util;
 #[cfg(feature = "stop")]
 mod stop;
 
-#[cfg(not(any(test, feature = "std")))]
+#[cfg(not(feature = "std"))]
 mod linux;
 
 use core::ffi::c_void;

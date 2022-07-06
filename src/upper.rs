@@ -23,9 +23,9 @@ pub use list_local::ListLocalAlloc;
 mod list_locked;
 pub use list_locked::ListLockedAlloc;
 
-#[cfg(any(test, feature = "std"))]
+#[cfg(feature = "std")]
 mod malloc;
-#[cfg(any(test, feature = "std"))]
+#[cfg(feature = "std")]
 pub use malloc::MallocAlloc;
 
 mod table;

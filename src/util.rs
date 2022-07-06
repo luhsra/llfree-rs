@@ -71,13 +71,13 @@ pub const fn align_down(v: usize, align: usize) -> usize {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(any(test, feature = "thread"))] {
+    if #[cfg(feature = "thread")] {
         fn core() -> usize {
             use crate::thread::PINNED;
             use core::sync::atomic::Ordering;
             PINNED.with(|p| p.load(Ordering::SeqCst))
         }
-    } else if #[cfg(any(test, feature = "std"))] {
+    } else if #[cfg(feature = "std")] {
         fn core() -> usize {
             0
         }
@@ -167,7 +167,7 @@ cfg_if::cfg_if! {
                 unsafe { time_stamp_counter() }.wrapping_sub(self.0)
             }
         }
-    } else if #[cfg(any(test, feature = "std"))] {
+    } else if #[cfg(feature = "std")] {
         /// Fallback to default ns timer.
         #[derive(Debug, Clone, Copy)]
         pub struct Cycles(std::time::Instant);

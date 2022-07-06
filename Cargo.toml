@@ -2,6 +2,7 @@
 name = "nvalloc"
 version = "0.1.0"
 edition = "2021"
+resolver = "2"
 
 [profile.release]
 lto = "thin"
@@ -20,9 +21,12 @@ env_logger = { version = "0.9", default-features = false, optional = true }
 spin = { version = "0.9.3", default-features = false, features = ["use_ticket_mutex", "barrier"] }
 
 [dev-dependencies]
-env_logger = { version = "0.9", default-features = false }
-libc = "0.2"
+# Require `std` for tests and benchmarks
+nvalloc = { path = ".", features = ["thread"] }
 clap = { version = "3.1", default-features = false, features = ["std", "derive"] }
+
+[target.'cfg(target_arch = "x86_64")'.dev-dependencies]
+raw-cpuid = "10.3"
 
 [features]
 std = ["log/std", "libc", "env_logger"]
@@ -32,28 +36,3 @@ log_warn = ["log/max_level_warn"]
 log_error = ["log/max_level_error"]
 stop = ["std"]
 thread = ["std"]
-
-# The examples / benchmarks
-
-[target.'cfg(target_arch = "x86_64")'.dev-dependencies]
-raw-cpuid = "10.3"
-
-[[example]]
-name = "bench"
-required-features = ["thread"]
-
-[[example]]
-name = "crash"
-required-features = ["thread"]
-
-[[example]]
-name = "detail"
-required-features = ["thread"]
-
-[[example]]
-name = "cpu"
-required-features = ["thread"]
-
-[[example]]
-name = "mmap"
-required-features = ["std"]
