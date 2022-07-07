@@ -17,8 +17,6 @@ use log::{LevelFilter, SetLoggerError};
 use nvalloc::upper::{Error, Size};
 use nvalloc::{init, instance, uninit};
 
-use kernel::prelude::*;
-
 extern "C" {
     /// Linux provided alloc function
     fn nvalloc_linux_alloc(size: usize, align: usize) -> *mut u8;
