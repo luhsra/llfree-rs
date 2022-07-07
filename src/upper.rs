@@ -605,7 +605,7 @@ mod test {
         const THREADS: usize = 4;
         const ALLOC_PER_THREAD: usize = PT_LEN - 1;
         // additional space for the allocators metadata
-        const PAGES: usize = THREADS * (ALLOC_PER_THREAD + 1) * Lower::MAPPING.span(2);
+        const PAGES: usize = THREADS * (ALLOC_PER_THREAD + 2) * Lower::MAPPING.span(1);
 
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
 

@@ -219,6 +219,8 @@ mod test {
     #[test]
     #[ignore]
     fn clwb() {
+        use alloc::boxed::Box;
+
         let mut data = Box::new(43_u64);
         *data = 44;
         unsafe { super::_mm_clwb(data.as_ref() as *const _ as _) };
