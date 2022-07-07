@@ -161,7 +161,7 @@ mod bindings {
 
 // Called from `vsprintf` with format specifier `%pA`.
 #[no_mangle]
-extern "C" fn rust_fmt_argument(
+pub extern "C" fn rust_fmt_argument(
     buf: *mut c_char,
     end: *mut c_char,
     ptr: *const c_void,
