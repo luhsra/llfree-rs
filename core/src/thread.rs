@@ -113,7 +113,8 @@ where
             let f = f.clone();
             std::thread::spawn(move || f(t))
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>(); // collect starts the threads immediately
+    // Then collect them...
     handles.into_iter().map(|t| t.join().unwrap()).collect()
 }
 

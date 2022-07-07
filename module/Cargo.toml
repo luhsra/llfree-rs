@@ -1,0 +1,15 @@
+[package]
+name = "nvalloc-module"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+test = false
+bench = false
+path = "nvalloc.rs"
+
+[dependencies]
+cfg-if = "1.0"
+log = { version = "0.4", default-features = false }
+nvalloc = { path = "../core", default-features = false }

@@ -1,3 +1,10 @@
+#![no_std]
+#![feature(alloc_error_handler)]
+#![feature(core_ffi_c)]
+
+#[macro_use]
+extern crate alloc;
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::{c_char, c_void};
 use core::fmt;
@@ -6,6 +13,11 @@ use core::sync::atomic::{self, Ordering};
 
 use log::{error, Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
+
+use nvalloc::upper::{Error, Size};
+use nvalloc::{init, instance, uninit};
+
+use kernel::prelude::*;
 
 extern "C" {
     /// Linux provided alloc function
@@ -16,11 +28,48 @@ extern "C" {
     fn nvalloc_printk(format: *const u8, module_name: *const u8, args: *const c_void);
 }
 
+/// Initialize the allocator for the given memory range.
+/// If `overwrite` is nonzero no existing allocator state is recovered.
 #[no_mangle]
-extern "C" fn nvalloc_init_logging() -> i64 {
-    match init() {
+pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwrite: u32) -> i64 {
+    if let Err(_) = init_logging() {
+        return -(Error::Corruption as i64);
+    }
+
+    let memory = unsafe { core::slice::from_raw_parts_mut(addr.cast(), pages as _) };
+    match init(cores as _, memory, overwrite != 0) {
         Ok(_) => 0,
-        Err(_) => -1,
+        Err(e) => -(e as usize as i64),
+    }
+}
+
+/// Shut down the allocator normally.
+#[no_mangle]
+pub extern "C" fn nvalloc_uninit() {
+    uninit();
+}
+
+/// Allocate a page of the given `size` on the given cpu `core`.
+#[no_mangle]
+pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
+    let size = match size {
+        0 => Size::L0,
+        1 => Size::L1,
+        _ => return -(Error::Memory as usize as i64),
+    };
+
+    match instance().get(core as _, size) {
+        Ok(addr) => addr as i64,
+        Err(e) => -(e as usize as i64),
+    }
+}
+
+/// Frees the given page.
+#[no_mangle]
+pub extern "C" fn nvalloc_put(core: u32, addr: u64) -> i64 {
+    match instance().put(core as _, addr) {
+        Ok(_) => 0,
+        Err(e) => -(e as usize as i64),
     }
 }
 
@@ -94,7 +143,7 @@ impl log::Log for KPrintLogger {
 
 static LOGGER: KPrintLogger = KPrintLogger;
 
-pub fn init() -> Result<(), SetLoggerError> {
+pub fn init_logging() -> Result<(), SetLoggerError> {
     log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info))
 }
 

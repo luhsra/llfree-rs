@@ -1,5 +1,3 @@
-#![cfg(all(feature = "thread"))]
-
 use std::slice;
 use std::sync::Arc;
 use std::sync::Barrier;
@@ -247,7 +245,7 @@ fn monitor(
 }
 
 #[allow(unused_variables)]
-fn mapping<'a>(
+fn mapping(
     begin: usize,
     length: usize,
     dax: Option<String>,

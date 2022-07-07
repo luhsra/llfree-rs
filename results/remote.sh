@@ -1,14 +1,15 @@
 export RUST_LOG=warn
 mkdir -p bench/out
 
-ALLOC="ArrayAlignedD ArrayAlignedF ArrayAlignedP ArrayAtomicD ArrayAtomicF ArrayAtomicP ArrayLockedD ArrayLockedF ArrayLockedP TableD TableF TableP ListLocal"
+#ALLOC="ArrayAlignedD ArrayAlignedF ArrayAlignedP ArrayAtomicD ArrayAtomicF ArrayAtomicP ArrayLockedD ArrayLockedF ArrayLockedP TableD TableF TableP ListLocal"
+ALLOC="ArrayAtomicP ArrayAtomicC64 ArrayAtomicC128 ArrayAtomicC256 ArrayAtomicC512 ArrayAlignedP ArrayAlignedC64 ArrayAlignedC128 ArrayAlignedC256 ArrayAlignedC512"
 THREADS="-x1 -x2 -x4 -x8 -x16 -x24 -x32 -x40 -x48 -x56 -x64 -x80 -x96"
 FILL="-x0 -x10 -x20 -x30 -x40 -x50 -x60 -x70 -x80"
 
 # NVRAM
-FLAGS="-t96 -i4 -s0 -m512 --dax=/dev/dax0.1"
+FLAGS="-t96 -i4 -s0 -m256 --dax=/dev/dax0.1 --stride 2"
 
-echo ">>> check p bulk"
+#echo ">>> check p bulk"
 chrt 99 target/release/examples/bench bulk $ALLOC $FLAGS $THREADS \
     -o bench/out/bulk_p.csv
 echo ">>> check p repeat"
@@ -26,7 +27,7 @@ chrt 99 target/release/examples/bench rand $FLAGS $ALLOC $THREADS \
 #    -o bench/out/align_p.csv
 
 # DRAM
-FLAGS="-t96 -i4 -s0 -m192"
+FLAGS="-t96 -i4 -s0 -m256 --stride 2"
 
 echo ">>> check v bulk"
 chrt 99 target/release/examples/bench bulk $ALLOC $FLAGS $THREADS \
@@ -101,5 +102,3 @@ chrt 99 target/release/examples/bench repeat $ALLOC $FLAGS $THREADS \
 echo ">>> check v rand2"
 chrt 99 target/release/examples/bench rand $FLAGS $ALLOC $THREADS \
     -o bench/out/rand_v2.csv
-
-

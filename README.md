@@ -48,8 +48,9 @@ To execute the benchmark on NVM, use the `--dax` flag to specify a DAX file to b
 
 The allocators can be compiled into a static library that can be linked against a non-std target like the Linux Kernel.
 
-```
-cargo build -r --config crate-type='"staticlib"' --target x86_64-unknown-none -Zbuild-std=core,alloc,compiler_builtins
+```sh
+cargo module
+# outputs `target/x86_64-unknown-none/release/libnvalloc_module.a`
 ```
 
 For linking, the `nvalloc_linux_alloc` and `nvalloc_linux_free` [functions](src/linux.rs) have to be implemented.
@@ -76,7 +77,7 @@ char *pointer(const char *fmt, char *buf, char *end, void *ptr,
 }
 ```
 
-Logging can be initialized by calling `nvalloc_init_logging`.
+Logging is automatically initialized with the allocator.
 
 ## Profiling
 

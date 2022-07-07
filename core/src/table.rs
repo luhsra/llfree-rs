@@ -5,6 +5,7 @@ use core::ptr::addr_of;
 use core::sync::atomic::{self, AtomicU8, Ordering};
 
 use crate::atomic::{Atomic, AtomicValue};
+use crate::upper::Error;
 use crate::util::{align_down, align_up, CacheLine};
 use crate::Page;
 
@@ -138,7 +139,7 @@ impl Bitfield {
     }
 
     /// Set the first 0 bit to 1 returning its bit index.
-    pub fn set_first_zero(&self, i: usize) -> core::result::Result<usize, ()> {
+    pub fn set_first_zero(&self, i: usize) -> core::result::Result<usize, Error> {
         for j in 0..self.data.len() {
             let i = (j + i) % self.data.len();
 
@@ -158,7 +159,7 @@ impl Bitfield {
                 return Ok(i * Self::ENTRY_BITS + e.trailing_ones() as usize);
             }
         }
-        Err(())
+        Err(Error::Memory)
     }
 
     pub fn fill(&self, v: bool) {

@@ -1,0 +1,40 @@
+[package]
+name = "nvalloc-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nvalloc = { path = "../core", features = ["std", "log_warn"] }
+libc = "0.2"
+log = { version = "0.4", default-features = false }
+clap = { version = "3.1", default-features = false, features = ["std", "derive"] }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+raw-cpuid = { version = "10.3" }
+
+# binaries
+
+[[bin]]
+name = "bench"
+test = false
+bench = false
+
+[[bin]]
+name = "cpu"
+test = false
+bench = false
+
+[[bin]]
+name = "crash"
+test = false
+bench = false
+
+[[bin]]
+name = "detail"
+test = false
+bench = false
+
+[[bin]]
+name = "mmap"
+test = false
+bench = false

@@ -3,10 +3,6 @@
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
 #![no_std]
 #![feature(generic_const_exprs)]
-#![feature(core_ffi_c)]
-
-// Custom out of memory handler
-#![cfg_attr(not(feature = "std"), feature(alloc_error_handler))]
 
 #[cfg(feature = "std")]
 #[macro_use]
@@ -17,7 +13,7 @@ extern crate alloc;
 
 #[cfg(feature = "std")]
 pub mod mmap;
-#[cfg(feature = "thread")]
+#[cfg(feature = "std")]
 pub mod thread;
 
 pub mod atomic;
@@ -30,13 +26,8 @@ pub mod util;
 #[cfg(feature = "stop")]
 mod stop;
 
-#[cfg(not(feature = "std"))]
-mod linux;
-
-use core::ffi::c_void;
-
 use alloc::boxed::Box;
-use upper::{Alloc, Error, Size};
+use upper::{Alloc, Size};
 use util::Page;
 
 pub type Allocator = upper::ArrayAtomicAlloc<lower::CacheLower<128>>;
@@ -55,49 +46,6 @@ pub fn instance<'a>() -> &'a dyn Alloc {
 
 pub fn uninit() {
     unsafe { ALLOC.take().unwrap() };
-}
-
-// C bindings
-
-/// Initialize the allocator for the given memory range.
-/// If `overwrite` is nonzero no existing allocator state is recovered.
-#[no_mangle]
-pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwrite: u32) -> i64 {
-    let memory = unsafe { core::slice::from_raw_parts_mut(addr.cast(), pages as _) };
-    match init(cores as _, memory, overwrite != 0) {
-        Ok(_) => 0,
-        Err(e) => -(e as usize as i64),
-    }
-}
-
-/// Shut down the allocator normally.
-#[no_mangle]
-pub extern "C" fn nvalloc_uninit() {
-    uninit();
-}
-
-/// Allocate a page of the given `size` on the given cpu `core`.
-#[no_mangle]
-pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
-    let size = match size {
-        0 => Size::L0,
-        1 => Size::L1,
-        _ => return -(Error::Memory as usize as i64),
-    };
-
-    match instance().get(core as _, size) {
-        Ok(addr) => addr as i64,
-        Err(e) => -(e as usize as i64),
-    }
-}
-
-/// Frees the given page.
-#[no_mangle]
-pub extern "C" fn nvalloc_put(core: u32, addr: u64) -> i64 {
-    match instance().put(core as _, addr) {
-        Ok(_) => 0,
-        Err(e) => -(e as usize as i64),
-    }
 }
 
 #[cfg(test)]

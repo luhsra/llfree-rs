@@ -1,8 +1,12 @@
 [alias]
-perf = ["run", "--features=thread", "--features=log_warn", "--release", "--example"]
-perf-build = ["build", "--features=thread", "--features=log_warn", "--release", "--example"]
+perf = ["run", "-pnvalloc-bench", "-r", "--bin"]
+perf-build = ["build", "-pnvalloc-bench", "-r", "--bin"]
+module = ["build", "-pnvalloc-module", "-r", "--target=module/x86_64-linux-gnu.json", "-Zbuild-std=core,alloc,compiler_builtins"]
 
 [target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.x86_64-unknown-none]
 rustflags = ["-C", "target-cpu=native"]
 
 [unstable]

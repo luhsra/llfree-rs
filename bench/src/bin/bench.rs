@@ -1,5 +1,3 @@
-#![cfg(all(feature = "thread"))]
-
 use core::iter::FromIterator;
 use core::{fmt, slice};
 use std::collections::{HashMap, HashSet};

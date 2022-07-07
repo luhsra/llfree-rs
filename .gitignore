@@ -8,8 +8,8 @@ memfile
 .vscode
 /test/
 
-/bench/*
-!/bench/remote_ma/
-!/bench/keep/
-!/bench/*.ipynb
-!/bench/remote.sh
+/results/*
+!/results/remote_ma/
+!/results/keep/
+!/results/*.ipynb
+!/results/remote.sh
