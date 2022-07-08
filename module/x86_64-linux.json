@@ -1,0 +1,12 @@
+{
+    "arch": "x86_64",
+    "data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128",
+    "features": "-3dnow,-3dnowa,-mmx,+soft-float",
+    "llvm-target": "x86_64-linux-gnu",
+    "target-pointer-width": "64",
+    "emit-debug-gdb-scripts": false,
+    "frame-pointer": "may-omit",
+    "stack-probes": {
+        "kind": "none"
+    }
+}

@@ -153,7 +153,7 @@ impl<T> Drop for MMap<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod test {
     use crate::util::logging;
     use std::thread;
@@ -161,7 +161,7 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::Page;
+    use crate::util::Page;
 
     #[test]
     fn mapping() {

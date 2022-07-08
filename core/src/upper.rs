@@ -9,6 +9,7 @@ use log::error;
 use crate::entry::Entry3;
 use crate::table::{Mapping, PT_LEN};
 use crate::util::Page;
+use crate::{Error, Result, Size};
 
 mod array_aligned;
 pub use array_aligned::ArrayAlignedAlloc;
@@ -22,52 +23,18 @@ mod list_local;
 pub use list_local::ListLocalAlloc;
 mod list_locked;
 pub use list_locked::ListLockedAlloc;
+mod table;
+pub use table::TableAlloc;
 
 #[cfg(feature = "std")]
 mod malloc;
 #[cfg(feature = "std")]
 pub use malloc::MallocAlloc;
 
-mod table;
-pub use table::TableAlloc;
-
 pub const CAS_RETRIES: usize = 4096;
 pub const MAGIC: usize = 0xdead_beef;
 pub const MIN_PAGES: usize = 1 * PT_LEN * PT_LEN;
 pub const MAX_PAGES: usize = Mapping([512; 4]).span(4);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
-    /// Not enough memory
-    Memory = 1,
-    /// Failed comapare and swap operation
-    CAS = 2,
-    /// Invalid address
-    Address = 3,
-    /// Allocator not initialized or initialization failed
-    Initialization = 4,
-    /// Corrupted allocator state
-    Corruption = 5,
-}
-
-pub type Result<T> = core::result::Result<T, Error>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Size {
-    /// 4KiB
-    L0 = 0,
-    /// 2MiB
-    L1 = 1,
-}
-
-impl Size {
-    pub fn span(self) -> usize {
-        match self {
-            Size::L0 => 1,
-            Size::L1 => PT_LEN,
-        }
-    }
-}
 
 pub trait Alloc: Sync + Send + fmt::Debug {
     /// Initialize the allocator.
@@ -196,7 +163,7 @@ impl<'a, const L: usize> Drop for LocalFreePush<'a, L> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod test {
 
     use core::ptr::null_mut;

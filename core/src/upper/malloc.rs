@@ -5,7 +5,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info, warn};
 
-use super::{Alloc, Error, Result, Size};
+use crate::{Error, Result, Size};
+use super::Alloc;
 use crate::util::Page;
 
 /// Wrapper for libc malloc.

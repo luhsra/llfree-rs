@@ -26,71 +26,37 @@ pub mod util;
 #[cfg(feature = "stop")]
 mod stop;
 
-use alloc::boxed::Box;
-use upper::{Alloc, Size};
-use util::Page;
+use table::PT_LEN;
 
-pub type Allocator = upper::ArrayAtomicAlloc<lower::CacheLower<128>>;
-static mut ALLOC: Option<Box<Allocator>> = None;
-
-pub fn init(cores: usize, memory: &mut [Page], overwrite: bool) -> upper::Result<()> {
-    let mut alloc = Allocator::default();
-    alloc.init(cores, memory, overwrite)?;
-    unsafe { ALLOC = Some(Box::new(alloc)) };
-    Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    /// Not enough memory
+    Memory = 1,
+    /// Failed comapare and swap operation
+    CAS = 2,
+    /// Invalid address
+    Address = 3,
+    /// Allocator not initialized or initialization failed
+    Initialization = 4,
+    /// Corrupted allocator state
+    Corruption = 5,
 }
 
-pub fn instance<'a>() -> &'a dyn Alloc {
-    unsafe { ALLOC.as_ref().unwrap().as_ref() }
+pub type Result<T> = core::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Size {
+    /// 4KiB
+    L0 = 0,
+    /// 2MiB
+    L1 = 1,
 }
 
-pub fn uninit() {
-    unsafe { ALLOC.take().unwrap() };
-}
-
-#[cfg(test)]
-mod test {
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    use log::info;
-
-    use crate::mmap::MMap;
-    use crate::table::PT_LEN;
-    use crate::thread::parallel;
-    use crate::util::logging;
-    use crate::{init, instance, uninit};
-    use crate::{Page, Size};
-
-    #[test]
-    fn threading() {
-        logging();
-
-        const THREADS: usize = 8;
-        const PAGES: usize = 2 * THREADS * PT_LEN * PT_LEN;
-
-        let mut mapping: MMap<Page> = MMap::anon(0x0000_1000_0000_0000, PAGES).unwrap();
-
-        info!("mmap {} bytes", mapping.len());
-
-        info!("init alloc");
-
-        const DEFAULT: AtomicU64 = AtomicU64::new(0);
-
-        init(THREADS, &mut mapping[..], true).unwrap();
-
-        parallel(THREADS, |t| {
-            let pages = [DEFAULT; PT_LEN];
-            for addr in &pages {
-                addr.store(instance().get(t, Size::L0).unwrap(), Ordering::SeqCst);
-            }
-
-            for addr in &pages {
-                instance().put(t, addr.load(Ordering::SeqCst)).unwrap();
-            }
-        });
-
-        uninit();
-
-        info!("Finish");
+impl Size {
+    pub fn span(self) -> usize {
+        match self {
+            Size::L0 => 1,
+            Size::L1 => PT_LEN,
+        }
     }
 }

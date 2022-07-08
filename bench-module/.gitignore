@@ -1,9 +1,0 @@
-*.cmd
-*.o
-*.ko
-*.mod
-*.mod.c
-*.mod.o
-modules.order
-hda.qcow2
-Module.symvers

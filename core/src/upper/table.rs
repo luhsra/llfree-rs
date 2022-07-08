@@ -6,7 +6,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info, warn};
 
-use super::{Alloc, Error, Local, Result, Size, CAS_RETRIES, MAGIC, MAX_PAGES, MIN_PAGES};
+use crate::{Error, Result, Size};
+use super::{Alloc, Local, CAS_RETRIES, MAGIC, MAX_PAGES};
 use crate::entry::{Change, Entry, Entry3};
 use crate::lower::LowerAlloc;
 use crate::table::{ATable, Mapping};
@@ -111,8 +112,8 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
             memory.as_ptr_range(),
             memory.len()
         );
-        if memory.len() < MIN_PAGES * cores {
-            error!("memory {} < {}", memory.len(), MIN_PAGES * cores);
+        if memory.len() < Self::MAPPING.span(2) * cores {
+            error!("memory {} < {}", memory.len(), Self::MAPPING.span(2) * cores);
             return Err(Error::Memory);
         }
 

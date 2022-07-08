@@ -4,7 +4,8 @@ use core::fmt::Write;
 use alloc::string::String;
 use log::{error, warn};
 
-use crate::upper::{Error, Result, Size, CAS_RETRIES};
+use crate::{Error, Result, Size};
+use crate::upper::CAS_RETRIES;
 use crate::entry::Entry2;
 use crate::table::{ATable, Bitfield, Mapping};
 use crate::util::{align_up, div_ceil, Page};
@@ -295,7 +296,7 @@ impl PackedLower {
 }
 
 #[cfg(feature = "stop")]
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod test {
     use std::sync::Arc;
 

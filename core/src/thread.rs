@@ -118,7 +118,7 @@ where
     handles.into_iter().map(|t| t.join().unwrap()).collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod test {
     use core::sync::atomic::Ordering;
 

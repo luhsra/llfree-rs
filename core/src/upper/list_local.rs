@@ -7,7 +7,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info};
 
-use super::{Alloc, Error, Result, Size, MIN_PAGES};
+use crate::{Error, Result, Size};
+use super::{Alloc, MIN_PAGES};
 use crate::util::Page;
 
 /// Simple volatile 4K page allocator that uses CPU-local linked lists.

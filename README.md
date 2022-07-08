@@ -44,16 +44,35 @@ To execute the benchmark on NVM, use the `--dax` flag to specify a DAX file to b
 
 > The debug output can be suppressed with setting `RUST_LOG=error`.
 
-## Compiling for Linux
+## Integrating into the Linux Kernel
 
-The allocators can be compiled into a static library that can be linked against a non-std target like the Linux Kernel.
+The [module](module/) directory contains wrapper code and Makefiles for integrating the allocators into the Linux kernel.
+
+First create a symlink in the linux tree to the `nvalloc-rs/module` directory:
 
 ```sh
-cargo module
-# outputs `target/x86_64-unknown-none/release/libnvalloc_module.a`
+ln -s </path/to/nvalloc-rs>/module </path/to/linux>/lib/nvalloc
 ```
 
-For linking, the `nvalloc_linux_alloc` and `nvalloc_linux_free` [functions](src/linux.rs) have to be implemented.
+Then add the `nvalloc` directory to the `</path/to/linux>/lib/Makefile`:
+
+```diff
+obj-y += nvalloc/
+```
+
+And finally compile the module and the linux kernel:
+
+```sh
+# in ./module
+make LLVM=1 modules
+# in </path/to/linux>
+make LLVM=1
+```
+
+> Problems:
+> - Please increase KSYM_NAME_LEN both in kernel and kallsyms.c
+> - Non-allocatable sections: .llvmbc, .llvmcmd
+> - Unknown sections: .text.__rust_probestack, .eh_frame
 
 ### Support for printk
 
@@ -61,16 +80,14 @@ The exported function `rust_fmt_argument` is a custom formatter for the rust pri
 It has to be called in `lib/vsprintf.c:pointer` for the `%pA` format argument:
 
 ```c
+char *rust_fmt_argument(char *buf, char *end, void *ptr);
+
 char *pointer(const char *fmt, char *buf, char *end, void *ptr,
 	      struct printf_spec spec)
 {
     switch(*fmt) {
 // ...
     case 'A':
-        if (!IS_ENABLED(CONFIG_RUST)) {
-            WARN_ONCE(1, "Please remove %%pA from non-Rust code\n");
-            return error_string(buf, end, "(%pA?)", spec);
-        }
         return rust_fmt_argument(buf, end, ptr);
 // ...
     }

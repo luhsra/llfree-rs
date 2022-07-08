@@ -11,20 +11,27 @@ use core::fmt;
 use core::panic::PanicInfo;
 use core::sync::atomic::{self, Ordering};
 
-use log::{error, Level, Metadata, Record};
+use alloc::boxed::Box;
+use log::{error, warn, Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
 
-use nvalloc::upper::{Error, Size};
-use nvalloc::{init, instance, uninit};
+use nvalloc::lower::CacheLower;
+use nvalloc::upper::{Alloc, ArrayAtomicAlloc};
+use nvalloc::{Error, Size};
+
+const MOD: &[u8] = b"nvalloc\0";
 
 extern "C" {
     /// Linux provided alloc function
-    fn nvalloc_linux_alloc(size: usize, align: usize) -> *mut u8;
+    fn nvalloc_linux_alloc(size: u64, align: u64) -> *mut u8;
     /// Linux provided free function
-    fn nvalloc_linux_free(ptr: *mut u8, size: usize, align: usize);
+    fn nvalloc_linux_free(ptr: *mut u8, size: u64, align: u64);
     /// Linux provided printk function
     fn nvalloc_printk(format: *const u8, module_name: *const u8, args: *const c_void);
 }
+
+type Allocator = ArrayAtomicAlloc<CacheLower<64>>;
+static mut ALLOC: Option<Box<Allocator>> = None;
 
 /// Initialize the allocator for the given memory range.
 /// If `overwrite` is nonzero no existing allocator state is recovered.
@@ -34,9 +41,16 @@ pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwr
         return -(Error::Corruption as i64);
     }
 
+    warn!("Initializing inside rust");
     let memory = unsafe { core::slice::from_raw_parts_mut(addr.cast(), pages as _) };
-    match init(cores as _, memory, overwrite != 0) {
-        Ok(_) => 0,
+
+    let mut alloc = Box::new(Allocator::default());
+    match alloc.init(cores as _, memory, overwrite != 0) {
+        Ok(_) => {
+            warn!("{alloc:?}");
+            unsafe { ALLOC = Some(alloc) };
+            0
+        }
         Err(e) => -(e as usize as i64),
     }
 }
@@ -44,7 +58,7 @@ pub extern "C" fn nvalloc_init(cores: u32, addr: *mut c_void, pages: u64, overwr
 /// Shut down the allocator normally.
 #[no_mangle]
 pub extern "C" fn nvalloc_uninit() {
-    uninit();
+    unsafe { core::mem::drop(ALLOC.take()) };
 }
 
 /// Allocate a page of the given `size` on the given cpu `core`.
@@ -56,29 +70,37 @@ pub extern "C" fn nvalloc_get(core: u32, size: u32) -> i64 {
         _ => return -(Error::Memory as usize as i64),
     };
 
-    match instance().get(core as _, size) {
-        Ok(addr) => addr as i64,
-        Err(e) => -(e as usize as i64),
+    if let Some(alloc) = unsafe { ALLOC.as_ref() } {
+        match alloc.get(core as _, size) {
+            Ok(addr) => addr as i64,
+            Err(e) => -(e as usize as i64),
+        }
+    } else {
+        -(Error::Initialization as usize as i64)
     }
 }
 
 /// Frees the given page.
 #[no_mangle]
 pub extern "C" fn nvalloc_put(core: u32, addr: u64) -> i64 {
-    match instance().put(core as _, addr) {
-        Ok(_) => 0,
-        Err(e) => -(e as usize as i64),
+    if let Some(alloc) = unsafe { ALLOC.as_ref() } {
+        match alloc.put(core as _, addr) {
+            Ok(_) => 0,
+            Err(e) => -(e as usize as i64),
+        }
+    } else {
+        -(Error::Initialization as usize as i64)
     }
 }
 
 struct LinuxAlloc;
 unsafe impl GlobalAlloc for LinuxAlloc {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        nvalloc_linux_alloc(layout.size(), layout.align())
+        nvalloc_linux_alloc(layout.size() as _, layout.align() as _)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-        nvalloc_linux_free(ptr, layout.size(), layout.align());
+        nvalloc_linux_free(ptr, layout.size() as _, layout.align() as _);
     }
 }
 
@@ -86,7 +108,7 @@ unsafe impl GlobalAlloc for LinuxAlloc {
 static LINUX_ALLOC: LinuxAlloc = LinuxAlloc;
 
 #[alloc_error_handler]
-fn on_oom(layout: Layout) -> ! {
+pub fn on_oom(layout: Layout) -> ! {
     error!("Unable to allocate {} bytes", layout.size());
     loop {
         atomic::compiler_fence(Ordering::SeqCst);
@@ -95,7 +117,7 @@ fn on_oom(layout: Layout) -> ! {
 
 #[inline(never)]
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
+pub fn panic(info: &PanicInfo) -> ! {
     error!("{info}");
     loop {
         atomic::compiler_fence(Ordering::SeqCst);
@@ -107,9 +129,9 @@ fn panic(info: &PanicInfo) -> ! {
 /// C header: [`include/linux/printk.h`](../../../../include/linux/printk.h)
 ///
 /// Reference: <https://www.kernel.org/doc/html/latest/core-api/printk-basics.html>
-struct KPrintLogger;
+struct PrintKLogger;
 
-impl log::Log for KPrintLogger {
+impl log::Log for PrintKLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         cfg_if::cfg_if! {
             if #[cfg(feature = "max_level_debug")] {
@@ -139,7 +161,7 @@ impl log::Log for KPrintLogger {
     fn flush(&self) {}
 }
 
-static LOGGER: KPrintLogger = KPrintLogger;
+static LOGGER: PrintKLogger = PrintKLogger;
 
 pub fn init_logging() -> Result<(), SetLoggerError> {
     log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info))
@@ -228,8 +250,6 @@ pub mod format_strings {
     pub static DEBUG: [u8; LENGTH] = generate(false, bindings::KERN_DEBUG);
 }
 
-const __LOG_PREFIX: &[u8] = b"nvalloc\0";
-
 /// Prints a message via the kernel's [`_printk`].
 ///
 /// Public but hidden since it should only be used from public macros.
@@ -245,7 +265,7 @@ pub unsafe fn call_printk(format_string: &[u8; format_strings::LENGTH], args: &f
     // `_printk` does not seem to fail in any path.
     nvalloc_printk(
         format_string.as_ptr() as _,
-        __LOG_PREFIX.as_ptr(),
+        MOD.as_ptr(),
         args as *const _ as *const c_void,
     );
 }

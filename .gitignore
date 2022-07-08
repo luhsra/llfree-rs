@@ -13,3 +13,15 @@ memfile
 !/results/keep/
 !/results/*.ipynb
 !/results/remote.sh
+
+# linux kernel
+*.cmd
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.a
+modules.order
+hda.qcow2
+Module.symvers

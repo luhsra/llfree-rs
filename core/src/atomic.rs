@@ -267,7 +267,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod test {
     use core::sync::atomic::AtomicU64;
     use std::sync::Arc;

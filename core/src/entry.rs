@@ -431,7 +431,7 @@ impl From<Entry1> for u64 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod test {
     use crate::table::{ATable, PT_LEN};
 

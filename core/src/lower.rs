@@ -1,8 +1,8 @@
 use core::fmt;
 use core::ops::Range;
 
-use crate::upper::{Result, Size};
-use crate::Page;
+use crate::{Result, Size};
+use crate::util::Page;
 use crate::table::Mapping;
 
 #[cfg(all(test, feature = "stop"))]

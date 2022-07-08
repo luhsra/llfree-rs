@@ -8,7 +8,8 @@ use alloc::vec::Vec;
 use log::{error, info};
 use spin::mutex::TicketMutex;
 
-use super::{Alloc, Error, Result, Size, MIN_PAGES};
+use crate::{Error, Result, Size};
+use super::{Alloc, MIN_PAGES};
 use crate::util::Page;
 
 /// Simple volatile 4K page allocator that uses a single shared linked lists

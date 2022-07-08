@@ -5,9 +5,9 @@ use core::ptr::addr_of;
 use core::sync::atomic::{self, AtomicU8, Ordering};
 
 use crate::atomic::{Atomic, AtomicValue};
-use crate::upper::Error;
+use crate::Error;
 use crate::util::{align_down, align_up, CacheLine};
-use crate::Page;
+use crate::util::Page;
 
 pub const PT_LEN: usize = 512;
 
@@ -301,10 +301,10 @@ impl<const L: usize> Mapping<L> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod test {
     use crate::table::Mapping;
-    use crate::Page;
+    use crate::util::Page;
 
     #[test]
     fn pt_size() {

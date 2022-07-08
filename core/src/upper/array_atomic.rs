@@ -7,7 +7,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info, warn};
 
-use super::{Alloc, Error, Local, Result, Size, MAGIC, MAX_PAGES, MIN_PAGES};
+use crate::{Error, Result, Size};
+use super::{Alloc, Local, MAGIC, MAX_PAGES};
 use crate::atomic::{AStack, AStackDbg, Atomic};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
@@ -105,7 +106,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
             memory.len()
         );
         if memory.len() < Self::MAPPING.span(2) * cores {
-            error!("memory {} < {}", memory.len(), MIN_PAGES * cores);
+            error!("memory {} < {}", memory.len(), Self::MAPPING.span(2) * cores);
             return Err(Error::Memory);
         }
 
@@ -429,7 +430,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod test {
     use crate::lower::{CacheLower, FixedLower};
 

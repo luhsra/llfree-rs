@@ -204,7 +204,7 @@ impl Stop for StopRand {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod test {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
