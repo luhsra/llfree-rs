@@ -3,6 +3,7 @@
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
 #![no_std]
 #![feature(generic_const_exprs)]
+#![feature(new_uninit)]
 
 #[cfg(feature = "std")]
 #[macro_use]
@@ -26,8 +27,6 @@ pub mod util;
 #[cfg(feature = "stop")]
 mod stop;
 
-use table::PT_LEN;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// Not enough memory
@@ -43,20 +42,3 @@ pub enum Error {
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Size {
-    /// 4KiB
-    L0 = 0,
-    /// 2MiB
-    L1 = 1,
-}
-
-impl Size {
-    pub fn span(self) -> usize {
-        match self {
-            Size::L0 => 1,
-            Size::L1 => PT_LEN,
-        }
-    }
-}

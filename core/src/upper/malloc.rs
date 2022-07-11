@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info, warn};
 
-use crate::{Error, Result, Size};
+use crate::{Error, Result};
 use super::Alloc;
 use crate::util::Page;
 
@@ -56,9 +56,9 @@ impl Alloc for MallocAlloc {
     }
 
     #[inline(never)]
-    fn get(&self, core: usize, size: Size) -> Result<u64> {
-        if size != Size::L0 {
-            error!("Invalid size {size:?}");
+    fn get(&self, core: usize, order: usize) -> Result<u64> {
+        if order != 0 {
+            error!("Invalid order {order:?}");
             return Err(Error::Memory);
         }
 
@@ -72,10 +72,15 @@ impl Alloc for MallocAlloc {
     }
 
     #[inline(never)]
-    fn put(&self, core: usize, addr: u64) -> Result<Size> {
+    fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
+        if order != 0 {
+            error!("Invalid order {order:?}");
+            return Err(Error::Memory);
+        }
+
         unsafe { libc::free(addr as *mut _) };
         self.local[core].counter.fetch_sub(1, Ordering::Relaxed);
-        Ok(Size::L0)
+        Ok(())
     }
 
     fn pages(&self) -> usize {

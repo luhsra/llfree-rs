@@ -1,7 +1,7 @@
 use core::fmt;
 use core::ops::Range;
 
-use crate::{Result, Size};
+use crate::{Result};
 use crate::util::Page;
 use crate::table::Mapping;
 
@@ -18,16 +18,11 @@ macro_rules! stop {
 
 mod cache;
 pub use cache::CacheLower;
-mod dynamic;
-pub use dynamic::DynamicLower;
-mod fixed;
-pub use fixed::FixedLower;
-mod packed;
-pub use packed::PackedLower;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug {
     const MAPPING: Mapping<2>;
+    const HUGE_ORDER: usize;
 
     /// Create a new lower allocator.
     fn new(cores: usize, memory: &mut [Page]) -> Self;
@@ -39,12 +34,13 @@ pub trait LowerAlloc: Default + fmt::Debug {
     fn clear(&self);
     /// Recover the level 2 page table at `start`.
     /// If deep, the level 1 pts are also traversed and false counters are corrected.
-    fn recover(&self, start: usize, deep: bool) -> Result<(usize, Size)>;
+    /// Returns the number of recovered pages and if the l2 table manages huge pages.
+    fn recover(&self, start: usize, deep: bool) -> Result<(usize, bool)>;
 
     /// Try allocating a new `huge` page at the subtree at `start`.
-    fn get(&self, core: usize, huge: bool, start: usize) -> Result<usize>;
+    fn get(&self, core: usize, order: usize, start: usize) -> Result<usize>;
     /// Try freeing a page. Returns if it was huge.
-    fn put(&self, page: usize) -> Result<bool>;
+    fn put(&self, page: usize, order: usize) -> Result<()>;
 
     /// Debug function, returning the number of allocated pages and performing internal checks.
     fn dbg_allocated_pages(&self) -> usize;
@@ -86,11 +82,11 @@ mod test {
 
                 let mut pages = [0; 4];
                 for p in &mut pages {
-                    *p = l.get(t, false, 0).unwrap();
+                    *p = l.get(t, 0, 0).unwrap();
                 }
                 pages.reverse();
                 for p in pages {
-                    l.put(p).unwrap();
+                    l.put(p, 0).unwrap();
                 }
             });
 
@@ -115,7 +111,7 @@ mod test {
             assert_eq!(lower.dbg_allocated_pages(), 0);
 
             for page in &mut pages[..PT_LEN - 3] {
-                *page = lower.get(0, false, 0).unwrap();
+                *page = lower.get(0, 0, 0).unwrap();
             }
 
             let stop = StopRand::new(THREADS, seed);
@@ -124,9 +120,9 @@ mod test {
                 let _stopper = Stopper::init(stop, t);
 
                 if t < THREADS / 2 {
-                    l.put(pages[t]).unwrap();
+                    l.put(pages[t], 0).unwrap();
                 } else {
-                    l.get(t, false, 0).unwrap();
+                    l.get(t, 0, 0).unwrap();
                 }
             });
 

@@ -6,10 +6,11 @@ use core::sync::atomic::{self, AtomicU8, Ordering};
 
 use crate::atomic::{Atomic, AtomicValue};
 use crate::Error;
-use crate::util::{align_down, align_up, CacheLine};
+use crate::util::{align_down, align_up, CacheLine, log2};
 use crate::util::Page;
 
-pub const PT_LEN: usize = 512;
+pub const PT_ORDER: usize = 9;
+pub const PT_LEN: usize = 1 << PT_ORDER;
 
 /// Page table with atomic entries
 #[repr(align(64))]
@@ -22,6 +23,7 @@ const _: () = assert!(size_of::<u64>() == ATable::<u64, PT_LEN>::PTE_SIZE);
 const _: () = assert!(size_of::<ATable<u64, PT_LEN>>() == Page::SIZE);
 const _: () = assert!(ATable::<u64, PT_LEN>::SIZE == Page::SIZE);
 const _: () = assert!(ATable::<u64, PT_LEN>::LEN == 512);
+const _: () = assert!(ATable::<u64, PT_LEN>::ORDER == 9);
 const _: () = assert!(align_of::<ATable<u64, PT_LEN>>() == CacheLine::SIZE);
 
 const _: () = assert!(ATable::<u16, 64>::PTE_SIZE == size_of::<u16>());
@@ -29,6 +31,7 @@ const _: () = assert!(ATable::<u16, 64>::SIZE == 128);
 
 impl<T: AtomicValue, const LEN: usize> ATable<T, LEN> {
     pub const LEN: usize = LEN;
+    pub const ORDER: usize = log2(LEN);
     pub const PTE_SIZE: usize = size_of::<T>();
     pub const SIZE: usize = LEN * Self::PTE_SIZE;
 
@@ -82,6 +85,8 @@ pub struct Bitfield {
 const _: () = assert!(size_of::<Bitfield>() == Bitfield::SIZE);
 const _: () = assert!(size_of::<Bitfield>() == CacheLine::SIZE);
 const _: () = assert!(Bitfield::LEN % Bitfield::ENTRY_BITS == 0);
+const _: () = assert!(Bitfield::LEN == PT_LEN);
+const _: () = assert!(Bitfield::ORDER == 9);
 
 impl Default for Bitfield {
     fn default() -> Self {
@@ -109,6 +114,7 @@ impl fmt::Debug for Bitfield {
 impl Bitfield {
     pub const ENTRY_BITS: usize = 8;
     pub const LEN: usize = PT_LEN;
+    pub const ORDER: usize = log2(Self::LEN);
     pub const SIZE: usize = Self::LEN / Self::ENTRY_BITS;
 
     pub fn set(&self, i: usize, v: bool) {
@@ -173,8 +179,10 @@ impl Bitfield {
     }
 }
 
-/// Specifies the different page table sizes from level 1 to N.
+/// Specifies the different table sizes from level 1 to N.
 /// Level 0 are the pages below the first level of page tables.
+/// Each entry contains the number of bits that are used to index the table.
+/// The total sum of bits has to be less than the systems pointer size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mapping<const L: usize>(pub [usize; L]);
 
@@ -213,33 +221,46 @@ impl<const L: usize> Mapping<L> {
         if level == 0 {
             1
         } else {
-            self.0[level - 1]
+            1 << self.0[level - 1]
         }
     }
 
-    /// Area in bytes that a page table covers
+    /// Memory bytes that the `level` covers.
+    /// 0 is always 1 page.
     pub const fn m_span(&self, level: usize) -> usize {
         self.span(level) << Page::SIZE_BITS
     }
 
-    /// Area in pages that a page table covers
+    /// Number of pages that the `level` covers.
+    /// 0 is always 1 page.
     pub const fn span(&self, level: usize) -> usize {
         debug_assert!(level <= Self::LEVELS);
 
-        let mut res = 1;
+        1 << self.order(level)
+    }
+
+    /// Log2 of the number of pages that the `level` covers.
+    pub const fn order(&self, level: usize) -> usize {
+        debug_assert!(level <= Self::LEVELS);
+
+        let mut res = 0;
         let mut l = 0;
         while l < level {
-            res *= self.0[l];
+            res += self.0[l];
             l += 1;
         }
         res
+    }
+
+    pub const fn max_order(&self) -> usize {
+        self.order(Self::LEVELS)
     }
 
     /// Returns pt index that contains the `page`
     pub const fn idx(&self, level: usize, page: usize) -> usize {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
-        (page / self.span(level - 1)) % self.0[level - 1]
+        (page / self.span(level - 1)) % self.len(level)
     }
 
     /// Returns the starting page of the corresponding page table
@@ -265,18 +286,18 @@ impl<const L: usize> Mapping<L> {
     pub fn range(&self, level: usize, pages: Range<usize>) -> Range<usize> {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
-        let level = level - 1;
         if pages.start < pages.end {
-            let span_m1 = self.span(level);
+            let span_m1 = self.span(level - 1);
             let start_d = pages.start / span_m1;
             let end_d = align_up(pages.end, span_m1) / span_m1;
 
-            let max = align_down(start_d, self.0[level]) + self.0[level];
-            let start = start_d % self.0[level];
+            let entries = self.len(level);
+            let max = align_down(start_d, entries) + entries;
+            let start = start_d % entries;
             let end = if end_d >= max {
-                self.0[level]
+                entries
             } else {
-                end_d % self.0[level]
+                end_d % entries
             };
             start..end
         } else {
@@ -294,7 +315,7 @@ impl<const L: usize> Mapping<L> {
         let rounded = self.round(level, start);
         let offset = self.round(level - 1, start - rounded);
         core::iter::once(start).chain(
-            (1..self.0[level - 1])
+            (1..self.len(level))
                 .into_iter()
                 .map(move |v| rounded + (v * span_m1 + offset) % span),
         )
@@ -308,7 +329,7 @@ mod test {
 
     #[test]
     fn pt_size() {
-        const MAPPING: Mapping<3> = Mapping([512, 512, 512]);
+        const MAPPING: Mapping<3> = Mapping([9, 9, 9]);
 
         assert_eq!(MAPPING.m_span(0), Page::SIZE);
         assert_eq!(MAPPING.m_span(1), Page::SIZE * 512);
@@ -329,7 +350,7 @@ mod test {
 
     #[test]
     fn pt_size_verying() {
-        const MAPPING: Mapping<3> = Mapping([512, 64, 32]);
+        const MAPPING: Mapping<3> = Mapping([9, 6, 5]);
 
         assert_eq!(MAPPING.m_span(0), Page::SIZE);
         assert_eq!(MAPPING.m_span(1), Page::SIZE * 512);
@@ -351,7 +372,7 @@ mod test {
 
     #[test]
     fn rounding() {
-        const MAPPING: Mapping<3> = Mapping([512, 512, 512]);
+        const MAPPING: Mapping<3> = Mapping([9, 9, 9]);
 
         assert_eq!(MAPPING.round(1, 15), 0);
         assert_eq!(MAPPING.round(1, 512), 512);
@@ -377,7 +398,7 @@ mod test {
 
     #[test]
     fn rounding_verying() {
-        const MAPPING: Mapping<3> = Mapping([512, 64, 32]);
+        const MAPPING: Mapping<3> = Mapping([9, 6, 5]);
 
         assert_eq!(MAPPING.round(1, 15), 0);
         assert_eq!(MAPPING.round(1, 512), 512);
@@ -403,7 +424,7 @@ mod test {
 
     #[test]
     fn range() {
-        const MAPPING: Mapping<3> = Mapping([512, 512, 512]);
+        const MAPPING: Mapping<3> = Mapping([9, 9, 9]);
 
         assert_eq!(MAPPING.range(1, 0..512), 0..512);
         assert_eq!(MAPPING.range(1, 0..0), 0..0);
@@ -425,7 +446,7 @@ mod test {
 
     #[test]
     fn range_verying() {
-        const MAPPING: Mapping<3> = Mapping([512, 64, 32]);
+        const MAPPING: Mapping<3> = Mapping([9, 6, 5]);
 
         assert_eq!(MAPPING.range(1, 0..MAPPING.len(1)), 0..MAPPING.len(1));
         assert_eq!(MAPPING.range(1, 0..0), 0..0);
@@ -447,7 +468,7 @@ mod test {
 
     #[test]
     fn iterate() {
-        const MAPPING: Mapping<3> = Mapping([512, 512, 512]);
+        const MAPPING: Mapping<3> = Mapping([9, 9, 9]);
 
         let mut iter = MAPPING.iterate(1, 0).enumerate();
         assert_eq!(iter.next(), Some((0, 0)));
@@ -470,7 +491,7 @@ mod test {
 
         let mut iter = MAPPING.iterate(2, 0).enumerate();
         assert_eq!(iter.next(), Some((0, 0)));
-        assert_eq!(iter.next(), Some((1, 1 * MAPPING.span(1))));
+        assert_eq!(iter.next(), Some((1, MAPPING.span(1))));
         assert_eq!(iter.last(), Some((511, 511 * MAPPING.span(1))));
 
         let mut iter = MAPPING.iterate(2, 500).enumerate();
@@ -486,7 +507,7 @@ mod test {
 
     #[test]
     fn iterate_varying() {
-        const MAPPING: Mapping<3> = Mapping([512, 64, 32]);
+        const MAPPING: Mapping<3> = Mapping([9, 6, 5]);
 
         let mut iter = MAPPING.iterate(1, 0).enumerate();
         assert_eq!(iter.next(), Some((0, 0)));

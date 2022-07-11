@@ -188,7 +188,7 @@ mod test {
 
         logging();
 
-        let file = std::env::var("NVM_DAX").unwrap_or("/dev/dax0.1".into());
+        let file = std::env::var("NVM_DAX").unwrap_or_else(|_| "/dev/dax0.1".into());
 
         info!("MMap file {file} l=1G");
 

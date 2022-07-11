@@ -6,12 +6,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info, warn};
 
-use crate::{Error, Result, Size};
 use super::{Alloc, Local, CAS_RETRIES, MAGIC, MAX_PAGES};
 use crate::entry::{Change, Entry, Entry3};
 use crate::lower::LowerAlloc;
 use crate::table::{ATable, Mapping};
 use crate::util::Page;
+use crate::{Error, Result};
 
 const PUTS_RESERVE: usize = 4;
 
@@ -39,11 +39,13 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 pub struct TableAlloc<L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
-    /// Array of the volatile level 3-5 page tables
+    /// Array of the volatile level 4-5 tables
     /// ```text
     /// DRAM: [ 1*PT5 | n*PT4 | m*PT3 ]
     /// ```
-    tables: Box<[Page]>,
+    tables: Box<[ATable<Entry>]>,
+    /// Array of the volatile level 3 tables
+    l3_tables: Box<[ATable<Entry3>]>,
     /// CPU local data
     local: Box<[Local<PUTS_RESERVE>]>,
     /// Metadata of the lower alloc
@@ -113,7 +115,11 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
             memory.len()
         );
         if memory.len() < Self::MAPPING.span(2) * cores {
-            error!("memory {} < {}", memory.len(), Self::MAPPING.span(2) * cores);
+            error!(
+                "memory {} < {}",
+                memory.len(),
+                Self::MAPPING.span(2) * cores
+            );
             return Err(Error::Memory);
         }
 
@@ -129,12 +135,14 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         // Create lower allocator
         self.lower = L::new(cores, memory);
 
+        let num_pt3 = Self::MAPPING.num_pts(3, self.lower.pages());
+        self.l3_tables = unsafe { Box::new_zeroed_slice(num_pt3).assume_init() };
+
         let mut num_pt = 0;
-        for level in 3..=Self::MAPPING.levels() {
+        for level in 4..=Self::MAPPING.levels() {
             num_pt += Self::MAPPING.num_pts(level, self.lower.pages());
         }
-
-        self.tables = vec![Page::new(); num_pt].into();
+        self.tables = unsafe { Box::new_zeroed_slice(num_pt).assume_init() };
 
         if !overwrite
             && meta.pages.load(Ordering::SeqCst) == self.pages()
@@ -161,16 +169,54 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
     }
 
     #[inline(never)]
-    fn get(&self, core: usize, size: Size) -> Result<u64> {
+    fn get(&self, core: usize, order: usize) -> Result<u64> {
+        if order > Self::HUGE_ORDER {
+            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+            return Err(Error::Memory);
+        }
+        let huge = order == Self::HUGE_ORDER;
+
         // Start at the reserved memory chunk for this thread
-        let page = self.get_lower(core, size == Size::L1)?;
+        let pte_a = self.local[core].pte(huge);
+        let start_a = self.local[core].start(huge);
+        let mut start = *start_a;
+
+        if start == usize::MAX {
+            let pte = self.reserve(order)?;
+            info!("reserved {}", pte.idx());
+            *pte_a = pte;
+            start = pte.idx() * Self::MAPPING.span(2);
+        } else {
+            // Decrement or reserve new if full
+            if let Some(pte) = pte_a.dec(huge, 1 << order, Self::MAPPING.span(2)) {
+                *pte_a = pte;
+            } else {
+                let pte = self.reserve(order)?;
+                info!("reserved {}", pte.idx());
+                self.swap_reserved(huge, pte, pte_a)?;
+                start = pte.idx() * Self::MAPPING.span(2);
+            }
+        }
+
+        let page = self.lower.get(core, order, start)?;
+        *start_a = page;
 
         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
     }
 
     #[inline(never)]
-    fn put(&self, core: usize, addr: u64) -> Result<Size> {
-        if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
+    fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
+        if order > Self::HUGE_ORDER {
+            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+            return Err(Error::Memory);
+        }
+
+        let num_pages = 1 << order;
+        let huge = order == Self::HUGE_ORDER;
+
+        if addr % (num_pages * Page::SIZE) as u64 != 0
+            || !self.lower.memory().contains(&(addr as _))
+        {
             error!("invalid addr");
             return Err(Error::Memory);
         }
@@ -186,8 +232,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
             return Err(Error::Address);
         }
 
-        let huge = self.lower.put(page)?;
-        let size = if huge { Size::L1 } else { Size::L0 };
+        self.lower.put(page, order)?;
 
         let local = &self.local[core];
 
@@ -196,29 +241,29 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         let _push = local.defer_frees_push(idx);
 
         let pte_a = local.pte(huge);
-        if let Some(pte) = pte_a.inc_idx(Self::MAPPING.span(huge as _), idx, max) {
+        if let Some(pte) = pte_a.inc_idx(huge, num_pages, idx, max) {
             *pte_a = pte;
-            return Ok(size);
+            return Ok(());
         }
         // Fallback to global page table
-        if let Ok(pte) = pt.update(i, |v| v.inc(Self::MAPPING.span(huge as _), max)) {
-            let new_pages = pte.free() + Self::MAPPING.span(huge as _);
+        if let Ok(pte) = pt.update(i, |v| v.inc(huge, num_pages, max)) {
+            let new_pages = pte.free() + num_pages;
             if pte.reserved() {
-                return Ok(size);
+                return Ok(());
             } else if new_pages == Self::MAPPING.span(2) {
                 self.update_parents(page, Change::p_dec(huge))?;
-                return Ok(size);
+                return Ok(());
             }
 
             // Reserve for bulk put
             if new_pages > Self::ALMOST_FULL && local.frees_related(idx) {
                 // Try reserve this subtree
-                match self.reserve_tree(huge, page, pte.free() > Self::ALMOST_FULL) {
+                match self.reserve_tree(page, order, pte.free() > Self::ALMOST_FULL) {
                     Ok(pte) => {
                         info!("put reserve {i}");
                         self.swap_reserved(huge, pte.with_idx(i), pte_a)?;
                         *local.start(huge) = page;
-                        return Ok(size);
+                        return Ok(());
                     }
                     Err(Error::Memory) => (),
                     Err(e) => return Err(e),
@@ -229,7 +274,7 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
                 // Increment parents if exceeding treshold
                 self.update_parents(page, Change::p_inc(huge))?;
             }
-            Ok(size)
+            Ok(())
         } else {
             error!("Corruption l3 i{i} {huge}");
             Err(Error::Corruption)
@@ -269,6 +314,7 @@ impl<L: LowerAlloc> Default for TableAlloc<L> {
         Self {
             meta: null_mut(),
             tables: Box::new([]),
+            l3_tables: Box::new([]),
             local: Box::new([]),
             lower: L::default(),
         }
@@ -276,7 +322,8 @@ impl<L: LowerAlloc> Default for TableAlloc<L> {
 }
 
 impl<L: LowerAlloc> TableAlloc<L> {
-    const MAPPING: Mapping<4> = Mapping([512; 2]).with_lower(&L::MAPPING);
+    const MAPPING: Mapping<4> = Mapping([9; 2]).with_lower(&L::MAPPING);
+    const HUGE_ORDER: usize = L::HUGE_ORDER;
     const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
 
     fn allocated_pages_rec(&self, level: usize, start: usize) -> usize {
@@ -303,16 +350,13 @@ impl<L: LowerAlloc> TableAlloc<L> {
         let offset: usize = (level..Self::MAPPING.levels())
             .map(|i| Self::MAPPING.num_pts(i, self.pages()))
             .sum();
-        self.tables[offset + i].cast()
+        &self.tables[offset + i]
     }
 
     /// Returns the page table of the given `level` that contains the `page`.
     fn pt3(&self, page: usize) -> &ATable<Entry3> {
         let i = page / Self::MAPPING.span(3);
-        let offset: usize = (3..Self::MAPPING.levels())
-            .map(|i| Self::MAPPING.num_pts(i, self.pages()))
-            .sum();
-        self.tables[offset + i].cast()
+        &self.l3_tables[i]
     }
 
     /// Setup a new allocator.
@@ -390,16 +434,16 @@ impl<L: LowerAlloc> TableAlloc<L> {
                 break;
             }
 
-            let (pages, size) = self.lower.recover(page, deep)?;
+            let (pages, huge) = self.lower.recover(page, deep)?;
             if pages > 0 {
-                pt.set(i, Entry3::new_table(pages, size, false));
+                pt.set(i, Entry3::new_table(pages, huge, false));
                 if pages == Self::MAPPING.span(2) {
                     empty += 1;
                 } else if pages > Self::ALMOST_FULL {
-                    if size == Size::L0 {
-                        partial_l0 += 1;
-                    } else {
+                    if huge {
                         partial_l1 += 1;
+                    } else {
+                        partial_l0 += 1;
                     }
                 }
             } else {
@@ -454,7 +498,8 @@ impl<L: LowerAlloc> TableAlloc<L> {
 
     /// Try reserving new subtree, prioritizing partially filled ones.
     #[cold]
-    fn reserve(&self, huge: bool) -> Result<Entry3> {
+    fn reserve(&self, order: usize) -> Result<Entry3> {
+        let huge = order == Self::HUGE_ORDER;
         match self.find_rec(
             Self::MAPPING.levels(),
             0,
@@ -462,7 +507,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
             |v| v.reserve_partial(huge, Self::ALMOST_FULL, Self::MAPPING.span(2)),
         ) {
             Ok(v) => v
-                .dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
+                .dec(huge, 1 << order, Self::MAPPING.span(2))
                 .ok_or(Error::Corruption),
             Err(Error::Memory) => match self.find_rec(
                 Self::MAPPING.levels(),
@@ -471,7 +516,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
                 |v| v.reserve_empty(huge, Self::MAPPING.span(2)),
             ) {
                 Ok(v) => v
-                    .dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
+                    .dec(huge, 1 << order, Self::MAPPING.span(2))
                     .ok_or(Error::Corruption),
                 Err(Error::Memory) => {
                     error!("No memory {self:?}");
@@ -485,7 +530,8 @@ impl<L: LowerAlloc> TableAlloc<L> {
 
     /// Try reserving a subtree, if `parents` the parent entries are updated first.
     /// Any changes to parent entries are reverted if the reservation fails.
-    fn reserve_tree(&self, huge: bool, page: usize, parents: bool) -> Result<Entry3> {
+    fn reserve_tree(&self, page: usize, order: usize, parents: bool) -> Result<Entry3> {
+        let huge = order == Self::HUGE_ORDER;
         // Try reserve top -> bottom
         if parents {
             for level in (4..=Self::MAPPING.levels()).rev() {
@@ -508,9 +554,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
         // Reserve the level 3 entry
         let i = Self::MAPPING.idx(3, page);
         let pt = self.pt3(page);
-        if let Ok(pte) = pt.update(i, |v| {
-            v.reserve(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
-        }) {
+        if let Ok(pte) = pt.update(i, |v| v.reserve(huge, 1 << order, Self::MAPPING.span(2))) {
             return Ok(pte);
         } else if parents {
             // Undo reservation
@@ -562,32 +606,5 @@ impl<L: LowerAlloc> TableAlloc<L> {
             error!("Unreserve failed {i}");
             Err(Error::Corruption)
         }
-    }
-
-    fn get_lower(&self, core: usize, huge: bool) -> Result<usize> {
-        let pte_a = self.local[core].pte(huge);
-        let start_a = self.local[core].start(huge);
-        let mut start = *start_a;
-
-        if start == usize::MAX {
-            let pte = self.reserve(huge)?;
-            info!("reserved {}", pte.idx());
-            *pte_a = pte;
-            start = pte.idx() * Self::MAPPING.span(2);
-        } else {
-            // Decrement or reserve new if full
-            if let Some(pte) = pte_a.dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2)) {
-                *pte_a = pte;
-            } else {
-                let pte = self.reserve(huge)?;
-                info!("reserved {}", pte.idx());
-                self.swap_reserved(huge, pte, pte_a)?;
-                start = pte.idx() * Self::MAPPING.span(2);
-            }
-        }
-
-        let page = self.lower.get(core, huge, start)?;
-        *start_a = page;
-        Ok(page)
     }
 }

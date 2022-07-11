@@ -8,13 +8,13 @@ use alloc::vec::Vec;
 use log::{error, info, warn};
 use spin::mutex::{TicketMutex, TicketMutexGuard};
 
-use crate::{Error, Result, Size};
 use super::{Alloc, Local, MAGIC, MAX_PAGES};
 use crate::atomic::Atomic;
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::table::Mapping;
 use crate::util::Page;
+use crate::{Error, Result};
 
 const PUTS_RESERVE: usize = 4;
 
@@ -107,7 +107,11 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
             memory.len()
         );
         if memory.len() < Self::MAPPING.span(2) * cores {
-            error!("memory {} < {}", memory.len(), Self::MAPPING.span(2) * cores);
+            error!(
+                "memory {} < {}",
+                memory.len(),
+                Self::MAPPING.span(2) * cores
+            );
             return Err(Error::Memory);
         }
 
@@ -153,14 +157,52 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
     }
 
     #[inline(never)]
-    fn get(&self, core: usize, size: Size) -> Result<u64> {
-        self.get_lower(core, size == Size::L1)
-            .map(|p| unsafe { self.lower.memory().start.add(p as _) } as u64)
+    fn get(&self, core: usize, order: usize) -> Result<u64> {
+        if order > Self::HUGE_ORDER {
+            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+            return Err(Error::Memory);
+        }
+
+        let num_pages = 1 << order;
+        let huge = order == Self::HUGE_ORDER;
+
+        let start_a = self.local[core].start(huge);
+        let pte_a = self.local[core].pte(huge);
+        let mut start = *start_a;
+
+        if start == usize::MAX {
+            let (s, pte) = self.reserve(order)?;
+            *pte_a = pte;
+            start = s;
+        } else {
+            // Incremet or clear (atomic sync with put dec)
+            if let Some(pte) = pte_a.dec(huge, num_pages, Self::MAPPING.span(2)) {
+                *pte_a = pte;
+            } else {
+                let (s, new_pte) = self.reserve(order)?;
+                self.swap_reserved(huge, new_pte, pte_a)?;
+                start = s;
+            }
+        }
+
+        let page = self.lower.get(core, order, start)?;
+        *start_a = page;
+        Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
     }
 
     #[inline(never)]
-    fn put(&self, core: usize, addr: u64) -> Result<Size> {
-        if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
+    fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
+        if order > Self::HUGE_ORDER {
+            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+            return Err(Error::Memory);
+        }
+
+        let num_pages = 1 << order;
+        let huge = order == Self::HUGE_ORDER;
+
+        if addr % (Page::SIZE * num_pages) as u64 != 0
+            || !self.lower.memory().contains(&(addr as _))
+        {
             error!("invalid addr");
             return Err(Error::Memory);
         }
@@ -168,7 +210,62 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
 
         let i = page / Self::MAPPING.span(2);
         let pte = self[i].load();
-        self.put_lower(core, page, pte)
+
+        let max = self
+            .pages()
+            .saturating_sub(Self::MAPPING.round(2, page))
+            .min(Self::MAPPING.span(2));
+        if pte.free() > max - num_pages {
+            error!("Not allocated {page} (i{})", page / Self::MAPPING.span(2));
+            return Err(Error::Address);
+        }
+
+        self.lower.put(page, order)?;
+
+        let local = &self.local[core];
+        let _push = local.defer_frees_push(i);
+
+        // Try decrement own pte first
+        let pte_a = local.pte(huge);
+        if let Some(pte) = pte_a.inc_idx(huge, num_pages, i, max) {
+            *pte_a = pte;
+            return Ok(());
+        }
+
+        // Subtree not owned by us
+        if let Ok(pte) = self[i].update(|v| v.inc(huge, num_pages, max)) {
+            if !pte.reserved() {
+                let new_pages = pte.free() + Self::MAPPING.span(huge as _);
+
+                // check if recent frees also operated in this subtree
+                if new_pages > Self::ALMOST_FULL && local.frees_related(i) {
+                    // Try to reserve it for bulk frees
+                    if let Ok(pte) = self[i]
+                        .update(|v| v.reserve(huge, num_pages, Self::MAPPING.span(2)))
+                    {
+                        let pte = pte.with_idx(i);
+                        // warn!("put reserve {i}");
+                        self.swap_reserved(huge, pte, pte_a)?;
+                        *local.start(huge) = page;
+                        return Ok(());
+                    }
+                }
+
+                // Add to partially free list
+                // Only if not already in list
+                if pte.idx() == Entry3::IDX_MAX
+                    && pte.free() <= Self::ALMOST_FULL
+                    && new_pages > Self::ALMOST_FULL
+                {
+                    let _ = self[i].update(|v| Some(v.with_idx(0)));
+                    self.partial(huge).push(i);
+                }
+            }
+            Ok(())
+        } else {
+            error!("Corruption l3 i{i} p=-{huge:?}");
+            Err(Error::Corruption)
+        }
     }
 
     fn pages(&self) -> usize {
@@ -215,6 +312,7 @@ impl<L: LowerAlloc> Default for ArrayLockedAlloc<L> {
 
 impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
+    const HUGE_ORDER: usize = L::HUGE_ORDER;
     const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
 
     /// Setup a new allocator.
@@ -253,15 +351,15 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
         let mut total = 0;
         for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
             let page = i * Self::MAPPING.span(2);
-            let (pages, size) = self.lower.recover(page, deep)?;
+            let (pages, huge) = self.lower.recover(page, deep)?;
 
-            self[i].store(Entry3::new_table(pages, size, false));
+            self[i].store(Entry3::new_table(pages, huge, false));
 
             // Add to lists
             if pages == Self::MAPPING.span(2) {
                 self.empty.lock().push(i);
             } else if pages > Self::ALMOST_FULL {
-                self.partial(size == Size::L1).push(i);
+                self.partial(huge).push(i);
             }
 
             total += pages;
@@ -280,7 +378,8 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
 
     /// Reserves a new subtree, prioritizing partially filled subtrees,
     /// and allocates a page from it in one step.
-    fn reserve(&self, huge: bool) -> Result<(usize, Entry3)> {
+    fn reserve(&self, order: usize) -> Result<(usize, Entry3)> {
+        let huge = order == Self::HUGE_ORDER;
         while let Some(i) = self.partial(huge).pop() {
             info!("reserve partial {i}");
             match self[i].update(|v| {
@@ -289,7 +388,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
             }) {
                 Ok(pte) => {
                     let pte = pte
-                        .dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
+                        .dec(huge, 1 << order, Self::MAPPING.span(2))
                         .unwrap()
                         .with_idx(i);
                     return Ok((i * Self::MAPPING.span(2), pte));
@@ -311,7 +410,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
                     .map(|v| v.with_idx(Entry3::IDX_MAX))
             }) {
                 let pte = pte
-                    .dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2))
+                    .dec(huge, 1 << order, Self::MAPPING.span(2))
                     .unwrap()
                     .with_idx(i);
                 return Ok((i * Self::MAPPING.span(2), pte));
@@ -348,93 +447,6 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
             Ok(())
         } else {
             error!("Unreserve failed i{i}");
-            Err(Error::Corruption)
-        }
-    }
-
-    /// Allocate a small or huge page from the lower alloc.
-    fn get_lower(&self, core: usize, huge: bool) -> Result<usize> {
-        let start_a = self.local[core].start(huge);
-        let pte_a = self.local[core].pte(huge);
-        let mut start = *start_a;
-
-        if start == usize::MAX {
-            let (s, pte) = self.reserve(huge)?;
-            *pte_a = pte;
-            start = s;
-        } else {
-            // Incremet or clear (atomic sync with put dec)
-            if let Some(pte) = pte_a.dec(Self::MAPPING.span(huge as _), Self::MAPPING.span(2)) {
-                *pte_a = pte;
-            } else {
-                let (s, new_pte) = self.reserve(huge)?;
-                self.swap_reserved(huge, new_pte, pte_a)?;
-                start = s;
-            }
-        }
-
-        let page = self.lower.get(core, huge, start)?;
-        *start_a = page;
-        Ok(page)
-    }
-
-    /// Free a small or huge page from the lower alloc.
-    fn put_lower(&self, core: usize, page: usize, pte: Entry3) -> Result<Size> {
-        let max = self
-            .pages()
-            .saturating_sub(Self::MAPPING.round(2, page))
-            .min(Self::MAPPING.span(2));
-        if pte.free() >= max {
-            error!("Not allocated {page} (i{})", page / Self::MAPPING.span(2));
-            return Err(Error::Address);
-        }
-
-        let i = page / Self::MAPPING.span(2);
-        let huge = self.lower.put(page)?;
-        let size = if huge { Size::L1 } else { Size::L0 };
-
-        let local = &self.local[core];
-        let _push = local.defer_frees_push(i);
-
-        // Try decrement own pte first
-        let pte_a = local.pte(huge);
-        if let Some(pte) = pte_a.inc_idx(Self::MAPPING.span(huge as _), i, max) {
-            *pte_a = pte;
-            return Ok(size);
-        }
-
-        // Subtree not owned by us
-        if let Ok(pte) = self[i].update(|v| v.inc(Self::MAPPING.span(huge as _), max)) {
-            if !pte.reserved() {
-                let new_pages = pte.free() + Self::MAPPING.span(huge as _);
-
-                // check if recent frees also operated in this subtree
-                if new_pages > Self::ALMOST_FULL && local.frees_related(i) {
-                    // Try to reserve it for bulk frees
-                    if let Ok(pte) = self[i]
-                        .update(|v| v.reserve(Self::MAPPING.span(huge as _), Self::MAPPING.span(2)))
-                    {
-                        let pte = pte.with_idx(i);
-                        // warn!("put reserve {i}");
-                        self.swap_reserved(huge, pte, pte_a)?;
-                        *local.start(huge) = page;
-                        return Ok(size);
-                    }
-                }
-
-                // Add to partially free list
-                // Only if not already in list
-                if pte.idx() == Entry3::IDX_MAX
-                    && pte.free() <= Self::ALMOST_FULL
-                    && new_pages > Self::ALMOST_FULL
-                {
-                    let _ = self[i].update(|v| Some(v.with_idx(0)));
-                    self.partial(huge).push(i);
-                }
-            }
-            Ok(size)
-        } else {
-            error!("Corruption l3 i{i} p=-{huge:?}");
             Err(Error::Corruption)
         }
     }

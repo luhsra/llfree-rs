@@ -5,7 +5,6 @@ use bitfield_struct::bitfield;
 use log::error;
 
 use crate::atomic::AtomicValue;
-use crate::Size;
 
 #[bitfield(u64)]
 pub struct Entry {
@@ -131,20 +130,19 @@ impl Entry3 {
     }
     /// Creates a new entry referring to a level 2 page table.
     #[inline]
-    pub fn new_table(pages: usize, size: Size, reserved: bool) -> Entry3 {
+    pub fn new_table(pages: usize, huge: bool, reserved: bool) -> Entry3 {
         Entry3::new()
             .with_free(pages)
-            .with_huge(size == Size::L1)
+            .with_huge(huge)
             .with_reserved(reserved)
     }
     /// Decrements the free pages counter.
     #[inline]
-    pub fn dec(self, page_span: usize, span: usize) -> Option<Entry3> {
-        let huge = page_span > 1;
-        if (self.huge() == huge || self.free() == span) && self.free() >= page_span
+    pub fn dec(self, huge: bool, num_pages: usize, span: usize) -> Option<Entry3> {
+        if (self.huge() == huge || self.free() == span) && self.free() >= num_pages
         {
             Some(
-                self.with_free(self.free() - page_span)
+                self.with_free(self.free() - num_pages)
                     .with_huge(huge)
                     .with_reserved(true),
             )
@@ -154,12 +152,11 @@ impl Entry3 {
     }
     /// Increments the free pages counter.
     #[inline]
-    pub fn inc(self, page_span: usize, max: usize) -> Option<Entry3> {
-        let huge = page_span > 1;
+    pub fn inc(self, huge: bool, num_pages: usize, max: usize) -> Option<Entry3> {
         if self.huge() != huge {
             return None;
         }
-        let pages = self.free() + page_span;
+        let pages = self.free() + num_pages;
         match pages.cmp(&max) {
             Ordering::Greater => None,
             Ordering::Equal => Some(self.with_free(max).with_huge(false)),
@@ -168,12 +165,11 @@ impl Entry3 {
     }
     /// Increments the free pages counter and checks for `idx` to match.
     #[inline]
-    pub fn inc_idx(self, page_span: usize, idx: usize, max: usize) -> Option<Entry3> {
-        let huge = page_span > 1;
+    pub fn inc_idx(self, huge: bool, num_pages: usize, idx: usize, max: usize) -> Option<Entry3> {
         if self.huge() != huge || self.idx() != idx {
             return None;
         }
-        let pages = self.free() + page_span;
+        let pages = self.free() + num_pages;
         match pages.cmp(&max) {
             Ordering::Greater => None,
             Ordering::Equal => Some(self.with_free(max).with_huge(false)),
@@ -182,11 +178,10 @@ impl Entry3 {
     }
     /// Reserves this entry.
     #[inline]
-    pub fn reserve(self, page_span: usize, span: usize) -> Option<Entry3> {
-        let huge = page_span > 1;
+    pub fn reserve(self, huge: bool, num_pages: usize, span: usize) -> Option<Entry3> {
         if !self.reserved()
             && (self.free() >= span || self.huge() == huge)
-            && self.free() >= page_span
+            && self.free() >= num_pages
         {
             Some(self.with_free(0).with_huge(huge).with_reserved(true))
         } else {
@@ -350,11 +345,6 @@ impl AtomicValue for SmallEntry2 {
 }
 
 impl SmallEntry2 {
-    /// Creates a new entry referencing a level one page table.
-    #[inline]
-    pub fn new_table(pages: usize) -> Self {
-        Self::new().with_free(pages)
-    }
     #[inline]
     pub fn mark_huge(self, span: usize) -> Option<Self> {
         if !self.page() && self.free() == span {

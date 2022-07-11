@@ -1,15 +1,13 @@
 use core::any::type_name;
 use core::cell::UnsafeCell;
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::string::String;
-use log::error;
 
 use crate::entry::Entry3;
 use crate::table::{Mapping, PT_LEN};
 use crate::util::Page;
-use crate::{Error, Result, Size};
+use crate::Result;
 
 mod array_aligned;
 pub use array_aligned::ArrayAlignedAlloc;
@@ -17,8 +15,6 @@ mod array_atomic;
 pub use array_atomic::ArrayAtomicAlloc;
 mod array_locked;
 pub use array_locked::ArrayLockedAlloc;
-mod array_unaligned;
-pub use array_unaligned::ArrayUnalignedAlloc;
 mod list_local;
 pub use list_local::ListLocalAlloc;
 mod list_locked;
@@ -33,8 +29,8 @@ pub use malloc::MallocAlloc;
 
 pub const CAS_RETRIES: usize = 4096;
 pub const MAGIC: usize = 0xdead_beef;
-pub const MIN_PAGES: usize = 1 * PT_LEN * PT_LEN;
-pub const MAX_PAGES: usize = Mapping([512; 4]).span(4);
+pub const MIN_PAGES: usize = PT_LEN * PT_LEN;
+pub const MAX_PAGES: usize = Mapping([9; 4]).span(4);
 
 pub trait Alloc: Sync + Send + fmt::Debug {
     /// Initialize the allocator.
@@ -42,9 +38,9 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()>;
 
     /// Allocate a new page.
-    fn get(&self, core: usize, size: Size) -> Result<u64>;
+    fn get(&self, core: usize, order: usize) -> Result<u64>;
     /// Free the given page.
-    fn put(&self, core: usize, addr: u64) -> Result<Size>;
+    fn put(&self, core: usize, addr: u64, order: usize) -> Result<()>;
 
     /// Return the number of pages that can be allocated.
     fn pages(&self) -> usize;
@@ -61,42 +57,32 @@ pub trait Alloc: Sync + Send + fmt::Debug {
 pub fn name<A: Alloc + ?Sized>() -> String {
     let name = type_name::<A>();
     // Add first letter of generic type as suffix
-    let (name, suffix, size) = if let Some((prefix, suffix)) = name.split_once('<') {
+    let (name, first, second, size) = if let Some((prefix, suffix)) = name.split_once('<') {
+        // Aligned / Unaligned allocator
+        let (first, suffix) = if let Some((first, suffix)) = suffix.split_once(", ") {
+            // Strip path
+            let first = first.rsplit_once(':').map_or(first, |s| s.1);
+            (&first[0..1], suffix)
+        } else {
+            ("", suffix)
+        };
+
+        // Strip path
         let suffix = suffix.rsplit_once(':').map_or(suffix, |s| s.1);
+        // Lower allocator size
         let size = suffix
             .split_once('<')
             .map(|(_, s)| s.split_once('>').map_or(s, |s| s.0))
             .unwrap_or_default();
-        (prefix, &suffix[0..1], size)
+        (prefix, first, &suffix[0..1], size)
     } else {
-        (name, "", "")
+        (name, "", "", "")
     };
 
     // Strip namespaces
     let name = name.rsplit_once(':').map_or(name, |s| s.1);
     let name = name.strip_suffix("Alloc").unwrap_or(name);
-    format!("{name}{suffix}{size}")
-}
-
-/// Allocates a new page and writes the value after translation into `dst`.
-/// If `dst` has an other value than `expected` the operation is revoked and `Error::CAS` is returned.
-pub fn get_cas<F: FnOnce(u64) -> u64>(
-    alloc: &dyn Alloc,
-    core: usize,
-    size: Size,
-    dst: &AtomicU64,
-    translate: F,
-    expected: u64,
-) -> Result<()> {
-    let page = alloc.get(core, size)?;
-    let new = translate(page);
-    if let Err(_) = dst.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
-        error!("CAS");
-        alloc.put(core, page).unwrap();
-        Err(Error::CAS)
-    } else {
-        Ok(())
-    }
+    format!("{name}{first}{second}{size}")
 }
 
 /// Per core data.
@@ -166,6 +152,7 @@ impl<'a, const L: usize> Drop for LocalFreePush<'a, L> {
 #[cfg(all(test, feature = "std"))]
 mod test {
 
+    use core::any::type_name;
     use core::ptr::null_mut;
     use std::sync::Arc;
     use std::time::Instant;
@@ -175,19 +162,20 @@ mod test {
 
     use log::{info, warn};
 
-    use super::Error;
     use super::Local;
     use crate::lower::*;
     use crate::mmap::MMap;
     use crate::table::PT_LEN;
-    use crate::upper::Alloc;
+    use crate::thread;
+    use crate::upper::array_aligned::{CacheAligned, Unaligned};
+    use crate::upper::*;
     use crate::util::{logging, Page, WyRand};
-    use crate::{thread, Size};
+    use crate::Error;
 
-    type Lower = CacheLower<256>;
-    type Allocator = super::ArrayAtomicAlloc<Lower>;
+    type Lower = CacheLower<128>;
+    type Allocator = TableAlloc<Lower>;
 
-    fn mapping<'a>(begin: usize, length: usize) -> Result<MMap<Page>, ()> {
+    fn mapping(begin: usize, length: usize) -> core::result::Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
         if let Ok(file) = std::env::var("NVM_FILE") {
             warn!("MMap file {file} l={}G", (length * Page::SIZE) >> 30);
@@ -202,8 +190,42 @@ mod test {
     }
 
     #[test]
+    fn names() {
+        println!(
+            "{} -> {}",
+            type_name::<ArrayAtomicAlloc<Lower>>(),
+            super::name::<ArrayAtomicAlloc<Lower>>()
+        );
+        println!(
+            "{} -> {}",
+            type_name::<ArrayLockedAlloc<Lower>>(),
+            super::name::<ArrayLockedAlloc<Lower>>()
+        );
+        println!(
+            "{} -> {}",
+            type_name::<TableAlloc<Lower>>(),
+            super::name::<TableAlloc<Lower>>()
+        );
+        println!(
+            "{} -> {}",
+            type_name::<ListLocalAlloc>(),
+            super::name::<ListLocalAlloc>()
+        );
+        println!(
+            "{} -> {}",
+            type_name::<ArrayAlignedAlloc<Unaligned, Lower>>(),
+            super::name::<ArrayAlignedAlloc<Unaligned, Lower>>()
+        );
+        println!(
+            "{} -> {}",
+            type_name::<ArrayAlignedAlloc<CacheAligned, Lower>>(),
+            super::name::<ArrayAlignedAlloc<CacheAligned, Lower>>()
+        );
+    }
+
+    #[test]
     fn correctly_sized_huge_pages() {
-        assert_eq!(Lower::MAPPING.span(1), Size::L1.span())
+        assert_eq!(Lower::MAPPING.span(1), 512)
     }
 
     /// Testing the related pages heuristic for frees
@@ -252,14 +274,14 @@ mod test {
         });
 
         warn!("start alloc...");
-        let small = alloc.get(0, Size::L0).unwrap();
+        let small = alloc.get(0, 0).unwrap();
 
-        assert_eq!(alloc.dbg_allocated_pages(), Size::L0.span());
+        assert_eq!(alloc.dbg_allocated_pages(), 1, "{alloc:?}");
 
         // Stress test
         let mut pages = Vec::new();
         loop {
-            match alloc.get(0, Size::L0) {
+            match alloc.get(0, 0) {
                 Ok(page) => pages.push(page),
                 Err(Error::Memory) => break,
                 Err(e) => panic!("{:?}", e),
@@ -286,22 +308,22 @@ mod test {
         // Free some
         const FREE_NUM: usize = PT_LEN * PT_LEN - 10;
         for page in &pages[..FREE_NUM] {
-            alloc.put(0, *page).unwrap();
+            alloc.put(0, *page, 0).unwrap();
         }
 
         assert_eq!(alloc.dbg_allocated_pages(), 1 + pages.len() - FREE_NUM);
 
         // Realloc
         for page in &mut pages[..FREE_NUM] {
-            *page = alloc.get(0, Size::L0).unwrap();
+            *page = alloc.get(0, 0).unwrap();
         }
 
         warn!("free...");
 
-        alloc.put(0, small).unwrap();
+        alloc.put(0, small, 0).unwrap();
         // Free all
         for page in &pages {
-            alloc.put(0, *page).unwrap();
+            alloc.put(0, *page, 0).unwrap();
         }
 
         assert_eq!(alloc.dbg_allocated_pages(), 0);
@@ -326,7 +348,7 @@ mod test {
         const ALLOCS: usize = MEM_SIZE / Page::SIZE / 4 * 3;
         let mut pages = Vec::with_capacity(ALLOCS);
         for _ in 0..ALLOCS {
-            pages.push(alloc.get(0, Size::L0).unwrap());
+            pages.push(alloc.get(0, 0).unwrap());
         }
         warn!("allocated {}", pages.len());
 
@@ -347,8 +369,8 @@ mod test {
 
         for _ in 0..pages.len() {
             let i = rng.range(0..pages.len() as _) as usize;
-            alloc.put(0, pages[i]).unwrap();
-            pages[i] = alloc.get(0, Size::L0).unwrap();
+            alloc.put(0, pages[i], 0).unwrap();
+            pages[i] = alloc.get(0, 0).unwrap();
         }
 
         warn!("check...");
@@ -365,7 +387,7 @@ mod test {
         warn!("free...");
         rng.shuffle(&mut pages);
         for page in &pages {
-            alloc.put(0, *page).unwrap();
+            alloc.put(0, *page, 0).unwrap();
         }
         assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
@@ -397,7 +419,7 @@ mod test {
             warn!("start alloc...");
             let mut pages = Vec::with_capacity(ALLOCS);
             for _ in 0..ALLOCS {
-                pages.push(alloc.get(t, Size::L0).unwrap());
+                pages.push(alloc.get(t, 0).unwrap());
             }
             warn!("allocated {}", pages.len());
 
@@ -418,8 +440,8 @@ mod test {
 
             for _ in 0..pages.len() {
                 let i = rng.range(0..pages.len() as _) as usize;
-                alloc.put(t, pages[i]).unwrap();
-                pages[i] = alloc.get(t, Size::L0).unwrap();
+                alloc.put(t, pages[i], 0).unwrap();
+                pages[i] = alloc.get(t, 0).unwrap();
             }
 
             warn!("check...");
@@ -435,7 +457,7 @@ mod test {
             warn!("free...");
             rng.shuffle(&mut pages);
             for page in &pages {
-                alloc.put(t, *page).unwrap();
+                alloc.put(t, *page, 0).unwrap();
             }
         });
 
@@ -460,10 +482,10 @@ mod test {
         assert_eq!(alloc.dbg_allocated_pages(), 0);
 
         warn!("start alloc");
-        let small = alloc.get(0, Size::L0).unwrap();
-        let huge = alloc.get(0, Size::L1).unwrap();
+        let small = alloc.get(0, 0).unwrap();
+        let huge = alloc.get(0, 9).unwrap();
 
-        let expected_pages = Size::L0.span() + Size::L1.span();
+        let expected_pages = 1 + (1 << 9);
         assert_eq!(alloc.dbg_allocated_pages(), expected_pages);
         assert!(small != huge);
 
@@ -472,7 +494,7 @@ mod test {
         // Stress test
         let mut pages = vec![0; PT_LEN * PT_LEN];
         for page in &mut pages {
-            *page = alloc.get(0, Size::L0).unwrap();
+            *page = alloc.get(0, 0).unwrap();
         }
 
         warn!("check");
@@ -493,26 +515,26 @@ mod test {
 
         // Free some
         for page in &pages[10..PT_LEN + 10] {
-            alloc.put(0, *page).unwrap();
+            alloc.put(0, *page, 0).unwrap();
         }
 
         warn!("free special...");
 
-        alloc.put(0, small).unwrap();
-        alloc.put(0, huge).unwrap();
+        alloc.put(0, small, 0).unwrap();
+        alloc.put(0, huge, 9).unwrap();
 
         warn!("realloc...");
 
         // Realloc
         for page in &mut pages[10..PT_LEN + 10] {
-            *page = alloc.get(0, Size::L0).unwrap();
+            *page = alloc.get(0, 0).unwrap();
         }
 
         warn!("free...");
 
         // Free all
         for page in &pages {
-            alloc.put(0, *page).unwrap();
+            alloc.put(0, *page, 0).unwrap();
         }
 
         assert_eq!(alloc.dbg_allocated_pages(), 0);
@@ -547,7 +569,7 @@ mod test {
 
             for i in 0..ALLOC_PER_THREAD {
                 let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
-                *dst = a.get(t, Size::L0).unwrap();
+                *dst = a.get(t, 0).unwrap();
             }
         });
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
@@ -595,7 +617,7 @@ mod test {
 
             for i in 0..ALLOC_PER_THREAD {
                 let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
-                *dst = a.get(t, Size::L1).unwrap();
+                *dst = a.get(t, 9).unwrap();
             }
         });
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
@@ -725,14 +747,14 @@ mod test {
             let mut pages = vec![0; ALLOC_PER_THREAD];
 
             for page in &mut pages {
-                *page = alloc.get(t, Size::L0).unwrap();
+                *page = alloc.get(t, 0).unwrap();
             }
 
             let mut rng = WyRand::new(t as _);
             rng.shuffle(&mut pages);
 
             for page in pages {
-                alloc.put(t, page).unwrap();
+                alloc.put(t, page, 0).unwrap();
             }
         });
 
@@ -760,7 +782,7 @@ mod test {
         thread::pin(0);
         let mut pages = vec![0; ALLOC_PER_THREAD];
         for page in &mut pages {
-            *page = alloc.get(0, Size::L0).unwrap();
+            *page = alloc.get(0, 0).unwrap();
         }
 
         let handle = {
@@ -771,7 +793,7 @@ mod test {
                 barrier.wait();
                 // Free on another thread
                 for page in &pages {
-                    alloc.put(1, *page).unwrap();
+                    alloc.put(1, *page, 0).unwrap();
                 }
             })
         };
@@ -782,7 +804,7 @@ mod test {
 
         // Simultaneously alloc on first thread
         for page in &mut pages {
-            *page = alloc.get(0, Size::L0).unwrap();
+            *page = alloc.get(0, 0).unwrap();
         }
 
         handle.join().unwrap();
@@ -798,7 +820,7 @@ mod test {
         let mut mapping = mapping(0x1000_0000_0000, 8 << 18).unwrap();
         thread::pin(0);
 
-        let expected_pages = (PT_LEN + 2) * (Size::L0.span() + Size::L1.span());
+        let expected_pages = (PT_LEN + 2) * (1 + (1 << 9));
 
         {
             let alloc = Arc::new({
@@ -808,8 +830,8 @@ mod test {
             });
 
             for _ in 0..PT_LEN + 2 {
-                alloc.get(0, Size::L0).unwrap();
-                alloc.get(0, Size::L1).unwrap();
+                alloc.get(0, 0).unwrap();
+                alloc.get(0, 9).unwrap();
             }
 
             assert_eq!(alloc.dbg_allocated_pages(), expected_pages);

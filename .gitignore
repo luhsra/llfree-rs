@@ -6,6 +6,7 @@ Cargo.lock
 .DS_Store
 memfile
 .vscode
+.devcontainer
 /test/
 
 /results/*

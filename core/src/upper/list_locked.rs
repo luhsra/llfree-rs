@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use log::{error, info};
 use spin::mutex::TicketMutex;
 
-use crate::{Error, Result, Size};
+use crate::{Error, Result};
 use super::{Alloc, MIN_PAGES};
 use crate::util::Page;
 
@@ -92,9 +92,9 @@ impl Alloc for ListLockedAlloc {
     }
 
     #[inline(never)]
-    fn get(&self, core: usize, size: Size) -> Result<u64> {
-        if size != Size::L0 {
-            error!("{size:?} not supported");
+    fn get(&self, core: usize, order: usize) -> Result<u64> {
+        if order != 0 {
+            error!("order {order:?} not supported");
             return Err(Error::Memory);
         }
 
@@ -110,15 +110,15 @@ impl Alloc for ListLockedAlloc {
     }
 
     #[inline(never)]
-    fn put(&self, core: usize, addr: u64) -> Result<Size> {
-        if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) {
+    fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
+        if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) || order != 0 {
             error!("invalid addr");
             return Err(Error::Address);
         }
 
         self.next.lock().push(unsafe { &mut *(addr as *mut Node) });
         self.local[core].counter.fetch_sub(1, Ordering::Relaxed);
-        Ok(Size::L0)
+        Ok(())
     }
 
     fn pages(&self) -> usize {

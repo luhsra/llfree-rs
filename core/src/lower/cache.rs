@@ -4,11 +4,11 @@ use core::ops::Range;
 use alloc::string::String;
 use log::{error, warn};
 
-use crate::{Error, Result, Size};
-use crate::upper::CAS_RETRIES;
 use crate::entry::SmallEntry2;
 use crate::table::{ATable, Bitfield, Mapping};
+use crate::upper::CAS_RETRIES;
 use crate::util::{align_up, div_ceil, Page};
+use crate::{Error, Result};
 
 use super::LowerAlloc;
 
@@ -23,7 +23,8 @@ pub struct CacheLower<const T2N: usize> {
 }
 
 impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
-    const MAPPING: Mapping<2> = Mapping([Bitfield::LEN, ATable::<SmallEntry2, T2N>::LEN]);
+    const MAPPING: Mapping<2> = Mapping([Bitfield::ORDER, ATable::<SmallEntry2, T2N>::ORDER]);
+    const HUGE_ORDER: usize = Self::MAPPING.order(1);
 
     fn new(_cores: usize, memory: &mut [Page]) -> Self {
         let s1 = Self::MAPPING.num_pts(1, memory.len()) * Bitfield::SIZE;
@@ -74,9 +75,9 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
         }
     }
 
-    fn recover(&self, start: usize, deep: bool) -> Result<(usize, Size)> {
+    fn recover(&self, start: usize, deep: bool) -> Result<(usize, bool)> {
         let mut pages = 0;
-        let mut size = Size::L0;
+        let mut huge = false;
 
         let pt = self.pt2(start);
         for i in 0..Self::MAPPING.len(2) {
@@ -87,8 +88,8 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
 
             let pte = pt.get(i);
             if pte.page() {
-                size = Size::L1;
-            } else if deep && pte.free() > 0 && size == Size::L0 {
+                huge = true;
+            } else if deep && pte.free() > 0 && !huge {
                 let p = self.recover_l1(start);
                 if pte.free() != p {
                     warn!("Invalid PTE2 start=0x{start:x} i{i}: {} != {p}", pte.free());
@@ -100,48 +101,57 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
             }
         }
 
-        Ok((pages, size))
+        Ok((pages, huge))
     }
 
-    fn get(&self, _core: usize, huge: bool, start: usize) -> Result<usize> {
-        if !huge {
-            return self.get_small(start);
-        }
+    fn get(&self, _core: usize, order: usize, start: usize) -> Result<usize> {
+        debug_assert!(order <= Self::MAPPING.order(1));
 
-        let pt = self.pt2(start);
-        for _ in 0..CAS_RETRIES {
-            for page in Self::MAPPING.iterate(2, start) {
-                let i = Self::MAPPING.idx(2, page);
-                if pt.update(i, |v| v.mark_huge(Self::MAPPING.span(1))).is_ok() {
-                    return Ok(page);
+        if order > 0 {
+            // allocate huge page
+            let pt = self.pt2(start);
+            for _ in 0..CAS_RETRIES {
+                for page in Self::MAPPING.iterate(2, start) {
+                    let i = Self::MAPPING.idx(2, page);
+                    if pt.update(i, |v| v.mark_huge(Self::MAPPING.span(1))).is_ok() {
+                        return Ok(page);
+                    }
                 }
             }
+            error!("Nothing found {}", start / Self::MAPPING.span(2));
+            Err(Error::Corruption)
+        } else {
+            self.get_small(start)
         }
-        error!("Nothing found {}", start / Self::MAPPING.span(2));
-        Err(Error::Corruption)
     }
 
     /// Free single page and returns if the page was huge
-    fn put(&self, page: usize) -> Result<bool> {
+    fn put(&self, page: usize, order: usize) -> Result<()> {
         debug_assert!(page < self.pages);
         stop!();
 
         let pt2 = self.pt2(page);
         let i2 = Self::MAPPING.idx(2, page);
-        // try free huge
-        if let Err(old) = pt2.cas(
-            i2,
-            SmallEntry2::new().with_page(true),
-            SmallEntry2::new_table(Self::MAPPING.span(1)),
-        ) {
-            if old.free() < Self::MAPPING.span(1) {
-                self.put_small(page).map(|_| false)
+        if order == 0 {
+            let old = pt2.get(i2);
+            if old.free() <= Self::MAPPING.span(1) - (1 << order) {
+                self.put_small(page)
             } else {
-                error!("Addr {page:x} {old:?}");
+                error!("Addr p={page:x} o={order} {old:?}");
                 Err(Error::Address)
             }
         } else {
-            Ok(true)
+            // try free huge
+            if let Err(old) = pt2.cas(
+                i2,
+                SmallEntry2::new().with_page(true),
+                SmallEntry2::new().with_free(Self::MAPPING.span(1)),
+            ) {
+                error!("Addr {page:x} o={order} {old:?}");
+                Err(Error::Address)
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -335,7 +345,7 @@ mod test {
             warn!("order: {order:?}");
             let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
-            lower.get(0, false, 0).unwrap();
+            lower.get(0, 0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
 
@@ -344,7 +354,7 @@ mod test {
                 thread::pin(t);
                 let key = Stopper::init(stop, t as _);
 
-                let page = l.get(t, false, 0).unwrap();
+                let page = l.get(t, 0, 0).unwrap();
                 drop(key);
                 assert!(page != 0);
             });
@@ -378,7 +388,7 @@ mod test {
                 thread::pin(t);
                 let _stopper = Stopper::init(stop, t as _);
 
-                l.get(t, false, 0).unwrap();
+                l.get(t, 0, 0).unwrap();
             });
 
             let pte2 = lower.pt2(0).get(0);
@@ -406,7 +416,7 @@ mod test {
             lower.clear();
 
             for _ in 0..MAPPING.span(1) - 1 {
-                lower.get(0, false, 0).unwrap();
+                lower.get(0, 0, 0).unwrap();
             }
 
             let stop = StopVec::new(2, order);
@@ -415,7 +425,7 @@ mod test {
                 thread::pin(t);
                 let _stopper = Stopper::init(stop, t as _);
 
-                l.get(t, false, 0).unwrap();
+                l.get(t, 0, 0).unwrap();
             });
 
             let pt2 = lower.pt2(0);
@@ -443,8 +453,8 @@ mod test {
             let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
-            pages[0] = lower.get(0, false, 0).unwrap();
-            pages[1] = lower.get(0, false, 0).unwrap();
+            pages[0] = lower.get(0, 0, 0).unwrap();
+            pages[1] = lower.get(0, 0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
@@ -453,7 +463,7 @@ mod test {
                 move |t| {
                     let _stopper = Stopper::init(stop, t as _);
 
-                    l.put(pages[t as usize]).unwrap();
+                    l.put(pages[t as usize], 0).unwrap();
                 }
             });
 
@@ -480,7 +490,7 @@ mod test {
             lower.clear();
 
             for page in &mut pages {
-                *page = lower.get(0, false, 0).unwrap();
+                *page = lower.get(0, 0, 0).unwrap();
             }
 
             let stop = StopVec::new(2, order);
@@ -488,7 +498,7 @@ mod test {
             thread::parallel(2, move |t| {
                 let _stopper = Stopper::init(stop, t as _);
 
-                l.put(pages[t as usize]).unwrap();
+                l.put(pages[t as usize], 0).unwrap();
             });
 
             let pt2 = lower.pt2(0);
@@ -521,7 +531,7 @@ mod test {
             lower.clear();
 
             for page in &mut pages[..MAPPING.span(1) - 1] {
-                *page = lower.get(0, false, 0).unwrap();
+                *page = lower.get(0, 0, 0).unwrap();
             }
             let stop = StopVec::new(2, order);
 
@@ -531,14 +541,14 @@ mod test {
                 move || {
                     let _stopper = Stopper::init(stop, 1);
 
-                    lower.get(1, false, 0).unwrap();
+                    lower.get(1, 0, 0).unwrap();
                 }
             });
 
             {
                 let _stopper = Stopper::init(stop, 0);
 
-                lower.put(pages[0]).unwrap();
+                lower.put(pages[0], 0).unwrap();
             }
 
             handle.join().unwrap();
