@@ -2,12 +2,12 @@ use core::fmt;
 use core::mem::{align_of, size_of};
 use core::ops::Range;
 use core::ptr::addr_of;
-use core::sync::atomic::{self, AtomicU8, Ordering};
+use core::sync::atomic::{self, AtomicU64, Ordering};
 
 use crate::atomic::{Atomic, AtomicValue};
-use crate::Error;
-use crate::util::{align_down, align_up, CacheLine, log2};
 use crate::util::Page;
+use crate::util::{align_down, align_up, log2, CacheLine};
+use crate::Error;
 
 pub const PT_ORDER: usize = 9;
 pub const PT_LEN: usize = 1 << PT_ORDER;
@@ -79,7 +79,7 @@ impl<T: AtomicValue + fmt::Debug, const LEN: usize> fmt::Debug for ATable<T, LEN
 /// Bitfield replacing the level one-page table.
 #[repr(align(64))]
 pub struct Bitfield {
-    data: [AtomicU8; Self::LEN / Self::ENTRY_BITS],
+    data: [AtomicU64; Self::ENTRIES],
 }
 
 const _: () = assert!(size_of::<Bitfield>() == Bitfield::SIZE);
@@ -90,9 +90,9 @@ const _: () = assert!(Bitfield::ORDER == 9);
 
 impl Default for Bitfield {
     fn default() -> Self {
-        const D: AtomicU8 = AtomicU8::new(0);
+        const D: AtomicU64 = AtomicU64::new(0);
         Self {
-            data: [D; Self::LEN / Self::ENTRY_BITS],
+            data: [D; Self::ENTRIES],
         }
     }
 }
@@ -100,11 +100,8 @@ impl Default for Bitfield {
 impl fmt::Debug for Bitfield {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Bitfield(")?;
-        for (i, d) in self.data.iter().enumerate() {
-            if i % 4 == 0 && i > 0 {
-                write!(f, " ")?;
-            }
-            write!(f, "{:02x}", d.load(Ordering::Relaxed))?;
+        for d in &self.data {
+            write!(f, "{:016x} ", d.load(Ordering::Relaxed))?;
         }
         write!(f, ")")?;
         Ok(())
@@ -112,10 +109,11 @@ impl fmt::Debug for Bitfield {
 }
 
 impl Bitfield {
-    pub const ENTRY_BITS: usize = 8;
+    pub const ENTRY_BITS: usize = 64;
+    pub const ENTRIES: usize = Self::LEN / Self::ENTRY_BITS;
     pub const LEN: usize = PT_LEN;
     pub const ORDER: usize = log2(Self::LEN);
-    pub const SIZE: usize = Self::LEN / Self::ENTRY_BITS;
+    pub const SIZE: usize = Self::LEN / 8;
 
     pub fn set(&self, i: usize, v: bool) {
         let di = i / Self::ENTRY_BITS;
@@ -133,26 +131,37 @@ impl Bitfield {
         self.data[di].load(Ordering::SeqCst) & bit != 0
     }
 
-    pub fn toggle(&self, i: usize, expected: bool) -> core::result::Result<bool, bool> {
+    pub fn toggle(&self, i: usize, order: usize, expected: bool) -> Result<(), ()> {
         let di = i / Self::ENTRY_BITS;
-        let bit = 1 << (i % Self::ENTRY_BITS);
+        let num_pages = 1 << order;
+        debug_assert!(num_pages <= u64::BITS);
+        let mask = if num_pages >= u64::BITS {
+            u64::MAX
+        } else {
+            ((1 << num_pages) - 1) << (i % Self::ENTRY_BITS)
+        };
         match self.data[di].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
-            ((e & bit != 0) == expected).then(|| if expected { e & !bit } else { e | bit })
+            if expected {
+                e & mask == (mask * expected as u64)
+            } else {
+                e & mask == 0
+            }
+            .then(|| if expected { e & !mask } else { e | mask })
         }) {
-            Ok(e) => Ok(e & bit != 0),
-            Err(e) => Err(e & bit != 0),
+            Ok(_) => Ok(()),
+            Err(_) => Err(()),
         }
     }
 
     /// Set the first 0 bit to 1 returning its bit index.
-    pub fn set_first_zero(&self, i: usize) -> core::result::Result<usize, Error> {
+    pub fn set_first_zero(&self, i: usize) -> Result<usize, Error> {
         for j in 0..self.data.len() {
             let i = (j + i) % self.data.len();
 
             #[cfg(feature = "stop")]
             {
                 // Skip full entries for the tests
-                if self.data[i].load(Ordering::SeqCst) == u8::MAX {
+                if self.data[i].load(Ordering::SeqCst) == u64::MAX {
                     continue;
                 }
                 crate::stop::stop().unwrap();
@@ -168,15 +177,58 @@ impl Bitfield {
         Err(Error::Memory)
     }
 
+    pub fn set_first_zeros(&self, i: usize, order: usize) -> Result<usize, Error> {
+        if order == 0 {
+            return self.set_first_zero(i);
+        }
+
+        for j in 0..self.data.len() {
+            let i = (j + i) % self.data.len();
+
+            #[cfg(feature = "stop")]
+            {
+                // Skip full entries for the tests
+                if self.data[i].load(Ordering::SeqCst) == u64::MAX {
+                    continue;
+                }
+                crate::stop::stop().unwrap();
+            }
+
+            if let Ok(e) = self.data[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
+                first_zeros_aligned(e, order).map(|v| v.0)
+            }) {
+                return Ok(i * Self::ENTRY_BITS + first_zeros_aligned(e, order).unwrap().1);
+            }
+        }
+        Err(Error::Memory)
+    }
+
     pub fn fill(&self, v: bool) {
-        let v = if v { u8::MAX } else { 0 };
+        let v = if v { u64::MAX } else { 0 };
         // cast to raw memory to let the compiler use vector instructions
         #[allow(clippy::cast_ref_to_mut)]
-        let mem = unsafe { &mut *(addr_of!(self.data) as *mut [u8; Self::SIZE]) };
+        let mem = unsafe { &mut *(addr_of!(self.data) as *mut [u64; Self::ENTRIES]) };
         mem.fill(v);
         // memory ordering has to be enforced with a memory barrier
         atomic::fence(Ordering::SeqCst);
     }
+}
+
+#[inline]
+fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
+    let num_pages = 1 << order;
+    debug_assert!(num_pages <= u64::BITS as usize);
+    if num_pages >= u64::BITS as usize {
+        return if v == 0 { Some((u64::MAX, 0)) } else { None };
+    }
+    for i in 0..64 / num_pages {
+        let i = i * num_pages;
+        let mask = ((1 << num_pages) - 1) << i;
+        if v & mask == 0 {
+            return Some((v | mask, i as usize));
+        }
+    }
+    None
 }
 
 /// Specifies the different table sizes from level 1 to N.
@@ -531,5 +583,47 @@ mod test {
         let mut iter = MAPPING.iterate(3, 5 * MAPPING.span(2)).enumerate();
         assert_eq!(iter.next(), Some((0, 5 * MAPPING.span(2))));
         assert_eq!(iter.last(), Some((31, 4 * MAPPING.span(2))));
+    }
+
+    #[test]
+    fn first_zeros_aligned() {
+        assert_eq!(super::first_zeros_aligned(0b0, 0), Some((0b1, 0)));
+        assert_eq!(super::first_zeros_aligned(0b0, 1), Some((0b11, 0)));
+        assert_eq!(super::first_zeros_aligned(0b0, 2), Some((0b1111, 0)));
+        assert_eq!(super::first_zeros_aligned(0b0, 3), Some((0xff, 0)));
+        assert_eq!(super::first_zeros_aligned(0b0, 4), Some((0xffff, 0)));
+        assert_eq!(super::first_zeros_aligned(0b0, 5), Some((0xffffffff, 0)));
+        assert_eq!(
+            super::first_zeros_aligned(0b0, 6),
+            Some((0xffffffffffffffff, 0))
+        );
+
+        assert_eq!(super::first_zeros_aligned(0b1, 0), Some((0b11, 1)));
+        assert_eq!(super::first_zeros_aligned(0b1, 1), Some((0b1101, 2)));
+        assert_eq!(super::first_zeros_aligned(0b1, 2), Some((0xf1, 4)));
+        assert_eq!(super::first_zeros_aligned(0b1, 3), Some((0xff01, 8)));
+        assert_eq!(super::first_zeros_aligned(0b1, 4), Some((0xffff0001, 16)));
+        assert_eq!(
+            super::first_zeros_aligned(0b1, 5),
+            Some((0xffffffff00000001, 32))
+        );
+        assert_eq!(super::first_zeros_aligned(0b1, 6), None);
+
+        assert_eq!(super::first_zeros_aligned(0b101, 0), Some((0b111, 1)));
+        assert_eq!(super::first_zeros_aligned(0b10011, 1), Some((0b11111, 2)));
+        assert_eq!(super::first_zeros_aligned(0x10f, 2), Some((0x1ff, 4)));
+        assert_eq!(super::first_zeros_aligned(0x100ff, 3), Some((0x1ffff, 8)));
+        assert_eq!(
+            super::first_zeros_aligned(0x10000ffff, 4),
+            Some((0x1ffffffff, 16))
+        );
+        assert_eq!(
+            super::first_zeros_aligned(0x00000000ff00ff0f, 5),
+            Some((0xffffffffff00ff0f, 32))
+        );
+        assert_eq!(
+            super::first_zeros_aligned(0b1111_0000_1100_0011_1000_1111, 2),
+            Some((0b1111_1111_1100_0011_1000_1111, 16))
+        );
     }
 }

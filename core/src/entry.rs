@@ -139,8 +139,7 @@ impl Entry3 {
     /// Decrements the free pages counter.
     #[inline]
     pub fn dec(self, huge: bool, num_pages: usize, span: usize) -> Option<Entry3> {
-        if (self.huge() == huge || self.free() == span) && self.free() >= num_pages
-        {
+        if (self.huge() == huge || self.free() == span) && self.free() >= num_pages {
             Some(
                 self.with_free(self.free() - num_pages)
                     .with_huge(huge)
@@ -191,11 +190,7 @@ impl Entry3 {
     /// Reserves this entry if it is partially filled.
     #[inline]
     pub fn reserve_partial(self, huge: bool, min: usize, span: usize) -> Option<Entry3> {
-        if !self.reserved()
-            && self.free() > min
-            && self.free() < span
-            && self.huge() == huge
-        {
+        if !self.reserved() && self.free() > min && self.free() < span && self.huge() == huge {
             Some(self.with_huge(huge).with_reserved(true).with_free(0))
         } else {
             None
@@ -258,81 +253,8 @@ impl fmt::Debug for Entry3 {
     }
 }
 
-#[bitfield(u64)]
-pub struct Entry2 {
-    /// Number of free pages.
-    #[bits(54)]
-    pub free: usize,
-    /// Index of the level one page table.
-    #[bits(9)]
-    pub i1: usize,
-    /// If this is allocated as large page.
-    pub page: bool,
-}
-
-impl AtomicValue for Entry2 {
-    type V = u64;
-}
-
-impl Entry2 {
-    /// Creates a new entry referencing a level one page table.
-    #[inline]
-    pub fn new_table(pages: usize, i1: usize) -> Self {
-        Self::new().with_free(pages).with_i1(i1)
-    }
-    #[inline]
-    pub fn mark_huge(self, span: usize) -> Option<Self> {
-        if !self.page() && self.free() == span {
-            Some(Entry2::new().with_page(true))
-        } else {
-            None
-        }
-    }
-    /// Decrement the free pages counter.
-    #[inline]
-    pub fn dec(self, i1: usize) -> Option<Self> {
-        if !self.page() && self.i1() == i1 && self.free() > 0 {
-            Some(self.with_free(self.free() - 1))
-        } else {
-            None
-        }
-    }
-    /// Increments the free pages counter.
-    #[inline]
-    pub fn inc_partial(self, i1: usize, span: usize) -> Option<Self> {
-        if !self.page()
-            && i1 == self.i1()
-            && self.free() > 0 // is the child pt already initialized?
-            && self.free() < span
-        {
-            Some(self.with_free(self.free() + 1))
-        } else {
-            None
-        }
-    }
-    /// Increments the free pages counter.
-    #[inline]
-    pub fn inc(self, span: usize) -> Option<Self> {
-        if !self.page() && self.free() < span {
-            Some(self.with_free(self.free() + 1))
-        } else {
-            None
-        }
-    }
-}
-
-impl fmt::Debug for Entry2 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Entry2")
-            .field("free", &self.free())
-            .field("i1", &self.i1())
-            .field("page", &self.page())
-            .finish()
-    }
-}
-
 #[bitfield(u16)]
-pub struct SmallEntry2 {
+pub struct Entry2 {
     /// Number of free pages.
     #[bits(15)]
     pub free: usize,
@@ -340,11 +262,11 @@ pub struct SmallEntry2 {
     pub page: bool,
 }
 
-impl AtomicValue for SmallEntry2 {
+impl AtomicValue for Entry2 {
     type V = u16;
 }
 
-impl SmallEntry2 {
+impl Entry2 {
     #[inline]
     pub fn mark_huge(self, span: usize) -> Option<Self> {
         if !self.page() && self.free() == span {
@@ -355,37 +277,45 @@ impl SmallEntry2 {
     }
     /// Decrement the free pages counter.
     #[inline]
-    pub fn dec(self) -> Option<Self> {
-        if !self.page() && self.free() > 0 {
-            Some(self.with_free(self.free() - 1))
+    pub fn dec(self, num_pages: usize) -> Option<Self> {
+        if !self.page() && self.free() >= num_pages {
+            Some(self.with_free(self.free() - num_pages))
         } else {
             None
         }
     }
     /// Increments the free pages counter.
     #[inline]
-    pub fn inc_partial(self, span: usize) -> Option<Self> {
-        if !self.page()
-            && self.free() > 0 // is the child pt already initialized?
-            && self.free() < span
-        {
-            Some(self.with_free(self.free() + 1))
-        } else {
-            None
-        }
-    }
-    /// Increments the free pages counter.
-    #[inline]
-    pub fn inc(self, span: usize) -> Option<Self> {
-        if !self.page() && self.free() < span {
-            Some(self.with_free(self.free() + 1))
+    pub fn inc(self, span: usize, num_pages: usize) -> Option<Self> {
+        if !self.page() && self.free() <= span - num_pages {
+            Some(self.with_free(self.free() + num_pages))
         } else {
             None
         }
     }
 }
 
-impl fmt::Debug for SmallEntry2 {
+#[derive(Clone, Copy)]
+#[repr(packed)]
+pub struct Entry2Pair(Entry2, Entry2);
+
+impl From<u32> for Entry2Pair {
+    fn from(v: u32) -> Self {
+        Entry2Pair((v as u16).into(), ((v >> 16) as u16).into())
+    }
+}
+
+impl From<Entry2Pair> for u32 {
+    fn from(v: Entry2Pair) -> Self {
+        u16::from(v.0) as u32 | ((u16::from(v.1) as u32) << 16)
+    }
+}
+
+impl AtomicValue for Entry2Pair {
+    type V = u32;
+}
+
+impl fmt::Debug for Entry2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry2")
             .field("free", &self.free())

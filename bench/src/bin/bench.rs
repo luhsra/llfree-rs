@@ -10,10 +10,10 @@ use std::time::Instant;
 use clap::{ArgEnum, Parser};
 use log::warn;
 
-use nvalloc::upper::*;
 use nvalloc::lower::*;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
+use nvalloc::upper::*;
 use nvalloc::util::{black_box, Page, WyRand};
 use nvalloc::{thread, util};
 
@@ -39,8 +39,8 @@ struct Args {
     #[clap(short, long, default_value_t = 1)]
     iterations: usize,
     /// Size of the allocated pages: 0 = 4K, 1 = 2M, 2 = 1G
-    #[clap(short, long, default_value_t = 0)]
-    size: usize,
+    #[clap(short = 's', long, default_value_t = 0)]
+    order: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
     #[clap(short, long, default_value_t = 16)]
     memory: usize,
@@ -57,7 +57,7 @@ fn main() {
         outfile,
         dax,
         iterations,
-        size,
+        order,
         memory,
         stride,
     } = Args::parse();
@@ -69,17 +69,12 @@ fn main() {
     }
 
     let ppt = (memory * PT_LEN * PT_LEN) / threads;
-    assert!(ppt >= MIN_PAGES, "{} > {}", ppt, MIN_PAGES);
+    assert!(ppt >= MIN_PAGES, "{ppt} > {MIN_PAGES}");
 
     let mut out = File::create(outfile).unwrap();
     writeln!(out, "alloc,x,iteration,memory,{}", Perf::header()).unwrap();
 
-    let size = match size {
-        0 => Size::L0,
-        1 => Size::L1,
-        _ => panic!("`size` has to be 0, 1 or 2"),
-    };
-    warn!("Allocating size {size:?}");
+    warn!("Allocating order {order}");
 
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
 
@@ -90,40 +85,31 @@ fn main() {
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
 
-    type F = FixedLower;
-    type P = PackedLower;
     type C512 = CacheLower<512>;
-    type C256 = CacheLower<256>;
     type C128 = CacheLower<128>;
     type C64 = CacheLower<64>;
-    let allocs: [Arc<dyn Alloc>; 20] = [
-        Arc::new(ArrayAlignedAlloc::<F>::default()),
-        Arc::new(ArrayUnalignedAlloc::<F>::default()),
-        Arc::new(ArrayLockedAlloc::<F>::default()),
-        Arc::new(ArrayAtomicAlloc::<F>::default()),
-        Arc::new(TableAlloc::<F>::default()),
-        Arc::new(ArrayAlignedAlloc::<P>::default()),
-        Arc::new(ArrayUnalignedAlloc::<P>::default()),
-        Arc::new(ArrayLockedAlloc::<P>::default()),
-        Arc::new(ArrayAtomicAlloc::<P>::default()),
-        Arc::new(TableAlloc::<P>::default()),
-        Arc::new(ArrayAlignedAlloc::<C512>::default()),
-        Arc::new(ArrayAtomicAlloc::<C512>::default()),
-        Arc::new(ArrayAlignedAlloc::<C256>::default()),
-        Arc::new(ArrayAtomicAlloc::<C256>::default()),
-        Arc::new(ArrayAlignedAlloc::<C128>::default()),
-        Arc::new(ArrayAtomicAlloc::<C128>::default()),
-        Arc::new(ArrayAlignedAlloc::<C64>::default()),
+    let allocs: [Arc<dyn Alloc>; 14] = [
+        Arc::new(ArrayAlignedAlloc::<CacheAligned, C64>::default()),
+        Arc::new(ArrayAlignedAlloc::<CacheAligned, C128>::default()),
+        Arc::new(ArrayAlignedAlloc::<CacheAligned, C512>::default()),
         Arc::new(ArrayAtomicAlloc::<C64>::default()),
+        Arc::new(ArrayAtomicAlloc::<C128>::default()),
+        Arc::new(ArrayAtomicAlloc::<C512>::default()),
+        Arc::new(ArrayLockedAlloc::<C64>::default()),
+        Arc::new(ArrayLockedAlloc::<C128>::default()),
+        Arc::new(ArrayLockedAlloc::<C512>::default()),
+        Arc::new(TableAlloc::<C64>::default()),
+        Arc::new(TableAlloc::<C128>::default()),
+        Arc::new(TableAlloc::<C512>::default()),
         Arc::new(ListLocalAlloc::default()),
         Arc::new(ListLockedAlloc::default()),
     ];
 
     // Additional constraints
-    let mut conditions = HashMap::<String, &'static dyn Fn(usize, Size) -> bool>::new();
-    conditions.insert(name::<ListLocalAlloc>(), &|_, size| size == Size::L0);
-    conditions.insert(name::<ListLockedAlloc>(), &|cores, size| {
-        size == Size::L0 && (cores <= 16 || cores == 32)
+    let mut conditions = HashMap::<String, &'static dyn Fn(usize, usize) -> bool>::new();
+    conditions.insert(name::<ListLocalAlloc>(), &|_, order| order == 0);
+    conditions.insert(name::<ListLockedAlloc>(), &|cores, order| {
+        order == 0 && (cores <= 16 || cores == 32)
     });
 
     for x in x {
@@ -135,10 +121,10 @@ fn main() {
         for alloc in &allocs {
             let name = alloc.name();
             if alloc_names.contains(&name)
-                && conditions.get(&name).map(|f| f(t, size)).unwrap_or(true)
+                && conditions.get(&name).map(|f| f(t, order)).unwrap_or(true)
             {
                 for i in 0..iterations {
-                    let perf = bench.run(alloc.clone(), &mut mapping, size, threads, x);
+                    let perf = bench.run(alloc.clone(), &mut mapping, order, threads, x);
                     writeln!(out, "{name},{x},{i},{memory},{perf}").unwrap();
                 }
             }
@@ -149,7 +135,7 @@ fn main() {
 }
 
 #[allow(unused_variables)]
-fn mapping<'a>(
+fn mapping(
     begin: usize,
     length: usize,
     dax: Option<String>,
@@ -198,17 +184,17 @@ impl Benchmark {
         self,
         alloc: Arc<dyn Alloc>,
         mapping: &mut [Page],
-        size: Size,
+        order: usize,
         threads: usize,
         x: usize,
     ) -> Perf {
-        warn!(">>> bench {self:?} x={x} {size:?} {}\n", alloc.name());
+        warn!(">>> bench {self:?} x={x} o={order} {}\n", alloc.name());
 
         match self {
-            Benchmark::Bulk => bulk(alloc, mapping, size, threads, x),
-            Benchmark::Repeat => repeat(alloc, mapping, size, threads, x),
-            Benchmark::Rand => rand(alloc, mapping, size, threads, x),
-            Benchmark::Filling => filling(alloc, mapping, size, threads, x),
+            Benchmark::Bulk => bulk(alloc, mapping, order, threads, x),
+            Benchmark::Repeat => repeat(alloc, mapping, order, threads, x),
+            Benchmark::Rand => rand(alloc, mapping, order, threads, x),
+            Benchmark::Filling => filling(alloc, mapping, order, threads, x),
         }
     }
 }
@@ -216,7 +202,7 @@ impl Benchmark {
 fn bulk(
     alloc: Arc<dyn Alloc>,
     mapping: &mut [Page],
-    size: Size,
+    order: usize,
     max_threads: usize,
     threads: usize,
 ) -> Perf {
@@ -225,7 +211,7 @@ fn bulk(
         .init(threads, mapping, true)
         .unwrap();
     let init = timer.elapsed().as_millis();
-    let allocs = alloc.pages() / max_threads / 2 / size.span();
+    let allocs = alloc.pages() / max_threads / 2 / (1 << order);
 
     let barrier = Arc::new(Barrier::new(threads));
     let a = alloc.clone();
@@ -235,7 +221,7 @@ fn bulk(
         let mut pages = Vec::with_capacity(allocs);
         let t1 = Instant::now();
         for _ in 0..allocs {
-            pages.push(alloc.get(t, size).unwrap());
+            pages.push(alloc.get(t, order).unwrap());
         }
         let get = t1.elapsed().as_nanos() / allocs as u128;
         pages.reverse();
@@ -244,7 +230,7 @@ fn bulk(
         barrier.wait();
         let t2 = Instant::now();
         for page in pages {
-            alloc.put(t, page).unwrap();
+            alloc.put(t, page, order).unwrap();
         }
         let put = t2.elapsed().as_nanos() / allocs as u128;
 
@@ -270,7 +256,7 @@ fn bulk(
 fn repeat(
     alloc: Arc<dyn Alloc>,
     mapping: &mut [Page],
-    size: Size,
+    order: usize,
     max_threads: usize,
     threads: usize,
 ) -> Perf {
@@ -280,21 +266,21 @@ fn repeat(
         .unwrap();
     let init = timer.elapsed().as_millis();
 
-    let allocs = alloc.pages() / max_threads / 2 / size.span();
+    let allocs = alloc.pages() / max_threads / 2 / (1 << order);
     let barrier = Arc::new(Barrier::new(threads));
     let a = alloc.clone();
     let mut perf = Perf::avg(thread::parallel(threads, move |t| {
         thread::pin(t);
         for _ in 0..allocs {
-            alloc.get(t, size).unwrap();
+            alloc.get(t, order).unwrap();
         }
 
         barrier.wait();
         let timer = Instant::now();
         for _ in 0..allocs {
-            let page = alloc.get(t, size).unwrap();
+            let page = alloc.get(t, order).unwrap();
             let page = black_box(page);
-            alloc.put(t, page).unwrap();
+            alloc.put(t, page, order).unwrap();
         }
 
         let realloc = timer.elapsed().as_nanos() / allocs as u128;
@@ -310,7 +296,7 @@ fn repeat(
             allocs,
         }
     }));
-    assert_eq!(a.dbg_allocated_pages(), allocs * threads * size.span());
+    assert_eq!(a.dbg_allocated_pages(), allocs * threads * (1 << order));
 
     perf.init = init;
     perf.allocs = allocs;
@@ -320,7 +306,7 @@ fn repeat(
 fn rand(
     alloc: Arc<dyn Alloc>,
     mapping: &mut [Page],
-    size: Size,
+    order: usize,
     max_threads: usize,
     threads: usize,
 ) -> Perf {
@@ -330,7 +316,7 @@ fn rand(
         .unwrap();
     let init = timer.elapsed().as_millis();
 
-    let allocs = alloc.pages() / max_threads / 2 / size.span();
+    let allocs = alloc.pages() / max_threads / 2 / (1 << order);
     let barrier = Arc::new(Barrier::new(threads));
     let a = alloc.clone();
 
@@ -345,8 +331,8 @@ fn rand(
         thread::pin(t);
         let pages = unsafe { slice::from_raw_parts_mut(pages_ptr[t] as *mut u64, allocs) };
 
-        for i in 0..allocs {
-            pages[i] = alloc.get(t, size).unwrap();
+        for page in pages.iter_mut() {
+            *page = alloc.get(t, order).unwrap();
         }
 
         let mut rng = WyRand::new(t as _);
@@ -364,8 +350,8 @@ fn rand(
 
         for _ in 0..allocs {
             let i = rng.range(0..allocs as u64) as usize;
-            alloc.put(t, pages[i]).unwrap();
-            pages[i] = alloc.get(t, size).unwrap();
+            alloc.put(t, pages[i], order).unwrap();
+            pages[i] = alloc.get(t, order).unwrap();
         }
         black_box(pages);
 
@@ -382,7 +368,7 @@ fn rand(
             allocs,
         }
     }));
-    assert_eq!(a.dbg_allocated_pages(), allocs * threads * size.span());
+    assert_eq!(a.dbg_allocated_pages(), allocs * threads * (1 << order));
 
     perf.init = init;
     perf.allocs = allocs;
@@ -392,7 +378,7 @@ fn rand(
 fn filling(
     alloc: Arc<dyn Alloc>,
     mapping: &mut [Page],
-    size: Size,
+    order: usize,
     threads: usize,
     x: usize,
 ) -> Perf {
@@ -403,7 +389,7 @@ fn filling(
         .init(threads, mapping, true)
         .unwrap();
     let init = timer.elapsed().as_millis();
-    let allocs = alloc.pages() / threads / size.span();
+    let allocs = alloc.pages() / threads / (1 << order);
 
     // Allocate to filling level
     let fill = (allocs * x) / 100;
@@ -417,7 +403,7 @@ fn filling(
     let mut perf = Perf::avg(thread::parallel(threads, move |t| {
         thread::pin(t);
         for _ in 0..fill {
-            alloc.get(t, size).unwrap();
+            alloc.get(t, order).unwrap();
         }
         barrier.wait();
 
@@ -425,7 +411,7 @@ fn filling(
         // Operate on filling level.
         let t1 = Instant::now();
         for _ in 0..allocs {
-            pages.push(alloc.get(t, size).unwrap());
+            pages.push(alloc.get(t, order).unwrap());
         }
         let get = t1.elapsed().as_nanos() / allocs as u128;
         pages.reverse();
@@ -434,7 +420,7 @@ fn filling(
         barrier.wait();
         let t2 = Instant::now();
         for page in pages {
-            alloc.put(t, page).unwrap();
+            alloc.put(t, page, order).unwrap();
         }
         let put = t2.elapsed().as_nanos() / allocs as u128;
 
@@ -450,7 +436,7 @@ fn filling(
             allocs,
         }
     }));
-    assert_eq!(a.dbg_allocated_pages(), fill * threads * size.span());
+    assert_eq!(a.dbg_allocated_pages(), fill * threads * (1 << order));
 
     perf.init = init;
     perf.allocs = allocs;

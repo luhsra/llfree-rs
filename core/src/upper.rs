@@ -10,7 +10,7 @@ use crate::util::Page;
 use crate::Result;
 
 mod array_aligned;
-pub use array_aligned::ArrayAlignedAlloc;
+pub use array_aligned::{ArrayAlignedAlloc, CacheAligned, Unaligned};
 mod array_atomic;
 pub use array_atomic::ArrayAtomicAlloc;
 mod array_locked;

@@ -21,8 +21,12 @@ pub use cache::CacheLower;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug {
+    /// The different table sizes
     const MAPPING: Mapping<2>;
+    /// The order of the supported huge-pages
     const HUGE_ORDER: usize;
+    /// The maximal allowed order of this allocator
+    const MAX_ORDER: usize;
 
     /// Create a new lower allocator.
     fn new(cores: usize, memory: &mut [Page]) -> Self;

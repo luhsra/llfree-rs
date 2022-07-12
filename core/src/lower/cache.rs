@@ -2,12 +2,12 @@ use core::fmt::Write;
 use core::ops::Range;
 
 use alloc::string::String;
-use log::{error, warn};
+use log::{error, info, warn};
 
-use crate::entry::SmallEntry2;
+use crate::entry::{Entry2, Entry2Pair};
 use crate::table::{ATable, Bitfield, Mapping};
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_up, div_ceil, Page};
+use crate::util::{align_up, div_ceil, log2, Page};
 use crate::{Error, Result};
 
 use super::LowerAlloc;
@@ -23,13 +23,14 @@ pub struct CacheLower<const T2N: usize> {
 }
 
 impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
-    const MAPPING: Mapping<2> = Mapping([Bitfield::ORDER, ATable::<SmallEntry2, T2N>::ORDER]);
+    const MAPPING: Mapping<2> = Mapping([Bitfield::ORDER, ATable::<Entry2, T2N>::ORDER]);
     const HUGE_ORDER: usize = Self::MAPPING.order(1);
+    const MAX_ORDER: usize = Self::HUGE_ORDER;
 
     fn new(_cores: usize, memory: &mut [Page]) -> Self {
         let s1 = Self::MAPPING.num_pts(1, memory.len()) * Bitfield::SIZE;
-        let s1 = align_up(s1, ATable::<SmallEntry2, T2N>::SIZE); // correct alignment
-        let s2 = Self::MAPPING.num_pts(2, memory.len()) * ATable::<SmallEntry2, T2N>::SIZE;
+        let s1 = align_up(s1, ATable::<Entry2, T2N>::SIZE); // correct alignment
+        let s2 = Self::MAPPING.num_pts(2, memory.len()) * ATable::<Entry2, T2N>::SIZE;
         let pages = div_ceil(s1 + s2, Page::SIZE);
         Self {
             begin: memory.as_ptr() as usize,
@@ -51,12 +52,12 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
         for i in 0..Self::MAPPING.num_pts(2, self.pages) {
             let pt2 = self.pt2(i * Self::MAPPING.span(2));
             if i + 1 < Self::MAPPING.num_pts(2, self.pages) {
-                pt2.fill(SmallEntry2::new().with_free(Self::MAPPING.span(1)));
+                pt2.fill(Entry2::new().with_free(Self::MAPPING.span(1)));
             } else {
                 for j in 0..Self::MAPPING.len(2) {
                     let page = i * Self::MAPPING.span(2) + j * Self::MAPPING.span(1);
                     let max = Self::MAPPING.span(1).min(self.pages.saturating_sub(page));
-                    pt2.set(j, SmallEntry2::new().with_free(max));
+                    pt2.set(j, Entry2::new().with_free(max));
                 }
             }
         }
@@ -83,7 +84,7 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
         for i in 0..Self::MAPPING.len(2) {
             let start = Self::MAPPING.page(2, start, i);
             if start > self.pages {
-                pt.set(i, SmallEntry2::new());
+                pt.set(i, Entry2::new());
             }
 
             let pte = pt.get(i);
@@ -105,9 +106,9 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
     }
 
     fn get(&self, _core: usize, order: usize, start: usize) -> Result<usize> {
-        debug_assert!(order <= Self::MAPPING.order(1));
+        debug_assert!(order <= Self::MAX_ORDER);
 
-        if order > 0 {
+        if 1 << order > u64::BITS {
             // allocate huge page
             let pt = self.pt2(start);
             for _ in 0..CAS_RETRIES {
@@ -121,21 +122,22 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
             error!("Nothing found {}", start / Self::MAPPING.span(2));
             Err(Error::Corruption)
         } else {
-            self.get_small(start)
+            self.get_small(start, order)
         }
     }
 
     /// Free single page and returns if the page was huge
     fn put(&self, page: usize, order: usize) -> Result<()> {
+        debug_assert!(order <= Self::MAX_ORDER);
         debug_assert!(page < self.pages);
         stop!();
 
         let pt2 = self.pt2(page);
         let i2 = Self::MAPPING.idx(2, page);
-        if order == 0 {
+        if 1 << order <= u64::BITS {
             let old = pt2.get(i2);
             if old.free() <= Self::MAPPING.span(1) - (1 << order) {
-                self.put_small(page)
+                self.put_small(page, order)
             } else {
                 error!("Addr p={page:x} o={order} {old:?}");
                 Err(Error::Address)
@@ -144,8 +146,8 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
             // try free huge
             if let Err(old) = pt2.cas(
                 i2,
-                SmallEntry2::new().with_page(true),
-                SmallEntry2::new().with_free(Self::MAPPING.span(1)),
+                Entry2::new().with_page(true),
+                Entry2::new().with_free(Self::MAPPING.span(1)),
             ) {
                 error!("Addr {page:x} o={order} {old:?}");
                 Err(Error::Address)
@@ -165,15 +167,15 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
                 let pte2 = pt2.get(i2);
 
                 pages -= if pte2.page() {
-                    Self::MAPPING.span(1)
+                    0
                 } else {
                     let pt1 = self.pt1(start);
-                    let mut child_pages = 0;
+                    let mut free = 0;
                     for i1 in Self::MAPPING.range(1, start..self.pages) {
-                        child_pages += !pt1.get(i1) as usize;
+                        free += !pt1.get(i1) as usize;
                     }
-                    assert_eq!(child_pages, pte2.free());
-                    child_pages
+                    assert_eq!(free, pte2.free(), "{pte2:?}: {pt1:?}");
+                    free
                 }
             }
         }
@@ -199,15 +201,21 @@ impl<const T2N: usize> CacheLower<T2N> {
     /// ```text
     /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
     /// ```
-    fn pt2(&self, page: usize) -> &ATable<SmallEntry2, T2N> {
+    fn pt2(&self, page: usize) -> &ATable<Entry2, T2N> {
         let mut offset = self.begin + self.pages * Page::SIZE;
         offset += Self::MAPPING.num_pts(1, self.pages) * Bitfield::SIZE;
-        offset = align_up(offset, ATable::<SmallEntry2, T2N>::SIZE); // correct alignment
+        offset = align_up(offset, ATable::<Entry2, T2N>::SIZE); // correct alignment
 
         let i = page / Self::MAPPING.span(2);
         debug_assert!(i < Self::MAPPING.num_pts(2, self.pages));
-        offset += i * ATable::<SmallEntry2, T2N>::SIZE;
-        unsafe { &*(offset as *mut ATable<SmallEntry2, T2N>) }
+        offset += i * ATable::<Entry2, T2N>::SIZE;
+        unsafe { &*(offset as *mut ATable<Entry2, T2N>) }
+    }
+
+    /// Returns the l2 page table with pair entries that can be updated at once.
+    fn pt2_pair(&self, page: usize) -> &ATable<Entry2Pair, { T2N / 2 }> {
+        let pt2 = self.pt2(page);
+        unsafe { &*((pt2 as *const ATable<Entry2, T2N>) as *const ATable<Entry2Pair, { T2N / 2 }>) }
     }
 
     fn recover_l1(&self, start: usize) -> usize {
@@ -220,7 +228,7 @@ impl<const T2N: usize> CacheLower<T2N> {
     }
 
     /// Allocate a single page
-    fn get_small(&self, start: usize) -> Result<usize> {
+    fn get_small(&self, start: usize, order: usize) -> Result<usize> {
         let pt2 = self.pt2(start);
 
         for _ in 0..CAS_RETRIES {
@@ -230,14 +238,14 @@ impl<const T2N: usize> CacheLower<T2N> {
                 #[cfg(feature = "stop")]
                 {
                     let pte2 = pt2.get(i2);
-                    if pte2.page() || pte2.free() == 0 {
+                    if pte2.page() || pte2.free() < 1 << order {
                         continue;
                     }
                     stop!();
                 }
 
-                if pt2.update(i2, |v| v.dec()).is_ok() {
-                    return self.get_table(newstart);
+                if pt2.update(i2, |v| v.dec(1 << order)).is_ok() {
+                    return self.get_table(newstart, order);
                 }
             }
         }
@@ -246,12 +254,12 @@ impl<const T2N: usize> CacheLower<T2N> {
     }
 
     /// Search free page table entry.
-    fn get_table(&self, start: usize) -> Result<usize> {
+    fn get_table(&self, start: usize, order: usize) -> Result<usize> {
         let i = Self::MAPPING.idx(1, start);
         let pt1 = self.pt1(start);
 
         for _ in 0..CAS_RETRIES {
-            if let Ok(i) = pt1.set_first_zero(i) {
+            if let Ok(i) = pt1.set_first_zeros(i, order) {
                 return Ok(Self::MAPPING.page(1, start, i));
             }
             stop!();
@@ -260,12 +268,12 @@ impl<const T2N: usize> CacheLower<T2N> {
         Err(Error::Corruption)
     }
 
-    fn put_small(&self, page: usize) -> Result<()> {
+    fn put_small(&self, page: usize, order: usize) -> Result<()> {
         stop!();
 
         let pt1 = self.pt1(page);
         let i1 = Self::MAPPING.idx(1, page);
-        if pt1.toggle(i1, true).is_err() {
+        if pt1.toggle(i1, order, true).is_err() {
             error!("Invalid Addr l1 i{i1} p={page}");
             return Err(Error::Address);
         }
@@ -274,7 +282,7 @@ impl<const T2N: usize> CacheLower<T2N> {
 
         let pt2 = self.pt2(page);
         let i2 = Self::MAPPING.idx(2, page);
-        if let Err(pte2) = pt2.update(i2, |v| v.inc(Self::MAPPING.span(1))) {
+        if let Err(pte2) = pt2.update(i2, |v| v.inc(Self::MAPPING.span(1), 1 << order)) {
             error!("Invalid Addr l1 i{i1} p={page} {pte2:?}");
             return Err(Error::Address);
         }
@@ -295,8 +303,8 @@ impl<const T2N: usize> CacheLower<T2N> {
 
             let pte2 = pt2.get(i2);
             let indent = (Self::MAPPING.levels() - 2) * 4;
-            let addr = start * Page::SIZE;
-            writeln!(out, "{:indent$}l2 i={i2} 0x{addr:x}: {pte2:?}", "").unwrap();
+            let pt1 = self.pt1(start);
+            writeln!(out, "{:indent$}l2 i={i2}: {pte2:?}\t{pt1:?}", "").unwrap();
         }
         warn!("{out}");
     }
@@ -307,16 +315,17 @@ impl<const T2N: usize> CacheLower<T2N> {
 mod test {
     use std::sync::Arc;
 
+    use alloc::vec::Vec;
     use log::warn;
 
     use super::CacheLower;
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
-    use crate::table::{Bitfield, Mapping};
+    use crate::table::{Bitfield, Mapping, PT_LEN};
     use crate::thread;
-    use crate::util::{logging, Page};
+    use crate::util::{logging, Page, WyRand};
 
-    const T2N: usize = 512;
+    const T2N: usize = 128;
     const MAPPING: Mapping<2> = CacheLower::<T2N>::MAPPING;
 
     fn count(pt: &Bitfield) -> usize {
@@ -449,7 +458,7 @@ mod test {
         let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
-            warn!("order: {:?}", order);
+            warn!("order: {order:?}");
             let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
@@ -485,7 +494,7 @@ mod test {
         let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
-            warn!("order: {:?}", order);
+            warn!("order: {order:?}");
             let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
@@ -526,7 +535,7 @@ mod test {
         let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
 
         for order in orders {
-            warn!("order: {:?}", order);
+            warn!("order: {order:?}");
             let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
@@ -564,5 +573,127 @@ mod test {
                 assert_eq!(count(lower.pt1(MAPPING.span(1))), MAPPING.span(1) - 1);
             }
         }
+    }
+
+    #[test]
+    fn alloc_normal_large() {
+        logging();
+
+        let orders = [
+            vec![0, 0, 1, 1],
+            vec![0, 0, 1, 1, 1, 0, 0],
+            vec![1, 1, 0, 0, 0, 1, 1],
+            vec![1, 0, 1, 0, 0],
+            vec![1, 1, 0, 0],
+        ];
+
+        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
+
+        for order in orders {
+            warn!("order: {order:?}");
+            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
+            lower.clear();
+            lower.get(0, 0, 0).unwrap();
+
+            let stop = StopVec::new(2, order);
+
+            let l = lower.clone();
+            thread::parallel(2, move |t| {
+                thread::pin(t);
+                let key = Stopper::init(stop, t as _);
+
+                let order = t + 1; // order 1 and 2
+                let page = l.get(t, order, 0).unwrap();
+                drop(key);
+                assert!(page != 0);
+            });
+
+            let allocated = 1 + 2 + 4;
+            assert_eq!(lower.pt2(0).get(0).free(), MAPPING.span(1) - allocated);
+            assert_eq!(count(lower.pt1(0)), MAPPING.span(1) - allocated);
+        }
+    }
+
+    #[test]
+    fn free_normal_large() {
+        logging();
+
+        let orders = [
+            vec![0, 0, 0, 1, 1, 1], // first 0, then 1
+            vec![0, 1, 0, 1, 0, 1, 0, 1],
+            vec![0, 0, 1, 1, 1, 0, 0],
+        ];
+
+        let mut pages = [0; 2];
+        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
+
+        for order in orders {
+            warn!("order: {order:?}");
+            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
+            lower.clear();
+
+            pages[0] = lower.get(0, 1, 0).unwrap();
+            pages[1] = lower.get(0, 2, 0).unwrap();
+
+            assert_eq!(lower.pt2(0).get(0).free(), MAPPING.span(1) - 2 - 4);
+
+            let stop = StopVec::new(2, order);
+            let l = lower.clone();
+            thread::parallel(2, {
+                let pages = pages.clone();
+                move |t| {
+                    let _stopper = Stopper::init(stop, t as _);
+
+                    l.put(pages[t as usize], t + 1).unwrap();
+                }
+            });
+
+            assert_eq!(lower.pt2(0).get(0).free(), MAPPING.span(1));
+        }
+    }
+
+    #[test]
+    fn different_sizes() {
+        logging();
+
+        const MAX_ORDER: usize = CacheLower::<T2N>::MAX_ORDER;
+        const MAX_LARGE_ORDER: usize = 6;
+        let mut buffer = vec![Page::new(); MAPPING.span(2)];
+
+        thread::pin(0);
+        let lower = Arc::new(CacheLower::<T2N>::new(1, &mut buffer));
+        lower.clear();
+
+        assert_eq!(lower.dbg_allocated_pages(), 0);
+
+        let mut rng = WyRand::new(42);
+
+        let mut num_pages = 0;
+        let mut pages = Vec::new();
+        for order in 0..=MAX_ORDER {
+            for _ in 0..1 << (MAX_ORDER - order) {
+                pages.push((order, 0));
+                num_pages += if order <= MAX_LARGE_ORDER {
+                    1 << order
+                } else {
+                    PT_LEN
+                };
+            }
+        }
+        rng.shuffle(&mut pages);
+        warn!("allocate {num_pages} pages");
+
+        for (order, page) in &mut pages {
+            *page = lower.get(0, *order, 0).unwrap();
+        }
+
+        lower.dump(0);
+        assert_eq!(lower.dbg_allocated_pages(), num_pages);
+
+        for (order, page) in &pages {
+            lower.put(*page, *order).unwrap();
+        }
+
+        assert_eq!(lower.dbg_allocated_pages(), 0);
     }
 }

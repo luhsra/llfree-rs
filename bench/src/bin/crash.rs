@@ -6,8 +6,7 @@ use std::time::Duration;
 use clap::Parser;
 use log::{error, warn};
 use nvalloc::upper::*;
-use nvalloc::lower::DynamicLower;
-use nvalloc::lower::FixedLower;
+use nvalloc::lower::CacheLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
@@ -24,7 +23,7 @@ struct Args {
     #[clap(long)]
     dax: Option<String>,
     #[clap(short, long, default_value_t = 0)]
-    size: usize,
+    order: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
     #[clap(short, long, default_value_t = 16)]
     memory: usize,
@@ -35,7 +34,7 @@ fn main() {
         alloc,
         threads,
         dax,
-        size,
+        order,
         memory,
     } = Args::parse();
 
@@ -44,27 +43,17 @@ fn main() {
     let pages = memory * PT_LEN * PT_LEN;
     assert!(pages >= MIN_PAGES * threads);
 
-    let size = match size {
-        0 => Size::L0,
-        1 => Size::L1,
-        _ => panic!("`size` has to be 0, 1 or 2"),
-    };
-
-    let allocs: [Arc<dyn Alloc>; 10] = [
-        Arc::new(ArrayAlignedAlloc::<DynamicLower>::default()),
-        Arc::new(ArrayUnalignedAlloc::<DynamicLower>::default()),
-        Arc::new(ArrayLockedAlloc::<DynamicLower>::default()),
-        Arc::new(ArrayAtomicAlloc::<DynamicLower>::default()),
-        Arc::new(TableAlloc::<DynamicLower>::default()),
-        Arc::new(ArrayAlignedAlloc::<FixedLower>::default()),
-        Arc::new(ArrayUnalignedAlloc::<FixedLower>::default()),
-        Arc::new(ArrayLockedAlloc::<FixedLower>::default()),
-        Arc::new(ArrayAtomicAlloc::<FixedLower>::default()),
-        Arc::new(TableAlloc::<FixedLower>::default()),
+    type L = CacheLower<128>;
+    let allocs: [Arc<dyn Alloc>; 5] = [
+        Arc::new(ArrayAlignedAlloc::<CacheAligned, L>::default()),
+        Arc::new(ArrayAlignedAlloc::<Unaligned, L>::default()),
+        Arc::new(ArrayLockedAlloc::<L>::default()),
+        Arc::new(ArrayAtomicAlloc::<L>::default()),
+        Arc::new(TableAlloc::<L>::default()),
     ];
     for a in allocs {
         if a.name() == alloc {
-            let allocs = pages / threads / 2 / size.span();
+            let allocs = pages / threads / 2 / (1 << order);
             let out_size = align_up(allocs + 2, Page::SIZE) * threads;
             // Shared memory where the allocated pages are backupped
             // Layout: [ ( idx | repeat | pages... ) for each thread ]
@@ -83,14 +72,14 @@ fn main() {
                 unsafe { libc::perror(b"fork failed\0" as *const _ as *mut _) };
                 panic!();
             } else if pid == 0 {
-                execute(a, allocs, threads, size, mapping, out_mapping);
+                execute(a, allocs, threads, order, mapping, out_mapping);
             } else {
-                monitor(a, allocs, threads, pid, mapping, out_mapping);
+                monitor(a, allocs, threads, order, pid, mapping, out_mapping);
             }
             return;
         }
     }
-    panic!("Unknown allocator: {}", alloc);
+    panic!("Unknown allocator: {alloc}");
 }
 
 /// Allocate and free memory indefinitely
@@ -98,7 +87,7 @@ fn execute(
     alloc: Arc<dyn Alloc>,
     allocs: usize,
     threads: usize,
-    size: Size,
+    order: usize,
     mut mapping: MMap<Page>,
     mut out_mapping: MMap<u64>,
 ) {
@@ -133,7 +122,7 @@ fn execute(
 
         for i in 0..allocs {
             *idx = i as _;
-            data[i] = alloc.get(t, size).unwrap();
+            data[i] = alloc.get(t, order).unwrap();
         }
 
         *repeat = 1;
@@ -144,8 +133,8 @@ fn execute(
             let i = rng.range(0..allocs as u64) as usize;
             *idx = i as _;
 
-            alloc.put(t, data[i]).unwrap();
-            data[i] = alloc.get(t, size).unwrap();
+            alloc.put(t, data[i], order).unwrap();
+            data[i] = alloc.get(t, order).unwrap();
         }
     });
 }
@@ -155,6 +144,7 @@ fn monitor(
     alloc: Arc<dyn Alloc>,
     allocs: usize,
     threads: usize,
+    order: usize,
     child: i32,
     mut mapping: MMap<Page>,
     out_mapping: MMap<u64>,
@@ -234,7 +224,7 @@ fn monitor(
         let max = if *repeat == 0 { *idx as usize } else { allocs };
         for (i, addr) in data[0..max].iter().enumerate() {
             if i != *idx as usize {
-                alloc.put(t, *addr).unwrap();
+                alloc.put(t, *addr, order).unwrap();
             }
         }
     }

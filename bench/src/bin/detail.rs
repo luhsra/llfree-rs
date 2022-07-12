@@ -5,14 +5,14 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::upper::{Alloc, Size, TableAlloc, MIN_PAGES};
-use nvalloc::lower::FixedLower;
+use nvalloc::upper::{Alloc, TableAlloc, MIN_PAGES};
+use nvalloc::lower::CacheLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::util::{logging, Cycles, Page};
 
-type Allocator = TableAlloc<FixedLower>;
+type Allocator = TableAlloc<CacheLower<128>>;
 
 /// Benchmarking an allocator in more detail.
 #[derive(Parser, Debug)]
@@ -27,7 +27,7 @@ struct Args {
     #[clap(short, long, default_value_t = 1)]
     iterations: usize,
     #[clap(short, long, default_value_t = 0)]
-    size: usize,
+    order: usize,
 }
 
 fn main() {
@@ -36,19 +36,13 @@ fn main() {
         outfile,
         dax,
         iterations,
-        size,
+        order,
     } = Args::parse();
 
     logging();
 
     assert!(threads >= 1);
     assert!(threads <= std::thread::available_parallelism().unwrap().get());
-
-    let size = match size {
-        0 => Size::L0,
-        1 => Size::L1,
-        _ => panic!("`size` has to be 0 or 1"),
-    };
 
     let mem_pages = 2 * threads * MIN_PAGES;
     let mut mapping = mapping(0x1000_0000_0000, mem_pages, dax).unwrap();
@@ -69,9 +63,9 @@ fn main() {
         });
         warn!("init time {}ms", timer.elapsed().as_millis());
         // Allocate half the memory
-        let allocs = mapping.len() / threads / 2 / size.span();
+        let allocs = mapping.len() / threads / 2 / (1 << order);
         assert!(allocs % PT_LEN == 0);
-        warn!("\n\n>>> bench t={threads} {size:?} {allocs}\n");
+        warn!("\n\n>>> bench t={threads} o={order:?} {allocs}\n");
 
         let barrier = Arc::new(Barrier::new(threads));
         let a = alloc.clone();
@@ -85,7 +79,7 @@ fn main() {
             let t_get = &mut times[0..PT_LEN];
             for i in 0..allocs {
                 let timer = Cycles::now();
-                pages.push(alloc.get(t, size).unwrap());
+                pages.push(alloc.get(t, order).unwrap());
                 let t = timer.elapsed() as f64;
 
                 let p = &mut t_get[i % PT_LEN];
@@ -100,7 +94,7 @@ fn main() {
             let t_put = &mut times[PT_LEN..];
             for (i, page) in pages.into_iter().enumerate() {
                 let timer = Cycles::now();
-                alloc.put(t, page).unwrap();
+                alloc.put(t, page, order).unwrap();
                 let t = timer.elapsed() as f64;
 
                 let p = &mut t_put[i % PT_LEN];
