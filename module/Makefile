@@ -1,6 +1,7 @@
 # In kbuild context
 obj-y := nvalloc.o
 nvalloc-objs := nvalloc_c.o nvalloc_rs.o
+LINUXINCLUDE += -I$(srctree)/lib/nvalloc/include
 
 # In normal make context
 NVALLOC := /workspaces/nvalloc-rs/target/x86_64-linux/release/libnvalloc_module.a
