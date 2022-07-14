@@ -2,12 +2,12 @@ use core::fmt::Write;
 use core::ops::Range;
 
 use alloc::string::String;
-use log::{error, info, warn};
+use log::{error, warn, info};
 
 use crate::entry::{Entry2, Entry2Pair};
 use crate::table::{ATable, Bitfield, Mapping};
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_up, div_ceil, log2, Page};
+use crate::util::{align_up, div_ceil, Page};
 use crate::{Error, Result};
 
 use super::LowerAlloc;
@@ -22,10 +22,13 @@ pub struct CacheLower<const T2N: usize> {
     pub pages: usize,
 }
 
-impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
+impl<const T2N: usize> LowerAlloc for CacheLower<T2N>
+where
+    [(); T2N / 2]:,
+{
     const MAPPING: Mapping<2> = Mapping([Bitfield::ORDER, ATable::<Entry2, T2N>::ORDER]);
     const HUGE_ORDER: usize = Self::MAPPING.order(1);
-    const MAX_ORDER: usize = Self::HUGE_ORDER;
+    const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
 
     fn new(_cores: usize, memory: &mut [Page]) -> Self {
         let s1 = Self::MAPPING.num_pts(1, memory.len()) * Bitfield::SIZE;
@@ -105,22 +108,13 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
         Ok((pages, huge))
     }
 
-    fn get(&self, _core: usize, order: usize, start: usize) -> Result<usize> {
+    fn get(&self, start: usize, order: usize) -> Result<usize> {
         debug_assert!(order <= Self::MAX_ORDER);
 
-        if 1 << order > u64::BITS {
-            // allocate huge page
-            let pt = self.pt2(start);
-            for _ in 0..CAS_RETRIES {
-                for page in Self::MAPPING.iterate(2, start) {
-                    let i = Self::MAPPING.idx(2, page);
-                    if pt.update(i, |v| v.mark_huge(Self::MAPPING.span(1))).is_ok() {
-                        return Ok(page);
-                    }
-                }
-            }
-            error!("Nothing found {}", start / Self::MAPPING.span(2));
-            Err(Error::Corruption)
+        if order > Self::HUGE_ORDER {
+            self.get_max(start)
+        } else if 1 << order > u64::BITS {
+            self.get_huge(start)
         } else {
             self.get_small(start, order)
         }
@@ -132,11 +126,15 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
         debug_assert!(page < self.pages);
         stop!();
 
+        if order > Self::HUGE_ORDER {
+            return self.put_max(page, order);
+        }
+
         let pt2 = self.pt2(page);
         let i2 = Self::MAPPING.idx(2, page);
-        if 1 << order <= u64::BITS {
+        if (1 << order) <= u64::BITS {
             let old = pt2.get(i2);
-            if old.free() <= Self::MAPPING.span(1) - (1 << order) {
+            if !old.page() && old.free() <= Self::MAPPING.span(1) - (1 << order) {
                 self.put_small(page, order)
             } else {
                 error!("Addr p={page:x} o={order} {old:?}");
@@ -146,8 +144,8 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
             // try free huge
             if let Err(old) = pt2.cas(
                 i2,
-                Entry2::new().with_page(true),
-                Entry2::new().with_free(Self::MAPPING.span(1)),
+                Entry2::new_page(),
+                Entry2::new_free(Self::MAPPING.span(1)),
             ) {
                 error!("Addr {page:x} o={order} {old:?}");
                 Err(Error::Address)
@@ -183,7 +181,10 @@ impl<const T2N: usize> LowerAlloc for CacheLower<T2N> {
     }
 }
 
-impl<const T2N: usize> CacheLower<T2N> {
+impl<const T2N: usize> CacheLower<T2N>
+where
+    [(); T2N / 2]:,
+{
     /// Returns the l1 page table that contains the `page`.
     /// ```text
     /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
@@ -245,12 +246,23 @@ impl<const T2N: usize> CacheLower<T2N> {
                 }
 
                 if pt2.update(i2, |v| v.dec(1 << order)).is_ok() {
-                    return self.get_table(newstart, order);
+                    match self.get_table(newstart, order) {
+                        // Revert conter
+                        Err(Error::Memory) => {
+                            if let Err(e) =
+                                pt2.update(i2, |v| v.inc(Self::MAPPING.span(1), 1 << order))
+                            {
+                                error!("Corruption! {e:?}");
+                                return Err(Error::Corruption);
+                            }
+                        }
+                        ret => return ret,
+                    }
                 }
             }
         }
-        error!("Nothing found {}", start / Self::MAPPING.span(2));
-        Err(Error::Corruption)
+        info!("Nothing found o={order}");
+        Err(Error::Memory)
     }
 
     /// Search free page table entry.
@@ -264,8 +276,45 @@ impl<const T2N: usize> CacheLower<T2N> {
             }
             stop!();
         }
-        error!("Nothing found {}", start / Self::MAPPING.span(2));
-        Err(Error::Corruption)
+        info!("Nothing found o={order}");
+        Err(Error::Memory)
+    }
+
+    /// Allocate huge page
+    fn get_huge(&self, start: usize) -> Result<usize> {
+        let pt2 = self.pt2(start);
+        for _ in 0..CAS_RETRIES {
+            for page in Self::MAPPING.iterate(2, start) {
+                let i2 = Self::MAPPING.idx(2, page);
+                if pt2
+                    .update(i2, |v| v.mark_huge(Self::MAPPING.span(1)))
+                    .is_ok()
+                {
+                    return Ok(Self::MAPPING.page(2, start, i2));
+                }
+            }
+        }
+        info!("Nothing found o=7..9");
+        Err(Error::Memory)
+    }
+
+    /// Allocate multiple huge pages
+    fn get_max(&self, start: usize) -> Result<usize> {
+        let pt2_pair = self.pt2_pair(start);
+        for _ in 0..CAS_RETRIES {
+            for page in Self::MAPPING.iterate(2, start).step_by(2) {
+                let i2 = Self::MAPPING.idx(2, page) / 2;
+                if pt2_pair
+                    .update(i2, |v| v.both(|v| v.mark_huge(Self::MAPPING.span(1))))
+                    .is_ok()
+                {
+                    info!("Alloc o=10 i={i2}");
+                    return Ok(Self::MAPPING.page(2, start, i2 * 2));
+                }
+            }
+        }
+        warn!("Nothing found o=10");
+        Err(Error::Memory)
     }
 
     fn put_small(&self, page: usize, order: usize) -> Result<()> {
@@ -288,6 +337,25 @@ impl<const T2N: usize> CacheLower<T2N> {
         }
 
         Ok(())
+    }
+
+    pub fn put_max(&self, page: usize, order: usize) -> Result<()> {
+        let pt2_pair = self.pt2_pair(page);
+        let i2 = Self::MAPPING.idx(2, page) / 2;
+        info!("Put o={order} i={i2}");
+        if let Err(old) = pt2_pair.cas(
+            i2,
+            Entry2Pair(Entry2::new_page(), Entry2::new_page()),
+            Entry2Pair(
+                Entry2::new_free(Self::MAPPING.span(1)),
+                Entry2::new_free(Self::MAPPING.span(1)),
+            ),
+        ) {
+            error!("Addr {page:x} o={order} {old:?} i={i2}");
+            Err(Error::Address)
+        } else {
+            Ok(())
+        }
     }
 
     #[allow(dead_code)]
@@ -321,7 +389,7 @@ mod test {
     use super::CacheLower;
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
-    use crate::table::{Bitfield, Mapping, PT_LEN};
+    use crate::table::{Bitfield, Mapping};
     use crate::thread;
     use crate::util::{logging, Page, WyRand};
 
@@ -354,7 +422,7 @@ mod test {
             warn!("order: {order:?}");
             let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
-            lower.get(0, 0, 0).unwrap();
+            lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
 
@@ -363,7 +431,7 @@ mod test {
                 thread::pin(t);
                 let key = Stopper::init(stop, t as _);
 
-                let page = l.get(t, 0, 0).unwrap();
+                let page = l.get(0, 0).unwrap();
                 drop(key);
                 assert!(page != 0);
             });
@@ -397,7 +465,7 @@ mod test {
                 thread::pin(t);
                 let _stopper = Stopper::init(stop, t as _);
 
-                l.get(t, 0, 0).unwrap();
+                l.get(0, 0).unwrap();
             });
 
             let pte2 = lower.pt2(0).get(0);
@@ -425,7 +493,7 @@ mod test {
             lower.clear();
 
             for _ in 0..MAPPING.span(1) - 1 {
-                lower.get(0, 0, 0).unwrap();
+                lower.get(0, 0).unwrap();
             }
 
             let stop = StopVec::new(2, order);
@@ -434,7 +502,7 @@ mod test {
                 thread::pin(t);
                 let _stopper = Stopper::init(stop, t as _);
 
-                l.get(t, 0, 0).unwrap();
+                l.get(0, 0).unwrap();
             });
 
             let pt2 = lower.pt2(0);
@@ -462,8 +530,8 @@ mod test {
             let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
-            pages[0] = lower.get(0, 0, 0).unwrap();
-            pages[1] = lower.get(0, 0, 0).unwrap();
+            pages[0] = lower.get(0, 0).unwrap();
+            pages[1] = lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
@@ -499,7 +567,7 @@ mod test {
             lower.clear();
 
             for page in &mut pages {
-                *page = lower.get(0, 0, 0).unwrap();
+                *page = lower.get(0, 0).unwrap();
             }
 
             let stop = StopVec::new(2, order);
@@ -540,7 +608,7 @@ mod test {
             lower.clear();
 
             for page in &mut pages[..MAPPING.span(1) - 1] {
-                *page = lower.get(0, 0, 0).unwrap();
+                *page = lower.get(0, 0).unwrap();
             }
             let stop = StopVec::new(2, order);
 
@@ -550,7 +618,7 @@ mod test {
                 move || {
                     let _stopper = Stopper::init(stop, 1);
 
-                    lower.get(1, 0, 0).unwrap();
+                    lower.get(0, 0).unwrap();
                 }
             });
 
@@ -593,7 +661,7 @@ mod test {
             warn!("order: {order:?}");
             let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
-            lower.get(0, 0, 0).unwrap();
+            lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
 
@@ -603,7 +671,7 @@ mod test {
                 let key = Stopper::init(stop, t as _);
 
                 let order = t + 1; // order 1 and 2
-                let page = l.get(t, order, 0).unwrap();
+                let page = l.get(0, order).unwrap();
                 drop(key);
                 assert!(page != 0);
             });
@@ -632,8 +700,8 @@ mod test {
             let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
             lower.clear();
 
-            pages[0] = lower.get(0, 1, 0).unwrap();
-            pages[1] = lower.get(0, 2, 0).unwrap();
+            pages[0] = lower.get(0, 1).unwrap();
+            pages[1] = lower.get(0, 2).unwrap();
 
             assert_eq!(lower.pt2(0).get(0).free(), MAPPING.span(1) - 2 - 4);
 
@@ -653,10 +721,11 @@ mod test {
     }
 
     #[test]
-    fn different_sizes() {
+    fn different_orders() {
         logging();
 
         const MAX_ORDER: usize = CacheLower::<T2N>::MAX_ORDER;
+        const HUGE_ORDER: usize = CacheLower::<T2N>::HUGE_ORDER;
         const MAX_LARGE_ORDER: usize = 6;
         let mut buffer = vec![Page::new(); MAPPING.span(2)];
 
@@ -676,15 +745,15 @@ mod test {
                 num_pages += if order <= MAX_LARGE_ORDER {
                     1 << order
                 } else {
-                    PT_LEN
+                    MAPPING.span(1) * ((order - 1) / HUGE_ORDER + 1)
                 };
             }
         }
         rng.shuffle(&mut pages);
-        warn!("allocate {num_pages} pages");
+        warn!("allocate {num_pages} pages up to order {MAX_ORDER}");
 
         for (order, page) in &mut pages {
-            *page = lower.get(0, *order, 0).unwrap();
+            *page = lower.get(0, *order).unwrap();
         }
 
         lower.dump(0);

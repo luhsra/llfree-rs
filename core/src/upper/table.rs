@@ -170,11 +170,11 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
 
     #[inline(never)]
     fn get(&self, core: usize, order: usize) -> Result<u64> {
-        if order > Self::HUGE_ORDER {
-            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+        if order > Self::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
             return Err(Error::Memory);
         }
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
 
         // Start at the reserved memory chunk for this thread
         let pte_a = self.local[core].pte(huge);
@@ -183,7 +183,6 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
 
         if start == usize::MAX {
             let pte = self.reserve(order)?;
-            info!("reserved {}", pte.idx());
             *pte_a = pte;
             start = pte.idx() * Self::MAPPING.span(2);
         } else {
@@ -192,13 +191,33 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
                 *pte_a = pte;
             } else {
                 let pte = self.reserve(order)?;
-                info!("reserved {}", pte.idx());
                 self.swap_reserved(huge, pte, pte_a)?;
                 start = pte.idx() * Self::MAPPING.span(2);
             }
         }
 
-        let page = self.lower.get(core, order, start)?;
+        let page = loop {
+            match self.lower.get(start, order) {
+                Ok(page) => break page,
+                Err(Error::Memory) => {
+                    // Reset counter and retry
+                    if let Some(pte) = pte_a.dec(huge, 1 << order, Self::MAPPING.span(2)) {
+                        *pte_a = pte;
+                        let pte = self.reserve(order)?;
+                        self.swap_reserved(huge, pte, pte_a)?;
+                        start = pte.idx() * Self::MAPPING.span(2);
+                    } else {
+                        error!(
+                            "Counter reset failed o={order} {}: {pte_a:?}",
+                            start / Self::MAPPING.span(2)
+                        );
+                        return Err(Error::Corruption);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        };
+
         *start_a = page;
 
         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
@@ -206,13 +225,13 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
 
     #[inline(never)]
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
-        if order > Self::HUGE_ORDER {
-            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+        if order > Self::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
             return Err(Error::Memory);
         }
 
         let num_pages = 1 << order;
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
 
         if addr % (num_pages * Page::SIZE) as u64 != 0
             || !self.lower.memory().contains(&(addr as _))
@@ -324,6 +343,7 @@ impl<L: LowerAlloc> Default for TableAlloc<L> {
 impl<L: LowerAlloc> TableAlloc<L> {
     const MAPPING: Mapping<4> = Mapping([9; 2]).with_lower(&L::MAPPING);
     const HUGE_ORDER: usize = L::HUGE_ORDER;
+    const MAX_ORDER: usize = L::MAX_ORDER;
     const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
 
     fn allocated_pages_rec(&self, level: usize, start: usize) -> usize {
@@ -499,7 +519,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
     /// Try reserving new subtree, prioritizing partially filled ones.
     #[cold]
     fn reserve(&self, order: usize) -> Result<Entry3> {
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
         match self.find_rec(
             Self::MAPPING.levels(),
             0,
@@ -531,7 +551,7 @@ impl<L: LowerAlloc> TableAlloc<L> {
     /// Try reserving a subtree, if `parents` the parent entries are updated first.
     /// Any changes to parent entries are reverted if the reservation fails.
     fn reserve_tree(&self, page: usize, order: usize, parents: bool) -> Result<Entry3> {
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
         // Try reserve top -> bottom
         if parents {
             for level in (4..=Self::MAPPING.levels()).rev() {

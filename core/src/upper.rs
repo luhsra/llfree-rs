@@ -27,7 +27,7 @@ mod malloc;
 #[cfg(feature = "std")]
 pub use malloc::MallocAlloc;
 
-pub const CAS_RETRIES: usize = 4096;
+pub const CAS_RETRIES: usize = 8;
 pub const MAGIC: usize = 0xdead_beef;
 pub const MIN_PAGES: usize = PT_LEN * PT_LEN;
 pub const MAX_PAGES: usize = Mapping([9; 4]).span(4);
@@ -173,7 +173,7 @@ mod test {
     use crate::Error;
 
     type Lower = CacheLower<128>;
-    type Allocator = TableAlloc<Lower>;
+    type Allocator = ArrayAtomicAlloc<Lower>;
 
     fn mapping(begin: usize, length: usize) -> core::result::Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -192,32 +192,32 @@ mod test {
     #[test]
     fn names() {
         println!(
-            "{} -> {}",
+            "{}\n -> {}",
             type_name::<ArrayAtomicAlloc<Lower>>(),
             super::name::<ArrayAtomicAlloc<Lower>>()
         );
         println!(
-            "{} -> {}",
+            "{}\n -> {}",
             type_name::<ArrayLockedAlloc<Lower>>(),
             super::name::<ArrayLockedAlloc<Lower>>()
         );
         println!(
-            "{} -> {}",
+            "{}\n -> {}",
             type_name::<TableAlloc<Lower>>(),
             super::name::<TableAlloc<Lower>>()
         );
         println!(
-            "{} -> {}",
+            "{}\n -> {}",
             type_name::<ListLocalAlloc>(),
             super::name::<ListLocalAlloc>()
         );
         println!(
-            "{} -> {}",
+            "{}\n -> {}",
             type_name::<ArrayAlignedAlloc<Unaligned, Lower>>(),
             super::name::<ArrayAlignedAlloc<Unaligned, Lower>>()
         );
         println!(
-            "{} -> {}",
+            "{}\n -> {}",
             type_name::<ArrayAlignedAlloc<CacheAligned, Lower>>(),
             super::name::<ArrayAlignedAlloc<CacheAligned, Lower>>()
         );
@@ -740,7 +740,7 @@ mod test {
         let barrier = Arc::new(Barrier::new(THREADS));
 
         let a = alloc.clone();
-        thread::parallel(THREADS as _, move |t| {
+        thread::parallel(THREADS, move |t| {
             thread::pin(t);
             barrier.wait();
 
@@ -847,5 +847,71 @@ mod test {
         });
 
         assert_eq!(alloc.dbg_allocated_pages(), expected_pages);
+    }
+
+    #[test]
+    fn different_orders() {
+        const MAX_ORDER: usize = Lower::MAX_ORDER;
+        const MAX_LARGE_ORDER: usize = 6;
+        const HUGE_ORDER: usize = Lower::HUGE_ORDER;
+        const MAPPING: Mapping<2> = Lower::MAPPING;
+        const THREADS: usize = 4;
+
+        logging();
+
+        let mut mapping = mapping(0x1000_0000_0000, MAPPING.span(2) * (THREADS * 2 + 1)).unwrap();
+        let alloc = Arc::new({
+            let mut a = Allocator::default();
+            a.init(THREADS, &mut mapping, true).unwrap();
+            a
+        });
+        let a = alloc.clone();
+
+        let barrier = Arc::new(Barrier::new(THREADS));
+
+        thread::parallel(THREADS, move |t| {
+            thread::pin(t);
+            let mut rng = WyRand::new(42 + t as u64);
+            let mut num_pages = 0;
+            let mut pages = Vec::new();
+            for order in 0..=MAX_ORDER {
+                for _ in 0..1 << (MAX_ORDER - order) {
+                    pages.push((order, 0));
+                    num_pages += if order <= MAX_LARGE_ORDER {
+                        1 << order
+                    } else {
+                        MAPPING.span(1) * ((order - 1) / HUGE_ORDER + 1)
+                    };
+                }
+            }
+            rng.shuffle(&mut pages);
+
+            warn!("allocate {num_pages} pages up to order {MAX_ORDER}");
+            barrier.wait();
+
+            for (order, page) in &mut pages {
+                *page = match alloc.get(t, *order) {
+                    Ok(page) => page,
+                    Err(e) => panic!("{e:?} o={order} {alloc:?}"),
+                };
+                assert!(
+                    *page % ((1 << *order) * Page::SIZE) as u64 == 0,
+                    "{page:x} {:x}",
+                    (1 << *order) * Page::SIZE
+                );
+            }
+
+            let mut rng = WyRand::new(t as _);
+            rng.shuffle(&mut pages);
+
+            for (order, page) in pages {
+                match alloc.put(t, page, order) {
+                    Ok(_) => {}
+                    Err(e) => panic!("{e:?} o={order} {alloc:?}"),
+                }
+            }
+        });
+
+        assert_eq!(a.dbg_allocated_pages(), 0);
     }
 }

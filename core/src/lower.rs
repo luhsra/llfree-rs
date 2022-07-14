@@ -41,8 +41,8 @@ pub trait LowerAlloc: Default + fmt::Debug {
     /// Returns the number of recovered pages and if the l2 table manages huge pages.
     fn recover(&self, start: usize, deep: bool) -> Result<(usize, bool)>;
 
-    /// Try allocating a new `huge` page at the subtree at `start`.
-    fn get(&self, core: usize, order: usize, start: usize) -> Result<usize>;
+    /// Try allocating a new `huge` page in the subtree at `start`.
+    fn get(&self, start: usize, order: usize) -> Result<usize>;
     /// Try freeing a page. Returns if it was huge.
     fn put(&self, page: usize, order: usize) -> Result<()>;
 
@@ -86,7 +86,7 @@ mod test {
 
                 let mut pages = [0; 4];
                 for p in &mut pages {
-                    *p = l.get(t, 0, 0).unwrap();
+                    *p = l.get(0, 0).unwrap();
                 }
                 pages.reverse();
                 for p in pages {
@@ -115,7 +115,7 @@ mod test {
             assert_eq!(lower.dbg_allocated_pages(), 0);
 
             for page in &mut pages[..PT_LEN - 3] {
-                *page = lower.get(0, 0, 0).unwrap();
+                *page = lower.get(0, 0).unwrap();
             }
 
             let stop = StopRand::new(THREADS, seed);
@@ -126,7 +126,7 @@ mod test {
                 if t < THREADS / 2 {
                     l.put(pages[t], 0).unwrap();
                 } else {
-                    l.get(t, 0, 0).unwrap();
+                    l.get(0, 0).unwrap();
                 }
             });
 

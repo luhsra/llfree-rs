@@ -182,11 +182,11 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
 
     #[inline(never)]
     fn get(&self, core: usize, order: usize) -> Result<u64> {
-        if order > Self::HUGE_ORDER {
-            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+        if order > Self::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
             return Err(Error::Memory);
         }
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
 
         let start_a = self.local[core].start(huge);
         let mut start = *start_a;
@@ -201,24 +201,48 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
             {
                 start = self.reserve(order)?;
                 if self[i].update(Entry3::unreserve).is_err() {
-                    panic!("Unreserve failed");
+                    error!("Unreserve failed");
+                    return Err(Error::Corruption);
                 }
             }
         }
 
-        let page = self.lower.get(core, order, start)?;
+        let page = loop {
+            match self.lower.get(start, order) {
+                Ok(page) => break page,
+                Err(Error::Memory) => {
+                    let i = start / Self::MAPPING.span(2);
+                    let max = self
+                        .pages()
+                        .saturating_sub(Self::MAPPING.round(2, start))
+                        .min(Self::MAPPING.span(2));
+                    if let Err(e) = self[i].update(|v| v.inc(huge, 1 << order, max)) {
+                        error!("Counter reset failed o={order} {i}: {e:?}");
+                        return Err(Error::Corruption);
+                    } else {
+                        start = self.reserve(order)?;
+                        if self[i].update(Entry3::unreserve).is_err() {
+                            error!("Unreserve failed");
+                            return Err(Error::Corruption);
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        };
+
         *start_a = page;
         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
     }
 
     #[inline(never)]
     fn put(&self, _core: usize, addr: u64, order: usize) -> Result<()> {
-        if order > Self::HUGE_ORDER {
-            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+        if order > Self::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
             return Err(Error::Memory);
         }
         let num_pages = 1 << order;
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
 
         if addr % (num_pages * Page::SIZE) as u64 != 0
             || !self.lower.memory().contains(&(addr as _))
@@ -301,6 +325,7 @@ impl<A: Entry, L: LowerAlloc> ArrayAlignedAlloc<A, L> {
     const MAPPING: Mapping<2> = L::MAPPING;
     const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
     const HUGE_ORDER: usize = L::HUGE_ORDER;
+    const MAX_ORDER: usize = L::MAX_ORDER;
 
     /// Setup a new allocator.
     #[cold]
@@ -362,7 +387,7 @@ impl<A: Entry, L: LowerAlloc> ArrayAlignedAlloc<A, L> {
     /// Reserves a new subtree, prioritizing partially filled subtrees,
     /// and allocates a page from it in one step.
     fn reserve(&self, order: usize) -> Result<usize> {
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
         while let Some((i, r)) = self.partial(huge).pop_update(self, |v| {
             // Skip empty entries
             if v.free() < Self::MAPPING.span(2) {
@@ -378,9 +403,10 @@ impl<A: Entry, L: LowerAlloc> ArrayAlignedAlloc<A, L> {
             self.empty.push(self, i);
         }
 
-        if let Some((i, r)) = self.empty.pop_update(self, |v| {
-            v.dec(huge, 1 << order, Self::MAPPING.span(2))
-        }) {
+        if let Some((i, r)) = self
+            .empty
+            .pop_update(self, |v| v.dec(huge, 1 << order, Self::MAPPING.span(2)))
+        {
             debug_assert!(r.is_ok());
             info!("reserve empty {i}");
             Ok(i * Self::MAPPING.span(2))

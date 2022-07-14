@@ -157,11 +157,11 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
 
     #[inline(never)]
     fn get(&self, core: usize, order: usize) -> Result<u64> {
-        if order > Self::HUGE_ORDER {
-            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+        if order > Self::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
             return Err(Error::Memory);
         }
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
 
         let start_a = self.local[core].start(huge);
         let pte_a = self.local[core].pte(huge);
@@ -182,28 +182,55 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
             }
         }
 
-        let page = self.lower.get(core, order, start)?;
+        let page = loop {
+            match self.lower.get(start, order) {
+                Ok(page) => break page,
+                Err(Error::Memory) => {
+                    warn!("alloc failed o={order} => retry");
+                    let max = self
+                        .pages()
+                        .saturating_sub(Self::MAPPING.round(2, start))
+                        .min(Self::MAPPING.span(2));
+                    if let Some(pte) = pte_a.inc(huge, 1 << order, max) {
+                        *pte_a = pte;
+                        let (s, new_pte) = self.reserve(order)?;
+                        self.swap_reserved(huge, new_pte, pte_a)?;
+                        start = s;
+                    } else {
+                        error!(
+                            "Counter reset failed o={order} {}: {pte_a:?}",
+                            start / Self::MAPPING.span(2)
+                        );
+                        return Err(Error::Corruption);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        debug_assert!(page % (1 << order) == 0, "{page:x} % {:x}", (1 << order));
         *start_a = page;
         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
     }
 
     #[inline(never)]
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
-        if order > Self::HUGE_ORDER {
-            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+        if order > Self::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
             return Err(Error::Memory);
         }
 
         let num_pages = 1 << order;
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
 
-        if addr % (num_pages * Page::SIZE) as u64 != 0
-            || !self.lower.memory().contains(&(addr as _))
-        {
-            error!("invalid addr");
-            return Err(Error::Memory);
+        if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
+            error!("invalid addr 0x{addr:x} range={:?}", self.lower.memory());
+            return Err(Error::Address);
         }
         let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
+        if page % num_pages != 0 {
+            error!("not aligned to order {order}: 0x{page:x}");
+            return Err(Error::Address);
+        }
 
         let i = page / Self::MAPPING.span(2);
         let pte = self[i].load();
@@ -213,7 +240,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
             .saturating_sub(Self::MAPPING.round(2, page))
             .min(Self::MAPPING.span(2));
         if pte.free() > max - num_pages {
-            error!("Not allocated {page} (i{i})");
+            error!("Not allocated o={order} {page} (i{i})");
             return Err(Error::Address);
         }
 
@@ -309,6 +336,7 @@ impl<L: LowerAlloc> Default for ArrayAtomicAlloc<L> {
 impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
     const HUGE_ORDER: usize = L::HUGE_ORDER;
+    const MAX_ORDER: usize = L::MAX_ORDER;
     const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
 
     /// Setup a new allocator.
@@ -371,7 +399,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     /// Reserves a new subtree, prioritizing partially filled subtrees,
     /// and allocates a page from it in one step.
     fn reserve(&self, order: usize) -> Result<(usize, Entry3)> {
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
         while let Some((i, r)) = self.partial(huge).pop_update(self, |v| {
             v.reserve_partial(huge, Self::ALMOST_FULL, Self::MAPPING.span(2))
         }) {

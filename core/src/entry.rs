@@ -268,9 +268,17 @@ impl AtomicValue for Entry2 {
 
 impl Entry2 {
     #[inline]
+    pub fn new_page() -> Self {
+        Self::new().with_page(true)
+    }
+    pub fn new_free(free: usize) -> Self {
+        Self::new().with_free(free)
+    }
+
+    #[inline]
     pub fn mark_huge(self, span: usize) -> Option<Self> {
         if !self.page() && self.free() == span {
-            Some(Self::new().with_page(true))
+            Some(Self::new_page())
         } else {
             None
         }
@@ -279,7 +287,7 @@ impl Entry2 {
     #[inline]
     pub fn dec(self, num_pages: usize) -> Option<Self> {
         if !self.page() && self.free() >= num_pages {
-            Some(self.with_free(self.free() - num_pages))
+            Some(Self::new_free(self.free() - num_pages))
         } else {
             None
         }
@@ -288,16 +296,25 @@ impl Entry2 {
     #[inline]
     pub fn inc(self, span: usize, num_pages: usize) -> Option<Self> {
         if !self.page() && self.free() <= span - num_pages {
-            Some(self.with_free(self.free() + num_pages))
+            Some(Self::new_free(self.free() + num_pages))
         } else {
             None
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 #[repr(packed)]
-pub struct Entry2Pair(Entry2, Entry2);
+pub struct Entry2Pair(pub Entry2, pub Entry2);
+
+impl Entry2Pair {
+    pub fn both<F: Fn(Entry2) -> Option<Entry2>>(self, f: F) -> Option<Entry2Pair> {
+        match (f(self.0), f(self.1)) {
+            (Some(a), Some(b)) => Some(Entry2Pair(a, b)),
+            _ => None,
+        }
+    }
+}
 
 impl From<u32> for Entry2Pair {
     fn from(v: u32) -> Self {

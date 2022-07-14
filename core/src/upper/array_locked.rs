@@ -158,13 +158,13 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
 
     #[inline(never)]
     fn get(&self, core: usize, order: usize) -> Result<u64> {
-        if order > Self::HUGE_ORDER {
-            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+        if order > Self::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
             return Err(Error::Memory);
         }
 
         let num_pages = 1 << order;
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
 
         let start_a = self.local[core].start(huge);
         let pte_a = self.local[core].pte(huge);
@@ -185,20 +185,43 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
             }
         }
 
-        let page = self.lower.get(core, order, start)?;
+        let page = loop {
+            match self.lower.get(start, order) {
+                Ok(page) => break page,
+                Err(Error::Memory) => {
+                    let max = self
+                        .pages()
+                        .saturating_sub(Self::MAPPING.round(2, start))
+                        .min(Self::MAPPING.span(2));
+                    if let Some(pte) = pte_a.inc(huge, 1 << order, max) {
+                        *pte_a = pte;
+                        let (s, new_pte) = self.reserve(order)?;
+                        self.swap_reserved(huge, new_pte, pte_a)?;
+                        start = s;
+                    } else {
+                        error!(
+                            "Counter reset failed o={order} {}: {pte_a:?}",
+                            start / Self::MAPPING.span(2)
+                        );
+                        return Err(Error::Corruption);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        };
         *start_a = page;
         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
     }
 
     #[inline(never)]
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
-        if order > Self::HUGE_ORDER {
-            error!("invalid order: !{order} <= {}", Self::HUGE_ORDER);
+        if order > Self::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
             return Err(Error::Memory);
         }
 
         let num_pages = 1 << order;
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
 
         if addr % (Page::SIZE * num_pages) as u64 != 0
             || !self.lower.memory().contains(&(addr as _))
@@ -240,8 +263,8 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
                 // check if recent frees also operated in this subtree
                 if new_pages > Self::ALMOST_FULL && local.frees_related(i) {
                     // Try to reserve it for bulk frees
-                    if let Ok(pte) = self[i]
-                        .update(|v| v.reserve(huge, num_pages, Self::MAPPING.span(2)))
+                    if let Ok(pte) =
+                        self[i].update(|v| v.reserve(huge, num_pages, Self::MAPPING.span(2)))
                     {
                         let pte = pte.with_idx(i);
                         // warn!("put reserve {i}");
@@ -313,6 +336,7 @@ impl<L: LowerAlloc> Default for ArrayLockedAlloc<L> {
 impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
     const HUGE_ORDER: usize = L::HUGE_ORDER;
+    const MAX_ORDER: usize = L::MAX_ORDER;
     const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
 
     /// Setup a new allocator.
@@ -379,7 +403,7 @@ impl<L: LowerAlloc> ArrayLockedAlloc<L> {
     /// Reserves a new subtree, prioritizing partially filled subtrees,
     /// and allocates a page from it in one step.
     fn reserve(&self, order: usize) -> Result<(usize, Entry3)> {
-        let huge = order == Self::HUGE_ORDER;
+        let huge = order >= Self::HUGE_ORDER;
         while let Some(i) = self.partial(huge).pop() {
             info!("reserve partial {i}");
             match self[i].update(|v| {
