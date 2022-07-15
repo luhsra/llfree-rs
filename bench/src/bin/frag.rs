@@ -55,8 +55,15 @@ fn main() {
 
     util::logging();
 
-    let out = Arc::new(Mutex::new(File::create(outfile).unwrap()));
-    writeln!(out.lock().unwrap(), "i,allocs,0%,<33%,<66%,<100%,100%").unwrap();
+    let out = Arc::new(Mutex::new({
+        let mut out = File::create(outfile).unwrap();
+        write!(out, "i,num_pages,allocs").unwrap();
+        for i in 0..PT_LEN + 1 {
+            write!(out, ",{i}").unwrap();
+        }
+        writeln!(out).unwrap();
+        out
+    }));
 
     assert!(order <= 6, "This benchmark is for small pages");
 
@@ -84,6 +91,7 @@ fn main() {
         v.resize_with(threads, || Mutex::new(Vec::<u64>::new()));
         v
     });
+    let a = alloc.clone();
     thread::parallel(threads, move |t| {
         thread::pin(t);
 
@@ -154,34 +162,26 @@ fn main() {
             barrier.wait();
         }
     });
+
+    warn!("{a:?}");
 }
 
-static mut BUCKETS: [usize; 5] = [0; 5];
+static mut FREE_PAGES: [usize; PT_LEN + 1] = [0; PT_LEN + 1];
 
 fn count_pte2(pte: Entry2) {
-    let border = PT_LEN / 3;
-    if pte.free() == 0 {
-        unsafe { BUCKETS[0] += 1 };
-    } else {
-        unsafe { BUCKETS[pte.free() / border + 1] += 1 };
-    }
+    unsafe { FREE_PAGES[pte.free()] += 1 };
 }
 
 /// count and output stats
-fn stats(out: &mut File, alloc: &Allocator, iteration: usize) -> io::Result<()> {
-    unsafe { BUCKETS.fill(0) };
+fn stats(out: &mut File, alloc: &Allocator, i: usize) -> io::Result<()> {
+    unsafe { FREE_PAGES.fill(0) };
     alloc.dbg_for_each_pte2(count_pte2);
 
-    writeln!(
-        out,
-        "{iteration},{},{},{},{},{},{}",
-        alloc.dbg_allocated_pages(),
-        unsafe { BUCKETS[0] } as f32 / (alloc.pages() / PT_LEN) as f32,
-        unsafe { BUCKETS[1] } as f32 / (alloc.pages() / PT_LEN) as f32,
-        unsafe { BUCKETS[2] } as f32 / (alloc.pages() / PT_LEN) as f32,
-        unsafe { BUCKETS[3] } as f32 / (alloc.pages() / PT_LEN) as f32,
-        unsafe { BUCKETS[4] } as f32 / (alloc.pages() / PT_LEN) as f32,
-    )?;
+    write!(out, "{i},{},{}", alloc.pages(), alloc.dbg_allocated_pages(),)?;
+    for b in unsafe { &FREE_PAGES } {
+        write!(out, ",{b}")?;
+    }
+    writeln!(out)?;
     Ok(())
 }
 
