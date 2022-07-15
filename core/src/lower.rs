@@ -1,6 +1,7 @@
 use core::fmt;
 use core::ops::Range;
 
+use crate::entry::Entry2;
 use crate::{Result};
 use crate::util::Page;
 use crate::table::Mapping;
@@ -48,6 +49,8 @@ pub trait LowerAlloc: Default + fmt::Debug {
 
     /// Debug function, returning the number of allocated pages and performing internal checks.
     fn dbg_allocated_pages(&self) -> usize;
+
+    fn dbg_for_each_pte2<F: FnMut(Entry2)>(&self, f: F);
 }
 
 #[cfg(all(test, feature = "stop"))]

@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use log::{error, info, warn};
 
 use super::{Alloc, Local, CAS_RETRIES, MAGIC, MAX_PAGES};
-use crate::entry::{Change, Entry, Entry3};
+use crate::entry::{Change, Entry, Entry3, Entry2};
 use crate::lower::LowerAlloc;
 use crate::table::{ATable, Mapping};
 use crate::util::Page;
@@ -300,8 +300,18 @@ impl<L: LowerAlloc> Alloc for TableAlloc<L> {
         }
     }
 
+    #[cold]
+    fn pages_needed(&self, cores: usize) -> usize {
+        Self::MAPPING.span(2) * cores
+    }
+
     fn pages(&self) -> usize {
         self.lower.pages()
+    }
+
+    #[cold]
+    fn dbg_for_each_pte2(&self, f: fn(Entry2)) {
+        self.lower.dbg_for_each_pte2(f)
     }
 
     #[cold]

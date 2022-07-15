@@ -9,7 +9,7 @@ use log::{error, info, warn};
 
 use super::{Alloc, Local, MAGIC, MAX_PAGES};
 use crate::atomic::{AStack, AStackDbg, Atomic};
-use crate::entry::Entry3;
+use crate::entry::{Entry3, Entry2};
 use crate::lower::LowerAlloc;
 use crate::table::Mapping;
 use crate::util::Page;
@@ -284,6 +284,16 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
 
     fn pages(&self) -> usize {
         self.lower.pages()
+    }
+
+    #[cold]
+    fn pages_needed(&self, cores: usize) -> usize {
+        Self::MAPPING.span(2) * cores
+    }
+
+    #[cold]
+    fn dbg_for_each_pte2(&self, f: fn(Entry2)) {
+        self.lower.dbg_for_each_pte2(f)
     }
 
     #[cold]

@@ -1,15 +1,16 @@
+use core::cell::UnsafeCell;
 use core::fmt;
 use core::ops::Range;
 use core::ptr::{null, null_mut};
-use core::cell::UnsafeCell;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info};
 
-use crate::{Error, Result};
 use super::{Alloc, MIN_PAGES};
+use crate::entry::Entry2;
 use crate::util::Page;
+use crate::{Error, Result};
 
 /// Simple volatile 4K page allocator that uses CPU-local linked lists.
 /// During initialization allocators memory is split into pages
@@ -127,6 +128,14 @@ impl Alloc for ListLocalAlloc {
     fn pages(&self) -> usize {
         self.pages
     }
+
+    #[cold]
+    fn pages_needed(&self, cores: usize) -> usize {
+        cores
+    }
+
+    #[cold]
+    fn dbg_for_each_pte2(&self, _f: fn(Entry2)) {}
 
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {

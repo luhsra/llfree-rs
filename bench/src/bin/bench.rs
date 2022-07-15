@@ -38,7 +38,7 @@ struct Args {
     dax: Option<String>,
     #[clap(short, long, default_value_t = 1)]
     iterations: usize,
-    /// Size of the allocated pages: 0 = 4K, 1 = 2M, 2 = 1G
+    /// Specifies how many pages should be allocated: #pages = 2^order
     #[clap(short = 's', long, default_value_t = 0)]
     order: usize,
     /// Max amount of memory in GiB. Is by the max thread count.

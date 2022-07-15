@@ -4,7 +4,7 @@ use core::fmt;
 
 use alloc::string::String;
 
-use crate::entry::Entry3;
+use crate::entry::{Entry3, Entry2};
 use crate::table::{Mapping, PT_LEN};
 use crate::util::Page;
 use crate::Result;
@@ -44,9 +44,15 @@ pub trait Alloc: Sync + Send + fmt::Debug {
 
     /// Return the number of pages that can be allocated.
     fn pages(&self) -> usize;
+
+    /// Returns the minimal number of pages the allocator needs.
+    #[cold]
+    fn pages_needed(&self, cores: usize) -> usize;
     /// Return the number of allocated pages.
     #[cold]
     fn dbg_allocated_pages(&self) -> usize;
+    #[cold]
+    fn dbg_for_each_pte2(&self, f: fn(Entry2));
     #[cold]
     fn name(&self) -> String {
         name::<Self>()

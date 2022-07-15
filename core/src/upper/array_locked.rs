@@ -10,7 +10,7 @@ use spin::mutex::{TicketMutex, TicketMutexGuard};
 
 use super::{Alloc, Local, MAGIC, MAX_PAGES};
 use crate::atomic::Atomic;
-use crate::entry::Entry3;
+use crate::entry::{Entry3, Entry2};
 use crate::lower::LowerAlloc;
 use crate::table::Mapping;
 use crate::util::Page;
@@ -291,8 +291,18 @@ impl<L: LowerAlloc> Alloc for ArrayLockedAlloc<L> {
         }
     }
 
+    #[cold]
+    fn pages_needed(&self, cores: usize) -> usize {
+        Self::MAPPING.span(2) * cores
+    }
+
     fn pages(&self) -> usize {
         self.lower.pages()
+    }
+
+    #[cold]
+    fn dbg_for_each_pte2(&self, f: fn(Entry2)) {
+        self.lower.dbg_for_each_pte2(f)
     }
 
     #[cold]

@@ -179,6 +179,16 @@ where
         }
         pages
     }
+
+    fn dbg_for_each_pte2<F: FnMut(Entry2)>(&self, mut f: F) {
+        for i2 in 0..(self.pages / Self::MAPPING.span(2)) {
+            let start = i2 * Self::MAPPING.span(2);
+            let pt2 = self.pt2(start);
+            for i1 in Self::MAPPING.range(2, start..self.pages) {
+                f(pt2.get(i1));
+            }
+        }
+    }
 }
 
 impl<const T2N: usize> CacheLower<T2N>

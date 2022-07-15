@@ -5,9 +5,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info, warn};
 
-use crate::{Error, Result};
 use super::Alloc;
+use crate::entry::Entry2;
 use crate::util::Page;
+use crate::{Error, Result};
 
 /// Wrapper for libc malloc.
 #[derive(Default)]
@@ -83,9 +84,17 @@ impl Alloc for MallocAlloc {
         Ok(())
     }
 
+    #[cold]
+    fn pages_needed(&self, cores: usize) -> usize {
+        cores
+    }
+
     fn pages(&self) -> usize {
         0
     }
+
+    #[cold]
+    fn dbg_for_each_pte2(&self, _f: fn(Entry2)) {}
 
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {

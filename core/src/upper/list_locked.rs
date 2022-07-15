@@ -8,9 +8,10 @@ use alloc::vec::Vec;
 use log::{error, info};
 use spin::mutex::TicketMutex;
 
-use crate::{Error, Result};
 use super::{Alloc, MIN_PAGES};
+use crate::entry::Entry2;
 use crate::util::Page;
+use crate::{Error, Result};
 
 /// Simple volatile 4K page allocator that uses a single shared linked lists
 /// protected by a ticked lock.
@@ -124,6 +125,14 @@ impl Alloc for ListLockedAlloc {
     fn pages(&self) -> usize {
         unsafe { self.memory.end.offset_from(self.memory.start) as usize }
     }
+
+    #[cold]
+    fn pages_needed(&self, cores: usize) -> usize {
+        cores
+    }
+
+    #[cold]
+    fn dbg_for_each_pte2(&self, _f: fn(Entry2)) {}
 
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {
