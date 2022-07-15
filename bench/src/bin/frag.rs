@@ -56,7 +56,7 @@ fn main() {
     util::logging();
 
     let out = Arc::new(Mutex::new(File::create(outfile).unwrap()));
-    writeln!(out.lock().unwrap(), "i,allocs,0,1,2,3,4").unwrap();
+    writeln!(out.lock().unwrap(), "i,allocs,0%,<33%,<66%,<100%,100%").unwrap();
 
     assert!(order <= 6, "This benchmark is for small pages");
 
@@ -156,11 +156,15 @@ fn main() {
     });
 }
 
-static mut BUCKETS: [usize; 4] = [0; 4];
+static mut BUCKETS: [usize; 5] = [0; 5];
 
 fn count_pte2(pte: Entry2) {
-    let border = PT_LEN / 4;
-    unsafe { BUCKETS[pte.free() / border] += 1 };
+    let border = PT_LEN / 3;
+    if pte.free() == 0 {
+        unsafe { BUCKETS[0] += 1 };
+    } else {
+        unsafe { BUCKETS[pte.free() / border + 1] += 1 };
+    }
 }
 
 /// count and output stats
@@ -170,12 +174,13 @@ fn stats(out: &mut File, alloc: &Allocator, iteration: usize) -> io::Result<()> 
 
     writeln!(
         out,
-        "{iteration},{},{},{},{},{}",
+        "{iteration},{},{},{},{},{},{}",
         alloc.dbg_allocated_pages(),
         unsafe { BUCKETS[0] } as f32 / (alloc.pages() / PT_LEN) as f32,
         unsafe { BUCKETS[1] } as f32 / (alloc.pages() / PT_LEN) as f32,
         unsafe { BUCKETS[2] } as f32 / (alloc.pages() / PT_LEN) as f32,
-        unsafe { BUCKETS[3] } as f32 / (alloc.pages() / PT_LEN) as f32
+        unsafe { BUCKETS[3] } as f32 / (alloc.pages() / PT_LEN) as f32,
+        unsafe { BUCKETS[4] } as f32 / (alloc.pages() / PT_LEN) as f32,
     )?;
     Ok(())
 }
