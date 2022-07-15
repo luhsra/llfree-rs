@@ -44,10 +44,9 @@ fn main() {
     assert!(pages >= MIN_PAGES * threads);
 
     type L = CacheLower<128>;
-    let allocs: [Arc<dyn Alloc>; 5] = [
+    let allocs: [Arc<dyn Alloc>; 4] = [
         Arc::new(ArrayAlignedAlloc::<CacheAligned, L>::default()),
         Arc::new(ArrayAlignedAlloc::<Unaligned, L>::default()),
-        Arc::new(ArrayLockedAlloc::<L>::default()),
         Arc::new(ArrayAtomicAlloc::<L>::default()),
         Arc::new(TableAlloc::<L>::default()),
     ];

@@ -88,16 +88,13 @@ fn main() {
     type C512 = CacheLower<512>;
     type C128 = CacheLower<128>;
     type C64 = CacheLower<64>;
-    let allocs: [Arc<dyn Alloc>; 14] = [
+    let allocs: [Arc<dyn Alloc>; 11] = [
         Arc::new(ArrayAlignedAlloc::<CacheAligned, C64>::default()),
         Arc::new(ArrayAlignedAlloc::<CacheAligned, C128>::default()),
         Arc::new(ArrayAlignedAlloc::<CacheAligned, C512>::default()),
         Arc::new(ArrayAtomicAlloc::<C64>::default()),
         Arc::new(ArrayAtomicAlloc::<C128>::default()),
         Arc::new(ArrayAtomicAlloc::<C512>::default()),
-        Arc::new(ArrayLockedAlloc::<C64>::default()),
-        Arc::new(ArrayLockedAlloc::<C128>::default()),
-        Arc::new(ArrayLockedAlloc::<C512>::default()),
         Arc::new(TableAlloc::<C64>::default()),
         Arc::new(TableAlloc::<C128>::default()),
         Arc::new(TableAlloc::<C512>::default()),

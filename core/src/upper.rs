@@ -13,19 +13,12 @@ mod array_aligned;
 pub use array_aligned::{ArrayAlignedAlloc, CacheAligned, Unaligned};
 mod array_atomic;
 pub use array_atomic::ArrayAtomicAlloc;
-mod array_locked;
-pub use array_locked::ArrayLockedAlloc;
 mod list_local;
 pub use list_local::ListLocalAlloc;
 mod list_locked;
 pub use list_locked::ListLockedAlloc;
 mod table;
 pub use table::TableAlloc;
-
-#[cfg(feature = "std")]
-mod malloc;
-#[cfg(feature = "std")]
-pub use malloc::MallocAlloc;
 
 pub const CAS_RETRIES: usize = 8;
 pub const MAGIC: usize = 0xdead_beef;
@@ -201,11 +194,6 @@ mod test {
             "{}\n -> {}",
             type_name::<ArrayAtomicAlloc<Lower>>(),
             super::name::<ArrayAtomicAlloc<Lower>>()
-        );
-        println!(
-            "{}\n -> {}",
-            type_name::<ArrayLockedAlloc<Lower>>(),
-            super::name::<ArrayLockedAlloc<Lower>>()
         );
         println!(
             "{}\n -> {}",

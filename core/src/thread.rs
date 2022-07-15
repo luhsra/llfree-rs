@@ -11,7 +11,6 @@ thread_local! {
 /// Returns the number of virtual cores.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn cores() -> usize {
-    // FIXME: Intel hyperthreading?
     let cores = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as usize };
     assert!(cores > 0, "sysconf");
     cores
