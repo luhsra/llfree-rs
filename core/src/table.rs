@@ -21,10 +21,11 @@ pub struct ATable<T: AtomicValue, const LEN: usize = { PT_LEN }> {
 // Sanity checks
 const _: () = assert!(size_of::<u64>() == ATable::<u64, PT_LEN>::PTE_SIZE);
 const _: () = assert!(size_of::<ATable<u64, PT_LEN>>() == Page::SIZE);
+const _: () = assert!(align_of::<ATable<u64, PT_LEN>>() == CacheLine::SIZE);
+
 const _: () = assert!(ATable::<u64, PT_LEN>::SIZE == Page::SIZE);
 const _: () = assert!(ATable::<u64, PT_LEN>::LEN == 512);
 const _: () = assert!(ATable::<u64, PT_LEN>::ORDER == 9);
-const _: () = assert!(align_of::<ATable<u64, PT_LEN>>() == CacheLine::SIZE);
 
 const _: () = assert!(ATable::<u16, 64>::PTE_SIZE == size_of::<u16>());
 const _: () = assert!(ATable::<u16, 64>::SIZE == 128);
@@ -85,8 +86,7 @@ pub struct Bitfield {
 const _: () = assert!(size_of::<Bitfield>() == Bitfield::SIZE);
 const _: () = assert!(size_of::<Bitfield>() == CacheLine::SIZE);
 const _: () = assert!(Bitfield::LEN % Bitfield::ENTRY_BITS == 0);
-const _: () = assert!(Bitfield::LEN == PT_LEN);
-const _: () = assert!(Bitfield::ORDER == 9);
+const _: () = assert!(1 << Bitfield::ORDER == Bitfield::LEN);
 
 impl Default for Bitfield {
     fn default() -> Self {

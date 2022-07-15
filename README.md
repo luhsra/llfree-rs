@@ -16,13 +16,25 @@ The `nightly` version `1.59.0` (or newer) is required to have access to inline a
 ## Project structure
 
 The [core](core/) directory contains the main `nvalloc` crate and all the allocators.
+The persistent lower allocators can be found in [lower](core/src/lower/).
+Their interface is defined in [lower.rs](core/src/lower.rs).
+These lower allocators are responsible for managing the level one and level two-page tables that are persisted on the non-volatile memory.
+They allocate pages of 4K up to 4M in these subtrees.
+Currently, there is only one lower allocator implementation:
+
+- [`Cache`](core/src/lower/cache.rs): This allocator has a 512 bit large bitset at the lowes level. It stores which 4K pages are allocated. The second level cosists of tables with N 16 bit entries, one for each bitset. These entries contain a counter of free pages in the related bitset and a flag if the whole subtree is allocated as a 2M huge page.
+The number of entries N in the second level tables can be defined at compile-time.
+
 The [upper](core/src/upper/) directory contains the different upper allocator variants.
 The general interface is defined in [upper.rs](core/src/upper.rs), together with various unit tests and stress tests.
+Most of the upper allocators depend on the lower allocator for the actual allocations and only manage the higher level subtrees.
+The upper allocators are completely volatile and have to be rebuilt on boot.
+The different implementations are listed down below:
 
-The persistent lower allocators can be found in [lower](core/src/lower/).
-Again their interface is defined in [lower.rs](core/src/lower.rs).
-These lower allocators are responsible for managing the level one and level two-page tables that are persisted on the non-volatile memory.
-Most of the upper allocators in [upper](core/src/upper/) use the lower allocator and focus only on managing the higher level subtrees using volatile data structures.
+- [`ArrayAligned`](core/src/upper/array_aligned.rs): Stores the level 3 entries in a large array, that is optionally cache-line aligned. Each cpu reserves a subtree and allocates from it.
+- [`ArrayAtomic`](core/src/upper/array_atomic.rs.rs): Similar to the `ArrayAligned` allocator, but its level 3 entries are not cache-line alinged. To prevent false-sharing when updating adjascent entries concurrently, each cpu has a local working copy of its reserved subtree.
+- [`ListLocal`](core/src/upper/list_local.rs) and [`ListLocked`](core/src/upper/list_locked.rs): These reference implementations are used to evaluate the performance of allocators.
+- [`Table`](core/src/upper/table.rs): Uses multiple levels of tables to manage the subtrees. Again, each cpu reserve a subtree for allocations to prevent memory sharing.
 
 The lower allocator is heavily tested for race conditions using synchronization points (`stop`) to control the execution order of parallel threads.
 They are similar to barriers where, on every synchronization point, the next running CPU is chosen either by a previously defined order or in a pseudo-randomized manner.
