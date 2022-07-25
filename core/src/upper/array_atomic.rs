@@ -153,8 +153,8 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
 
     #[inline(never)]
     fn get(&self, core: usize, order: usize) -> Result<u64> {
-        if order > Self::MAX_ORDER {
-            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
+        if order > L::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", L::MAX_ORDER);
             return Err(Error::Memory);
         }
 
@@ -217,22 +217,24 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
 
     #[inline(never)]
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
-        if order > Self::MAX_ORDER {
-            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
+        if order > L::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", L::MAX_ORDER);
             return Err(Error::Memory);
         }
 
         let num_pages = 1 << order;
 
-        if addr % Page::SIZE as u64 != 0 || !self.lower.memory().contains(&(addr as _)) {
-            error!("invalid addr 0x{addr:x} range={:?}", self.lower.memory());
+        if addr % (num_pages * Page::SIZE) as u64 != 0
+            || !self.lower.memory().contains(&(addr as _))
+        {
+            error!(
+                "invalid addr 0x{addr:x} r={:?} o={order}",
+                self.lower.memory()
+            );
             return Err(Error::Address);
         }
+
         let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
-        if page % num_pages != 0 {
-            error!("not aligned to order {order}: 0x{page:x}");
-            return Err(Error::Address);
-        }
 
         self.lower.put(page, order)?;
 
@@ -342,9 +344,7 @@ impl<L: LowerAlloc> Default for ArrayAtomicAlloc<L> {
 
 impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
     const MAPPING: Mapping<3> = Mapping([512]).with_lower(&L::MAPPING);
-    const HUGE_ORDER: usize = L::HUGE_ORDER;
-    const MAX_ORDER: usize = L::MAX_ORDER;
-    const ALMOST_FULL: usize = Self::MAPPING.span(2) / 128;
+    const ALMOST_FULL: usize = 1 << L::MAX_ORDER;
 
     /// Setup a new allocator.
     #[cold]

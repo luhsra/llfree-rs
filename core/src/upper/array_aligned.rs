@@ -176,8 +176,8 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
 
     #[inline(never)]
     fn get(&self, core: usize, order: usize) -> Result<u64> {
-        if order > Self::MAX_ORDER {
-            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
+        if order > L::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", L::MAX_ORDER);
             return Err(Error::Memory);
         }
 
@@ -240,8 +240,8 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
 
     #[inline(never)]
     fn put(&self, _core: usize, addr: u64, order: usize) -> Result<()> {
-        if order > Self::MAX_ORDER {
-            error!("invalid order: !{order} <= {}", Self::MAX_ORDER);
+        if order > L::MAX_ORDER {
+            error!("invalid order: !{order} <= {}", L::MAX_ORDER);
             return Err(Error::Memory);
         }
         let num_pages = 1 << order;
@@ -249,8 +249,11 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
         if addr % (num_pages * Page::SIZE) as u64 != 0
             || !self.lower.memory().contains(&(addr as _))
         {
-            error!("invalid addr {addr:x}");
-            return Err(Error::Memory);
+            error!(
+                "invalid addr 0x{addr:x} r={:?} o={order}",
+                self.lower.memory()
+            );
+            return Err(Error::Address);
         }
 
         let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
@@ -332,9 +335,7 @@ impl<A: Entry, L: LowerAlloc> Default for ArrayAlignedAlloc<A, L> {
 
 impl<A: Entry, L: LowerAlloc> ArrayAlignedAlloc<A, L> {
     const MAPPING: Mapping<2> = L::MAPPING;
-    const ALMOST_FULL: usize = Self::MAPPING.span(2) / 64;
-    const HUGE_ORDER: usize = L::HUGE_ORDER;
-    const MAX_ORDER: usize = L::MAX_ORDER;
+    const ALMOST_FULL: usize = 1 << L::MAX_ORDER;
 
     /// Setup a new allocator.
     #[cold]

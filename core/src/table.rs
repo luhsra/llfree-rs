@@ -182,6 +182,8 @@ impl Bitfield {
             return self.set_first_zero(i);
         }
 
+        debug_assert!(order <= 6);
+
         for j in 0..self.data.len() {
             let i = (j + i) % self.data.len();
 
@@ -194,10 +196,19 @@ impl Bitfield {
                 crate::stop::stop().unwrap();
             }
 
-            if let Ok(e) = self.data[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
-                first_zeros_aligned(e, order).map(|v| v.0)
-            }) {
-                return Ok(i * Self::ENTRY_BITS + first_zeros_aligned(e, order).unwrap().1);
+            let mut offset = 0;
+            if self.data[i]
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
+                    if let Some((val, o)) = first_zeros_aligned(e, order) {
+                        offset = o;
+                        Some(val)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Ok(i * Self::ENTRY_BITS + offset);
             }
         }
         Err(Error::Memory)
