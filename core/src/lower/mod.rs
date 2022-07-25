@@ -2,9 +2,9 @@ use core::fmt;
 use core::ops::Range;
 
 use crate::entry::Entry2;
-use crate::{Result};
-use crate::util::Page;
 use crate::table::Mapping;
+use crate::util::Page;
+use crate::Result;
 
 #[cfg(all(test, feature = "stop"))]
 macro_rules! stop {
@@ -39,8 +39,8 @@ pub trait LowerAlloc: Default + fmt::Debug {
     fn clear(&self);
     /// Recover the level 2 page table at `start`.
     /// If deep, the level 1 pts are also traversed and false counters are corrected.
-    /// Returns the number of recovered pages and if the l2 table manages huge pages.
-    fn recover(&self, start: usize, deep: bool) -> Result<(usize, bool)>;
+    /// Returns the number of recovered pages.
+    fn recover(&self, start: usize, deep: bool) -> Result<usize>;
 
     /// Try allocating a new `huge` page in the subtree at `start`.
     fn get(&self, start: usize, order: usize) -> Result<usize>;

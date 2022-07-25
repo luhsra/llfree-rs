@@ -6,7 +6,7 @@ use log::error;
 
 use crate::entry::Entry3;
 
-/// Atomic wrapper for the different integer sizes.
+/// Atomic wrapper for the different integer sizes and values that can be converted into them.
 #[repr(transparent)]
 pub struct Atomic<T: AtomicValue>(pub <<T as AtomicValue>::V as AtomicT>::A);
 
@@ -52,25 +52,15 @@ impl<T: AtomicValue> Atomic<T> {
     }
 }
 
+/// Value that can be converted into an atomic type.
 pub trait AtomicValue: From<Self::V> + Into<Self::V> + Clone + Copy {
     type V: AtomicT;
 }
 
-impl AtomicValue for u64 {
-    type V = u64;
-}
-impl AtomicValue for u32 {
-    type V = u32;
-}
-impl AtomicValue for u16 {
-    type V = u16;
-}
-impl AtomicValue for u8 {
-    type V = u8;
-}
-
+/// An atomic type with atomic functions.
 pub trait AtomicT: Sized + Clone + Copy {
     type A;
+    /// Specifies the memory ordering used by this type.
     const ORDER: Ordering = Ordering::SeqCst;
 
     fn atomic(v: Self) -> Self::A;
@@ -88,6 +78,10 @@ pub trait AtomicT: Sized + Clone + Copy {
 
 macro_rules! impl_atomic {
     ($value:ident, $atomic:ident) => {
+        impl AtomicValue for $value {
+            type V = $value;
+        }
+
         impl AtomicT for $value {
             type A = $atomic;
 
@@ -228,6 +222,7 @@ impl<T: ANode> AStack<T> {
     }
 }
 
+/// Debug printer for the [AStack].
 #[allow(dead_code)]
 pub struct AStackDbg<'a, T, B>(pub &'a AStack<T>, pub &'a B)
 where

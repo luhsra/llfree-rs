@@ -4,7 +4,7 @@ use core::fmt;
 
 use alloc::string::String;
 
-use crate::entry::{Entry3, Entry2};
+use crate::entry::{Entry2, Entry3};
 use crate::table::{Mapping, PT_LEN};
 use crate::util::Page;
 use crate::Result;
@@ -17,8 +17,6 @@ mod list_local;
 pub use list_local::ListLocalAlloc;
 mod list_locked;
 pub use list_locked::ListLockedAlloc;
-mod table;
-pub use table::TableAlloc;
 
 pub const CAS_RETRIES: usize = 8;
 pub const MAGIC: usize = 0xdead_beef;
@@ -89,25 +87,20 @@ pub fn name<A: Alloc + ?Sized>() -> String {
 /// This should only be accessed from the corresponding (virtual) CPU core!
 #[repr(transparent)]
 pub struct Local<const L: usize>(UnsafeCell<Inner<L>>);
+
 #[repr(align(64))]
 struct Inner<const L: usize> {
-    start: [usize; 2],
-    pte: [Entry3; 2],
+    start: usize,
+    pte: Entry3,
     frees: [usize; L],
     frees_i: usize,
 }
 
-unsafe impl<const L: usize> Send for Local<L> {}
-unsafe impl<const L: usize> Sync for Local<L> {}
-
 impl<const L: usize> Local<L> {
     fn new() -> Self {
         Self(UnsafeCell::new(Inner {
-            start: [usize::MAX, usize::MAX],
-            pte: [
-                Entry3::new().with_idx(Entry3::IDX_MAX),
-                Entry3::new().with_idx(Entry3::IDX_MAX),
-            ],
+            start: usize::MAX,
+            pte: Entry3::new().with_idx(Entry3::IDX_MAX),
             frees_i: 0,
             frees: [usize::MAX; L],
         }))
@@ -117,12 +110,12 @@ impl<const L: usize> Local<L> {
         unsafe { &mut *self.0.get() }
     }
     #[allow(clippy::mut_from_ref)]
-    pub fn start(&self, huge: bool) -> &mut usize {
-        &mut self.p().start[huge as usize]
+    pub fn start(&self) -> &mut usize {
+        &mut self.p().start
     }
     #[allow(clippy::mut_from_ref)]
-    pub fn pte(&self, huge: bool) -> &mut Entry3 {
-        &mut self.p().pte[huge as usize]
+    pub fn pte(&self) -> &mut Entry3 {
+        &mut self.p().pte
     }
     /// Add a chunk (subtree) id to the history of chunks.
     pub fn frees_push(&self, chunk: usize) {
@@ -131,12 +124,24 @@ impl<const L: usize> Local<L> {
     }
     /// Calls frees_push on exiting scope.
     /// NOTE: Bind the return value to a variable!
+    #[must_use]
     pub fn defer_frees_push(&self, chunk: usize) -> LocalFreePush<'_, L> {
         LocalFreePush(self, chunk)
     }
     /// Checks if the previous frees were in the given chunk.
     pub fn frees_related(&self, chunk: usize) -> bool {
         self.p().frees.iter().all(|p| *p == chunk)
+    }
+}
+
+impl<const L: usize> fmt::Debug for Local<L> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Local")
+            .field("start", &self.p().start)
+            .field("pte", &self.p().pte)
+            .field("frees", &self.p().frees)
+            .field("frees_i", &self.p().frees_i)
+            .finish()
     }
 }
 
@@ -171,7 +176,7 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::Error;
 
-    type Lower = CacheLower<128>;
+    type Lower = CacheLower<64>;
     type Allocator = ArrayAtomicAlloc<Lower>;
 
     fn mapping(begin: usize, length: usize) -> core::result::Result<MMap<Page>, ()> {
@@ -194,11 +199,6 @@ mod test {
             "{}\n -> {}",
             type_name::<ArrayAtomicAlloc<Lower>>(),
             super::name::<ArrayAtomicAlloc<Lower>>()
-        );
-        println!(
-            "{}\n -> {}",
-            type_name::<TableAlloc<Lower>>(),
-            super::name::<TableAlloc<Lower>>()
         );
         println!(
             "{}\n -> {}",

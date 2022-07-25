@@ -5,14 +5,14 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::upper::{Alloc, TableAlloc, MIN_PAGES};
 use nvalloc::lower::CacheLower;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
+use nvalloc::upper::{Alloc, ArrayAtomicAlloc, MIN_PAGES};
 use nvalloc::util::{logging, Cycles, Page};
 
-type Allocator = TableAlloc<CacheLower<128>>;
+type Allocator = ArrayAtomicAlloc<CacheLower<128>>;
 
 /// Benchmarking an allocator in more detail.
 #[derive(Parser, Debug)]
@@ -46,7 +46,6 @@ fn main() {
 
     let mem_pages = 2 * threads * MIN_PAGES;
     let mut mapping = mapping(0x1000_0000_0000, mem_pages, dax).unwrap();
-
 
     let mut times = vec![Perf::default(); 2 * PT_LEN];
 

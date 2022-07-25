@@ -79,9 +79,8 @@ where
         }
     }
 
-    fn recover(&self, start: usize, deep: bool) -> Result<(usize, bool)> {
+    fn recover(&self, start: usize, deep: bool) -> Result<usize> {
         let mut pages = 0;
-        let mut huge = false;
 
         let pt = self.pt2(start);
         for i in 0..Self::MAPPING.len(2) {
@@ -92,8 +91,8 @@ where
 
             let pte = pt.get(i);
             if pte.page() {
-                huge = true;
-            } else if deep && pte.free() > 0 && !huge {
+                pages += pte.free()
+            } else if deep && pte.free() > 0 {
                 let p = self.recover_l1(start);
                 if pte.free() != p {
                     warn!("Invalid PTE2 start=0x{start:x} i{i}: {} != {p}", pte.free());
@@ -105,7 +104,7 @@ where
             }
         }
 
-        Ok((pages, huge))
+        Ok(pages)
     }
 
     fn get(&self, start: usize, order: usize) -> Result<usize> {

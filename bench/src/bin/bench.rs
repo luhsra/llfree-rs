@@ -87,22 +87,19 @@ fn main() {
 
     type C512 = CacheLower<512>;
     type C128 = CacheLower<128>;
-    type C32 = CacheLower<32>;
-    let allocs: [Arc<dyn Alloc>; 11] = [
-        Arc::new(ArrayAlignedAlloc::<CacheAligned, C32>::default()),
+    type C64 = CacheLower<64>;
+    let allocs: [Arc<dyn Alloc>; 8] = [
+        Arc::new(ArrayAlignedAlloc::<CacheAligned, C64>::default()),
         Arc::new(ArrayAlignedAlloc::<CacheAligned, C128>::default()),
         Arc::new(ArrayAlignedAlloc::<CacheAligned, C512>::default()),
-        Arc::new(ArrayAtomicAlloc::<C32>::default()),
+        Arc::new(ArrayAtomicAlloc::<C64>::default()),
         Arc::new(ArrayAtomicAlloc::<C128>::default()),
         Arc::new(ArrayAtomicAlloc::<C512>::default()),
-        Arc::new(TableAlloc::<C32>::default()),
-        Arc::new(TableAlloc::<C128>::default()),
-        Arc::new(TableAlloc::<C512>::default()),
         Arc::new(ListLocalAlloc::default()),
         Arc::new(ListLockedAlloc::default()),
     ];
 
-    // Additional constraints
+    // Additional constraints (perf)
     let mut conditions = HashMap::<String, &'static dyn Fn(usize, usize) -> bool>::new();
     conditions.insert(name::<ListLocalAlloc>(), &|_, order| order == 0);
     conditions.insert(name::<ListLockedAlloc>(), &|cores, order| {

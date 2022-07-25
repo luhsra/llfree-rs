@@ -44,11 +44,11 @@ fn main() {
     assert!(pages >= MIN_PAGES * threads);
 
     type L = CacheLower<128>;
-    let allocs: [Arc<dyn Alloc>; 4] = [
+    let allocs: [Arc<dyn Alloc>; 3] = [
         Arc::new(ArrayAlignedAlloc::<CacheAligned, L>::default()),
         Arc::new(ArrayAlignedAlloc::<Unaligned, L>::default()),
         Arc::new(ArrayAtomicAlloc::<L>::default()),
-        Arc::new(TableAlloc::<L>::default()),
+        // Arc::new(TableAlloc::<L>::default()),
     ];
     for a in allocs {
         if a.name() == alloc {
