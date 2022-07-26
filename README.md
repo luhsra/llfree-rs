@@ -60,55 +60,7 @@ To execute the benchmark on NVM, use the `--dax` flag to specify a DAX file to b
 
 ## Integrating into the Linux Kernel
 
-The [module](module/) directory contains wrapper code and Makefiles for integrating the allocators into the Linux kernel.
-
-First create a symlink in the linux tree to the `nvalloc-rs/module` directory:
-
-```sh
-ln -s </path/to/nvalloc-rs>/module </path/to/linux>/lib/nvalloc
-```
-
-Then add the `nvalloc` directory to the `</path/to/linux>/lib/Makefile`:
-
-```diff
-obj-y += nvalloc/
-```
-
-And finally compile the module and the linux kernel:
-
-```sh
-# in ./module
-make LLVM=1 modules
-# in </path/to/linux>
-make LLVM=1
-```
-
-> Problems:
-> - Please increase KSYM_NAME_LEN both in kernel and kallsyms.c
-> - Non-allocatable sections: .llvmbc, .llvmcmd
-> - Unknown sections: .text.__rust_probestack, .eh_frame
-
-### Support for printk
-
-The exported function `rust_fmt_argument` is a custom formatter for the rust print formatting.
-It has to be called in `lib/vsprintf.c:pointer` for the `%pA` format argument:
-
-```c
-char *rust_fmt_argument(char *buf, char *end, void *ptr);
-
-char *pointer(const char *fmt, char *buf, char *end, void *ptr,
-	      struct printf_spec spec)
-{
-    switch(*fmt) {
-// ...
-    case 'A':
-        return rust_fmt_argument(buf, end, ptr);
-// ...
-    }
-}
-```
-
-Logging is automatically initialized with the allocator.
+@see https://scm.sra.uni-hannover.de/research/nvalloc-linux
 
 ## Profiling
 
