@@ -99,7 +99,7 @@ impl Default for Bitfield {
 
 impl fmt::Debug for Bitfield {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Bitfield(")?;
+        write!(f, "Bitfield( ")?;
         for d in &self.data {
             write!(f, "{:016x} ", d.load(Ordering::Relaxed))?;
         }

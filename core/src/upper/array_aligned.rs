@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use log::{error, info, warn};
 
 use super::{Alloc, Local, CAS_RETRIES, MAGIC, MAX_PAGES};
-use crate::atomic::{AStack, AStackDbg, Atomic};
+use crate::atomic::{ANode, AStack, AStackDbg, Atomic};
 use crate::entry::{Entry2, Entry3};
 use crate::lower::LowerAlloc;
 use crate::table::Mapping;
@@ -119,7 +119,7 @@ impl<A: Entry, L: LowerAlloc> fmt::Debug for ArrayAlignedAlloc<A, L> {
 
 impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
     #[cold]
-    fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()> {
+    fn init(&mut self, cores: usize, mut memory: &mut [Page], persistent: bool) -> Result<()> {
         info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -134,43 +134,104 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
             return Err(Error::Memory);
         }
 
-        // Last frame is reserved for metadata
-        let (memory, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
-        let meta = rem[0].cast_mut::<Meta>();
-        self.meta = meta;
+        if persistent {
+            // Last frame is reserved for metadata
+            let (m, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
+            let meta = rem[0].cast_mut::<Meta>();
+            self.meta = meta;
+            memory = m;
+        }
 
         let mut local = Vec::with_capacity(cores);
         local.resize_with(cores, Local::new);
         self.local = local.into();
 
         // Create lower allocator
-        self.lower = L::new(cores, memory);
+        self.lower = L::new(cores, memory, persistent);
 
         // Array with all pte3
         let pte3_num = Self::MAPPING.num_pts(2, self.lower.pages());
-        let mut subtrees = Vec::with_capacity(pte3_num);
-        subtrees.resize_with(pte3_num, || A::new(Atomic::new(Entry3::new())));
-        self.subtrees = subtrees.into();
+        let mut pte3s = Vec::with_capacity(pte3_num);
+        pte3s.resize_with(pte3_num, || A::new(Atomic::new(Entry3::new())));
+        self.subtrees = pte3s.into();
 
         self.empty = AStack::default();
         self.partial = AStack::default();
 
-        if !overwrite
-            && meta.pages.load(Ordering::SeqCst) == self.pages()
+        Ok(())
+    }
+
+    #[cold]
+    fn recover(&self) -> Result<()> {
+        assert!(!self.meta.is_null());
+        let meta = unsafe { &mut *self.meta };
+
+        if meta.pages.load(Ordering::SeqCst) == self.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
         {
-            info!("Recover allocator state p={}", self.pages());
+            info!("recover p={}", self.pages());
             let deep = meta.active.load(Ordering::SeqCst) != 0;
-            self.recover(deep)?;
+            self.recover_inner(deep)?;
+            meta.active.store(1, Ordering::SeqCst);
+            Ok(())
         } else {
-            info!("Setup allocator state p={}", self.pages());
-            self.setup();
+            Err(Error::Initialization)
+        }
+    }
 
-            meta.pages.store(self.pages(), Ordering::SeqCst);
-            meta.magic.store(MAGIC, Ordering::SeqCst);
+    #[cold]
+    fn free_all(&self) -> Result<()> {
+        info!("free all p={}", self.pages());
+
+        self.lower.free_all();
+
+        // Add all entries to the empty list
+        let pte3_num = Self::MAPPING.num_pts(2, self.pages());
+        for i in 0..pte3_num - 1 {
+            self[i].store(Entry3::empty(Self::MAPPING.span(2)));
+            self.empty.push(self, i);
         }
 
-        meta.active.store(1, Ordering::SeqCst);
+        // The last one may be cut off
+        let max =
+            (self.pages() - (pte3_num - 1) * Self::MAPPING.span(2)).min(Self::MAPPING.span(2));
+        self[pte3_num - 1].store(Entry3::new().with_free(max));
+
+        if max == Self::MAPPING.span(2) {
+            self.empty.push(self, pte3_num - 1);
+        } else if max > Self::ALMOST_FULL {
+            self.partial.push(self, pte3_num - 1);
+        }
+
+        if !self.meta.is_null() {
+            let meta = unsafe { &mut *self.meta };
+            meta.pages.store(self.pages(), Ordering::SeqCst);
+            meta.magic.store(MAGIC, Ordering::SeqCst);
+            meta.active.store(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    #[cold]
+    fn reserve_all(&self) -> Result<()> {
+        info!("reserve all p={}", self.pages());
+
+        let pte3_num = Self::MAPPING.num_pts(2, self.pages());
+
+        // Set all entries to zero
+        for i in 0..pte3_num {
+            self[i].store(Entry3::new());
+        }
+        // Clear the lists
+        self.empty.set(Entry3::default().with_next(None));
+        self.partial.set(Entry3::default().with_next(None));
+
+        if !self.meta.is_null() {
+            let meta = unsafe { &mut *self.meta };
+            meta.pages.store(self.pages(), Ordering::SeqCst);
+            meta.magic.store(MAGIC, Ordering::SeqCst);
+            meta.active.store(1, Ordering::SeqCst);
+        }
         Ok(())
     }
 
@@ -337,34 +398,10 @@ impl<A: Entry, L: LowerAlloc> ArrayAlignedAlloc<A, L> {
     const MAPPING: Mapping<2> = L::MAPPING;
     const ALMOST_FULL: usize = 1 << L::MAX_ORDER;
 
-    /// Setup a new allocator.
-    #[cold]
-    fn setup(&mut self) {
-        self.lower.clear();
-
-        // Add all entries to the empty list
-        let pte3_num = Self::MAPPING.num_pts(2, self.pages());
-        for i in 0..pte3_num - 1 {
-            self[i].store(Entry3::empty(Self::MAPPING.span(2)));
-            self.empty.push(self, i);
-        }
-
-        // The last one may be cut off
-        let max =
-            (self.pages() - (pte3_num - 1) * Self::MAPPING.span(2)).min(Self::MAPPING.span(2));
-        self[pte3_num - 1].store(Entry3::new().with_free(max));
-
-        if max == Self::MAPPING.span(2) {
-            self.empty.push(self, pte3_num - 1);
-        } else if max > Self::ALMOST_FULL {
-            self.partial.push(self, pte3_num - 1);
-        }
-    }
-
     /// Recover the allocator from NVM after reboot.
     /// If `deep` then the level 1 page tables are traversed and diverging counters are corrected.
     #[cold]
-    fn recover(&self, deep: bool) -> Result<usize> {
+    fn recover_inner(&self, deep: bool) -> Result<usize> {
         if deep {
             warn!("Try recover crashed allocator!");
         }

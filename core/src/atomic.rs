@@ -170,6 +170,10 @@ impl<T: ANode> Default for AStack<T> {
 }
 
 impl<T: ANode> AStack<T> {
+    pub fn set(&self, v: T) {
+        self.start.store(v)
+    }
+
     /// Pushes the element at `idx` to the front of the stack.
     pub fn push<B>(&self, buf: &B, idx: usize)
     where

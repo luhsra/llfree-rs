@@ -30,13 +30,15 @@ pub trait LowerAlloc: Default + fmt::Debug {
     const MAX_ORDER: usize;
 
     /// Create a new lower allocator.
-    fn new(cores: usize, memory: &mut [Page]) -> Self;
+    fn new(cores: usize, memory: &mut [Page], persistent: bool) -> Self;
 
     fn pages(&self) -> usize;
     fn memory(&self) -> Range<*const Page>;
 
-    /// Clear all metadata.
-    fn clear(&self);
+    /// Free all pages.
+    fn free_all(&self);
+    /// Reserve all pages.
+    fn reserve_all(&self);
     /// Recover the level 2 page table at `start`.
     /// If deep, the level 1 pts are also traversed and false counters are corrected.
     /// Returns the number of recovered pages.
@@ -68,18 +70,19 @@ mod test {
     type Lower = super::cache::CacheLower<512>;
 
     #[test]
+    #[ignore]
     fn rand_realloc_first() {
         logging();
 
         const THREADS: usize = 6;
         let mut buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
-        for _ in 0..32 {
+        for _ in 0..8 {
             let seed = unsafe { libc::rand() } as u64;
             warn!("order: {seed:x}");
 
-            let lower = Arc::new(Lower::new(THREADS, &mut buffer));
-            lower.clear();
+            let lower = Arc::new(Lower::new(THREADS, &mut buffer, true));
+            lower.free_all();
             assert_eq!(lower.dbg_allocated_pages(), 0);
 
             let stop = StopRand::new(THREADS, seed);
@@ -102,6 +105,7 @@ mod test {
     }
 
     #[test]
+    #[ignore]
     fn rand_realloc_last() {
         logging();
 
@@ -113,8 +117,8 @@ mod test {
             let seed = unsafe { libc::rand() } as u64;
             warn!("order: {seed:x}");
 
-            let lower = Arc::new(Lower::new(THREADS, &mut buffer));
-            lower.clear();
+            let lower = Arc::new(Lower::new(THREADS, &mut buffer, true));
+            lower.free_all();
             assert_eq!(lower.dbg_allocated_pages(), 0);
 
             for page in &mut pages[..PT_LEN - 3] {

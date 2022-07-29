@@ -7,7 +7,7 @@ use alloc::string::String;
 use crate::entry::{Entry2, Entry3};
 use crate::table::{Mapping, PT_LEN};
 use crate::util::Page;
-use crate::Result;
+use crate::{Error, Result};
 
 mod array_aligned;
 pub use array_aligned::{ArrayAlignedAlloc, CacheAligned, Unaligned};
@@ -25,8 +25,24 @@ pub const MAX_PAGES: usize = Mapping([9; 4]).span(4);
 
 pub trait Alloc: Sync + Send + fmt::Debug {
     /// Initialize the allocator.
+    /// When `persistent` is set all level 1 and 2 page tables are allocated
+    /// at the end of `memory` together with an meta page.
     #[cold]
-    fn init(&mut self, cores: usize, memory: &mut [Page], overwrite: bool) -> Result<()>;
+    fn init(&mut self, cores: usize, memory: &mut [Page], persistent: bool) -> Result<()>;
+
+    /// Init as entirely free area.
+    #[cold]
+    fn free_all(&self) -> Result<()>;
+
+    /// Init as fully reserved area.
+    #[cold]
+    fn reserve_all(&self) -> Result<()>;
+
+    /// Recover the allocator from persistent memory.
+    #[cold]
+    fn recover(&self) -> Result<()> {
+        Err(Error::Initialization)
+    }
 
     /// Allocate a new page.
     fn get(&self, core: usize, order: usize) -> Result<u64>;
@@ -263,7 +279,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(1, &mut mapping, true).unwrap();
+            a.init(1, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
             a
         });
 
@@ -334,7 +351,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(1, &mut mapping, true).unwrap();
+            a.init(1, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
             a
         });
 
@@ -400,7 +418,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, true).unwrap();
+            a.init(THREADS, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
             a
         });
 
@@ -469,7 +488,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(1, &mut mapping, true).unwrap();
+            a.init(1, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
             a
         });
 
@@ -546,7 +566,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, true).unwrap();
+            a.init(THREADS, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
             a
         });
 
@@ -594,7 +615,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, true).unwrap();
+            a.init(THREADS, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
             a
         });
 
@@ -726,7 +748,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, true).unwrap();
+            a.init(THREADS, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
             a
         });
 
@@ -766,7 +789,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, true).unwrap();
+            a.init(THREADS, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
             a
         });
 
@@ -820,6 +844,7 @@ mod test {
             let alloc = Arc::new({
                 let mut a = Allocator::default();
                 a.init(1, &mut mapping, true).unwrap();
+                a.free_all().unwrap();
                 a
             });
 
@@ -836,7 +861,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(1, &mut mapping, false).unwrap();
+            a.init(1, &mut mapping, true).unwrap();
+            a.recover().unwrap();
             a
         });
 
@@ -856,7 +882,8 @@ mod test {
         let mut mapping = mapping(0x1000_0000_0000, MAPPING.span(2) * (THREADS * 2 + 1)).unwrap();
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, true).unwrap();
+            a.init(THREADS, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
             a
         });
         let a = alloc.clone();

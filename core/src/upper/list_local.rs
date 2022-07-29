@@ -4,6 +4,7 @@ use core::ops::Range;
 use core::ptr::{null, null_mut};
 
 use alloc::boxed::Box;
+use alloc::slice;
 use alloc::vec::Vec;
 use log::{error, info};
 
@@ -55,7 +56,7 @@ impl Default for ListLocalAlloc {
 
 impl Alloc for ListLocalAlloc {
     #[cold]
-    fn init(&mut self, cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
+    fn init(&mut self, cores: usize, memory: &mut [Page], _persistent: bool) -> Result<()> {
         info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -66,14 +67,25 @@ impl Alloc for ListLocalAlloc {
             return Err(Error::Memory);
         }
 
-        let begin = memory.as_ptr() as usize;
-        let pages = memory.len();
+        let mut local = Vec::with_capacity(cores);
+        local.resize_with(cores, || UnsafeCell::new(Local::default()));
+
+        self.pages = (memory.len() / cores) * cores;
+        self.memory = memory[..self.pages].as_ptr_range();
+        self.local = local.into();
+        Ok(())
+    }
+
+    #[cold]
+    fn free_all(&self) -> Result<()> {
+        let begin = self.memory.start as usize;
+        let cores = self.local.len();
+        let memory = unsafe { slice::from_raw_parts_mut(begin as *mut Page, self.pages) };
 
         // build core local free lists
-        let mut local = Vec::with_capacity(cores);
-        let p_core = pages / cores;
+        let p_core = self.pages / cores;
         for core in 0..cores {
-            let mut l = Local::default();
+            let l = unsafe { &mut *self.local[core].get() };
             // build linked list
             for i in core * p_core + 1..(core + 1) * p_core {
                 memory[i - 1]
@@ -84,12 +96,20 @@ impl Alloc for ListLocalAlloc {
                 .cast_mut::<Node>()
                 .set(null_mut());
             l.next.set((begin + core * p_core * Page::SIZE) as *mut _);
-            local.push(UnsafeCell::new(l));
+            l.counter = 0;
         }
+        Ok(())
+    }
 
-        self.pages = p_core * cores;
-        self.memory = memory[..p_core * cores].as_ptr_range();
-        self.local = local.into();
+    #[cold]
+    fn reserve_all(&self) -> Result<()> {
+        let cores = self.local.len();
+
+        for core in 0..cores {
+            let l = unsafe { &mut *self.local[core].get() };
+            l.next.set(null_mut());
+            l.counter = self.pages() / cores;
+        }
         Ok(())
     }
 

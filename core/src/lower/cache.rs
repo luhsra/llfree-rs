@@ -1,8 +1,10 @@
 use core::fmt::Write;
 use core::ops::Range;
 
+use alloc::boxed::Box;
+use alloc::slice;
 use alloc::string::String;
-use log::{error, warn, info};
+use log::{error, info, warn};
 
 use crate::entry::{Entry2, Entry2Pair};
 use crate::table::{ATable, Bitfield, Mapping};
@@ -20,6 +22,9 @@ use super::LowerAlloc;
 pub struct CacheLower<const T2N: usize> {
     pub begin: usize,
     pub pages: usize,
+    l1: Box<[Bitfield]>,
+    l2: Box<[ATable<Entry2, T2N>]>,
+    persistent: bool,
 }
 
 impl<const T2N: usize> LowerAlloc for CacheLower<T2N>
@@ -30,15 +35,44 @@ where
     const HUGE_ORDER: usize = Self::MAPPING.order(1);
     const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
 
-    fn new(_cores: usize, memory: &mut [Page]) -> Self {
-        let s1 = Self::MAPPING.num_pts(1, memory.len()) * Bitfield::SIZE;
-        let s1 = align_up(s1, ATable::<Entry2, T2N>::SIZE); // correct alignment
-        let s2 = Self::MAPPING.num_pts(2, memory.len()) * ATable::<Entry2, T2N>::SIZE;
-        let pages = div_ceil(s1 + s2, Page::SIZE);
-        Self {
-            begin: memory.as_ptr() as usize,
-            // level 1 and 2 tables are stored at the end of the NVM
-            pages: memory.len() - pages,
+    fn new(_cores: usize, memory: &mut [Page], persistent: bool) -> Self {
+        let n1 = Self::MAPPING.num_pts(1, memory.len());
+        let n2 = Self::MAPPING.num_pts(2, memory.len());
+        if persistent {
+            let s1 = n1 * Bitfield::SIZE;
+            let s1 = align_up(s1, ATable::<Entry2, T2N>::SIZE); // correct alignment
+            let s2 = n1 * ATable::<Entry2, T2N>::SIZE;
+
+            let pages = div_ceil(s1 + s2, Page::SIZE);
+
+            assert!(pages < memory.len());
+
+            let mut offset = memory.as_ptr() as usize + (memory.len() - pages) * Page::SIZE;
+
+            let l1 = unsafe { Box::from_raw(slice::from_raw_parts_mut(offset as *mut _, n1)) };
+
+            offset += n1 * Bitfield::SIZE;
+            offset = align_up(offset, ATable::<Entry2, T2N>::SIZE); // correct alignment
+
+            let l2 = unsafe { Box::from_raw(slice::from_raw_parts_mut(offset as *mut _, n2)) };
+
+            Self {
+                begin: memory.as_ptr() as usize,
+                pages: memory.len() - pages,
+                // level 1 and 2 tables are stored at the end of the NVM
+                l1,
+                l2,
+                persistent,
+            }
+        } else {
+            Self {
+                begin: memory.as_ptr() as usize,
+                pages: memory.len(),
+                // Allocate in volatile memory
+                l1: unsafe { Box::new_zeroed_slice(n1).assume_init() },
+                l2: unsafe { Box::new_zeroed_slice(n2).assume_init() },
+                persistent,
+            }
         }
     }
 
@@ -50,7 +84,7 @@ where
         self.begin as *const Page..(self.begin + self.pages * Page::SIZE) as *const Page
     }
 
-    fn clear(&self) {
+    fn free_all(&self) {
         // Init pt2
         for i in 0..Self::MAPPING.num_pts(2, self.pages) {
             let pt2 = self.pt2(i * Self::MAPPING.span(2));
@@ -79,6 +113,42 @@ where
         }
     }
 
+    fn reserve_all(&self) {
+        // Init pt2
+        for i in 0..Self::MAPPING.num_pts(2, self.pages) {
+            let pt2 = self.pt2(i * Self::MAPPING.span(2));
+            let end = (i + 1) * Self::MAPPING.span(2);
+            if self.pages >= end {
+                // Table is fully included in the memory range
+                // -> Allocated as full pages
+                pt2.fill(Entry2::new_page());
+            } else {
+                // Table is only partially included in the memory range
+                for j in 0..Self::MAPPING.len(2) {
+                    let end = i * Self::MAPPING.span(2) + (j + 1) * Self::MAPPING.span(1);
+                    if self.pages >= end {
+                        pt2.set(j, Entry2::new_page());
+                    } else {
+                        // Remainder is allocated as small pages
+                        pt2.set(j, Entry2::new_free(0));
+                    }
+                }
+            }
+        }
+        // Init pt1
+        for i in 0..Self::MAPPING.num_pts(1, self.pages) {
+            let pt1 = self.pt1(i * Self::MAPPING.span(1));
+            let end = (i + 1) * Self::MAPPING.span(1);
+            if self.pages >= end {
+                // Table is fully included in the memory range
+                pt1.fill(false);
+            } else {
+                // Table is only partially included in the memory range
+                pt1.fill(true);
+            }
+        }
+    }
+
     fn recover(&self, start: usize, deep: bool) -> Result<usize> {
         let mut pages = 0;
 
@@ -87,12 +157,11 @@ where
             let start = Self::MAPPING.page(2, start, i);
             if start > self.pages {
                 pt.set(i, Entry2::new());
+                continue;
             }
 
             let pte = pt.get(i);
-            if pte.page() {
-                pages += pte.free()
-            } else if deep && pte.free() > 0 {
+            if deep && pte.free() > 0 {
                 let p = self.recover_l1(start);
                 if pte.free() != p {
                     warn!("Invalid PTE2 start=0x{start:x} i{i}: {} != {p}", pte.free());
@@ -133,7 +202,11 @@ where
         let i2 = Self::MAPPING.idx(2, page);
         if (1 << order) <= u64::BITS {
             let old = pt2.get(i2);
-            if !old.page() && old.free() <= Self::MAPPING.span(1) - (1 << order) {
+            if old.page() {
+                // TODO: handle partial free of huge page
+                warn!("ignore partial free of huge page {page:x} o={order}");
+                Ok(())
+            } else if old.free() <= Self::MAPPING.span(1) - (1 << order) {
                 self.put_small(page, order)
             } else {
                 error!("Addr p={page:x} o={order} {old:?}");
@@ -199,12 +272,9 @@ where
     /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
     /// ```
     fn pt1(&self, page: usize) -> &Bitfield {
-        let mut offset = self.begin + self.pages * Page::SIZE;
-
         let i = page / Self::MAPPING.span(1);
         debug_assert!(i < Self::MAPPING.num_pts(1, self.pages));
-        offset += i * Bitfield::SIZE;
-        unsafe { &*(offset as *const Bitfield) }
+        &self.l1[i]
     }
 
     /// Returns the l2 page table that contains the `page`.
@@ -212,14 +282,9 @@ where
     /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
     /// ```
     fn pt2(&self, page: usize) -> &ATable<Entry2, T2N> {
-        let mut offset = self.begin + self.pages * Page::SIZE;
-        offset += Self::MAPPING.num_pts(1, self.pages) * Bitfield::SIZE;
-        offset = align_up(offset, ATable::<Entry2, T2N>::SIZE); // correct alignment
-
         let i = page / Self::MAPPING.span(2);
         debug_assert!(i < Self::MAPPING.num_pts(2, self.pages));
-        offset += i * ATable::<Entry2, T2N>::SIZE;
-        unsafe { &*(offset as *mut ATable<Entry2, T2N>) }
+        &self.l2[i]
     }
 
     /// Returns the l2 page table with pair entries that can be updated at once.
@@ -387,6 +452,15 @@ where
     }
 }
 
+impl<const T2N: usize> Drop for CacheLower<T2N> {
+    fn drop(&mut self) {
+        if self.persistent {
+            Box::leak(core::mem::take(&mut self.l1));
+            Box::leak(core::mem::take(&mut self.l2));
+        }
+    }
+}
+
 #[cfg(feature = "stop")]
 #[cfg(all(test, feature = "std"))]
 mod test {
@@ -402,8 +476,8 @@ mod test {
     use crate::thread;
     use crate::util::{logging, Page, WyRand};
 
-    const T2N: usize = 128;
-    const MAPPING: Mapping<2> = CacheLower::<T2N>::MAPPING;
+    type Allocator = CacheLower<64>;
+    const MAPPING: Mapping<2> = Allocator::MAPPING;
 
     fn count(pt: &Bitfield) -> usize {
         let mut pages = 0;
@@ -429,8 +503,8 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
-            lower.clear();
+            let lower = Arc::new(Allocator::new(2, &mut buffer, true));
+            lower.free_all();
             lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
@@ -465,8 +539,8 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
-            lower.clear();
+            let lower = Arc::new(Allocator::new(2, &mut buffer, true));
+            lower.free_all();
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
@@ -498,8 +572,8 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
-            lower.clear();
+            let lower = Arc::new(Allocator::new(2, &mut buffer, true));
+            lower.free_all();
 
             for _ in 0..MAPPING.span(1) - 1 {
                 lower.get(0, 0).unwrap();
@@ -536,8 +610,8 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
-            lower.clear();
+            let lower = Arc::new(Allocator::new(2, &mut buffer, true));
+            lower.free_all();
 
             pages[0] = lower.get(0, 0).unwrap();
             pages[1] = lower.get(0, 0).unwrap();
@@ -572,8 +646,8 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
-            lower.clear();
+            let lower = Arc::new(Allocator::new(2, &mut buffer, true));
+            lower.free_all();
 
             for page in &mut pages {
                 *page = lower.get(0, 0).unwrap();
@@ -613,8 +687,8 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
-            lower.clear();
+            let lower = Arc::new(Allocator::new(2, &mut buffer, true));
+            lower.free_all();
 
             for page in &mut pages[..MAPPING.span(1) - 1] {
                 *page = lower.get(0, 0).unwrap();
@@ -668,8 +742,8 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
-            lower.clear();
+            let lower = Arc::new(Allocator::new(2, &mut buffer, true));
+            lower.free_all();
             lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
@@ -706,8 +780,8 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(CacheLower::<T2N>::new(2, &mut buffer));
-            lower.clear();
+            let lower = Arc::new(Allocator::new(2, &mut buffer, true));
+            lower.free_all();
 
             pages[0] = lower.get(0, 1).unwrap();
             pages[1] = lower.get(0, 2).unwrap();
@@ -733,14 +807,14 @@ mod test {
     fn different_orders() {
         logging();
 
-        const MAX_ORDER: usize = CacheLower::<T2N>::MAX_ORDER;
-        const HUGE_ORDER: usize = CacheLower::<T2N>::HUGE_ORDER;
+        const MAX_ORDER: usize = Allocator::MAX_ORDER;
+        const HUGE_ORDER: usize = Allocator::HUGE_ORDER;
         const MAX_LARGE_ORDER: usize = 6;
         let mut buffer = vec![Page::new(); MAPPING.span(2)];
 
         thread::pin(0);
-        let lower = Arc::new(CacheLower::<T2N>::new(1, &mut buffer));
-        lower.clear();
+        let lower = Arc::new(Allocator::new(1, &mut buffer, true));
+        lower.free_all();
 
         assert_eq!(lower.dbg_allocated_pages(), 0);
 
@@ -773,5 +847,25 @@ mod test {
         }
 
         assert_eq!(lower.dbg_allocated_pages(), 0);
+    }
+
+    #[test]
+    fn init_reserved() {
+        logging();
+
+        const MAX_ORDER: usize = Allocator::MAX_ORDER;
+
+        let mut buffer = vec![Page::new(); MAPPING.span(2) - 1];
+
+        let lower = Arc::new(Allocator::new(1, &mut buffer, false));
+        lower.reserve_all();
+
+        assert_eq!(lower.dbg_allocated_pages(), MAPPING.span(2) - 1);
+
+        for (i, _) in buffer.chunks_exact(1 << MAX_ORDER).enumerate() {
+            lower.put(i * (1 << MAX_ORDER), MAX_ORDER).unwrap();
+        }
+
+        assert_eq!(lower.dbg_allocated_pages(), (1 << MAX_ORDER) - 1);
     }
 }

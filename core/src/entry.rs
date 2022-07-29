@@ -146,6 +146,7 @@ impl Entry2 {
     pub fn new_page() -> Self {
         Self::new().with_page(true)
     }
+    #[inline]
     pub fn new_free(free: usize) -> Self {
         Self::new().with_free(free)
     }

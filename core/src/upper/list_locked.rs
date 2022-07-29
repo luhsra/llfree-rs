@@ -4,6 +4,7 @@ use core::ptr::{null, null_mut};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
+use alloc::slice;
 use alloc::vec::Vec;
 use log::{error, info};
 use spin::mutex::TicketMutex;
@@ -58,7 +59,7 @@ impl Default for ListLockedAlloc {
 
 impl Alloc for ListLockedAlloc {
     #[cold]
-    fn init(&mut self, cores: usize, memory: &mut [Page], _overwrite: bool) -> Result<()> {
+    fn init(&mut self, cores: usize, memory: &mut [Page], _persistent: bool) -> Result<()> {
         info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -69,19 +70,7 @@ impl Alloc for ListLockedAlloc {
             return Err(Error::Memory);
         }
 
-        let begin = memory.as_ptr() as usize;
-        let pages = memory.len();
-
-        // build free lists
-        for i in 1..pages {
-            memory[i - 1]
-                .cast_mut::<Node>()
-                .set((begin + i * Page::SIZE) as *mut _);
-        }
-        memory[pages - 1].cast_mut::<Node>().set(null_mut());
-
         self.memory = memory.as_ptr_range();
-        self.next = TicketMutex::new(Node(begin as _));
 
         let mut local = Vec::with_capacity(cores);
         local.resize_with(cores, || LocalCounter {
@@ -89,6 +78,33 @@ impl Alloc for ListLockedAlloc {
         });
         self.local = local.into();
 
+        Ok(())
+    }
+
+    #[cold]
+    fn free_all(&self) -> Result<()> {
+        let begin = self.memory.start as usize;
+        let memory =
+            unsafe { slice::from_raw_parts_mut(self.memory.start as *mut Page, self.pages()) };
+        // build free lists
+        for i in 1..self.pages() {
+            memory[i - 1]
+                .cast_mut::<Node>()
+                .set((begin + i * Page::SIZE) as *mut _);
+        }
+        memory[self.pages() - 1].cast_mut::<Node>().set(null_mut());
+
+        *self.next.lock() = Node(begin as _);
+        Ok(())
+    }
+
+    fn reserve_all(&self) -> Result<()> {
+        for local in self.local.iter() {
+            local
+                .counter
+                .store(self.pages() / self.local.len(), Ordering::Relaxed);
+        }
+        *self.next.lock() = Node::new();
         Ok(())
     }
 

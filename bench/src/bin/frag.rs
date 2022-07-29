@@ -78,7 +78,8 @@ fn main() {
 
     // Map memory for the allocator and initialize it
     let mut mapping = mapping(0x1000_0000_0000, pages, dax).unwrap();
-    alloc.init(threads, &mut mapping, true).unwrap();
+    alloc.init(threads, &mut mapping, false).unwrap();
+    alloc.free_all().unwrap();
 
     // Operate on half of the avaliable memory
     let allocs = (pages / 2) / (1 << order) / threads;
