@@ -219,8 +219,14 @@ where
                 Entry2::new_page(),
                 Entry2::new_free(Self::MAPPING.span(1)),
             ) {
-                error!("Addr {page:x} o={order} {old:?}");
-                Err(Error::Address)
+                if order < Self::HUGE_ORDER {
+                    // TODO: handle partial free of huge page
+                    warn!("ignore partial free of huge page {page:x} o={order}");
+                    Ok(())
+                } else {
+                    error!("Addr p={page:x} o={order} {old:?}");
+                    Err(Error::Address)
+                }
             } else {
                 Ok(())
             }
