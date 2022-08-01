@@ -182,6 +182,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
 
     fn reserve_all(&self) -> Result<()> {
         info!("reserve all p={}", self.pages());
+        self.lower.reserve_all();
 
         // Set all entries to zero
         let pte3_num = Self::MAPPING.num_pts(2, self.pages());
