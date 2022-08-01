@@ -1,6 +1,6 @@
 use core::fmt;
 use core::ops::Index;
-use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::*;
 
 use log::error;
 
@@ -127,6 +127,7 @@ macro_rules! impl_atomic {
     };
 }
 
+impl_atomic!(usize, AtomicUsize);
 impl_atomic!(u64, AtomicU64);
 impl_atomic!(u32, AtomicU32);
 impl_atomic!(u16, AtomicU16);
@@ -250,6 +251,9 @@ where
                     dbg.entry(&i);
                     let elem = self.1[i].load();
                     if let Some(next) = elem.next() {
+                        if i == next {
+                            break;
+                        }
                         i = next;
                     } else {
                         ended = true;

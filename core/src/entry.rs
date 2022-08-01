@@ -43,7 +43,7 @@ impl Entry3 {
     /// Decrements the free pages counter.
     #[inline]
     pub fn dec(self, num_pages: usize) -> Option<Entry3> {
-        if self.free() >= num_pages {
+        if self.idx() != Self::IDX_MAX && self.free() >= num_pages {
             Some(self.with_free(self.free() - num_pages).with_reserved(true))
         } else {
             None
@@ -107,12 +107,12 @@ impl Entry3 {
     /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
     #[inline]
-    pub fn unreserve_add(self, other: Entry3, max: usize) -> Option<Entry3> {
-        let pages = self.free() + other.free();
+    pub fn unreserve_add(self, add: usize, max: usize) -> Option<Entry3> {
+        let pages = self.free() + add;
         if self.reserved() && pages <= max {
             Some(self.with_free(pages).with_reserved(false))
         } else {
-            error!("{self:?} + {other:?}, {pages} <= {max}");
+            error!("{self:?} + {add}, {pages} <= {max}");
             None
         }
     }

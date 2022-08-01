@@ -242,14 +242,17 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
             return Err(Error::Memory);
         }
 
-        let start_a = self.local[core].start();
+        let start_a = &self.local[core].start;
+        let mut start = start_a.load();
 
-        if *start_a == usize::MAX {
-            *start_a = self.reserve(order)?;
+        if start == usize::MAX {
+            start = self.reserve(order)?;
+            start_a.store(start);
         } else {
-            let i = *start_a / Self::MAPPING.span(2);
+            let i = start / Self::MAPPING.span(2);
             if self[i].update(|v| v.dec(1 << order)).is_err() {
-                *start_a = self.reserve(order)?;
+                start = self.reserve(order)?;
+                start_a.store(start);
                 if self[i].update(Entry3::unreserve).is_err() {
                     error!("Unreserve failed");
                     return Err(Error::Corruption);
@@ -259,19 +262,19 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
 
         // TODO: Better handle: Reserve + Failed Alloc (fragmentation) -> Search through partial...
         for _ in 0..CAS_RETRIES {
-            match self.lower.get(*start_a, order) {
+            match self.lower.get(start, order) {
                 Ok(page) => {
                     // small pages
                     if order < log2(64) {
-                        *start_a = page;
+                        start_a.store(page);
                     }
                     return Ok(unsafe { self.lower.memory().start.add(page as _) } as u64);
                 }
                 Err(Error::Memory) => {
-                    let i = *start_a / Self::MAPPING.span(2);
+                    let i = start / Self::MAPPING.span(2);
                     let max = self
                         .pages()
-                        .saturating_sub(Self::MAPPING.round(2, *start_a))
+                        .saturating_sub(Self::MAPPING.round(2, start))
                         .min(Self::MAPPING.span(2));
                     match self[i].update(|v| v.inc(1 << order, max)) {
                         Err(e) => {
@@ -279,7 +282,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
                             return Err(Error::Corruption);
                         }
                         Ok(pte3) => {
-                            *start_a = self.reserve(order)?;
+                            start_a.store(self.reserve(order)?);
                             if self[i].update(Entry3::unreserve).is_err() {
                                 error!("Unreserve failed");
                                 return Err(Error::Corruption);

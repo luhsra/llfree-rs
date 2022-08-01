@@ -4,6 +4,7 @@ use core::fmt;
 
 use alloc::string::String;
 
+use crate::atomic::Atomic;
 use crate::entry::{Entry2, Entry3};
 use crate::table::{Mapping, PT_LEN};
 use crate::util::Page;
@@ -99,39 +100,34 @@ pub fn name<A: Alloc + ?Sized>() -> String {
 }
 
 /// Per core data.
-/// # Safety
-/// This should only be accessed from the corresponding (virtual) CPU core!
-#[repr(transparent)]
-pub struct Local<const L: usize>(UnsafeCell<Inner<L>>);
+pub struct Local<const L: usize> {
+    start: Atomic<usize>,
+    pte: Atomic<Entry3>,
+    /// # Safety
+    /// This should only be accessed from the corresponding (virtual) CPU core!
+    inner: UnsafeCell<Inner<L>>,
+}
 
 #[repr(align(64))]
 struct Inner<const L: usize> {
-    start: usize,
-    pte: Entry3,
     frees: [usize; L],
     frees_i: usize,
 }
 
 impl<const L: usize> Local<L> {
     fn new() -> Self {
-        Self(UnsafeCell::new(Inner {
-            start: usize::MAX,
-            pte: Entry3::new().with_idx(Entry3::IDX_MAX),
-            frees_i: 0,
-            frees: [usize::MAX; L],
-        }))
+        Self {
+            start: Atomic::new(usize::MAX),
+            pte: Atomic::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
+            inner: UnsafeCell::new(Inner {
+                frees_i: 0,
+                frees: [usize::MAX; L],
+            }),
+        }
     }
     #[allow(clippy::mut_from_ref)]
     fn p(&self) -> &mut Inner<L> {
-        unsafe { &mut *self.0.get() }
-    }
-    #[allow(clippy::mut_from_ref)]
-    pub fn start(&self) -> &mut usize {
-        &mut self.p().start
-    }
-    #[allow(clippy::mut_from_ref)]
-    pub fn pte(&self) -> &mut Entry3 {
-        &mut self.p().pte
+        unsafe { &mut *self.inner.get() }
     }
     /// Add a chunk (subtree) id to the history of chunks.
     pub fn frees_push(&self, chunk: usize) {
@@ -153,8 +149,8 @@ impl<const L: usize> Local<L> {
 impl<const L: usize> fmt::Debug for Local<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Local")
-            .field("start", &self.p().start)
-            .field("pte", &self.p().pte)
+            .field("start", &self.start.load())
+            .field("pte", &self.pte.load())
             .field("frees", &self.p().frees)
             .field("frees_i", &self.p().frees_i)
             .finish()
@@ -322,7 +318,11 @@ mod test {
             alloc.put(0, *page, 0).unwrap();
         }
 
-        assert_eq!(alloc.dbg_allocated_pages(), 1 + pages.len() - FREE_NUM);
+        assert_eq!(
+            alloc.dbg_allocated_pages(),
+            1 + pages.len() - FREE_NUM,
+            "{alloc:?}"
+        );
 
         // Realloc
         for page in &mut pages[..FREE_NUM] {
@@ -600,6 +600,68 @@ mod test {
             assert!(mapping.as_ptr_range().contains(&(p1 as _)));
             assert!(p1 != p2);
         }
+    }
+
+    #[test]
+    fn less_mem() {
+        logging();
+
+        const THREADS: usize = 4;
+        const PAGES: usize = 4096;
+        const ALLOC_PER_THREAD: usize = PAGES / THREADS - THREADS;
+
+        let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
+
+        let alloc = Arc::new({
+            let mut a = Allocator::default();
+            a.init(THREADS, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
+            a
+        });
+
+        // Stress test
+        let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let pages_begin = pages.as_ptr() as usize;
+        let timer = Instant::now();
+
+        let a = alloc.clone();
+        thread::parallel(THREADS as _, move |t| {
+            thread::pin(t);
+            barrier.wait();
+
+            for i in 0..ALLOC_PER_THREAD {
+                let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
+                *dst = a.get(t, 0).unwrap();
+            }
+        });
+        warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
+
+        assert_eq!(alloc.dbg_allocated_pages(), pages.len());
+        warn!("allocated pages: {}", pages.len());
+
+        // Check that the same page was not allocated twice
+        pages.sort_unstable();
+        for i in 0..pages.len() - 1 {
+            let p1 = pages[i];
+            let p2 = pages[i + 1];
+            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
+            assert!(p1 != p2);
+        }
+
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let a = alloc.clone();
+        thread::parallel(THREADS, move |t| {
+            thread::pin(t);
+            barrier.wait();
+
+            for i in 0..ALLOC_PER_THREAD {
+                let addr = unsafe { *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
+                a.put(t, addr, 0).unwrap();
+            }
+        });
+
+        assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
 
     #[test]
