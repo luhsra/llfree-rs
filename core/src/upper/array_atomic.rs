@@ -296,8 +296,8 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
             }
         }
 
-        error!("Exceeding retries");
-        Err(Error::CAS)
+        error!("Exceeding retries {self:?}");
+        Err(Error::Memory)
     }
 
     #[inline(never)]
@@ -503,7 +503,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             }
         }
 
-        error!("No memory {self:?}");
+        error!("reserve: no memory");
         Err(Error::Memory)
     }
 
