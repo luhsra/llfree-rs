@@ -1,4 +1,5 @@
 use core::fmt;
+use core::mem::{align_of, size_of};
 
 use bitfield_struct::bitfield;
 use log::error;
@@ -190,8 +191,11 @@ impl fmt::Debug for Entry2 {
 
 /// Pair of level 2 entries that can be changed at once.
 #[derive(Debug, Clone, Copy)]
-#[repr(packed)]
+#[repr(align(4))]
 pub struct Entry2Pair(pub Entry2, pub Entry2);
+
+const _: () = assert!(size_of::<Entry2Pair>() == 2 * size_of::<Entry2>());
+const _: () = assert!(align_of::<Entry2Pair>() == size_of::<Entry2Pair>());
 
 impl Entry2Pair {
     pub fn both<F: Fn(Entry2) -> Option<Entry2>>(self, f: F) -> Option<Entry2Pair> {
