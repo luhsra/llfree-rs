@@ -6,43 +6,46 @@ use alloc::slice;
 use alloc::string::String;
 use log::{error, info, warn};
 
-use crate::entry::{Entry2, Entry2Pair};
+use crate::entry::{SEntry2, SEntry2T2, SEntry2T4, SEntry2T8, SEntry2Tuple};
 use crate::table::{ATable, Bitfield, Mapping};
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_up, div_ceil, Page};
+use crate::util::{align_up, div_ceil, log2, Page};
 use crate::{Error, Result};
 
 use super::LowerAlloc;
 
-type Table1 = Bitfield<8>;
+type Table1 = Bitfield<2>;
 
 /// Level 2 page allocator.
 /// ```text
 /// NVRAM: [ Pages | PT1s + padding | PT2s | Meta ]
 /// ```
 #[derive(Default, Debug)]
-pub struct CacheLower<const T2N: usize> {
+pub struct AtomLower<const T2N: usize> {
     pub begin: usize,
     pub pages: usize,
     l1: Box<[Table1]>,
-    l2: Box<[ATable<Entry2, T2N>]>,
+    l2: Box<[ATable<SEntry2, T2N>]>,
     persistent: bool,
 }
 
-impl<const T2N: usize> LowerAlloc for CacheLower<T2N>
+impl<const T2N: usize> LowerAlloc for AtomLower<T2N>
 where
+    [(); T2N / 1]:,
     [(); T2N / 2]:,
+    [(); T2N / 4]:,
+    [(); T2N / 8]:,
 {
-    const MAPPING: Mapping<2> = Mapping([Table1::ORDER, ATable::<Entry2, T2N>::ORDER]);
-    const MAX_ORDER: usize = Self::MAPPING.order(1) + 1;
+    const MAPPING: Mapping<2> = Mapping([Table1::ORDER, ATable::<SEntry2, T2N>::ORDER]);
+    const MAX_ORDER: usize = Self::MAPPING.order(1) + 3;
 
     fn new(_cores: usize, memory: &mut [Page], persistent: bool) -> Self {
         let n1 = Self::MAPPING.num_pts(1, memory.len());
         let n2 = Self::MAPPING.num_pts(2, memory.len());
         if persistent {
             let s1 = n1 * Table1::SIZE;
-            let s1 = align_up(s1, ATable::<Entry2, T2N>::SIZE); // correct alignment
-            let s2 = n1 * ATable::<Entry2, T2N>::SIZE;
+            let s1 = align_up(s1, ATable::<SEntry2, T2N>::SIZE); // correct alignment
+            let s2 = n1 * ATable::<SEntry2, T2N>::SIZE;
 
             let pages = div_ceil(s1 + s2, Page::SIZE);
 
@@ -53,7 +56,7 @@ where
             let l1 = unsafe { Box::from_raw(slice::from_raw_parts_mut(offset as *mut _, n1)) };
 
             offset += n1 * Table1::SIZE;
-            offset = align_up(offset, ATable::<Entry2, T2N>::SIZE); // correct alignment
+            offset = align_up(offset, ATable::<SEntry2, T2N>::SIZE); // correct alignment
 
             let l2 = unsafe { Box::from_raw(slice::from_raw_parts_mut(offset as *mut _, n2)) };
 
@@ -90,12 +93,12 @@ where
         for i in 0..Self::MAPPING.num_pts(2, self.pages) {
             let pt2 = self.pt2(i * Self::MAPPING.span(2));
             if i + 1 < Self::MAPPING.num_pts(2, self.pages) {
-                pt2.fill(Entry2::new().with_free(Self::MAPPING.span(1)));
+                pt2.fill(SEntry2::new().with_free(Self::MAPPING.span(1)));
             } else {
                 for j in 0..Self::MAPPING.len(2) {
                     let page = i * Self::MAPPING.span(2) + j * Self::MAPPING.span(1);
                     let max = Self::MAPPING.span(1).min(self.pages.saturating_sub(page));
-                    pt2.set(j, Entry2::new().with_free(max));
+                    pt2.set(j, SEntry2::new().with_free(max));
                 }
             }
         }
@@ -122,16 +125,16 @@ where
             if self.pages >= end {
                 // Table is fully included in the memory range
                 // -> Allocated as full pages
-                pt2.fill(Entry2::new_page());
+                pt2.fill(SEntry2::new_page());
             } else {
                 // Table is only partially included in the memory range
                 for j in 0..Self::MAPPING.len(2) {
                     let end = i * Self::MAPPING.span(2) + (j + 1) * Self::MAPPING.span(1);
                     if self.pages >= end {
-                        pt2.set(j, Entry2::new_page());
+                        pt2.set(j, SEntry2::new_page());
                     } else {
                         // Remainder is allocated as small pages
-                        pt2.set(j, Entry2::new_free(0));
+                        pt2.set(j, SEntry2::new_free(0));
                     }
                 }
             }
@@ -157,7 +160,7 @@ where
         for i in 0..Self::MAPPING.len(2) {
             let start = Self::MAPPING.page(2, start, i);
             if start > self.pages {
-                pt.set(i, Entry2::new());
+                pt.set(i, SEntry2::new());
                 continue;
             }
 
@@ -180,12 +183,18 @@ where
     fn get(&self, start: usize, order: usize) -> Result<usize> {
         debug_assert!(order <= Self::MAX_ORDER);
 
-        if order > Self::MAPPING.order(1) {
-            self.get_max(start)
-        } else if 1 << order > u64::BITS {
-            self.get_huge(start)
-        } else {
+        if order < Self::MAPPING.order(1) {
             self.get_small(start, order)
+        } else if order == Self::MAPPING.order(1) {
+            self.get_huge_n::<SEntry2>(start)
+        } else if order == Self::MAPPING.order(1) + 1 {
+            self.get_huge_n::<SEntry2T2>(start)
+        } else if order == Self::MAPPING.order(1) + 2 {
+            self.get_huge_n::<SEntry2T4>(start)
+        } else if order == Self::MAPPING.order(1) + 3 {
+            self.get_huge_n::<SEntry2T8>(start)
+        } else {
+            Err(Error::Address)
         }
     }
 
@@ -195,16 +204,25 @@ where
         debug_assert!(page < self.pages);
         stop!();
 
-        if order > Self::MAPPING.order(1) {
-            return self.put_max(page, order);
-        }
-
-        let pt2 = self.pt2(page);
-        let i2 = Self::MAPPING.idx(2, page);
-        if (1 << order) <= u64::BITS {
+        if order >= Self::MAPPING.order(1) {
+            return if order == Self::MAPPING.order(1) {
+                self.put_huge_n::<SEntry2>(page)
+            } else if order == Self::MAPPING.order(1) + 1 {
+                self.put_huge_n::<SEntry2T2>(page)
+            } else if order == Self::MAPPING.order(1) + 2 {
+                self.put_huge_n::<SEntry2T4>(page)
+            } else if order == Self::MAPPING.order(1) + 3 {
+                self.put_huge_n::<SEntry2T8>(page)
+            } else {
+                Err(Error::Address)
+            };
+        } else {
+            let pt2 = self.pt2(page);
+            let i2 = Self::MAPPING.idx(2, page);
             let old = pt2.get(i2);
             if old.page() {
                 // TODO: handle partial free of huge page
+                // Order 6 should work -> set other half to 1, clear page flag
                 warn!("ignore partial free of huge page {page:x} o={order}");
                 Ok(())
             } else if old.free() <= Self::MAPPING.span(1) - (1 << order) {
@@ -212,24 +230,6 @@ where
             } else {
                 error!("Addr p={page:x} o={order} {old:?}");
                 Err(Error::Address)
-            }
-        } else {
-            // try free huge
-            if let Err(old) = pt2.cas(
-                i2,
-                Entry2::new_page(),
-                Entry2::new_free(Self::MAPPING.span(1)),
-            ) {
-                if order < Self::MAPPING.order(1) {
-                    // TODO: handle partial free of huge page
-                    warn!("ignore partial free of huge page {page:x} o={order}");
-                    Ok(())
-                } else {
-                    error!("Addr p={page:x} o={order} {old:?}");
-                    Err(Error::Address)
-                }
-            } else {
-                Ok(())
             }
         }
     }
@@ -262,17 +262,21 @@ where
     fn dbg_for_each_huge_page<F: FnMut(usize)>(&self, mut f: F) {
         for i2 in 0..(self.pages / Self::MAPPING.span(2)) {
             let start = i2 * Self::MAPPING.span(2);
-            let pt2 = self.pt2(start);
-            for i1 in Self::MAPPING.range(2, start..self.pages) {
-                f(pt2.get(i1).free());
+            let pt2 = self.pt2_t::<SEntry2T4>(start);
+            for i1 in Self::MAPPING.range(2, start..self.pages).step_by(4) {
+                let SEntry2T4([e0, e1, e2, e3]) = pt2.get(i1 / 4);
+                f(e0.free() + e1.free() + e2.free() + e3.free());
             }
         }
     }
 }
 
-impl<const T2N: usize> CacheLower<T2N>
+impl<const T2N: usize> AtomLower<T2N>
 where
+    [(); T2N / 1]:,
     [(); T2N / 2]:,
+    [(); T2N / 4]:,
+    [(); T2N / 8]:,
 {
     /// Returns the l1 page table that contains the `page`.
     /// ```text
@@ -288,16 +292,19 @@ where
     /// ```text
     /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
     /// ```
-    fn pt2(&self, page: usize) -> &ATable<Entry2, T2N> {
+    fn pt2(&self, page: usize) -> &ATable<SEntry2, T2N> {
         let i = page / Self::MAPPING.span(2);
         debug_assert!(i < Self::MAPPING.num_pts(2, self.pages));
         &self.l2[i]
     }
 
     /// Returns the l2 page table with pair entries that can be updated at once.
-    fn pt2_pair(&self, page: usize) -> &ATable<Entry2Pair, { T2N / 2 }> {
+    fn pt2_t<T: SEntry2Tuple>(&self, page: usize) -> &ATable<T, { T2N / T::N }>
+    where
+        [(); T2N / T::N]:,
+    {
         let pt2 = self.pt2(page);
-        unsafe { &*((pt2 as *const ATable<Entry2, T2N>) as *const ATable<Entry2Pair, { T2N / 2 }>) }
+        unsafe { &*((pt2 as *const ATable<SEntry2, T2N>) as *const ATable<T, { T2N / T::N }>) }
     }
 
     fn recover_l1(&self, start: usize) -> usize {
@@ -361,40 +368,27 @@ where
         Err(Error::Memory)
     }
 
-    /// Allocate huge page
-    fn get_huge(&self, start: usize) -> Result<usize> {
-        let pt2 = self.pt2(start);
-        for _ in 0..CAS_RETRIES {
-            for page in Self::MAPPING.iterate(2, start) {
-                let i2 = Self::MAPPING.idx(2, page);
-                if pt2
-                    .update(i2, |v| v.mark_huge(Self::MAPPING.span(1)))
-                    .is_ok()
-                {
-                    return Ok(Self::MAPPING.page(2, start, i2));
-                }
-            }
-        }
-        info!("Nothing found o=7..9");
-        Err(Error::Memory)
-    }
-
     /// Allocate multiple huge pages
-    fn get_max(&self, start: usize) -> Result<usize> {
-        let pt2_pair = self.pt2_pair(start);
+    fn get_huge_n<T: SEntry2Tuple>(&self, start: usize) -> Result<usize>
+    where
+        [(); T2N / T::N]:,
+    {
+        let order = Table1::ORDER + log2(T::N);
+        let pt2 = self.pt2_t::<T>(start);
         for _ in 0..CAS_RETRIES {
-            for page in Self::MAPPING.iterate(2, start).step_by(2) {
-                let i2 = Self::MAPPING.idx(2, page) / 2;
-                if pt2_pair
+            for page in Self::MAPPING.iterate(2, start).step_by(T::N) {
+                let i2 = Self::MAPPING.idx(2, page) / T::N;
+                if pt2
                     .update(i2, |v| v.all(|v| v.mark_huge(Self::MAPPING.span(1))))
                     .is_ok()
                 {
-                    info!("Alloc o=10 i={i2}");
-                    return Ok(Self::MAPPING.page(2, start, i2 * 2));
+                    // TODO: set pt1s to 1?
+                    info!("Alloc o={order} i={i2}");
+                    return Ok(Self::MAPPING.page(2, start, i2 * T::N));
                 }
             }
         }
-        warn!("Nothing found o=10");
+        warn!("Nothing found o={order}");
         Err(Error::Memory)
     }
 
@@ -420,17 +414,21 @@ where
         Ok(())
     }
 
-    pub fn put_max(&self, page: usize, order: usize) -> Result<()> {
-        let pt2_pair = self.pt2_pair(page);
-        let i2 = Self::MAPPING.idx(2, page) / 2;
+    pub fn put_huge_n<T: SEntry2Tuple>(&self, page: usize) -> Result<()>
+    where
+        [(); T2N / T::N]:,
+    {
+        let order = Table1::ORDER + log2(T::N);
+        let pt2 = self.pt2_t::<T>(page);
+        let i2 = Self::MAPPING.idx(2, page) / T::N;
         info!("Put o={order} i={i2}");
-        if let Err(old) = pt2_pair.cas(
+
+        // TODO: set pt1s to 1?
+
+        if let Err(old) = pt2.cas(
             i2,
-            Entry2Pair(Entry2::new_page(), Entry2::new_page()),
-            Entry2Pair(
-                Entry2::new_free(Self::MAPPING.span(1)),
-                Entry2::new_free(Self::MAPPING.span(1)),
-            ),
+            T::new(SEntry2::new_page()),
+            T::new(SEntry2::new_free(Self::MAPPING.span(1))),
         ) {
             error!("Addr {page:x} o={order} {old:?} i={i2}");
             Err(Error::Address)
@@ -459,7 +457,7 @@ where
     }
 }
 
-impl<const T2N: usize> Drop for CacheLower<T2N> {
+impl<const T2N: usize> Drop for AtomLower<T2N> {
     fn drop(&mut self) {
         if self.persistent {
             Box::leak(core::mem::take(&mut self.l1));
@@ -474,16 +472,16 @@ mod test {
     use std::sync::Arc;
 
     use alloc::vec::Vec;
-    use log::warn;
+    use log::{debug, info, warn};
 
-    use super::{CacheLower, Table1};
+    use super::{AtomLower, Table1};
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
     use crate::table::Mapping;
     use crate::thread;
     use crate::util::{logging, Page, WyRand};
 
-    type Allocator = CacheLower<64>;
+    type Allocator = AtomLower<128>;
     const MAPPING: Mapping<2> = Allocator::MAPPING;
 
     fn count(pt: &Table1) -> usize {
@@ -497,6 +495,12 @@ mod test {
     #[test]
     fn alloc_normal() {
         logging();
+
+        println!("{:?}", log::STATIC_MAX_LEVEL);
+        println!("{:?}", log::max_level());
+        debug!("debug");
+        info!("info");
+        warn!("warn");
 
         let orders = [
             vec![0, 0, 1, 1],
@@ -815,7 +819,6 @@ mod test {
         logging();
 
         const MAX_ORDER: usize = Allocator::MAX_ORDER;
-        const MAX_LARGE_ORDER: usize = 6;
         let mut buffer = vec![Page::new(); MAPPING.span(2)];
 
         thread::pin(0);
@@ -829,13 +832,9 @@ mod test {
         let mut num_pages = 0;
         let mut pages = Vec::new();
         for order in 0..=MAX_ORDER {
-            for _ in 0..1 << (MAX_ORDER - order) {
+            for _ in 0..1usize << (MAX_ORDER - order) {
                 pages.push((order, 0));
-                num_pages += if order <= MAX_LARGE_ORDER {
-                    1 << order
-                } else {
-                    MAPPING.span(1) * ((order - 1) / Allocator::MAPPING.order(1) + 1)
-                };
+                num_pages += 1 << order;
             }
         }
         rng.shuffle(&mut pages);

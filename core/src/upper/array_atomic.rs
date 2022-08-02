@@ -9,7 +9,7 @@ use log::{error, info, warn};
 
 use super::{Alloc, Local, MAGIC, MAX_PAGES};
 use crate::atomic::{ANode, AStack, AStackDbg, Atomic};
-use crate::entry::{Entry2, Entry3};
+use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::table::Mapping;
 use crate::upper::CAS_RETRIES;
@@ -407,8 +407,8 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
     }
 
     #[cold]
-    fn dbg_for_each_pte2(&self, f: fn(Entry2)) {
-        self.lower.dbg_for_each_pte2(f)
+    fn dbg_for_each_huge_page(&self, f: fn(usize)) {
+        self.lower.dbg_for_each_huge_page(f)
     }
 
     #[cold]

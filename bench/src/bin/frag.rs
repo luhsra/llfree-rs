@@ -6,7 +6,6 @@ use std::sync::{Arc, Barrier, Mutex};
 use clap::Parser;
 use log::warn;
 
-use nvalloc::entry::Entry2;
 use nvalloc::lower::*;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
@@ -40,7 +39,7 @@ struct Args {
     stride: usize,
 }
 
-type Allocator = ArrayAtomicAlloc<CacheLower<64>>;
+type Allocator = ArrayAtomicAlloc<AtomLower<128>>;
 
 fn main() {
     let Args {
@@ -169,14 +168,14 @@ fn main() {
 
 static mut FREE_PAGES: [usize; PT_LEN + 1] = [0; PT_LEN + 1];
 
-fn count_pte2(pte: Entry2) {
-    unsafe { FREE_PAGES[pte.free()] += 1 };
+fn count_pte2(free: usize) {
+    unsafe { FREE_PAGES[free] += 1 };
 }
 
 /// count and output stats
 fn stats(out: &mut File, alloc: &Allocator, i: usize) -> io::Result<()> {
     unsafe { FREE_PAGES.fill(0) };
-    alloc.dbg_for_each_pte2(count_pte2);
+    alloc.dbg_for_each_huge_page(count_pte2);
 
     write!(out, "{i},{},{}", alloc.pages(), alloc.dbg_allocated_pages(),)?;
     for b in unsafe { &FREE_PAGES } {

@@ -88,13 +88,16 @@ fn main() {
     type C512 = CacheLower<512>;
     type C128 = CacheLower<128>;
     type C64 = CacheLower<64>;
+    type A512 = AtomLower<512>;
+    type A256 = AtomLower<256>;
+    type A128 = AtomLower<128>;
     let allocs: [Arc<dyn Alloc>; 8] = [
-        Arc::new(ArrayAlignedAlloc::<CacheAligned, C64>::default()),
-        Arc::new(ArrayAlignedAlloc::<CacheAligned, C128>::default()),
-        Arc::new(ArrayAlignedAlloc::<CacheAligned, C512>::default()),
         Arc::new(ArrayAtomicAlloc::<C64>::default()),
         Arc::new(ArrayAtomicAlloc::<C128>::default()),
         Arc::new(ArrayAtomicAlloc::<C512>::default()),
+        Arc::new(ArrayAtomicAlloc::<A128>::default()),
+        Arc::new(ArrayAtomicAlloc::<A256>::default()),
+        Arc::new(ArrayAtomicAlloc::<A512>::default()),
         Arc::new(ListLocalAlloc::default()),
         Arc::new(ListLockedAlloc::default()),
     ];
@@ -204,6 +207,7 @@ fn bulk(
     unsafe { &mut *(Arc::as_ptr(&alloc) as *mut dyn Alloc) }
         .init(threads, mapping, true)
         .unwrap();
+    alloc.free_all().unwrap();
     let init = timer.elapsed().as_millis();
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
 
@@ -240,7 +244,7 @@ fn bulk(
             allocs,
         }
     }));
-    assert_eq!(a.dbg_allocated_pages(), 0);
+    assert_eq!(a.dbg_allocated_pages(), 0, "{a:?}");
 
     perf.init = init;
     perf.allocs = allocs;
@@ -258,6 +262,7 @@ fn repeat(
     unsafe { &mut *(Arc::as_ptr(&alloc) as *mut dyn Alloc) }
         .init(threads, mapping, true)
         .unwrap();
+    alloc.free_all().unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
@@ -308,6 +313,7 @@ fn rand(
     unsafe { &mut *(Arc::as_ptr(&alloc) as *mut dyn Alloc) }
         .init(threads, mapping, true)
         .unwrap();
+    alloc.free_all().unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
@@ -382,7 +388,9 @@ fn filling(
     unsafe { &mut *(Arc::as_ptr(&alloc) as *mut dyn Alloc) }
         .init(threads, mapping, true)
         .unwrap();
+    alloc.free_all().unwrap();
     let init = timer.elapsed().as_millis();
+
     let allocs = alloc.pages() / threads / (1 << order);
 
     // Allocate to filling level

@@ -5,7 +5,7 @@ use core::fmt;
 use alloc::string::String;
 
 use crate::atomic::Atomic;
-use crate::entry::{Entry2, Entry3};
+use crate::entry::Entry3;
 use crate::table::{Mapping, PT_LEN};
 use crate::util::Page;
 use crate::{Error, Result};
@@ -60,7 +60,7 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     #[cold]
     fn dbg_allocated_pages(&self) -> usize;
     #[cold]
-    fn dbg_for_each_pte2(&self, f: fn(Entry2));
+    fn dbg_for_each_huge_page(&self, f: fn(usize));
     #[cold]
     fn name(&self) -> String {
         name::<Self>()
@@ -188,7 +188,7 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::Error;
 
-    type Lower = CacheLower<64>;
+    type Lower = AtomLower<128>;
     type Allocator = ArrayAtomicAlloc<Lower>;
 
     fn mapping(begin: usize, length: usize) -> core::result::Result<MMap<Page>, ()> {
@@ -227,11 +227,6 @@ mod test {
             type_name::<ArrayAlignedAlloc<CacheAligned, Lower>>(),
             super::name::<ArrayAlignedAlloc<CacheAligned, Lower>>()
         );
-    }
-
-    #[test]
-    fn correctly_sized_huge_pages() {
-        assert_eq!(Lower::MAPPING.span(1), 512)
     }
 
     /// Testing the related pages heuristic for frees
@@ -284,6 +279,7 @@ mod test {
         let small = alloc.get(0, 0).unwrap();
 
         assert_eq!(alloc.dbg_allocated_pages(), 1, "{alloc:?}");
+        warn!("stress test...");
 
         // Stress test
         let mut pages = Vec::new();
@@ -603,6 +599,7 @@ mod test {
     }
 
     #[test]
+    #[ignore]
     fn less_mem() {
         logging();
 
@@ -671,7 +668,7 @@ mod test {
         const THREADS: usize = 4;
         const ALLOC_PER_THREAD: usize = PT_LEN - 1;
         // additional space for the allocators metadata
-        const PAGES: usize = THREADS * (ALLOC_PER_THREAD + 2) * Lower::MAPPING.span(1);
+        const PAGES: usize = THREADS * (ALLOC_PER_THREAD + 2) * PT_LEN;
 
         let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
 
@@ -934,8 +931,6 @@ mod test {
     #[test]
     fn different_orders() {
         const MAX_ORDER: usize = Lower::MAX_ORDER;
-        const MAX_LARGE_ORDER: usize = 6;
-        const HUGE_ORDER: usize = Lower::HUGE_ORDER;
         const MAPPING: Mapping<2> = Lower::MAPPING;
         const THREADS: usize = 4;
 
@@ -960,11 +955,7 @@ mod test {
             for order in 0..=MAX_ORDER {
                 for _ in 0..1 << (MAX_ORDER - order) {
                     pages.push((order, 0));
-                    num_pages += if order <= MAX_LARGE_ORDER {
-                        1 << order
-                    } else {
-                        MAPPING.span(1) * ((order - 1) / HUGE_ORDER + 1)
-                    };
+                    num_pages += 1 << order;
                 }
             }
             rng.shuffle(&mut pages);

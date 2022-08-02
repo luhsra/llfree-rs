@@ -78,26 +78,24 @@ impl<T: AtomicValue + fmt::Debug, const LEN: usize> fmt::Debug for ATable<T, LEN
 }
 
 /// Bitfield replacing the level one-page table.
-#[repr(align(64))]
-pub struct Bitfield {
-    data: [AtomicU64; Self::ENTRIES],
+pub struct Bitfield<const N: usize> {
+    data: [AtomicU64; N],
 }
 
-const _: () = assert!(size_of::<Bitfield>() == Bitfield::SIZE);
-const _: () = assert!(size_of::<Bitfield>() == CacheLine::SIZE);
-const _: () = assert!(Bitfield::LEN % Bitfield::ENTRY_BITS == 0);
-const _: () = assert!(1 << Bitfield::ORDER == Bitfield::LEN);
+const _: () = assert!(size_of::<Bitfield<64>>() == Bitfield::<64>::SIZE);
+const _: () = assert!(size_of::<Bitfield<64>>() >= 8);
+const _: () = assert!(Bitfield::<64>::LEN % Bitfield::<64>::ENTRY_BITS == 0);
+const _: () = assert!(1 << Bitfield::<64>::ORDER == Bitfield::<64>::LEN);
+const _: () = assert!(Bitfield::<2>::ORDER == 7);
 
-impl Default for Bitfield {
+impl<const N: usize> Default for Bitfield<N> {
     fn default() -> Self {
         const D: AtomicU64 = AtomicU64::new(0);
-        Self {
-            data: [D; Self::ENTRIES],
-        }
+        Self { data: [D; N] }
     }
 }
 
-impl fmt::Debug for Bitfield {
+impl<const N: usize> fmt::Debug for Bitfield<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Bitfield( ")?;
         for d in &self.data {
@@ -108,10 +106,10 @@ impl fmt::Debug for Bitfield {
     }
 }
 
-impl Bitfield {
+impl<const N: usize> Bitfield<N> {
     pub const ENTRY_BITS: usize = 64;
-    pub const ENTRIES: usize = Self::LEN / Self::ENTRY_BITS;
-    pub const LEN: usize = PT_LEN;
+    pub const ENTRIES: usize = N;
+    pub const LEN: usize = N * Self::ENTRY_BITS;
     pub const ORDER: usize = log2(Self::LEN);
     pub const SIZE: usize = Self::LEN / 8;
 
@@ -218,7 +216,7 @@ impl Bitfield {
         let v = if v { u64::MAX } else { 0 };
         // cast to raw memory to let the compiler use vector instructions
         #[allow(clippy::cast_ref_to_mut)]
-        let mem = unsafe { &mut *(addr_of!(self.data) as *mut [u64; Self::ENTRIES]) };
+        let mem = unsafe { &mut *(addr_of!(self.data) as *mut [u64; N]) };
         mem.fill(v);
         // memory ordering has to be enforced with a memory barrier
         atomic::fence(Ordering::SeqCst);

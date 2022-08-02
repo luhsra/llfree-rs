@@ -9,7 +9,6 @@ use alloc::vec::Vec;
 use log::{error, info};
 
 use super::{Alloc, MIN_PAGES};
-use crate::entry::Entry2;
 use crate::util::Page;
 use crate::{Error, Result};
 
@@ -155,7 +154,7 @@ impl Alloc for ListLocalAlloc {
     }
 
     #[cold]
-    fn dbg_for_each_pte2(&self, _f: fn(Entry2)) {}
+    fn dbg_for_each_huge_page(&self, _f: fn(usize)) {}
 
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {

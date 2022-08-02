@@ -1,7 +1,6 @@
 use core::fmt;
 use core::ops::Range;
 
-use crate::entry::Entry2;
 use crate::table::Mapping;
 use crate::util::Page;
 use crate::Result;
@@ -19,13 +18,13 @@ macro_rules! stop {
 
 mod cache;
 pub use cache::CacheLower;
+mod atom;
+pub use atom::AtomLower;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug {
     /// The different table sizes
     const MAPPING: Mapping<2>;
-    /// The order of the supported huge-pages
-    const HUGE_ORDER: usize;
     /// The maximal allowed order of this allocator
     const MAX_ORDER: usize;
 
@@ -51,8 +50,8 @@ pub trait LowerAlloc: Default + fmt::Debug {
 
     /// Debug function, returning the number of allocated pages and performing internal checks.
     fn dbg_allocated_pages(&self) -> usize;
-
-    fn dbg_for_each_pte2<F: FnMut(Entry2)>(&self, f: F);
+    /// Debug function returning number of free pages in each order 9 chunk
+    fn dbg_for_each_huge_page<F: FnMut(usize)>(&self, f: F);
 }
 
 #[cfg(all(test, feature = "stop"))]
@@ -67,7 +66,7 @@ mod test {
     use crate::thread;
     use crate::util::{logging, Page};
 
-    type Lower = super::cache::CacheLower<512>;
+    type Lower = super::atom::AtomLower<512>;
 
     #[test]
     #[ignore]
@@ -113,7 +112,7 @@ mod test {
         let mut pages = [0; PT_LEN];
         let mut buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
-        for _ in 0..32 {
+        for _ in 0..8 {
             let seed = unsafe { libc::rand() } as u64;
             warn!("order: {seed:x}");
 

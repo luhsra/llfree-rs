@@ -1,7 +1,8 @@
 export RUST_LOG=warn
 mkdir -p bench/out
+set -e
 
-ALLOC="ArrayAtomicC64 ArrayAtomicC128 ArrayAtomicC512 ArrayAlignedCC64 ArrayAlignedCC128 ArrayAlignedCC512 TableC64 TableC128 TableC512"
+ALLOC="ArrayAtomicC64 ArrayAtomicC128 ArrayAtomicC512 ArrayAtomicA128 ArrayAtomicA256 ArrayAtomicA512"
 THREADS="-x1 -x2 -x4 -x8 -x16 -x24 -x32 -x40 -x48 -x56 -x64 -x80 -x96"
 FILL="-x0 -x10 -x20 -x30 -x40 -x50 -x60 -x70 -x80"
 

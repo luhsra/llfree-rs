@@ -198,7 +198,7 @@ const _: () = assert!(size_of::<Entry2Pair>() == 2 * size_of::<Entry2>());
 const _: () = assert!(align_of::<Entry2Pair>() == size_of::<Entry2Pair>());
 
 impl Entry2Pair {
-    pub fn both<F: Fn(Entry2) -> Option<Entry2>>(self, f: F) -> Option<Entry2Pair> {
+    pub fn all<F: Fn(Entry2) -> Option<Entry2>>(self, f: F) -> Option<Entry2Pair> {
         match (f(self.0), f(self.1)) {
             (Some(a), Some(b)) => Some(Entry2Pair(a, b)),
             _ => None,
@@ -220,6 +220,214 @@ impl From<Entry2Pair> for u32 {
 
 impl AtomicValue for Entry2Pair {
     type V = u32;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SEntry2(u8);
+
+impl AtomicValue for SEntry2 {
+    type V = u8;
+}
+
+impl SEntry2 {
+    pub fn new() -> Self {
+        Self(0)
+    }
+    pub fn new_page() -> Self {
+        Self::new().with_page(true)
+    }
+    pub fn new_free(free: usize) -> Self {
+        Self::new().with_free(free)
+    }
+
+    pub fn page(self) -> bool {
+        self.0 == u8::MAX
+    }
+    pub fn with_page(self, page: bool) -> Self {
+        Self(if page { u8::MAX } else { 0 })
+    }
+    pub fn free(self) -> usize {
+        if self.0 < u8::MAX {
+            self.0 as _
+        } else {
+            0
+        }
+    }
+    pub fn with_free(self, free: usize) -> Self {
+        Self(free as _)
+    }
+    pub fn mark_huge(self, span: usize) -> Option<Self> {
+        if !self.page() && self.free() == span {
+            Some(Self::new_page())
+        } else {
+            None
+        }
+    }
+    /// Decrement the free pages counter.
+    pub fn dec(self, num_pages: usize) -> Option<Self> {
+        if !self.page() && self.free() >= num_pages {
+            Some(Self::new_free(self.free() - num_pages))
+        } else {
+            None
+        }
+    }
+    /// Increments the free pages counter.
+    pub fn inc(self, span: usize, num_pages: usize) -> Option<Self> {
+        if !self.page() && self.free() <= span - num_pages {
+            Some(Self::new_free(self.free() + num_pages))
+        } else {
+            None
+        }
+    }
+}
+
+impl From<u8> for SEntry2 {
+    fn from(v: u8) -> Self {
+        Self(v)
+    }
+}
+impl From<SEntry2> for u8 {
+    fn from(v: SEntry2) -> Self {
+        v.0
+    }
+}
+
+impl fmt::Debug for SEntry2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SEntry2")
+            .field("free", &self.free())
+            .field("page", &self.page())
+            .finish()
+    }
+}
+
+pub trait SEntry2Tuple: AtomicValue + fmt::Debug {
+    const N: usize;
+    fn new(v: SEntry2) -> Self;
+    fn all<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self>;
+}
+
+impl SEntry2Tuple for SEntry2 {
+    const N: usize = 1;
+    fn new(v: SEntry2) -> Self {
+        v
+    }
+    fn all<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
+        f(self)
+    }
+}
+
+/// Tuple of level 2 entries that can be changed at once.
+#[derive(Debug, Clone, Copy)]
+// #[repr(packed)]
+#[repr(align(8))]
+pub struct SEntry2T8(pub [SEntry2; 8]);
+const _: () = assert!(size_of::<SEntry2T8>() == 8 * size_of::<SEntry2>());
+const _: () = assert!(align_of::<SEntry2T8>() == size_of::<SEntry2T8>());
+
+impl From<u64> for SEntry2T8 {
+    fn from(v: u64) -> Self {
+        SEntry2T8(v.to_le_bytes().map(SEntry2::from))
+    }
+}
+
+impl From<SEntry2T8> for u64 {
+    fn from(v: SEntry2T8) -> Self {
+        u64::from_le_bytes(v.0.map(u8::from))
+    }
+}
+
+impl AtomicValue for SEntry2T8 {
+    type V = u64;
+}
+
+impl SEntry2Tuple for SEntry2T8 {
+    const N: usize = 8;
+    fn new(v: SEntry2) -> Self {
+        Self([v; 8])
+    }
+    fn all<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
+        match self.0.map(f) {
+            [Some(r0), Some(r1), Some(r2), Some(r3), Some(r4), Some(r5), Some(r6), Some(r7)] => {
+                Some(Self([r0, r1, r2, r3, r4, r5, r6, r7]))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Tuple of level 2 entries that can be changed at once.
+#[derive(Debug, Clone, Copy)]
+// #[repr(packed)]
+#[repr(align(4))]
+pub struct SEntry2T4(pub [SEntry2; 4]);
+const _: () = assert!(size_of::<SEntry2T4>() == 4 * size_of::<SEntry2>());
+const _: () = assert!(align_of::<SEntry2T4>() == size_of::<SEntry2T4>());
+
+impl From<u32> for SEntry2T4 {
+    fn from(v: u32) -> Self {
+        SEntry2T4(v.to_le_bytes().map(SEntry2::from))
+    }
+}
+
+impl From<SEntry2T4> for u32 {
+    fn from(v: SEntry2T4) -> Self {
+        u32::from_le_bytes(v.0.map(u8::from))
+    }
+}
+
+impl AtomicValue for SEntry2T4 {
+    type V = u32;
+}
+
+impl SEntry2Tuple for SEntry2T4 {
+    const N: usize = 4;
+    fn new(v: SEntry2) -> Self {
+        Self([v; 4])
+    }
+    fn all<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
+        match self.0.map(f) {
+            [Some(r0), Some(r1), Some(r2), Some(r3)] => Some(Self([r0, r1, r2, r3])),
+            _ => None,
+        }
+    }
+}
+
+/// Tuple of level 2 entries that can be changed at once.
+#[derive(Debug, Clone, Copy)]
+// #[repr(packed)]
+#[repr(align(2))]
+pub struct SEntry2T2(pub [SEntry2; 2]);
+const _: () = assert!(size_of::<SEntry2T2>() == 2 * size_of::<SEntry2>());
+const _: () = assert!(align_of::<SEntry2T2>() == size_of::<SEntry2T2>());
+
+impl From<u16> for SEntry2T2 {
+    fn from(v: u16) -> Self {
+        SEntry2T2(v.to_le_bytes().map(SEntry2::from))
+    }
+}
+
+impl From<SEntry2T2> for u16 {
+    fn from(v: SEntry2T2) -> Self {
+        u16::from_le_bytes(v.0.map(u8::from))
+    }
+}
+
+impl AtomicValue for SEntry2T2 {
+    type V = u16;
+}
+
+impl SEntry2Tuple for SEntry2T2 {
+    const N: usize = 2;
+    fn new(v: SEntry2) -> Self {
+        Self([v; 2])
+    }
+    fn all<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
+        match self.0.map(f) {
+            [Some(r0), Some(r1)] => Some(Self([r0, r1])),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(all(test, feature = "std"))]
