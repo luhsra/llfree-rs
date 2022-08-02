@@ -38,3 +38,8 @@ bench = false
 name = "mmap"
 test = false
 bench = false
+
+[[bin]]
+name = "write"
+test = false
+bench = false
