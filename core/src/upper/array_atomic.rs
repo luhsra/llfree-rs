@@ -65,20 +65,22 @@ unsafe impl<L: LowerAlloc> Sync for ArrayAtomicAlloc<L> {}
 impl<L: LowerAlloc> fmt::Debug for ArrayAtomicAlloc<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
+
         writeln!(
             f,
             "    memory: {:?} ({})",
             self.lower.memory(),
             self.lower.pages()
         )?;
-        for (i, entry) in self.subtrees.iter().enumerate() {
-            let pte = entry.load();
-            writeln!(f, "    {i:>3}: {pte:?}")?;
-        }
         writeln!(f, "    empty: {:?}", AStackDbg(&self.empty, self))?;
         writeln!(f, "    partial: {:?}", AStackDbg(&self.partial, self))?;
         for (t, local) in self.local.iter().enumerate() {
             writeln!(f, "    L{t:>2}: {:?}", local.pte.load())?;
+        }
+
+        for (i, entry) in self.subtrees.iter().enumerate() {
+            let pte = entry.load();
+            writeln!(f, "    {i:>3}: {pte:?}")?;
         }
         writeln!(f, "}}")?;
         Ok(())
@@ -88,7 +90,6 @@ impl<L: LowerAlloc> fmt::Debug for ArrayAtomicAlloc<L> {
 impl<L: LowerAlloc> Index<usize> for ArrayAtomicAlloc<L> {
     type Output = Atomic<Entry3>;
 
-    #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         &self.subtrees[index]
     }
@@ -102,12 +103,8 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
             memory.as_ptr_range(),
             memory.len()
         );
-        if memory.len() < Self::MAPPING.span(2) * cores {
-            warn!(
-                "memory {} < {}",
-                memory.len(),
-                Self::MAPPING.span(2) * cores
-            );
+        if memory.len() < self.pages_needed(cores) {
+            warn!("memory {} < {}", memory.len(), self.pages_needed(cores));
             cores = 1.max(memory.len() / Self::MAPPING.span(2));
         }
 
@@ -202,7 +199,6 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
         Ok(())
     }
 
-    #[inline(never)]
     fn get(&self, core: usize, order: usize) -> Result<u64> {
         if order > L::MAX_ORDER {
             error!("invalid order: !{order} <= {}", L::MAX_ORDER);
@@ -211,52 +207,22 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
 
         // Select local data (which can be shared between cores if we do not have enough memory)
         let c = core % self.local.len();
-        let start_a = &self.local[c].start;
-        let pte_a = &self.local[c].pte;
+        let local = &self.local[c];
 
         // Incremet or clear (atomic sync with put dec)
-        let mut pte_res = pte_a.update(|v| v.dec(1 << order));
+        let mut pte_res = local.pte.update(|v| v.dec(1 << order));
 
-        for _ in 0..CAS_RETRIES {
+        'outer: for _ in 0..CAS_RETRIES {
             let (pte, mut start) = match pte_res {
-                Ok(pte) => (pte, start_a.load()),
+                Ok(pte) => (pte, local.start.load()),
                 Err(pte) => {
-                    // Try reserve new subtree
-                    let (s, new_pte) = match self.reserve(order) {
-                        Ok((s, pte)) => (s, pte),
-                        Err(Error::Memory) => {
-                            hint::spin_loop();
-                            continue;
-                        }
-                        Err(e) => return Err(e),
-                    };
-                    match self.cas_reserved(pte_a, pte, new_pte) {
-                        Err(Error::CAS) => {
-                            let max = self
-                                .pages()
-                                .saturating_sub(Self::MAPPING.round(2, s))
-                                .min(Self::MAPPING.span(2));
-
-                            // Rollback reservation & and counter
-                            if let Ok(pte) = self[new_pte.idx()]
-                                .update(|v| v.unreserve_add(new_pte.free() + (1 << order), max))
-                            {
-                                debug_assert!(pte.idx() == Entry3::IDX_MAX);
-                                self.enqueue(new_pte.idx(), pte.free() + (1 << order));
-                            } else {
-                                error!("get - rollback reservation failed");
-                                return Err(Error::Corruption);
-                            }
-                            // CAS -> retry
-                            pte_res = pte_a.update(|v| v.dec(1 << order));
-                            hint::spin_loop();
-                            continue;
-                        }
-                        Err(e) => return Err(e),
-                        Ok(_) => (),
+                    // Try reserving new subtree
+                    if let Some(ret) = self.get_reserve(local, pte, order)? {
+                        ret
+                    } else {
+                        pte_res = local.pte.update(|v| v.dec(1 << order));
+                        continue 'outer;
                     }
-                    start_a.store(s);
-                    (new_pte, s)
                 }
             };
 
@@ -270,7 +236,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
                 Ok(page) => {
                     // small pages
                     if order < log2(64) {
-                        start_a.store(page);
+                        local.start.store(page);
                     }
                     return Ok(unsafe { self.lower.memory().start.add(page as _) } as u64);
                 }
@@ -285,23 +251,20 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
                     match self[pte.idx()].update(|v| v.inc(1 << order, max)) {
                         Ok(pte) => pte_res = Err(pte), // -> reserve new
                         Err(pte) => {
-                            error!(
-                                "Counter reset failed o={order} {}: {pte:?}",
-                                start / Self::MAPPING.span(2)
-                            );
+                            error!("Counter reset failed o={order} {}: {pte:?}", pte.idx());
                             return Err(Error::Corruption);
                         }
                     }
+                    continue 'outer;
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        error!("Exceeding retries {self:?}");
+        error!("Exceeding retries");
         Err(Error::Memory)
     }
 
-    #[inline(never)]
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
         if order > L::MAX_ORDER {
             error!("invalid order: !{order} <= {}", L::MAX_ORDER);
@@ -335,12 +298,11 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
             .min(Self::MAPPING.span(2));
 
         // Try decrement own subtree first
-        let l_pte = if let Err(pte) = local.pte.update(|v| v.inc_idx(num_pages, i, max)) {
+        if let Err(pte) = local.pte.update(|v| v.inc_idx(num_pages, i, max)) {
             if pte.idx() == i {
                 error!("inc failed L{i}: {pte:?} o={order}");
                 return Err(Error::Corruption);
             }
-            pte
         } else {
             if c == core {
                 local.frees_push(i);
@@ -353,29 +315,10 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
             Ok(pte) => {
                 let new_pages = pte.free() + num_pages;
                 if !pte.reserved() && new_pages > Self::ALMOST_FULL {
-                    // check if recent frees also operated in this subtree
+                    // Try to reserve subtree if recent frees were part of it
                     if core == c && local.frees_related(i) {
-                        // Try to reserve it for bulk frees
-                        if let Ok(new_pte) = self[i].update(|v| v.reserve(Self::ALMOST_FULL)) {
-                            match self.cas_reserved(&local.pte, l_pte, new_pte.with_idx(i)) {
-                                Err(Error::CAS) => {
-                                    warn!("rollback {i}");
-                                    // Rollback reservation
-                                    let max = (self.pages() - i * Self::MAPPING.span(2))
-                                        .min(Self::MAPPING.span(2));
-                                    if let Err(_) =
-                                        self[i].update(|v| v.unreserve_add(new_pte.free(), max))
-                                    {
-                                        error!("put - reservation rollback failed");
-                                        return Err(Error::Corruption);
-                                    }
-                                }
-                                Err(e) => return Err(e),
-                                Ok(_) => {
-                                    local.start.store(i * Self::MAPPING.span(2));
-                                    return Ok(());
-                                }
-                            }
+                        if self.put_reserve(local, i)? {
+                            return Ok(());
                         }
                     }
 
@@ -397,7 +340,6 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
         }
     }
 
-    #[cold]
     fn pages_needed(&self, cores: usize) -> usize {
         Self::MAPPING.span(2) * cores
     }
@@ -474,7 +416,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
 
     /// Reserves a new subtree, prioritizing partially filled subtrees,
     /// and allocates a page from it in one step.
-    fn reserve(&self, order: usize) -> Result<(usize, Entry3)> {
+    fn reserve(&self, order: usize) -> Result<(Entry3, usize)> {
         while let Some((i, r)) = self.partial.pop_update(self, |v| {
             v.reserve_partial(Self::ALMOST_FULL, Self::MAPPING.span(2))
         }) {
@@ -482,7 +424,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             match r {
                 Ok(pte) => {
                     let pte = pte.with_idx(i).dec(1 << order).unwrap();
-                    return Ok((i * Self::MAPPING.span(2), pte));
+                    return Ok((pte, i * Self::MAPPING.span(2)));
                 }
                 Err(pte) => {
                     // Skip empty entries
@@ -500,7 +442,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
             info!("reserve empty {i}");
             if let Ok(pte) = r {
                 let pte = pte.with_idx(i).dec(1 << order).unwrap();
-                return Ok((i * Self::MAPPING.span(2), pte));
+                return Ok((pte, i * Self::MAPPING.span(2)));
             }
         }
 
@@ -519,9 +461,16 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
 
     /// Swap the current reserved subtree out replacing it with a new one.
     /// The old subtree is unreserved and added back to the lists.
-    fn cas_reserved(&self, pte_a: &Atomic<Entry3>, old_pte: Entry3, new_pte: Entry3) -> Result<()> {
+    fn cas_reserved(
+        &self,
+        pte_a: &Atomic<Entry3>,
+        expect_reserved: bool,
+        new_pte: Entry3,
+    ) -> Result<()> {
+        debug_assert!(!new_pte.reserved());
+
         let pte = pte_a
-            .compare_exchange(old_pte, new_pte)
+            .update(|v| (v.reserved() == expect_reserved).then_some(new_pte))
             .map_err(|_| Error::CAS)?;
         let i = pte.idx();
         if i >= Entry3::IDX_MAX {
@@ -539,6 +488,85 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         } else {
             error!("Unreserve failed i{i}");
             Err(Error::Corruption)
+        }
+    }
+
+    /// Try to reserve a new subtree or wait for concurrent reservations to finish
+    fn get_reserve(
+        &self,
+        local: &Local<PUTS_RESERVE>,
+        pte: Entry3,
+        order: usize,
+    ) -> Result<Option<(Entry3, usize)>> {
+        // Set the reserved flag, locking the reservation
+        if !pte.reserved()
+            && local
+                .pte
+                .update(|v| (!v.reserved()).then_some(v.with_reserved(true)))
+                .is_ok()
+        {
+            // Try reserve new subtree
+            let (new_pte, start) = match self.reserve(order) {
+                Ok(ret) => ret,
+                Err(e) => {
+                    // Clear reserve flag
+                    if local
+                        .pte
+                        .update(|v| v.reserved().then_some(v.with_reserved(false)))
+                        .is_err()
+                    {
+                        error!("unexpected reserve state");
+                        return Err(Error::Corruption);
+                    }
+                    return Err(e);
+                }
+            };
+            match self.cas_reserved(&local.pte, true, new_pte) {
+                Ok(_) => {}
+                Err(Error::CAS) => {
+                    error!("unexpected reserve state");
+                    return Err(Error::Corruption);
+                }
+                Err(e) => return Err(e),
+            }
+            local.start.store(start);
+            Ok(Some((new_pte, start)))
+        } else {
+            // Wait for reservation to end
+            for _ in 0..(2 * CAS_RETRIES) {
+                if local.pte.load().reserved() {
+                    hint::spin_loop()
+                } else {
+                    return Ok(None);
+                }
+            }
+            error!("Timeout reservation wait");
+            return Err(Error::Corruption);
+        }
+    }
+
+    fn put_reserve(&self, local: &Local<PUTS_RESERVE>, i: usize) -> Result<bool> {
+        // Try to reserve it for bulk frees
+        if let Ok(new_pte) = self[i].update(|v| v.reserve(Self::ALMOST_FULL)) {
+            match self.cas_reserved(&local.pte, false, new_pte.with_idx(i)) {
+                Ok(_) => {
+                    local.start.store(i * Self::MAPPING.span(2));
+                    Ok(true)
+                }
+                Err(Error::CAS) => {
+                    warn!("rollback {i}");
+                    // Rollback reservation
+                    let max = (self.pages() - i * Self::MAPPING.span(2)).min(Self::MAPPING.span(2));
+                    if let Err(_) = self[i].update(|v| v.unreserve_add(new_pte.free(), max)) {
+                        error!("put - reservation rollback failed");
+                        return Err(Error::Corruption);
+                    }
+                    Ok(false)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            Ok(false)
         }
     }
 }

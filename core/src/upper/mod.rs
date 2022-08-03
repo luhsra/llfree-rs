@@ -54,7 +54,6 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     fn pages(&self) -> usize;
 
     /// Returns the minimal number of pages the allocator needs.
-    #[cold]
     fn pages_needed(&self, cores: usize) -> usize;
     /// Return the number of allocated pages.
     #[cold]

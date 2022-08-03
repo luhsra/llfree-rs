@@ -32,26 +32,22 @@ impl AtomicValue for Entry3 {
 impl Entry3 {
     pub const IDX_MAX: usize = (1 << 41) - 1;
 
-    #[inline]
     pub fn empty(span: usize) -> Entry3 {
         Entry3::new().with_free(span)
     }
     /// Creates a new entry referring to a level 2 page table.
-    #[inline]
     pub fn new_table(pages: usize, reserved: bool) -> Entry3 {
         Entry3::new().with_free(pages).with_reserved(reserved)
     }
     /// Decrements the free pages counter.
-    #[inline]
     pub fn dec(self, num_pages: usize) -> Option<Entry3> {
-        if self.idx() != Self::IDX_MAX && self.free() >= num_pages {
-            Some(self.with_free(self.free() - num_pages).with_reserved(true))
+        if self.is_valid() && self.free() >= num_pages {
+            Some(self.with_free(self.free() - num_pages))
         } else {
             None
         }
     }
     /// Increments the free pages counter.
-    #[inline]
     pub fn inc(self, num_pages: usize, max: usize) -> Option<Entry3> {
         let pages = self.free() + num_pages;
         if pages <= max {
@@ -61,7 +57,6 @@ impl Entry3 {
         }
     }
     /// Increments the free pages counter and checks for `idx` to match.
-    #[inline]
     pub fn inc_idx(self, num_pages: usize, idx: usize, max: usize) -> Option<Entry3> {
         if self.idx() == idx {
             self.inc(num_pages, max)
@@ -70,7 +65,6 @@ impl Entry3 {
         }
     }
     /// Reserves this entry.
-    #[inline]
     pub fn reserve(self, min: usize) -> Option<Entry3> {
         if !self.reserved() && self.free() > min {
             Some(self.with_free(0).with_reserved(true))
@@ -79,7 +73,6 @@ impl Entry3 {
         }
     }
     /// Reserves this entry if it is partially filled.
-    #[inline]
     pub fn reserve_partial(self, min: usize, span: usize) -> Option<Entry3> {
         if !self.reserved() && self.free() > min && self.free() < span {
             Some(self.with_reserved(true).with_free(0))
@@ -88,7 +81,6 @@ impl Entry3 {
         }
     }
     /// Reserves this entry if it is completely empty.
-    #[inline]
     pub fn reserve_empty(self, span: usize) -> Option<Entry3> {
         if !self.reserved() && self.free() == span {
             Some(self.with_reserved(true).with_free(0))
@@ -97,7 +89,6 @@ impl Entry3 {
         }
     }
     /// Clears the reserve flag of this entry.
-    #[inline]
     pub fn unreserve(self) -> Option<Entry3> {
         if self.reserved() {
             Some(self.with_reserved(false))
@@ -107,7 +98,6 @@ impl Entry3 {
     }
     /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
-    #[inline]
     pub fn unreserve_add(self, add: usize, max: usize) -> Option<Entry3> {
         let pages = self.free() + add;
         if self.reserved() && pages <= max {
@@ -116,6 +106,9 @@ impl Entry3 {
             error!("{self:?} + {add}, {pages} <= {max}");
             None
         }
+    }
+    pub fn is_valid(self) -> bool {
+        self.idx() < Self::IDX_MAX
     }
 }
 
@@ -143,16 +136,13 @@ impl AtomicValue for Entry2 {
 }
 
 impl Entry2 {
-    #[inline]
     pub fn new_page() -> Self {
         Self::new().with_page(true)
     }
-    #[inline]
     pub fn new_free(free: usize) -> Self {
         Self::new().with_free(free)
     }
 
-    #[inline]
     pub fn mark_huge(self, span: usize) -> Option<Self> {
         if !self.page() && self.free() == span {
             Some(Self::new_page())
@@ -161,7 +151,6 @@ impl Entry2 {
         }
     }
     /// Decrement the free pages counter.
-    #[inline]
     pub fn dec(self, num_pages: usize) -> Option<Self> {
         if !self.page() && self.free() >= num_pages {
             Some(Self::new_free(self.free() - num_pages))
@@ -170,7 +159,6 @@ impl Entry2 {
         }
     }
     /// Increments the free pages counter.
-    #[inline]
     pub fn inc(self, span: usize, num_pages: usize) -> Option<Self> {
         if !self.page() && self.free() <= span - num_pages {
             Some(Self::new_free(self.free() + num_pages))

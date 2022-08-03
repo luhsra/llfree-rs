@@ -49,19 +49,15 @@ impl<T: AtomicValue, const LEN: usize> ATable<T, LEN> {
         // memory ordering has to be enforced with a memory barrier
         atomic::fence(Ordering::SeqCst);
     }
-    #[inline]
     pub fn get(&self, i: usize) -> T {
         self.entries[i].load()
     }
-    #[inline]
     pub fn set(&self, i: usize, e: T) {
         self.entries[i].store(e);
     }
-    #[inline]
     pub fn cas(&self, i: usize, expected: T, new: T) -> Result<T, T> {
         self.entries[i].compare_exchange(expected, new)
     }
-    #[inline]
     pub fn update<F: FnMut(T) -> Option<T>>(&self, i: usize, f: F) -> Result<T, T> {
         self.entries[i].update(f)
     }
@@ -223,7 +219,6 @@ impl<const N: usize> Bitfield<N> {
     }
 }
 
-#[inline]
 fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
     let num_pages = 1 << order;
     debug_assert!(num_pages <= u64::BITS as usize);

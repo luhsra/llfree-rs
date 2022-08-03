@@ -88,7 +88,6 @@ impl Entry for Unaligned {
 impl<A: Entry, L: LowerAlloc> Index<usize> for ArrayAlignedAlloc<A, L> {
     type Output = Atomic<Entry3>;
 
-    #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         self.subtrees[index].as_ref()
     }
@@ -237,7 +236,6 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
         Ok(())
     }
 
-    #[inline(never)]
     fn get(&self, core: usize, order: usize) -> Result<u64> {
         if order > L::MAX_ORDER {
             error!("invalid order: !{order} <= {}", L::MAX_ORDER);
@@ -304,7 +302,6 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
         Err(Error::Memory)
     }
 
-    #[inline(never)]
     fn put(&self, _core: usize, addr: u64, order: usize) -> Result<()> {
         if order > L::MAX_ORDER {
             error!("invalid order: !{order} <= {}", L::MAX_ORDER);
@@ -355,7 +352,6 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAlignedAlloc<A, L> {
         self.lower.pages()
     }
 
-    #[cold]
     fn pages_needed(&self, cores: usize) -> usize {
         Self::MAPPING.span(2) * cores
     }

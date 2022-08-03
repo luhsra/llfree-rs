@@ -340,7 +340,7 @@ where
                             if let Err(e) =
                                 pt2.update(i2, |v| v.inc(Self::MAPPING.span(1), 1 << order))
                             {
-                                error!("Corruption! {e:?}");
+                                error!("Rollback failed {e:?}");
                                 return Err(Error::Corruption);
                             }
                         }
@@ -382,13 +382,11 @@ where
                     .update(i2, |v| v.all(|v| v.mark_huge(Self::MAPPING.span(1))))
                     .is_ok()
                 {
-                    // TODO: set pt1s to 1?
-                    info!("Alloc o={order} i={i2}");
                     return Ok(Self::MAPPING.page(2, start, i2 * T::N));
                 }
             }
         }
-        warn!("Nothing found o={order}");
+        info!("Nothing found o={order}");
         Err(Error::Memory)
     }
 
@@ -398,7 +396,7 @@ where
         let pt1 = self.pt1(page);
         let i1 = Self::MAPPING.idx(1, page);
         if pt1.toggle(i1, order, true).is_err() {
-            error!("Invalid Addr l1 i{i1} p={page}");
+            error!("L1 put failed p={page} o={order}");
             return Err(Error::Address);
         }
 
@@ -407,8 +405,8 @@ where
         let pt2 = self.pt2(page);
         let i2 = Self::MAPPING.idx(2, page);
         if let Err(pte2) = pt2.update(i2, |v| v.inc(Self::MAPPING.span(1), 1 << order)) {
-            error!("Invalid Addr l1 i{i1} p={page} {pte2:?}");
-            return Err(Error::Address);
+            error!("Inc failed i{i1} p={page} {pte2:?}");
+            return Err(Error::Corruption);
         }
 
         Ok(())

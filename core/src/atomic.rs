@@ -13,40 +13,33 @@ pub struct Atomic<T: AtomicValue>(pub <<T as AtomicValue>::V as AtomicT>::A);
 const _: () = assert!(core::mem::size_of::<Atomic<u64>>() == 8);
 
 impl<T: AtomicValue> Atomic<T> {
-    #[inline]
     pub fn new(v: T) -> Self {
         Self(T::V::atomic(v.into()))
     }
-    #[inline]
     pub fn compare_exchange(&self, current: T, new: T) -> Result<T, T> {
         match T::V::atomic_compare_exchange(&self.0, current.into(), new.into()) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
     }
-    #[inline]
     pub fn compare_exchange_weak(&self, current: T, new: T) -> Result<T, T> {
         match T::V::atomic_compare_exchange_weak(&self.0, current.into(), new.into()) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
     }
-    #[inline]
     pub fn update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
         match T::V::atomic_update(&self.0, |v| f(v.into()).map(T::into)) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
     }
-    #[inline]
     pub fn load(&self) -> T {
         T::V::atomic_load(&self.0).into()
     }
-    #[inline]
     pub fn store(&self, v: T) {
         T::V::atomic_store(&self.0, v.into());
     }
-    #[inline]
     pub fn swap(&self, v: T) -> T {
         T::V::atomic_swap(&self.0, v.into()).into()
     }

@@ -107,7 +107,6 @@ impl Alloc for ListLockedAlloc {
         Ok(())
     }
 
-    #[inline(never)]
     fn get(&self, core: usize, order: usize) -> Result<u64> {
         if order != 0 {
             error!("order {order:?} not supported");
@@ -125,7 +124,6 @@ impl Alloc for ListLockedAlloc {
         }
     }
 
-    #[inline(never)]
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
         if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) || order != 0 {
             error!("invalid addr");
@@ -141,7 +139,6 @@ impl Alloc for ListLockedAlloc {
         unsafe { self.memory.end.offset_from(self.memory.start) as usize }
     }
 
-    #[cold]
     fn pages_needed(&self, cores: usize) -> usize {
         cores
     }
