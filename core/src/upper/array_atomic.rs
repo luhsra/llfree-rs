@@ -184,11 +184,11 @@ impl<L: LowerAlloc> Alloc for ArrayAtomicAlloc<L> {
         // Set all entries to zero
         let pte3_num = Self::MAPPING.num_pts(2, self.pages());
         for i in 0..pte3_num {
-            self[i].store(Entry3::new());
+            self[i].store(Entry3::new().with_next(None));
         }
         // Clear the lists
-        self.empty.set(Entry3::default().with_next(None));
-        self.partial.set(Entry3::default().with_next(None));
+        self.empty.set(Entry3::new().with_next(None));
+        self.partial.set(Entry3::new().with_next(None));
 
         if !self.meta.is_null() {
             let meta = unsafe { &mut *self.meta };
@@ -480,7 +480,7 @@ impl<L: LowerAlloc> ArrayAtomicAlloc<L> {
         let max = (self.pages() - i * Self::MAPPING.span(2)).min(Self::MAPPING.span(2));
         if let Ok(v) = self[i].update(|v| v.unreserve_add(pte.free(), max)) {
             // Only if not already in list
-            if v.idx() == Entry3::IDX_MAX {
+            if !v.is_valid() {
                 // Add to list
                 self.enqueue(i, v.free() + pte.free());
             }

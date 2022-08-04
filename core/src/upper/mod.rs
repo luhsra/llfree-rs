@@ -987,4 +987,36 @@ mod test {
 
         assert_eq!(a.dbg_allocated_pages(), 0);
     }
+
+    #[test]
+    fn init_reserved() {
+        logging();
+
+        const THREADS: usize = 2;
+        const PAGES: usize = 8 << 18;
+
+        let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
+
+        let alloc = Arc::new({
+            let mut a = Allocator::default();
+            a.init(THREADS, &mut mapping, false).unwrap();
+            a.reserve_all().unwrap();
+            a
+        });
+        assert_eq!(alloc.dbg_allocated_pages(), PAGES);
+
+        for pages in mapping.chunks_exact(1 << Lower::MAX_ORDER) {
+            alloc.put(0, pages.as_ptr() as _, Lower::MAX_ORDER).unwrap();
+        }
+        assert_eq!(alloc.dbg_allocated_pages(), 0);
+
+        let a = alloc.clone();
+        thread::parallel(THREADS, move |core| {
+            thread::pin(core);
+            for _ in 0..(PAGES / THREADS) / (1 << Lower::MAX_ORDER) {
+                alloc.get(core, Lower::MAX_ORDER).unwrap();
+            }
+        });
+        assert_eq!(a.dbg_allocated_pages(), PAGES);
+    }
 }
