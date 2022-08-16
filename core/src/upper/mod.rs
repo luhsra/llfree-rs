@@ -14,6 +14,8 @@ mod array_aligned;
 pub use array_aligned::{ArrayAligned, CacheAligned, Unaligned};
 mod array_atomic;
 pub use array_atomic::ArrayAtomic;
+mod array_list;
+pub use array_list::ArrayList;
 mod list_local;
 pub use list_local::ListLocal;
 mod list_locked;
@@ -188,7 +190,7 @@ mod test {
     use crate::Error;
 
     type Lower = Atom<128>;
-    type Allocator = ArrayAtomic<Lower>;
+    type Allocator = ArrayList<Lower>;
 
     fn mapping(begin: usize, length: usize) -> core::result::Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
