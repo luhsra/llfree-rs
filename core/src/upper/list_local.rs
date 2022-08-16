@@ -21,17 +21,17 @@ use crate::{Error, Result};
 /// No extra load balancing is made, if a core runs out of memory,
 /// the allocation fails.
 #[repr(align(64))]
-pub struct ListLocalAlloc {
+pub struct ListLocal {
     memory: Range<*const Page>,
     /// CPU local metadata
     local: Box<[UnsafeCell<Local>]>,
     pages: usize,
 }
 
-unsafe impl Send for ListLocalAlloc {}
-unsafe impl Sync for ListLocalAlloc {}
+unsafe impl Send for ListLocal {}
+unsafe impl Sync for ListLocal {}
 
-impl fmt::Debug for ListLocalAlloc {
+impl fmt::Debug for ListLocal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
         for (t, l) in self.local.iter().enumerate() {
@@ -43,7 +43,7 @@ impl fmt::Debug for ListLocalAlloc {
     }
 }
 
-impl Default for ListLocalAlloc {
+impl Default for ListLocal {
     fn default() -> Self {
         Self {
             memory: null()..null(),
@@ -53,7 +53,7 @@ impl Default for ListLocalAlloc {
     }
 }
 
-impl Alloc for ListLocalAlloc {
+impl Alloc for ListLocal {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], _persistent: bool) -> Result<()> {
         info!(

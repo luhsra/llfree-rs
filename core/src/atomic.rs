@@ -1,4 +1,5 @@
 use core::fmt;
+use core::marker::PhantomData;
 use core::ops::Index;
 use core::sync::atomic::*;
 
@@ -263,6 +264,98 @@ where
     }
 }
 
+/// Simple linked list over a buffer of atomic entries.
+#[derive(Default)]
+pub struct BufList<T: ANode> {
+    start: Option<usize>,
+    end: Option<usize>,
+    _phantom: PhantomData<T>,
+}
+
+impl<T: ANode> BufList<T> {
+    pub fn clear<B>(&mut self, buf: &B)
+    where
+        B: Index<usize, Output = Atomic<T>>,
+    {
+        while self.pop(buf).is_some() {}
+    }
+
+    pub fn push<B>(&mut self, buf: &B, idx: usize)
+    where
+        B: Index<usize, Output = Atomic<T>>,
+    {
+        let _ = buf[idx].update(|v| Some(v.with_next(self.start)));
+        if self.start.is_none() {
+            self.end = Some(idx);
+        }
+        self.start = Some(idx);
+    }
+
+    pub fn push_end<B>(&mut self, buf: &B, idx: usize)
+    where
+        B: Index<usize, Output = Atomic<T>>,
+    {
+        let _ = buf[idx].update(|v| Some(v.with_next(None)));
+        if let Some(end) = self.end {
+            let _ = buf[end].update(|v| Some(v.with_next(Some(idx))));
+        }
+        self.end = Some(idx);
+        if self.start.is_none() {
+            self.start = Some(idx);
+        }
+    }
+
+    /// Poping the first element and updating it in place.
+    pub fn pop<B>(&mut self, buf: &B) -> Option<usize>
+    where
+        B: Index<usize, Output = Atomic<T>>,
+    {
+        let start = self.start?;
+        match buf[start].update(|v| Some(v.with_next(None))) {
+            Ok(pte) | Err(pte) => {
+                self.start = pte.next();
+                if self.start.is_none() {
+                    self.end = None;
+                }
+                Some(start)
+            }
+        }
+    }
+}
+
+/// Debug printer for the [BufList].
+#[allow(dead_code)]
+pub struct BufListDbg<'a, T, B>(pub &'a BufList<T>, pub &'a B)
+where
+    T: ANode,
+    B: Index<usize, Output = Atomic<T>>;
+
+impl<'a, T, B> fmt::Debug for BufListDbg<'a, T, B>
+where
+    T: ANode,
+    B: Index<usize, Output = Atomic<T>>,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut dbg = f.debug_list();
+
+        let mut next = self.0.start;
+        let mut n = 0;
+        while let Some(i) = next {
+            dbg.entry(&i);
+
+            next = self.1[i].load().next();
+            if n > 1000 {
+                error!("Circular List!");
+                break;
+            } else {
+                n += 1;
+            }
+        }
+
+        dbg.finish()
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod test {
     use core::sync::atomic::AtomicU64;
@@ -270,34 +363,34 @@ mod test {
 
     use spin::Barrier;
 
-    use crate::{thread, util::black_box};
+    use crate::{atomic::BufList, thread, util::black_box};
 
     use super::{ANode, AStack, AStackDbg, Atomic};
 
-    const DATA_V: Atomic<u64> = Atomic(AtomicU64::new(0));
-    const N: usize = 64;
-    static mut DATA: [Atomic<u64>; N] = [DATA_V; N];
+    impl ANode for u64 {
+        fn next(self) -> Option<usize> {
+            (self != u64::MAX).then(|| self as _)
+        }
+        fn with_next(self, next: Option<usize>) -> Self {
+            next.map(|v| v as u64).unwrap_or(u64::MAX)
+        }
+    }
 
     #[test]
     fn atomic_stack() {
-        impl ANode for u64 {
-            fn next(self) -> Option<usize> {
-                (self != u64::MAX).then(|| self as _)
-            }
-            fn with_next(self, next: Option<usize>) -> Self {
-                next.map(|v| v as u64).unwrap_or(u64::MAX)
-            }
-        }
+        const DATA_V: Atomic<u64> = Atomic(AtomicU64::new(0));
+        const N: usize = 64;
+        let data: [Atomic<u64>; N] = [DATA_V; N];
 
         let stack = AStack::default();
-        stack.push(unsafe { &DATA }, 0);
-        stack.push(unsafe { &DATA }, 1);
+        stack.push(&data, 0);
+        stack.push(&data, 1);
 
-        println!("{:?}", AStackDbg(&stack, unsafe { &DATA }));
+        println!("{:?}", AStackDbg(&stack, &data));
 
-        assert_eq!(stack.pop(unsafe { &DATA }), Some(1));
-        assert_eq!(stack.pop(unsafe { &DATA }), Some(0));
-        assert_eq!(stack.pop(unsafe { &DATA }), None);
+        assert_eq!(stack.pop(&data), Some(1));
+        assert_eq!(stack.pop(&data), Some(0));
+        assert_eq!(stack.pop(&data), None);
 
         // Stress test
 
@@ -306,7 +399,7 @@ mod test {
         let barrier = Arc::new(Barrier::new(THREADS));
         let stack = Arc::new(stack);
         let copy = stack.clone();
-        thread::parallel(THREADS, move |t| {
+        thread::parallel(THREADS, |t| {
             thread::pin(t);
             let mut idx: [usize; I] = [0; I];
             for i in 0..I {
@@ -316,7 +409,7 @@ mod test {
 
             for _ in 0..1000 {
                 for &i in &idx {
-                    stack.push(unsafe { &DATA }, i);
+                    stack.push(&data, i);
                 }
                 idx = black_box(idx);
                 for (i, &a) in idx.iter().enumerate() {
@@ -325,10 +418,30 @@ mod test {
                     }
                 }
                 for i in &mut idx {
-                    *i = stack.pop(unsafe { &DATA }).unwrap();
+                    *i = stack.pop(&data).unwrap();
                 }
             }
         });
-        assert_eq!(copy.pop(unsafe { &DATA }), None);
+        assert_eq!(copy.pop(&data), None);
+    }
+
+    #[test]
+    fn buf_list() {
+        const DATA_V: Atomic<u64> = Atomic(AtomicU64::new(0));
+        const N: usize = 64;
+        let data: [Atomic<u64>; N] = [DATA_V; N];
+
+        let mut list = BufList::default();
+        assert_eq!(list.pop(&data), None);
+        list.push(&data, 0);
+        list.push(&data, 1);
+        list.push_end(&data, 63);
+        list.push_end(&data, 62);
+
+        assert_eq!(list.pop(&data), Some(1));
+        assert_eq!(list.pop(&data), Some(0));
+        assert_eq!(list.pop(&data), Some(63));
+        assert_eq!(list.pop(&data), Some(62));
+        assert_eq!(list.pop(&data), None);
     }
 }

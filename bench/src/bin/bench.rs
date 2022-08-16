@@ -85,27 +85,27 @@ fn main() {
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
 
-    type C512 = CacheLower<512>;
-    type C128 = CacheLower<128>;
-    type C64 = CacheLower<64>;
-    type A512 = AtomLower<512>;
-    type A256 = AtomLower<256>;
-    type A128 = AtomLower<128>;
+    type C512 = Cache<512>;
+    type C128 = Cache<128>;
+    type C64 = Cache<64>;
+    type A512 = Atom<512>;
+    type A256 = Atom<256>;
+    type A128 = Atom<128>;
     let allocs: [Arc<dyn Alloc>; 8] = [
-        Arc::new(ArrayAtomicAlloc::<C64>::default()),
-        Arc::new(ArrayAtomicAlloc::<C128>::default()),
-        Arc::new(ArrayAtomicAlloc::<C512>::default()),
-        Arc::new(ArrayAtomicAlloc::<A128>::default()),
-        Arc::new(ArrayAtomicAlloc::<A256>::default()),
-        Arc::new(ArrayAtomicAlloc::<A512>::default()),
-        Arc::new(ListLocalAlloc::default()),
-        Arc::new(ListLockedAlloc::default()),
+        Arc::new(ArrayAtomic::<C64>::default()),
+        Arc::new(ArrayAtomic::<C128>::default()),
+        Arc::new(ArrayAtomic::<C512>::default()),
+        Arc::new(ArrayAtomic::<A128>::default()),
+        Arc::new(ArrayAtomic::<A256>::default()),
+        Arc::new(ArrayAtomic::<A512>::default()),
+        Arc::new(ListLocal::default()),
+        Arc::new(ListLocked::default()),
     ];
 
     // Additional constraints (perf)
     let mut conditions = HashMap::<String, &'static dyn Fn(usize, usize) -> bool>::new();
-    conditions.insert(name::<ListLocalAlloc>(), &|_, order| order == 0);
-    conditions.insert(name::<ListLockedAlloc>(), &|cores, order| {
+    conditions.insert(name::<ListLocal>(), &|_, order| order == 0);
+    conditions.insert(name::<ListLocked>(), &|cores, order| {
         order == 0 && (cores <= 16 || cores == 32)
     });
 

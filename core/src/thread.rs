@@ -103,17 +103,19 @@ pub fn pin(core: usize) {
 /// Executed `f` on `n` parallel threads.
 pub fn parallel<T, F>(n: usize, f: F) -> Vec<T>
 where
-    T: Send + 'static,
-    F: FnOnce(usize) -> T + Clone + Send + 'static,
+    T: Send,
+    F: FnOnce(usize) -> T + Clone + Send,
 {
-    let handles = (0..n)
-        .into_iter()
-        .map(|t| {
-            let f = f.clone();
-            std::thread::spawn(move || f(t))
-        })
-        .collect::<Vec<_>>(); // collect starts the threads immediately
-    handles.into_iter().map(|t| t.join().unwrap()).collect()
+    std::thread::scope(|scope| {
+        let handles = (0..n)
+            .into_iter()
+            .map(|t| {
+                let f = f.clone();
+                scope.spawn(move || f(t))
+            })
+            .collect::<Vec<_>>();
+        handles.into_iter().map(|t| t.join().unwrap()).collect()
+    })
 }
 
 #[cfg(all(test, feature = "std"))]

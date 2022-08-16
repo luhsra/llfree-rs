@@ -11,13 +11,13 @@ use crate::util::Page;
 use crate::{Error, Result};
 
 mod array_aligned;
-pub use array_aligned::{ArrayAlignedAlloc, CacheAligned, Unaligned};
+pub use array_aligned::{ArrayAligned, CacheAligned, Unaligned};
 mod array_atomic;
-pub use array_atomic::ArrayAtomicAlloc;
+pub use array_atomic::ArrayAtomic;
 mod list_local;
-pub use list_local::ListLocalAlloc;
+pub use list_local::ListLocal;
 mod list_locked;
-pub use list_locked::ListLockedAlloc;
+pub use list_locked::ListLocked;
 
 pub const CAS_RETRIES: usize = 8;
 pub const MAGIC: usize = 0xdead_beef;
@@ -187,8 +187,8 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::Error;
 
-    type Lower = AtomLower<128>;
-    type Allocator = ArrayAtomicAlloc<Lower>;
+    type Lower = Atom<128>;
+    type Allocator = ArrayAtomic<Lower>;
 
     fn mapping(begin: usize, length: usize) -> core::result::Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -208,23 +208,23 @@ mod test {
     fn names() {
         println!(
             "{}\n -> {}",
-            type_name::<ArrayAtomicAlloc<Lower>>(),
-            super::name::<ArrayAtomicAlloc<Lower>>()
+            type_name::<ArrayAtomic<Lower>>(),
+            super::name::<ArrayAtomic<Lower>>()
         );
         println!(
             "{}\n -> {}",
-            type_name::<ListLocalAlloc>(),
-            super::name::<ListLocalAlloc>()
+            type_name::<ListLocal>(),
+            super::name::<ListLocal>()
         );
         println!(
             "{}\n -> {}",
-            type_name::<ArrayAlignedAlloc<Unaligned, Lower>>(),
-            super::name::<ArrayAlignedAlloc<Unaligned, Lower>>()
+            type_name::<ArrayAligned<Unaligned, Lower>>(),
+            super::name::<ArrayAligned<Unaligned, Lower>>()
         );
         println!(
             "{}\n -> {}",
-            type_name::<ArrayAlignedAlloc<CacheAligned, Lower>>(),
-            super::name::<ArrayAlignedAlloc<CacheAligned, Lower>>()
+            type_name::<ArrayAligned<CacheAligned, Lower>>(),
+            super::name::<ArrayAligned<CacheAligned, Lower>>()
         );
     }
 

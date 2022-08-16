@@ -21,7 +21,7 @@ type Table1 = Bitfield<2>;
 /// NVRAM: [ Pages | PT1s + padding | PT2s | Meta ]
 /// ```
 #[derive(Default, Debug)]
-pub struct AtomLower<const T2N: usize> {
+pub struct Atom<const T2N: usize> {
     pub begin: usize,
     pub pages: usize,
     l1: Box<[Table1]>,
@@ -29,7 +29,7 @@ pub struct AtomLower<const T2N: usize> {
     persistent: bool,
 }
 
-impl<const T2N: usize> LowerAlloc for AtomLower<T2N>
+impl<const T2N: usize> LowerAlloc for Atom<T2N>
 where
     [(); T2N / 1]:,
     [(); T2N / 2]:,
@@ -271,7 +271,7 @@ where
     }
 }
 
-impl<const T2N: usize> AtomLower<T2N>
+impl<const T2N: usize> Atom<T2N>
 where
     [(); T2N / 1]:,
     [(); T2N / 2]:,
@@ -455,7 +455,7 @@ where
     }
 }
 
-impl<const T2N: usize> Drop for AtomLower<T2N> {
+impl<const T2N: usize> Drop for Atom<T2N> {
     fn drop(&mut self) {
         if self.persistent {
             Box::leak(core::mem::take(&mut self.l1));
@@ -472,14 +472,14 @@ mod test {
     use alloc::vec::Vec;
     use log::{debug, info, warn};
 
-    use super::{AtomLower, Table1};
+    use super::{Atom, Table1};
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
     use crate::table::Mapping;
     use crate::thread;
     use crate::util::{logging, Page, WyRand};
 
-    type Allocator = AtomLower<128>;
+    type Allocator = Atom<128>;
     const MAPPING: Mapping<2> = Allocator::MAPPING;
 
     fn count(pt: &Table1) -> usize {

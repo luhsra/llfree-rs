@@ -67,7 +67,7 @@ impl Entry3 {
     /// Reserves this entry.
     pub fn reserve(self, min: usize) -> Option<Entry3> {
         if !self.reserved() && self.free() > min {
-            Some(self.with_free(0).with_reserved(true))
+            Some(self.with_reserved(true).with_free(0))
         } else {
             None
         }

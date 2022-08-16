@@ -20,7 +20,7 @@ use crate::{Error, Result};
 ///
 /// As expected the contention on the ticket lock is very high.
 #[repr(align(64))]
-pub struct ListLockedAlloc {
+pub struct ListLocked {
     memory: Range<*const Page>,
     next: TicketMutex<Node>,
     /// CPU local metadata
@@ -32,10 +32,10 @@ struct LocalCounter {
     counter: AtomicUsize,
 }
 
-unsafe impl Send for ListLockedAlloc {}
-unsafe impl Sync for ListLockedAlloc {}
+unsafe impl Send for ListLocked {}
+unsafe impl Sync for ListLocked {}
 
-impl fmt::Debug for ListLockedAlloc {
+impl fmt::Debug for ListLocked {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
         for (t, l) in self.local.iter().enumerate() {
@@ -46,7 +46,7 @@ impl fmt::Debug for ListLockedAlloc {
     }
 }
 
-impl Default for ListLockedAlloc {
+impl Default for ListLocked {
     fn default() -> Self {
         Self {
             memory: null()..null(),
@@ -56,7 +56,7 @@ impl Default for ListLockedAlloc {
     }
 }
 
-impl Alloc for ListLockedAlloc {
+impl Alloc for ListLocked {
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], _persistent: bool) -> Result<()> {
         info!(

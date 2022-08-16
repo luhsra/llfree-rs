@@ -17,9 +17,9 @@ macro_rules! stop {
 }
 
 mod cache;
-pub use cache::CacheLower;
+pub use cache::Cache;
 mod atom;
-pub use atom::AtomLower;
+pub use atom::Atom;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug {
@@ -66,7 +66,7 @@ mod test {
     use crate::thread;
     use crate::util::{logging, Page};
 
-    type Lower = super::atom::AtomLower<512>;
+    type Lower = super::atom::Atom<512>;
 
     #[test]
     #[ignore]
