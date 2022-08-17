@@ -85,19 +85,16 @@ fn main() {
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
 
-    type C512 = Cache<512>;
-    type C128 = Cache<128>;
-    type C64 = Cache<64>;
     type A512 = Atom<512>;
     type A256 = Atom<256>;
     type A128 = Atom<128>;
     let allocs: [Arc<dyn Alloc>; 8] = [
-        Arc::new(ArrayAtomic::<C64>::default()),
-        Arc::new(ArrayAtomic::<C128>::default()),
-        Arc::new(ArrayAtomic::<C512>::default()),
         Arc::new(ArrayAtomic::<A128>::default()),
         Arc::new(ArrayAtomic::<A256>::default()),
         Arc::new(ArrayAtomic::<A512>::default()),
+        Arc::new(ArrayList::<A128>::default()),
+        Arc::new(ArrayList::<A256>::default()),
+        Arc::new(ArrayList::<A512>::default()),
         Arc::new(ListLocal::default()),
         Arc::new(ListLocked::default()),
     ];

@@ -16,9 +16,19 @@ use super::LowerAlloc;
 
 type Table1 = Bitfield<2>;
 
-/// Level 2 page allocator.
+/// Subtree allocator which is able to allocate order 0..11 pages.
+///
+/// The generic parameter `T2N` configures the level 2 table size.
+/// It has to be a multiple of 8!
+///
+/// ## Memory Layout
+/// **persistent:**
 /// ```text
 /// NVRAM: [ Pages | PT1s + padding | PT2s | Meta ]
+/// ```
+/// **volatile:**
+/// ```text
+/// RAM: [ Pages ], PT1s and PT2s are allocated elswhere
 /// ```
 #[derive(Default, Debug)]
 pub struct Atom<const T2N: usize> {

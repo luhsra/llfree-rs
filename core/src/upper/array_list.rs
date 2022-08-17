@@ -6,7 +6,7 @@ use core::{fmt, hint};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info, warn};
-use spin::mutex::TicketMutex;
+use spin::Mutex;
 
 use super::{Alloc, Local, MAGIC, MAX_PAGES};
 use crate::atomic::{ANode, Atomic, BufList, BufListDbg};
@@ -48,15 +48,15 @@ pub struct ArrayList<L: LowerAlloc> {
     meta: *mut Meta,
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Box<[Atomic<Entry3>]>,
-    /// CPU local data
+    /// CPU local data (only shared between CPUs if the memory area is too small)
     local: Box<[Local<PUTS_RESERVE>]>,
     /// Metadata of the lower alloc
     lower: L,
 
     /// List of idx to subtrees that are not allocated at all
-    empty: TicketMutex<BufList<Entry3>>,
+    empty: Mutex<BufList<Entry3>>,
     /// List of idx to subtrees that are partially allocated with huge pages
-    partial: TicketMutex<BufList<Entry3>>,
+    partial: Mutex<BufList<Entry3>>,
 }
 
 unsafe impl<L: LowerAlloc> Send for ArrayList<L> {}
@@ -140,8 +140,8 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
     }
 
     fn recover(&self) -> Result<()> {
-        let meta = unsafe { &mut *self.meta };
-        if meta.pages.load(Ordering::SeqCst) == self.pages()
+        if let Some(meta) = unsafe { self.meta.as_ref() }
+            && meta.pages.load(Ordering::SeqCst) == self.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
         {
             info!("recover p={}", self.pages());
@@ -173,8 +173,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
 
         self.enqueue(pte3_num - 1, max);
 
-        if !self.meta.is_null() {
-            let meta = unsafe { &mut *self.meta };
+        if let Some(meta) = unsafe { self.meta.as_ref() } {
             meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
             meta.active.store(1, Ordering::SeqCst);
@@ -195,8 +194,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
         self.empty.lock().clear(self);
         self.partial.lock().clear(self);
 
-        if !self.meta.is_null() {
-            let meta = unsafe { &mut *self.meta };
+        if let Some(meta) = unsafe { self.meta.as_ref() } {
             meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
             meta.active.store(1, Ordering::SeqCst);
@@ -210,63 +208,10 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
             return Err(Error::Memory);
         }
 
-        // Select local data (which can be shared between cores if we do not have enough memory)
-        let c = core % self.local.len();
-        let local = &self.local[c];
-
-        // Incremet or clear (atomic sync with put)
-        let mut pte_res = local.pte.update(|v| v.dec(1 << order));
-
-        // On Error:
-        // - sync with global & retry
-        // - reserve new & retry
-        //   - unreserve & add old one to the back of the stack
-
-        'outer: for _ in 0..CAS_RETRIES {
-            let (pte, mut start) = match pte_res {
-                Ok(pte) => (pte, local.start.load()),
-                Err(pte) => {
-                    // Try reserving new subtree
-                    if let Some(ret) = self.get_reserve(local, pte, order)? {
-                        ret
-                    } else {
-                        pte_res = local.pte.update(|v| v.dec(1 << order));
-                        continue 'outer;
-                    }
-                }
-            };
-
-            // Load starting idx
-            if start / L::MAPPING.span(2) != pte.idx() {
-                start = pte.idx() * L::MAPPING.span(2)
-            }
-
-            // Allocate in subtree
-            match self.lower.get(start, order) {
-                Ok(page) => {
-                    // small pages
-                    if order < log2(64) {
-                        local.start.store(page);
-                    }
-                    return Ok(unsafe { self.lower.memory().start.add(page as _) } as u64);
-                }
-                Err(Error::Memory) => {
-                    // Counter reset and retry
-                    warn!("alloc failed o={order} => retry");
-                    let max = self
-                        .pages()
-                        .saturating_sub(L::MAPPING.round(2, start))
-                        .min(L::MAPPING.span(2));
-                    // Increment global to prevent race condition with concurrent reservation
-                    match self[pte.idx()].update(|v| v.inc(1 << order, max)) {
-                        Ok(pte) => pte_res = Err(pte), // -> reserve new
-                        Err(pte) => {
-                            error!("Counter reset failed o={order} {}: {pte:?}", pte.idx());
-                            return Err(Error::Corruption);
-                        }
-                    }
-                    continue 'outer;
-                }
+        for _ in 0..CAS_RETRIES {
+            match self.get_inner(core, order) {
+                Err(Error::CAS) => continue,
+                Ok(addr) => return Ok(addr),
                 Err(e) => return Err(e),
             }
         }
@@ -327,7 +272,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
                 if !pte.reserved() && new_pages > Self::ALMOST_FULL {
                     // Try to reserve subtree if recent frees were part of it
                     if core == c && local.frees_related(i) {
-                        if self.put_reserve(local, i)? {
+                        if self.reserve_entry(local, i)? {
                             return Ok(());
                         }
                     }
@@ -423,17 +368,61 @@ impl<L: LowerAlloc> ArrayList<L> {
         Ok(total)
     }
 
-    /// Reserves a new subtree, prioritizing partially filled subtrees,
-    /// and allocates a page from it in one step.
-    fn reserve(&self, order: usize) -> Result<(Entry3, usize)> {
+    fn get_inner(&self, core: usize, order: usize) -> Result<u64> {
+        // Select local data (which can be shared between cores if we do not have enough memory)
+        let c = core % self.local.len();
+        let local = &self.local[c];
+
+        match local.pte.update(|v| v.dec(1 << order)) {
+            Ok(pte) => {
+                let mut start = local.start.load();
+                if start / L::MAPPING.span(2) != pte.idx() {
+                    start = pte.idx() * L::MAPPING.span(2)
+                }
+                match self.lower.get(start, order) {
+                    Ok(page) => {
+                        if order < log2(64) {
+                            local.start.store(page);
+                        }
+                        Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
+                    }
+                    Err(Error::Memory) => {
+                        // counter reset
+                        warn!("alloc failed o={order} => retry");
+                        let max = self
+                            .pages()
+                            .saturating_sub(L::MAPPING.round(2, start))
+                            .min(L::MAPPING.span(2));
+                        // Increment global to prevent race condition with concurrent reservation
+                        if let Err(pte) = self[pte.idx()].update(|v| v.inc(1 << order, max)) {
+                            error!("Counter reset failed o={order} {}: {pte:?}", pte.idx());
+                            return Err(Error::Corruption);
+                        } else {
+                            // reserve new, pushing the old entry to the end of the partial list
+                            self.reserve_or_wait(local, pte, true)?;
+                            Err(Error::CAS)
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Err(pte) => {
+                // TODO: try sync with global
+
+                // reserve new
+                self.reserve_or_wait(local, pte, false)?;
+                Err(Error::CAS)
+            }
+        }
+    }
+
+    /// Reserves a new subtree, prioritizing partially filled subtrees.
+    fn reserve_from_list(&self) -> Result<Entry3> {
         while let Some(i) = self.partial.lock().pop(self) {
             info!("reserve partial {i}");
 
             match self[i].update(|v| v.reserve_partial(Self::ALMOST_FULL, L::MAPPING.span(2))) {
-                Ok(pte) => {
-                    let pte = pte.with_idx(i).dec(1 << order).unwrap();
-                    return Ok((pte, i * L::MAPPING.span(2)));
-                }
+                Ok(pte) => return Ok(pte.with_idx(i)),
                 Err(pte) => {
                     // Skip empty entries
                     if !pte.reserved() && pte.free() == L::MAPPING.span(2) {
@@ -446,8 +435,7 @@ impl<L: LowerAlloc> ArrayList<L> {
         while let Some(i) = self.empty.lock().pop(self) {
             info!("reserve empty {i}");
             if let Ok(pte) = self[i].update(|v| v.reserve_empty(L::MAPPING.span(2))) {
-                let pte = pte.with_idx(i).dec(1 << order).unwrap();
-                return Ok((pte, i * L::MAPPING.span(2)));
+                return Ok(pte.with_idx(i));
             } else {
                 error!("reserve empty failed");
                 return Err(Error::Corruption);
@@ -467,45 +455,23 @@ impl<L: LowerAlloc> ArrayList<L> {
         }
     }
 
-    /// Swap the current reserved subtree out replacing it with a new one.
-    /// The old subtree is unreserved and added back to the lists.
-    fn cas_reserved(
-        &self,
-        pte_a: &Atomic<Entry3>,
-        expect_reserved: bool,
-        new_pte: Entry3,
-    ) -> Result<()> {
-        debug_assert!(!new_pte.reserved());
-
-        let pte = pte_a
-            .update(|v| (v.reserved() == expect_reserved).then_some(new_pte))
-            .map_err(|_| Error::CAS)?;
-        let i = pte.idx();
-        if i >= Entry3::IDX_MAX {
-            return Ok(());
-        }
-
-        let max = (self.pages() - i * L::MAPPING.span(2)).min(L::MAPPING.span(2));
-        if let Ok(v) = self[i].update(|v| v.unreserve_add(pte.free(), max)) {
-            // Only if not already in list
-            if !v.is_valid() {
-                // Add to list
-                self.enqueue(i, v.free() + pte.free());
-            }
-            Ok(())
-        } else {
-            error!("Unreserve failed i{i}");
-            Err(Error::Corruption)
+    fn enqueue_back(&self, i: usize, new_pages: usize) {
+        if new_pages == L::MAPPING.span(2) {
+            self.empty.lock().push(self, i);
+        } else if new_pages > Self::ALMOST_FULL {
+            self.partial.lock().push_back(self, i);
         }
     }
 
-    /// Try to reserve a new subtree or wait for concurrent reservations to finish
-    fn get_reserve(
+    /// Try to reserve a new subtree or wait for concurrent reservations to finish.
+    ///
+    /// If `enqueue_back`, the old unreserved entry is added to the back of the partial list.
+    fn reserve_or_wait(
         &self,
         local: &Local<PUTS_RESERVE>,
         pte: Entry3,
-        order: usize,
-    ) -> Result<Option<(Entry3, usize)>> {
+        enqueue_back: bool,
+    ) -> Result<Entry3> {
         // Set the reserved flag, locking the reservation
         if !pte.reserved()
             && local
@@ -514,7 +480,7 @@ impl<L: LowerAlloc> ArrayList<L> {
                 .is_ok()
         {
             // Try reserve new subtree
-            let (new_pte, start) = match self.reserve(order) {
+            let new_pte = match self.reserve_from_list() {
                 Ok(ret) => ret,
                 Err(e) => {
                     // Clear reserve flag
@@ -529,34 +495,33 @@ impl<L: LowerAlloc> ArrayList<L> {
                     return Err(e);
                 }
             };
-            match self.cas_reserved(&local.pte, true, new_pte) {
-                Ok(_) => {}
+            match self.cas_reserved(&local.pte, new_pte, true, enqueue_back) {
+                Ok(_) => Ok(new_pte),
                 Err(Error::CAS) => {
                     error!("unexpected reserve state");
-                    return Err(Error::Corruption);
+                    Err(Error::Corruption)
                 }
-                Err(e) => return Err(e),
+                Err(e) => Err(e),
             }
-            local.start.store(start);
-            Ok(Some((new_pte, start)))
         } else {
             // Wait for reservation to end
             for _ in 0..(2 * CAS_RETRIES) {
-                if local.pte.load().reserved() {
-                    hint::spin_loop()
+                let new_pte = local.pte.load();
+                if new_pte.reserved() {
+                    hint::spin_loop() // pause cpu
                 } else {
-                    return Ok(None);
+                    return Ok(new_pte);
                 }
             }
             error!("Timeout reservation wait");
-            return Err(Error::Corruption);
+            Err(Error::Corruption)
         }
     }
 
-    fn put_reserve(&self, local: &Local<PUTS_RESERVE>, i: usize) -> Result<bool> {
+    fn reserve_entry(&self, local: &Local<PUTS_RESERVE>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
         if let Ok(new_pte) = self[i].update(|v| v.reserve(Self::ALMOST_FULL)) {
-            match self.cas_reserved(&local.pte, false, new_pte.with_idx(i)) {
+            match self.cas_reserved(&local.pte, new_pte.with_idx(i), false, false) {
                 Ok(_) => {
                     local.start.store(i * L::MAPPING.span(2));
                     Ok(true)
@@ -575,6 +540,45 @@ impl<L: LowerAlloc> ArrayList<L> {
             }
         } else {
             Ok(false)
+        }
+    }
+
+    /// Swap the current reserved subtree out replacing it with a new one.
+    /// The old subtree is unreserved and added back to the lists.
+    ///
+    /// If `enqueue_back`, the old unreserved entry is added to the back of the partial list.
+    fn cas_reserved(
+        &self,
+        pte_a: &Atomic<Entry3>,
+        new_pte: Entry3,
+        expect_reserved: bool,
+        enqueue_back: bool,
+    ) -> Result<()> {
+        debug_assert!(!new_pte.reserved());
+
+        let pte = pte_a
+            .update(|v| (v.reserved() == expect_reserved).then_some(new_pte))
+            .map_err(|_| Error::CAS)?;
+        let i = pte.idx();
+        if i >= Entry3::IDX_MAX {
+            return Ok(());
+        }
+
+        let max = (self.pages() - i * L::MAPPING.span(2)).min(L::MAPPING.span(2));
+        if let Ok(v) = self[i].update(|v| v.unreserve_add(pte.free(), max)) {
+            // Only if not already in list
+            if !v.is_valid() {
+                // Add to list
+                if enqueue_back {
+                    self.enqueue_back(i, v.free() + pte.free());
+                } else {
+                    self.enqueue(i, v.free() + pte.free());
+                }
+            }
+            Ok(())
+        } else {
+            error!("Unreserve failed i{i}");
+            Err(Error::Corruption)
         }
     }
 }

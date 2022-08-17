@@ -291,7 +291,7 @@ impl<T: ANode> BufList<T> {
         self.start = Some(idx);
     }
 
-    pub fn push_end<B>(&mut self, buf: &B, idx: usize)
+    pub fn push_back<B>(&mut self, buf: &B, idx: usize)
     where
         B: Index<usize, Output = Atomic<T>>,
     {
@@ -435,8 +435,8 @@ mod test {
         assert_eq!(list.pop(&data), None);
         list.push(&data, 0);
         list.push(&data, 1);
-        list.push_end(&data, 63);
-        list.push_end(&data, 62);
+        list.push_back(&data, 63);
+        list.push_back(&data, 62);
 
         assert_eq!(list.pop(&data), Some(1));
         assert_eq!(list.pop(&data), Some(0));

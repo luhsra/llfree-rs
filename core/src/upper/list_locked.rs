@@ -7,7 +7,7 @@ use alloc::boxed::Box;
 use alloc::slice;
 use alloc::vec::Vec;
 use log::{error, info};
-use spin::mutex::TicketMutex;
+use spin::Mutex;
 
 use super::{Alloc, MIN_PAGES};
 use crate::util::Page;
@@ -22,7 +22,7 @@ use crate::{Error, Result};
 #[repr(align(64))]
 pub struct ListLocked {
     memory: Range<*const Page>,
-    next: TicketMutex<Node>,
+    next: Mutex<Node>,
     /// CPU local metadata
     local: Box<[LocalCounter]>,
 }
@@ -50,7 +50,7 @@ impl Default for ListLocked {
     fn default() -> Self {
         Self {
             memory: null()..null(),
-            next: TicketMutex::new(Node::new()),
+            next: Mutex::new(Node::new()),
             local: Box::new([]),
         }
     }
