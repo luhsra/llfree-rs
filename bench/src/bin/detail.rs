@@ -5,14 +5,14 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::lower::Cache;
+use nvalloc::lower::Atom;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::upper::{Alloc, ArrayAtomic, MIN_PAGES};
 use nvalloc::util::{logging, Cycles, Page};
 
-type Allocator = ArrayAtomic<Cache<128>>;
+type Allocator = ArrayAtomic<Atom<128>>;
 
 /// Benchmarking an allocator in more detail.
 #[derive(Parser, Debug)]

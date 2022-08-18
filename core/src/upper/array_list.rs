@@ -233,7 +233,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
                 let new_pages = pte.free() + num_pages;
                 if !pte.reserved() && new_pages > Subtrees::almost_full(L::N) {
                     // Try to reserve subtree if recent frees were part of it
-                    if core == c && local.frees_related(i) && self.reserve_entry(local, i)? {
+                    if core == c && local.frees_related(i) && self.reserve_entry(&local.pte, i)? {
                         return Ok(());
                     }
 
@@ -354,7 +354,7 @@ impl<L: LowerAlloc> ArrayList<L> {
                             Err(Error::Corruption)
                         } else {
                             // reserve new, pushing the old entry to the end of the partial list
-                            self.reserve_or_wait(local, pte, true)?;
+                            self.reserve_or_wait(&local.pte, pte, true)?;
                             Err(Error::CAS)
                         }
                     }
@@ -365,7 +365,7 @@ impl<L: LowerAlloc> ArrayList<L> {
                 // TODO: try sync with global
 
                 // reserve new
-                self.reserve_or_wait(local, pte, false)?;
+                self.reserve_or_wait(&local.pte, pte, false)?;
                 Err(Error::CAS)
             }
         }
@@ -374,16 +374,10 @@ impl<L: LowerAlloc> ArrayList<L> {
     /// Try to reserve a new subtree or wait for concurrent reservations to finish.
     ///
     /// If `retry`, tries to reserve a less fragmented subtree
-    fn reserve_or_wait(
-        &self,
-        local: &Local<PUTS_RESERVE>,
-        pte: Entry3,
-        retry: bool,
-    ) -> Result<Entry3> {
+    fn reserve_or_wait(&self, pte_a: &Atomic<Entry3>, old: Entry3, retry: bool) -> Result<Entry3> {
         // Set the reserved flag, locking the reservation
-        if !pte.reserved()
-            && local
-                .pte
+        if !old.reserved()
+            && pte_a
                 .update(|v| (!v.reserved()).then_some(v.with_reserved(true)))
                 .is_ok()
         {
@@ -392,8 +386,7 @@ impl<L: LowerAlloc> ArrayList<L> {
                 Ok(ret) => ret,
                 Err(e) => {
                     // Clear reserve flag
-                    if local
-                        .pte
+                    if pte_a
                         .update(|v| v.reserved().then_some(v.with_reserved(false)))
                         .is_err()
                     {
@@ -403,7 +396,7 @@ impl<L: LowerAlloc> ArrayList<L> {
                     return Err(e);
                 }
             };
-            match self.cas_reserved(&local.pte, new_pte, true, retry) {
+            match self.cas_reserved(pte_a, new_pte, true, retry) {
                 Ok(_) => Ok(new_pte),
                 Err(Error::CAS) => {
                     error!("unexpected reserve state");
@@ -414,7 +407,7 @@ impl<L: LowerAlloc> ArrayList<L> {
         } else {
             // Wait for reservation to end
             for _ in 0..(2 * CAS_RETRIES) {
-                let new_pte = local.pte.load();
+                let new_pte = pte_a.load();
                 if new_pte.reserved() {
                     hint::spin_loop() // pause cpu
                 } else {
@@ -426,14 +419,11 @@ impl<L: LowerAlloc> ArrayList<L> {
         }
     }
 
-    fn reserve_entry(&self, local: &Local<PUTS_RESERVE>, i: usize) -> Result<bool> {
+    fn reserve_entry(&self, pte_a: &Atomic<Entry3>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
         if let Ok(new_pte) = self.subtrees[i].update(|v| v.reserve(Subtrees::almost_full(L::N))) {
-            match self.cas_reserved(&local.pte, new_pte.with_idx(i), false, false) {
-                Ok(_) => {
-                    local.start.store(i * L::N);
-                    Ok(true)
-                }
+            match self.cas_reserved(pte_a, new_pte.with_idx(i), false, false) {
+                Ok(_) => Ok(true),
                 Err(Error::CAS) => {
                     warn!("rollback {i}");
                     // Rollback reservation

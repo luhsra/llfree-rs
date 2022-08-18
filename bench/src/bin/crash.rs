@@ -6,7 +6,7 @@ use std::time::Duration;
 use clap::Parser;
 use log::{error, warn};
 use nvalloc::upper::*;
-use nvalloc::lower::Cache;
+use nvalloc::lower::Atom;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
@@ -43,7 +43,7 @@ fn main() {
     let pages = memory * PT_LEN * PT_LEN;
     assert!(pages >= MIN_PAGES * threads);
 
-    type L = Cache<128>;
+    type L = Atom<128>;
     let allocs: [Arc<dyn Alloc>; 3] = [
         Arc::new(ArrayAligned::<CacheAligned, L>::default()),
         Arc::new(ArrayAligned::<Unaligned, L>::default()),

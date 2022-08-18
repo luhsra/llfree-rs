@@ -15,8 +15,6 @@ macro_rules! stop {
     () => {};
 }
 
-mod cache;
-pub use cache::Cache;
 mod atom;
 pub use atom::Atom;
 
