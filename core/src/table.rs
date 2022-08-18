@@ -6,7 +6,7 @@ use core::sync::atomic::{self, AtomicU64, Ordering};
 
 use crate::atomic::{Atomic, AtomicValue};
 use crate::util::Page;
-use crate::util::{align_down, align_up, log2, CacheLine};
+use crate::util::{align_down, align_up, CacheLine};
 use crate::Error;
 
 pub const PT_ORDER: usize = 9;
@@ -32,7 +32,7 @@ const _: () = assert!(ATable::<u16, 64>::SIZE == 128);
 
 impl<T: AtomicValue, const LEN: usize> ATable<T, LEN> {
     pub const LEN: usize = LEN;
-    pub const ORDER: usize = log2(LEN);
+    pub const ORDER: usize = LEN.ilog2() as _;
     pub const PTE_SIZE: usize = size_of::<T>();
     pub const SIZE: usize = LEN * Self::PTE_SIZE;
 
@@ -106,7 +106,7 @@ impl<const N: usize> Bitfield<N> {
     pub const ENTRY_BITS: usize = 64;
     pub const ENTRIES: usize = N;
     pub const LEN: usize = N * Self::ENTRY_BITS;
-    pub const ORDER: usize = log2(Self::LEN);
+    pub const ORDER: usize = Self::LEN.ilog2() as _;
     pub const SIZE: usize = Self::LEN / 8;
 
     pub fn set(&self, i: usize, v: bool) {
@@ -136,11 +136,10 @@ impl<const N: usize> Bitfield<N> {
         };
         match self.data[di].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
             if expected {
-                e & mask == (mask * expected as u64)
+                (e & mask == mask).then_some(e & !mask)
             } else {
-                e & mask == 0
+                (e & mask == 0).then_some(e | mask)
             }
-            .then(|| if expected { e & !mask } else { e | mask })
         }) {
             Ok(_) => Ok(()),
             Err(_) => Err(()),

@@ -12,7 +12,7 @@ const _: () = assert!(size_of::<Page>() == Page::SIZE);
 const _: () = assert!(align_of::<Page>() == Page::SIZE);
 impl Page {
     pub const SIZE: usize = 0x1000;
-    pub const SIZE_BITS: usize = log2(Self::SIZE);
+    pub const SIZE_BITS: usize = Self::SIZE.ilog2() as _;
     pub const fn new() -> Self {
         Self {
             _data: [0; Self::SIZE],
@@ -37,7 +37,7 @@ const _: () = assert!(size_of::<CacheLine>() == CacheLine::SIZE);
 const _: () = assert!(align_of::<CacheLine>() == CacheLine::SIZE);
 impl CacheLine {
     pub const SIZE: usize = 64;
-    pub const SIZE_BITS: usize = log2(Self::SIZE);
+    pub const SIZE_BITS: usize = Self::SIZE.ilog2() as _;
     pub const fn new() -> Self {
         Self {
             _data: [0; Self::SIZE],
@@ -51,11 +51,6 @@ impl CacheLine {
         debug_assert!(size_of::<T>() <= size_of::<Self>());
         unsafe { transmute(self) }
     }
-}
-
-/// Computes the binary logarithm of `v` rounded down.
-pub const fn log2(v: usize) -> usize {
-    (usize::BITS - v.leading_zeros() - 1) as usize
 }
 
 pub const fn div_ceil(v: usize, d: usize) -> usize {

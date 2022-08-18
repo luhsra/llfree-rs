@@ -932,12 +932,11 @@ mod test {
     #[test]
     fn different_orders() {
         const MAX_ORDER: usize = Lower::MAX_ORDER;
-        const MAPPING: Mapping<2> = Lower::MAPPING;
         const THREADS: usize = 4;
 
         logging();
 
-        let mut mapping = mapping(0x1000_0000_0000, MAPPING.span(2) * (THREADS * 2 + 1)).unwrap();
+        let mut mapping = mapping(0x1000_0000_0000, Lower::N * (THREADS * 2 + 1)).unwrap();
         let alloc = Arc::new({
             let mut a = Allocator::default();
             a.init(THREADS, &mut mapping, false).unwrap();

@@ -46,6 +46,9 @@ struct Args {
     memory: usize,
     #[clap(long, default_value_t = 1)]
     stride: usize,
+    /// Write into every page before benchmarking.
+    #[clap(long)]
+    warmup: bool,
 }
 
 fn main() {
@@ -60,6 +63,7 @@ fn main() {
         order,
         memory,
         stride,
+        warmup,
     } = Args::parse();
 
     util::logging();
@@ -78,9 +82,10 @@ fn main() {
 
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
 
-    // Warmup
-    for page in &mut mapping[..] {
-        *page.cast_mut::<usize>() = 1;
+    if warmup {
+        for page in &mut mapping[..] {
+            *page.cast_mut::<usize>() = 1;
+        }
     }
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());

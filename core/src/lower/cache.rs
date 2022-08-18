@@ -33,7 +33,7 @@ impl<const T2N: usize> LowerAlloc for Cache<T2N>
 where
     [(); T2N / 2]:,
 {
-    const MAPPING: Mapping<2> = Mapping([Table1::ORDER, ATable::<Entry2, T2N>::ORDER]);
+    const N: usize = Self::MAPPING.span(2);
     const MAX_ORDER: usize = Self::MAPPING.order(1) + 1;
 
     fn new(_cores: usize, memory: &mut [Page], persistent: bool) -> Self {
@@ -274,6 +274,8 @@ impl<const T2N: usize> Cache<T2N>
 where
     [(); T2N / 2]:,
 {
+    const MAPPING: Mapping<2> = Mapping([Table1::ORDER, ATable::<Entry2, T2N>::ORDER]);
+
     /// Returns the l1 page table that contains the `page`.
     /// ```text
     /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]

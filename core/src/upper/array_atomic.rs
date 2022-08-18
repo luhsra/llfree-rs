@@ -12,7 +12,7 @@ use crate::atomic::{ANode, AStack, AStackDbg, Atomic};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
-use crate::util::{log2, Page};
+use crate::util::{align_down, Page};
 use crate::{Error, Result};
 
 const PUTS_RESERVE: usize = 4;
@@ -104,7 +104,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
         );
         if memory.len() < self.pages_needed(cores) {
             warn!("memory {} < {}", memory.len(), self.pages_needed(cores));
-            cores = 1.max(memory.len() / L::MAPPING.span(2));
+            cores = 1.max(memory.len() / L::N);
         }
 
         if persistent {
@@ -123,7 +123,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
         self.lower = L::new(cores, memory, persistent);
 
         // Array with all pte3
-        let pte3_num = L::MAPPING.num_pts(2, self.lower.pages());
+        let pte3_num = self.pages().div_ceil(L::N);
         let mut pte3s = Vec::with_capacity(pte3_num);
         pte3s.resize_with(pte3_num, || Atomic::new(Entry3::new()));
         self.subtrees = pte3s.into();
@@ -154,15 +154,14 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
         self.lower.free_all();
 
         // Add all entries to the empty list
-        let pte3_num = L::MAPPING.num_pts(2, self.pages());
+        let pte3_num = self.pages().div_ceil(L::N);
         for i in 0..pte3_num - 1 {
-            self[i].store(Entry3::empty(L::MAPPING.span(2)));
+            self[i].store(Entry3::empty(L::N));
             self.empty.push(self, i);
         }
 
         // The last one may be cut off
-        let max =
-            (self.pages() - (pte3_num - 1) * L::MAPPING.span(2)).min(L::MAPPING.span(2));
+        let max = (self.pages() - (pte3_num - 1) * L::N).min(L::N);
         self[pte3_num - 1].store(Entry3::new().with_free(max));
 
         self.enqueue(pte3_num - 1, max);
@@ -181,7 +180,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
         self.lower.reserve_all();
 
         // Set all entries to zero
-        let pte3_num = L::MAPPING.num_pts(2, self.pages());
+        let pte3_num = self.pages().div_ceil(L::N);
         for i in 0..pte3_num {
             self[i].store(Entry3::new().with_next(None));
         }
@@ -226,15 +225,15 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
             };
 
             // Load starting idx
-            if start / L::MAPPING.span(2) != pte.idx() {
-                start = pte.idx() * L::MAPPING.span(2)
+            if start / L::N != pte.idx() {
+                start = pte.idx() * L::N
             }
 
             // Allocate in subtree
             match self.lower.get(start, order) {
                 Ok(page) => {
                     // small pages
-                    if order < log2(64) {
+                    if order < 64usize.ilog2() as usize {
                         local.start.store(page);
                     }
                     return Ok(unsafe { self.lower.memory().start.add(page as _) } as u64);
@@ -242,10 +241,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
                 Err(Error::Memory) => {
                     // Counter reset and retry
                     warn!("alloc failed o={order} => retry");
-                    let max = self
-                        .pages()
-                        .saturating_sub(L::MAPPING.round(2, start))
-                        .min(L::MAPPING.span(2));
+                    let max = (self.pages() - align_down(start, L::N)).min(L::N);
                     // Increment global to prevent race condition with concurrent reservation
                     match self[pte.idx()].update(|v| v.inc(1 << order, max)) {
                         Ok(pte) => pte_res = Err(pte), // -> reserve new
@@ -286,15 +282,12 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
 
         self.lower.put(page, order)?;
 
-        let i = page / L::MAPPING.span(2);
+        let i = page / L::N;
         // Save the modified subtree id for the push-reserve heuristic
         let c = core % self.local.len();
         let local = &self.local[c];
 
-        let max = self
-            .pages()
-            .saturating_sub(L::MAPPING.round(2, page))
-            .min(L::MAPPING.span(2));
+        let max = (self.pages() - i * L::N).min(L::N);
 
         // Try decrement own subtree first
         if let Err(pte) = local.pte.update(|v| v.inc_idx(num_pages, i, max)) {
@@ -315,10 +308,8 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
                 let new_pages = pte.free() + num_pages;
                 if !pte.reserved() && new_pages > Self::ALMOST_FULL {
                     // Try to reserve subtree if recent frees were part of it
-                    if core == c && local.frees_related(i) {
-                        if self.put_reserve(local, i)? {
-                            return Ok(());
-                        }
+                    if core == c && local.frees_related(i) && self.put_reserve(local, i)? {
+                        return Ok(());
                     }
 
                     // Add to partially free list
@@ -340,7 +331,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
     }
 
     fn pages_needed(&self, cores: usize) -> usize {
-        L::MAPPING.span(2) * cores
+        L::N * cores
     }
 
     fn pages(&self) -> usize {
@@ -355,7 +346,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages();
-        for i in 0..L::MAPPING.num_pts(2, self.pages()) {
+        for i in 0..self.pages().div_ceil(L::N) {
             let pte = self[i].load();
             pages -= pte.free();
         }
@@ -399,8 +390,8 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
             warn!("Try recover crashed allocator!");
         }
         let mut total = 0;
-        for i in 0..L::MAPPING.num_pts(2, self.pages()) {
-            let page = i * L::MAPPING.span(2);
+        for i in 0..self.pages().div_ceil(L::N) {
+            let page = i * L::N;
             let pages = self.lower.recover(page, deep)?;
 
             self[i].store(Entry3::new_table(pages, false));
@@ -415,32 +406,30 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
     /// Reserves a new subtree, prioritizing partially filled subtrees,
     /// and allocates a page from it in one step.
     fn reserve(&self, order: usize) -> Result<(Entry3, usize)> {
-        while let Some((i, r)) = self.partial.pop_update(self, |v| {
-            v.reserve_partial(Self::ALMOST_FULL, L::MAPPING.span(2))
-        }) {
+        while let Some((i, r)) = self
+            .partial
+            .pop_update(self, |v| v.reserve_partial(Self::ALMOST_FULL, L::N))
+        {
             info!("reserve partial {i}");
             match r {
                 Ok(pte) => {
                     let pte = pte.with_idx(i).dec(1 << order).unwrap();
-                    return Ok((pte, i * L::MAPPING.span(2)));
+                    return Ok((pte, i * L::N));
                 }
                 Err(pte) => {
                     // Skip empty entries
-                    if !pte.reserved() && pte.free() == L::MAPPING.span(2) {
+                    if !pte.reserved() && pte.free() == L::N {
                         self.empty.push(self, i);
                     }
                 }
             }
         }
 
-        while let Some((i, r)) = self
-            .empty
-            .pop_update(self, |v| v.reserve_empty(L::MAPPING.span(2)))
-        {
+        while let Some((i, r)) = self.empty.pop_update(self, |v| v.reserve_empty(L::N)) {
             info!("reserve empty {i}");
             if let Ok(pte) = r {
                 let pte = pte.with_idx(i).dec(1 << order).unwrap();
-                return Ok((pte, i * L::MAPPING.span(2)));
+                return Ok((pte, i * L::N));
             }
         }
 
@@ -450,7 +439,7 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
 
     fn enqueue(&self, i: usize, new_pages: usize) {
         // Add to list if new counter is small enough
-        if new_pages == L::MAPPING.span(2) {
+        if new_pages == L::N {
             self.empty.push(self, i);
         } else if new_pages > Self::ALMOST_FULL {
             self.partial.push(self, i);
@@ -475,7 +464,7 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
             return Ok(());
         }
 
-        let max = (self.pages() - i * L::MAPPING.span(2)).min(L::MAPPING.span(2));
+        let max = (self.pages() - i * L::N).min(L::N);
         if let Ok(v) = self[i].update(|v| v.unreserve_add(pte.free(), max)) {
             // Only if not already in list
             if !v.is_valid() {
@@ -539,7 +528,7 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
                 }
             }
             error!("Timeout reservation wait");
-            return Err(Error::Corruption);
+            Err(Error::Corruption)
         }
     }
 
@@ -548,13 +537,13 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
         if let Ok(new_pte) = self[i].update(|v| v.reserve(Self::ALMOST_FULL)) {
             match self.cas_reserved(&local.pte, false, new_pte.with_idx(i)) {
                 Ok(_) => {
-                    local.start.store(i * L::MAPPING.span(2));
+                    local.start.store(i * L::N);
                     Ok(true)
                 }
                 Err(Error::CAS) => {
                     warn!("rollback {i}");
                     // Rollback reservation
-                    let max = (self.pages() - i * L::MAPPING.span(2)).min(L::MAPPING.span(2));
+                    let max = (self.pages() - i * L::N).min(L::N);
                     if let Err(_) = self[i].update(|v| v.unreserve_add(new_pte.free(), max)) {
                         error!("put - reservation rollback failed");
                         return Err(Error::Corruption);

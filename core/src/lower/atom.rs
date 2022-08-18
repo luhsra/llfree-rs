@@ -9,7 +9,7 @@ use log::{error, info, warn};
 use crate::entry::{SEntry2, SEntry2T2, SEntry2T4, SEntry2T8, SEntry2Tuple};
 use crate::table::{ATable, Bitfield, Mapping};
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_up, div_ceil, log2, Page};
+use crate::util::{align_up, div_ceil, Page};
 use crate::{Error, Result};
 
 use super::LowerAlloc;
@@ -46,7 +46,7 @@ where
     [(); T2N / 4]:,
     [(); T2N / 8]:,
 {
-    const MAPPING: Mapping<2> = Mapping([Table1::ORDER, ATable::<SEntry2, T2N>::ORDER]);
+    const N: usize = Self::MAPPING.span(2);
     const MAX_ORDER: usize = Self::MAPPING.order(1) + 3;
 
     fn new(_cores: usize, memory: &mut [Page], persistent: bool) -> Self {
@@ -215,7 +215,7 @@ where
         stop!();
 
         if order >= Self::MAPPING.order(1) {
-            return if order == Self::MAPPING.order(1) {
+            if order == Self::MAPPING.order(1) {
                 self.put_huge_n::<SEntry2>(page)
             } else if order == Self::MAPPING.order(1) + 1 {
                 self.put_huge_n::<SEntry2T2>(page)
@@ -225,7 +225,7 @@ where
                 self.put_huge_n::<SEntry2T8>(page)
             } else {
                 Err(Error::Address)
-            };
+            }
         } else {
             let pt2 = self.pt2(page);
             let i2 = Self::MAPPING.idx(2, page);
@@ -288,6 +288,8 @@ where
     [(); T2N / 4]:,
     [(); T2N / 8]:,
 {
+    const MAPPING: Mapping<2> = Mapping([Table1::ORDER, ATable::<SEntry2, T2N>::ORDER]);
+
     /// Returns the l1 page table that contains the `page`.
     /// ```text
     /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
@@ -383,7 +385,7 @@ where
     where
         [(); T2N / T::N]:,
     {
-        let order = Table1::ORDER + log2(T::N);
+        let order = Table1::ORDER + T::N.ilog2() as usize;
         let pt2 = self.pt2_t::<T>(start);
         for _ in 0..CAS_RETRIES {
             for page in Self::MAPPING.iterate(2, start).step_by(T::N) {
@@ -426,7 +428,7 @@ where
     where
         [(); T2N / T::N]:,
     {
-        let order = Table1::ORDER + log2(T::N);
+        let order = Table1::ORDER + T::N.ilog2() as usize;
         let pt2 = self.pt2_t::<T>(page);
         let i2 = Self::MAPPING.idx(2, page) / T::N;
         info!("Put o={order} i={i2}");

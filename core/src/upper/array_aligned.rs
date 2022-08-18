@@ -11,7 +11,7 @@ use super::{Alloc, Local, CAS_RETRIES, MAGIC, MAX_PAGES};
 use crate::atomic::{ANode, AStack, AStackDbg, Atomic};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
-use crate::util::{log2, Page};
+use crate::util::{align_down, Page};
 use crate::{Error, Result};
 
 /// Non-Volatile global metadata
@@ -123,12 +123,8 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
             memory.as_ptr_range(),
             memory.len()
         );
-        if memory.len() < L::MAPPING.span(2) * cores {
-            error!(
-                "memory {} < {}",
-                memory.len(),
-                L::MAPPING.span(2) * cores
-            );
+        if memory.len() < L::N * cores {
+            error!("memory {} < {}", memory.len(), L::N * cores);
             return Err(Error::Memory);
         }
 
@@ -148,7 +144,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
         self.lower = L::new(cores, memory, persistent);
 
         // Array with all pte3
-        let pte3_num = L::MAPPING.num_pts(2, self.lower.pages());
+        let pte3_num = self.pages().div_ceil(L::N);
         let mut pte3s = Vec::with_capacity(pte3_num);
         pte3s.resize_with(pte3_num, || A::new(Atomic::new(Entry3::new())));
         self.subtrees = pte3s.into();
@@ -184,18 +180,17 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
         self.lower.free_all();
 
         // Add all entries to the empty list
-        let pte3_num = L::MAPPING.num_pts(2, self.pages());
+        let pte3_num = self.pages().div_ceil(L::N);
         for i in 0..pte3_num - 1 {
-            self[i].store(Entry3::empty(L::MAPPING.span(2)));
+            self[i].store(Entry3::empty(L::N));
             self.empty.push(self, i);
         }
 
         // The last one may be cut off
-        let max =
-            (self.pages() - (pte3_num - 1) * L::MAPPING.span(2)).min(L::MAPPING.span(2));
+        let max = (self.pages() - (pte3_num - 1) * L::N).min(L::N);
         self[pte3_num - 1].store(Entry3::new().with_free(max));
 
-        if max == L::MAPPING.span(2) {
+        if max == L::N {
             self.empty.push(self, pte3_num - 1);
         } else if max > Self::ALMOST_FULL {
             self.partial.push(self, pte3_num - 1);
@@ -216,9 +211,8 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
 
         self.lower.reserve_all();
 
-        let pte3_num = L::MAPPING.num_pts(2, self.pages());
-
         // Set all entries to zero
+        let pte3_num = self.pages().div_ceil(L::N);
         for i in 0..pte3_num {
             self[i].store(Entry3::new());
         }
@@ -248,7 +242,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
             start = self.reserve(order)?;
             start_a.store(start);
         } else {
-            let i = start / L::MAPPING.span(2);
+            let i = start / L::N;
             if self[i].update(|v| v.dec(1 << order)).is_err() {
                 start = self.reserve(order)?;
                 start_a.store(start);
@@ -264,17 +258,14 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
             match self.lower.get(start, order) {
                 Ok(page) => {
                     // small pages
-                    if order < log2(64) {
+                    if order < 64usize.ilog2() as usize {
                         start_a.store(page);
                     }
                     return Ok(unsafe { self.lower.memory().start.add(page as _) } as u64);
                 }
                 Err(Error::Memory) => {
-                    let i = start / L::MAPPING.span(2);
-                    let max = self
-                        .pages()
-                        .saturating_sub(L::MAPPING.round(2, start))
-                        .min(L::MAPPING.span(2));
+                    let i = start / L::N;
+                    let max = (self.pages() - align_down(start, L::N)).min(L::N);
                     match self[i].update(|v| v.inc(1 << order, max)) {
                         Err(e) => {
                             error!("Counter reset failed o={order} {i}: {e:?}");
@@ -322,13 +313,10 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
 
         self.lower.put(page, order)?;
 
+        let i = page / L::N;
         // The last page table might have fewer pages
-        let max = self
-            .pages()
-            .saturating_sub(L::MAPPING.round(2, page))
-            .min(L::MAPPING.span(2));
+        let max = (self.pages() - i * L::N).min(L::N);
 
-        let i = page / L::MAPPING.span(2);
         match self[i].update(|v| v.inc(num_pages, max)) {
             Ok(pte3) => {
                 if !pte3.reserved() {
@@ -352,7 +340,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
     }
 
     fn pages_needed(&self, cores: usize) -> usize {
-        L::MAPPING.span(2) * cores
+        L::N * cores
     }
 
     #[cold]
@@ -363,7 +351,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages();
-        for i in 0..L::MAPPING.num_pts(2, self.pages()) {
+        for i in 0..self.pages().div_ceil(L::N) {
             let pte = self[i].load();
             // warn!("{i:>3}: {pte:?}");
             pages -= pte.free();
@@ -405,14 +393,14 @@ impl<A: Entry, L: LowerAlloc> ArrayAligned<A, L> {
             warn!("Try recover crashed allocator!");
         }
         let mut total = 0;
-        for i in 0..L::MAPPING.num_pts(2, self.pages()) {
-            let page = i * L::MAPPING.span(2);
+        for i in 0..self.pages().div_ceil(L::N) {
+            let page = i * L::N;
             let pages = self.lower.recover(page, deep)?;
 
             self[i].store(Entry3::new_table(pages, false));
 
             // Add to lists
-            if pages == L::MAPPING.span(2) {
+            if pages == L::N {
                 self.empty.push(self, i);
             } else if pages > Self::ALMOST_FULL {
                 self.partial.push(self, i);
@@ -427,7 +415,7 @@ impl<A: Entry, L: LowerAlloc> ArrayAligned<A, L> {
     fn reserve(&self, order: usize) -> Result<usize> {
         while let Some((i, r)) = self.partial.pop_update(self, |v| {
             // Skip empty entries
-            if v.free() < L::MAPPING.span(2) {
+            if v.free() < L::N {
                 v.dec(1 << order)
             } else {
                 None
@@ -435,7 +423,7 @@ impl<A: Entry, L: LowerAlloc> ArrayAligned<A, L> {
         }) {
             if r.is_ok() {
                 info!("reserve partial {i}");
-                return Ok(i * L::MAPPING.span(2));
+                return Ok(i * L::N);
             }
             self.empty.push(self, i);
         }
@@ -443,7 +431,7 @@ impl<A: Entry, L: LowerAlloc> ArrayAligned<A, L> {
         if let Some((i, r)) = self.empty.pop_update(self, |v| v.dec(1 << order)) {
             debug_assert!(r.is_ok());
             info!("reserve empty {i}");
-            Ok(i * L::MAPPING.span(2))
+            Ok(i * L::N)
         } else {
             error!("No memory");
             Err(Error::Memory)

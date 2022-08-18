@@ -1,7 +1,6 @@
 use core::fmt;
 use core::ops::Range;
 
-use crate::table::Mapping;
 use crate::util::Page;
 use crate::Result;
 
@@ -23,8 +22,8 @@ pub use atom::Atom;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug {
-    /// The different table sizes
-    const MAPPING: Mapping<2>;
+    /// Pages per subtree
+    const N: usize;
     /// The maximal allowed order of this allocator
     const MAX_ORDER: usize;
 

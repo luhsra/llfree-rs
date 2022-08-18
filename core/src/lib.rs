@@ -4,6 +4,8 @@
 #![no_std]
 #![feature(generic_const_exprs)]
 #![feature(new_uninit)]
+#![feature(int_roundings)]
+#![feature(int_log)]
 
 #[cfg(feature = "std")]
 #[macro_use]
