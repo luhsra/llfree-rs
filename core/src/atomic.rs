@@ -321,37 +321,55 @@ impl<T: ANode> BufList<T> {
             }
         }
     }
+
+    pub fn iter<'a, B>(&'a self, buf: &'a B) -> BufListIter<'a, T, B>
+    where
+        B: Index<usize, Output = Atomic<T>>,
+    {
+        BufListIter {
+            next: self.start,
+            buf,
+        }
+    }
 }
 
-/// Debug printer for the [BufList].
-#[allow(dead_code)]
-pub struct BufListDbg<'a, T, B>(pub &'a BufList<T>, pub &'a B)
+pub struct BufListIter<'a, T: ANode, B: Index<usize, Output = Atomic<T>>> {
+    next: Option<usize>,
+    buf: &'a B,
+}
+
+impl<'a, T, B> Iterator for BufListIter<'a, T, B>
 where
     T: ANode,
-    B: Index<usize, Output = Atomic<T>>;
+    B: Index<usize, Output = Atomic<T>>,
+{
+    type Item = (usize, T);
 
-impl<'a, T, B> fmt::Debug for BufListDbg<'a, T, B>
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(next) = self.next {
+            let ret = self.buf[next].load();
+            self.next = ret.next();
+            Some((next, ret))
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, T, B> fmt::Debug for BufListIter<'a, T, B>
 where
     T: ANode,
     B: Index<usize, Output = Atomic<T>>,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut dbg = f.debug_list();
-
-        let mut next = self.0.start;
-        let mut n = 0;
-        while let Some(i) = next {
+        let iter = BufListIter {
+            next: self.next,
+            buf: self.buf,
+        };
+        for (i, _) in iter.take(1000) {
             dbg.entry(&i);
-
-            next = self.1[i].load().next();
-            if n > 1000 {
-                error!("Circular List!");
-                break;
-            } else {
-                n += 1;
-            }
         }
-
         dbg.finish()
     }
 }

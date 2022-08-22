@@ -106,10 +106,13 @@ fn main() {
 
     // Additional constraints (perf)
     let mut conditions = HashMap::<String, &'static dyn Fn(usize, usize) -> bool>::new();
-    conditions.insert(name::<ListLocal>(), &|_, order| order == 0);
-    conditions.insert(name::<ListLocked>(), &|cores, order| {
-        order == 0 && (cores <= 16 || cores == 32)
+    conditions.insert(format!("{}", AllocName::new::<ListLocal>()), &|_, order| {
+        order == 0
     });
+    conditions.insert(
+        format!("{}", AllocName::new::<ListLocked>()),
+        &|cores, order| order == 0 && (cores <= 16 || cores == 32),
+    );
 
     for x in x {
         let t = bench.threads(threads, x);
@@ -118,7 +121,7 @@ fn main() {
         }
 
         for alloc in &allocs {
-            let name = alloc.name();
+            let name = format!("{}", alloc.name());
             if alloc_names.contains(&name)
                 && conditions.get(&name).map(|f| f(t, order)).unwrap_or(true)
             {

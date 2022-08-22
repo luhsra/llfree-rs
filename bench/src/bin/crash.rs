@@ -51,7 +51,7 @@ fn main() {
         // Arc::new(TableAlloc::<L>::default()),
     ];
     for a in allocs {
-        if a.name() == alloc {
+        if format!("{}", a.name()) == alloc {
             let allocs = pages / threads / 2 / (1 << order);
             let out_size = align_up(allocs + 2, Page::SIZE) * threads;
             // Shared memory where the allocated pages are backupped

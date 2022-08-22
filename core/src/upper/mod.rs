@@ -2,8 +2,6 @@ use core::any::type_name;
 use core::cell::UnsafeCell;
 use core::fmt;
 
-use alloc::string::String;
-
 use crate::atomic::Atomic;
 use crate::entry::Entry3;
 use crate::table::{Mapping, PT_LEN};
@@ -63,41 +61,60 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     #[cold]
     fn dbg_for_each_huge_page(&self, f: fn(usize));
     #[cold]
-    fn name(&self) -> String {
-        name::<Self>()
+    fn name(&self) -> AllocName {
+        AllocName::new::<Self>()
     }
 }
 
-#[must_use]
-pub fn name<A: Alloc + ?Sized>() -> String {
-    let name = type_name::<A>();
-    // Add first letter of generic type as suffix
-    let (name, first, second, size) = if let Some((prefix, suffix)) = name.split_once('<') {
-        // Aligned / Unaligned allocator
-        let (first, suffix) = if let Some((first, suffix)) = suffix.split_once(", ") {
+pub struct AllocName {
+    base: &'static str,
+    first: &'static str,
+    second: &'static str,
+    size: &'static str,
+}
+
+impl fmt::Display for AllocName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}{}{}", self.base, self.first, self.second, self.size)
+    }
+}
+
+impl AllocName {
+    pub fn new<A: Alloc + ?Sized>() -> Self {
+        let name = type_name::<A>();
+        // Add first letter of generic type as suffix
+        let (name, first, second, size) = if let Some((prefix, suffix)) = name.split_once('<') {
+            // Aligned / Unaligned allocator
+            let (first, suffix) = if let Some((first, suffix)) = suffix.split_once(", ") {
+                // Strip path
+                let first = first.rsplit_once(':').map_or(first, |s| s.1);
+                (&first[0..1], suffix)
+            } else {
+                ("", suffix)
+            };
+
             // Strip path
-            let first = first.rsplit_once(':').map_or(first, |s| s.1);
-            (&first[0..1], suffix)
+            let suffix = suffix.rsplit_once(':').map_or(suffix, |s| s.1);
+            // Lower allocator size
+            let size = suffix
+                .split_once('<')
+                .map(|(_, s)| s.split_once('>').map_or(s, |s| s.0))
+                .unwrap_or_default();
+            (prefix, first, &suffix[0..1], size)
         } else {
-            ("", suffix)
+            (name, "", "", "")
         };
 
-        // Strip path
-        let suffix = suffix.rsplit_once(':').map_or(suffix, |s| s.1);
-        // Lower allocator size
-        let size = suffix
-            .split_once('<')
-            .map(|(_, s)| s.split_once('>').map_or(s, |s| s.0))
-            .unwrap_or_default();
-        (prefix, first, &suffix[0..1], size)
-    } else {
-        (name, "", "", "")
-    };
-
-    // Strip namespaces
-    let name = name.rsplit_once(':').map_or(name, |s| s.1);
-    let name = name.strip_suffix("Alloc").unwrap_or(name);
-    format!("{name}{first}{second}{size}")
+        // Strip namespaces
+        let base = name.rsplit_once(':').map_or(name, |s| s.1);
+        let base = base.strip_suffix("Alloc").unwrap_or(base);
+        Self {
+            base,
+            first,
+            second,
+            size,
+        }
+    }
 }
 
 /// Per core data.
@@ -211,22 +228,22 @@ mod test {
         println!(
             "{}\n -> {}",
             type_name::<ArrayAtomic<Lower>>(),
-            super::name::<ArrayAtomic<Lower>>()
+            AllocName::new::<ArrayAtomic<Lower>>()
         );
         println!(
             "{}\n -> {}",
             type_name::<ListLocal>(),
-            super::name::<ListLocal>()
+            AllocName::new::<ListLocal>()
         );
         println!(
             "{}\n -> {}",
             type_name::<ArrayAligned<Unaligned, Lower>>(),
-            super::name::<ArrayAligned<Unaligned, Lower>>()
+            AllocName::new::<ArrayAligned<Unaligned, Lower>>()
         );
         println!(
             "{}\n -> {}",
             type_name::<ArrayAligned<CacheAligned, Lower>>(),
-            super::name::<ArrayAligned<CacheAligned, Lower>>()
+            AllocName::new::<ArrayAligned<CacheAligned, Lower>>()
         );
     }
 
@@ -293,6 +310,7 @@ mod test {
         }
 
         warn!("allocated {}", 1 + pages.len());
+        warn!("{alloc:?}");
         warn!("check...");
 
         assert_eq!(alloc.dbg_allocated_pages(), 1 + pages.len());

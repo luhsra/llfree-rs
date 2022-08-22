@@ -9,7 +9,7 @@ use log::{error, info, warn};
 use spin::Mutex;
 
 use super::{Alloc, Local, MAGIC, MAX_PAGES};
-use crate::atomic::{ANode, Atomic, BufList, BufListDbg};
+use crate::atomic::{ANode, Atomic, BufList};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
@@ -72,7 +72,7 @@ impl<L: LowerAlloc> fmt::Debug for ArrayList<L> {
         }
 
         write!(f, "{:?}", self.subtrees)?;
-        writeln!(f, "}}")?;
+        write!(f, "}}")?;
         Ok(())
     }
 }
@@ -504,18 +504,18 @@ impl Index<usize> for Subtrees {
 
 impl fmt::Debug for Subtrees {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "    empty: {:?}", BufListDbg(&self.empty.lock(), self))?;
+        let empty_count = self.empty.lock().iter(self).count();
+        let partial_count = self.partial.lock().iter(self).count();
 
-        writeln!(
-            f,
-            "    partial: {:?}",
-            BufListDbg(&self.partial.lock(), self)
-        )?;
+        writeln!(f, "    total: {}", self.entries.len())?;
+        writeln!(f, "    empty: {empty_count}")?;
+        writeln!(f, "    partial: {partial_count}")?;
 
-        for (i, entry) in self.entries.iter().enumerate() {
-            let pte = entry.load();
-            writeln!(f, "    {i:>3}: {pte:?}")?;
+        let mut free = 0;
+        for pte in &self.entries[..] {
+            free += pte.load().free();
         }
+        writeln!(f, "    free pages: {free}")?;
         Ok(())
     }
 }
