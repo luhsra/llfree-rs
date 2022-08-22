@@ -486,13 +486,17 @@ impl<L: LowerAlloc> ArrayList<L> {
 }
 
 #[derive(Default)]
+struct Lists {
+    empty: BufList<Entry3>,
+    partial: BufList<Entry3>,
+}
+
+#[derive(Default)]
 struct Subtrees {
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     entries: Box<[Atomic<Entry3>]>,
     /// List of idx to subtrees that are not allocated at all
-    empty: Mutex<BufList<Entry3>>,
-    /// List of idx to subtrees that are partially allocated with huge pages
-    partial: Mutex<BufList<Entry3>>,
+    lists: Mutex<Lists>,
 }
 
 impl Index<usize> for Subtrees {
@@ -505,9 +509,17 @@ impl Index<usize> for Subtrees {
 
 impl fmt::Debug for Subtrees {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (empty, partial) = {
+            let lists = self.lists.lock();
+            (
+                lists.empty.iter(self).count(),
+                lists.partial.iter(self).count(),
+            )
+        };
+
         writeln!(f, "    total: {}", self.entries.len())?;
-        writeln!(f, "    empty: {}", self.empty.lock().iter(self).count())?;
-        writeln!(f, "    partial: {}", self.partial.lock().iter(self).count())?;
+        writeln!(f, "    empty: {empty}")?;
+        writeln!(f, "    partial: {partial}")?;
         Ok(())
     }
 }
@@ -518,8 +530,7 @@ impl Subtrees {
         pte3s.resize_with(pte3_num, || Atomic::new(Entry3::new()));
 
         self.entries = pte3s.into();
-        self.empty = Default::default();
-        self.partial = Default::default();
+        self.lists = Default::default();
     }
 
     fn almost_full(span: usize) -> usize {
@@ -532,40 +543,43 @@ impl Subtrees {
             pte.store(Entry3::new().with_next(None));
         }
         // Clear the lists
-        self.empty.lock().clear(self);
-        self.partial.lock().clear(self);
+        let mut lists = self.lists.lock();
+        lists.empty.clear(self);
+        lists.partial.clear(self);
     }
 
     fn push_empty_all(&self, entries: impl Iterator<Item = usize>) {
-        let mut empty = self.empty.lock();
+        let mut lists = self.lists.lock();
         for entry in entries {
-            empty.push(self, entry);
+            lists.empty.push(self, entry);
         }
     }
 
     fn push(&self, i: usize, new_pages: usize, span: usize) {
         // Add to list if new counter is small enough
+        let mut lists = self.lists.lock();
         if new_pages == span {
-            self.empty.lock().push(self, i);
+            lists.empty.push(self, i);
         } else if new_pages > Self::almost_full(span) {
-            self.partial.lock().push(self, i);
+            lists.partial.push(self, i);
         }
     }
 
     fn push_back(&self, i: usize, new_pages: usize, span: usize) {
+        let mut lists = self.lists.lock();
         if new_pages == span {
-            self.empty.lock().push(self, i);
+            lists.empty.push(self, i);
         } else if new_pages > Self::almost_full(span) {
-            self.partial.lock().push_back(self, i);
+            lists.partial.push_back(self, i);
         }
     }
 
     fn push_partial(&self, i: usize) {
-        self.partial.lock().push(self, i);
+        self.lists.lock().partial.push(self, i);
     }
 
     fn reserve_empty(&self, span: usize) -> Result<Entry3> {
-        if let Some(i) = self.empty.lock().pop(self) {
+        if let Some(i) = self.lists.lock().empty.pop(self) {
             info!("reserve empty {i}");
             if let Ok(pte) = self[i].update(|v| v.reserve_empty(span)) {
                 Ok(pte.with_idx(i))
@@ -579,20 +593,24 @@ impl Subtrees {
     }
 
     fn reserve_partial(&self, span: usize) -> Result<Entry3> {
-        while let Some(i) = self.partial.lock().pop(self) {
-            info!("reserve partial {i}");
+        loop {
+            let mut lists = self.lists.lock();
+            if let Some(i) = lists.partial.pop(self) {
+                info!("reserve partial {i}");
 
-            match self[i].update(|v| v.reserve_partial(Self::almost_full(span), span)) {
-                Ok(pte) => return Ok(pte.with_idx(i)),
-                Err(pte) => {
-                    // Skip empty entries
-                    if !pte.reserved() && pte.free() == span {
-                        self.empty.lock().push(self, i);
+                match self[i].update(|v| v.reserve_partial(Self::almost_full(span), span)) {
+                    Ok(pte) => return Ok(pte.with_idx(i)),
+                    Err(pte) => {
+                        // Skip empty entries
+                        if !pte.reserved() && pte.free() == span {
+                            lists.empty.push(self, i);
+                        }
                     }
                 }
+            } else {
+                return Err(Error::Memory);
             }
         }
-        Err(Error::Memory)
     }
 
     /// Reserves a new subtree, prioritizing partially filled subtrees.
