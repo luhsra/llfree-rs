@@ -487,7 +487,10 @@ impl<L: LowerAlloc> ArrayList<L> {
 
 #[derive(Default)]
 struct Lists {
+    /// List of subtrees where all pages are free
     empty: BufList<Entry3>,
+    /// List of subtrees that are partially allocated.
+    /// This list may also include reserved or 'empty' subtrees, which should be skipped.
     partial: BufList<Entry3>,
 }
 
@@ -495,7 +498,7 @@ struct Lists {
 struct Subtrees {
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     entries: Box<[Atomic<Entry3>]>,
-    /// List of idx to subtrees that are not allocated at all
+    /// List of idx to subtrees
     lists: Mutex<Lists>,
 }
 
@@ -509,13 +512,15 @@ impl Index<usize> for Subtrees {
 
 impl fmt::Debug for Subtrees {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        warn!("dbg locking...");
         let (empty, partial) = {
             let lists = self.lists.lock();
             (
-                lists.empty.iter(self).count(),
-                lists.partial.iter(self).count(),
+                lists.empty.iter(self).take(1000).count(),
+                lists.partial.iter(self).take(1000).count(),
             )
         };
+        warn!("list unlock {empty}, {partial}");
 
         writeln!(f, "    total: {}", self.entries.len())?;
         writeln!(f, "    empty: {empty}")?;
