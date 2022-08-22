@@ -344,15 +344,15 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
     }
 
     #[cold]
-    fn dbg_allocated_pages(&self) -> usize {
-        let mut pages = self.pages();
+    fn dbg_free_pages(&self) -> usize {
+        let mut pages = 0;
         for i in 0..self.pages().div_ceil(L::N) {
             let pte = self[i].load();
-            pages -= pte.free();
+            pages += pte.free();
         }
         // Pages allocated in reserved subtrees
         for local in self.local.iter() {
-            pages -= local.pte.load().free();
+            pages += local.pte.load().free();
         }
         pages
     }

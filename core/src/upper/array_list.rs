@@ -72,6 +72,7 @@ impl<L: LowerAlloc> fmt::Debug for ArrayList<L> {
         }
 
         write!(f, "{:?}", self.subtrees)?;
+        writeln!(f, "    free pages: {}", self.dbg_free_pages())?;
         write!(f, "}}")?;
         Ok(())
     }
@@ -269,15 +270,15 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
     }
 
     #[cold]
-    fn dbg_allocated_pages(&self) -> usize {
-        let mut pages = self.pages();
+    fn dbg_free_pages(&self) -> usize {
+        let mut pages = 0;
         for i in 0..self.pages().div_ceil(L::N) {
             let pte = self.subtrees[i].load();
-            pages -= pte.free();
+            pages += pte.free();
         }
         // Pages allocated in reserved subtrees
         for local in self.local.iter() {
-            pages -= local.pte.load().free();
+            pages += local.pte.load().free();
         }
         pages
     }
@@ -504,18 +505,9 @@ impl Index<usize> for Subtrees {
 
 impl fmt::Debug for Subtrees {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let empty_count = self.empty.lock().iter(self).count();
-        let partial_count = self.partial.lock().iter(self).count();
-
         writeln!(f, "    total: {}", self.entries.len())?;
-        writeln!(f, "    empty: {empty_count}")?;
-        writeln!(f, "    partial: {partial_count}")?;
-
-        let mut free = 0;
-        for pte in &self.entries[..] {
-            free += pte.load().free();
-        }
-        writeln!(f, "    free pages: {free}")?;
+        writeln!(f, "    empty: {}", self.empty.lock().iter(self).count())?;
+        writeln!(f, "    partial: {}", self.partial.lock().iter(self).count())?;
         Ok(())
     }
 }

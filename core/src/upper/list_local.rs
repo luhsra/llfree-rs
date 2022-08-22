@@ -154,11 +154,11 @@ impl Alloc for ListLocal {
     fn dbg_for_each_huge_page(&self, _f: fn(usize)) {}
 
     #[cold]
-    fn dbg_allocated_pages(&self) -> usize {
-        let mut pages = 0;
+    fn dbg_free_pages(&self) -> usize {
+        let mut pages = self.pages;
         for local in self.local.iter() {
             let local = unsafe { &*local.get() };
-            pages += local.counter;
+            pages -= local.counter;
         }
         pages
     }

@@ -349,12 +349,11 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
     }
 
     #[cold]
-    fn dbg_allocated_pages(&self) -> usize {
-        let mut pages = self.pages();
+    fn dbg_free_pages(&self) -> usize {
+        let mut pages = 0;
         for i in 0..self.pages().div_ceil(L::N) {
             let pte = self[i].load();
-            // warn!("{i:>3}: {pte:?}");
-            pages -= pte.free();
+            pages += pte.free();
         }
         pages
     }

@@ -57,7 +57,11 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     fn pages_needed(&self, cores: usize) -> usize;
     /// Return the number of allocated pages.
     #[cold]
-    fn dbg_allocated_pages(&self) -> usize;
+    fn dbg_allocated_pages(&self) -> usize {
+        self.pages() - self.dbg_free_pages()
+    }
+    #[cold]
+    fn dbg_free_pages(&self) -> usize;
     #[cold]
     fn dbg_for_each_huge_page(&self, f: fn(usize));
     #[cold]

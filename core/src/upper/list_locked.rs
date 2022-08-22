@@ -147,11 +147,13 @@ impl Alloc for ListLocked {
     fn dbg_for_each_huge_page(&self, _f: fn(usize)) {}
 
     #[cold]
-    fn dbg_allocated_pages(&self) -> usize {
-        self.local
-            .iter()
-            .map(|c| c.counter.load(Ordering::SeqCst))
-            .sum()
+    fn dbg_free_pages(&self) -> usize {
+        self.pages()
+            - self
+                .local
+                .iter()
+                .map(|c| c.counter.load(Ordering::SeqCst))
+                .sum::<usize>()
     }
 }
 
