@@ -41,7 +41,7 @@ impl Entry3 {
     }
     /// Decrements the free pages counter.
     pub fn dec(self, num_pages: usize) -> Option<Entry3> {
-        if self.is_valid() && self.free() >= num_pages {
+        if self.idx() < Self::IDX_MAX && self.free() >= num_pages {
             Some(self.with_free(self.free() - num_pages))
         } else {
             None
@@ -106,9 +106,6 @@ impl Entry3 {
             error!("{self:?} + {add}, {pages} <= {max}");
             None
         }
-    }
-    pub fn is_valid(self) -> bool {
-        self.idx() < Self::IDX_MAX
     }
 }
 

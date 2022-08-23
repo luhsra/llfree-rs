@@ -135,9 +135,10 @@ pub trait ANode: AtomicValue + Default {
 
 impl ANode for Entry3 {
     fn next(self) -> Option<usize> {
-        match self.idx() {
-            Entry3::IDX_MAX => None,
-            v => Some(v),
+        if self.idx() < Entry3::IDX_MAX {
+            Some(self.idx())
+        } else {
+            None
         }
     }
 
@@ -236,27 +237,24 @@ where
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut dbg = f.debug_list();
 
-        match self.0.start.load().next() {
-            None => {}
-            Some(i) => {
-                let mut i = i as usize;
-                let mut ended = false;
-                for _ in 0..1000 {
-                    dbg.entry(&i);
-                    let elem = self.1[i].load();
-                    if let Some(next) = elem.next() {
-                        if i == next {
-                            break;
-                        }
-                        i = next;
-                    } else {
-                        ended = true;
+        if let Some(i) = self.0.start.load().next() {
+            let mut i = i as usize;
+            let mut ended = false;
+            for _ in 0..1000 {
+                dbg.entry(&i);
+                let elem = self.1[i].load();
+                if let Some(next) = elem.next() {
+                    if i == next {
                         break;
                     }
+                    i = next;
+                } else {
+                    ended = true;
+                    break;
                 }
-                if !ended {
-                    error!("Circular List!");
-                }
+            }
+            if !ended {
+                error!("Circular List!");
             }
         }
 
@@ -284,7 +282,9 @@ impl<T: ANode> BufList<T> {
     where
         B: Index<usize, Output = Atomic<T>>,
     {
-        let _ = buf[idx].update(|v| Some(v.with_next(self.start)));
+        if buf[idx].update(|v| Some(v.with_next(self.start))).is_err() {
+            unreachable!();
+        }
         if self.start.is_none() {
             self.end = Some(idx);
         }
@@ -295,9 +295,13 @@ impl<T: ANode> BufList<T> {
     where
         B: Index<usize, Output = Atomic<T>>,
     {
-        let _ = buf[idx].update(|v| Some(v.with_next(None)));
+        if buf[idx].update(|v| Some(v.with_next(None))).is_err() {
+            unreachable!();
+        }
         if let Some(end) = self.end {
-            let _ = buf[end].update(|v| Some(v.with_next(Some(idx))));
+            if buf[end].update(|v| Some(v.with_next(Some(idx)))).is_err() {
+                unreachable!();
+            }
         }
         self.end = Some(idx);
         if self.start.is_none() {
@@ -311,14 +315,14 @@ impl<T: ANode> BufList<T> {
         B: Index<usize, Output = Atomic<T>>,
     {
         let start = self.start?;
-        match buf[start].update(|v| Some(v.with_next(None))) {
-            Ok(pte) | Err(pte) => {
-                self.start = pte.next();
-                if self.start.is_none() {
-                    self.end = None;
-                }
-                Some(start)
+        if let Ok(pte) = buf[start].update(|v| Some(v.with_next(None))) {
+            self.start = pte.next();
+            if self.start.is_none() {
+                self.end = None;
             }
+            Some(start)
+        } else {
+            unreachable!()
         }
     }
 

@@ -467,7 +467,7 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
         let max = (self.pages() - i * L::N).min(L::N);
         if let Ok(v) = self[i].update(|v| v.unreserve_add(pte.free(), max)) {
             // Only if not already in list
-            if !v.is_valid() {
+            if v.next().is_none() {
                 // Add to list
                 self.enqueue(i, v.free() + pte.free());
             }

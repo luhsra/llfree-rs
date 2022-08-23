@@ -233,15 +233,16 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
             Ok(pte) => {
                 let new_pages = pte.free() + num_pages;
                 if !pte.reserved() && new_pages > Subtrees::almost_full(L::N) {
-                    // Try to reserve subtree if recent frees were part of it
+                    // put-reserve optimization:
+                    // Try to reserve the subtree that was targeted by the recent frees
                     if core == c && local.frees_related(i) && self.reserve_entry(&local.pte, i)? {
                         return Ok(());
                     }
 
                     // Add to partially free list
                     // Only if not already in list
-                    if pte.idx() == Entry3::IDX_MAX && pte.free() <= Subtrees::almost_full(L::N) {
-                        self.subtrees.push_partial(i);
+                    if pte.next().is_none() {
+                        self.subtrees.push(i, new_pages, L::N);
                     }
                 }
                 if c == core {
@@ -469,8 +470,7 @@ impl<L: LowerAlloc> ArrayList<L> {
         let max = (self.pages() - i * L::N).min(L::N);
         if let Ok(v) = self.subtrees[i].update(|v| v.unreserve_add(pte.free(), max)) {
             // Only if not already in list
-            if !v.is_valid() {
-                // Add to list
+            if v.next().is_none() {
                 if enqueue_back {
                     self.subtrees.push_back(i, v.free() + pte.free(), L::N);
                 } else {
@@ -512,7 +512,6 @@ impl Index<usize> for Subtrees {
 
 impl fmt::Debug for Subtrees {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        warn!("dbg locking...");
         let (empty, partial) = {
             let lists = self.lists.lock();
             (
@@ -520,8 +519,6 @@ impl fmt::Debug for Subtrees {
                 lists.partial.iter(self).take(1000).count(),
             )
         };
-        warn!("list unlock {empty}, {partial}");
-
         writeln!(f, "    total: {}", self.entries.len())?;
         writeln!(f, "    empty: {empty}")?;
         writeln!(f, "    partial: {partial}")?;
@@ -562,25 +559,19 @@ impl Subtrees {
 
     fn push(&self, i: usize, new_pages: usize, span: usize) {
         // Add to list if new counter is small enough
-        let mut lists = self.lists.lock();
         if new_pages == span {
-            lists.empty.push(self, i);
+            self.lists.lock().empty.push(self, i);
         } else if new_pages > Self::almost_full(span) {
-            lists.partial.push(self, i);
+            self.lists.lock().partial.push(self, i);
         }
     }
 
     fn push_back(&self, i: usize, new_pages: usize, span: usize) {
-        let mut lists = self.lists.lock();
         if new_pages == span {
-            lists.empty.push(self, i);
+            self.lists.lock().empty.push(self, i);
         } else if new_pages > Self::almost_full(span) {
-            lists.partial.push_back(self, i);
+            self.lists.lock().partial.push_back(self, i);
         }
-    }
-
-    fn push_partial(&self, i: usize) {
-        self.lists.lock().partial.push(self, i);
     }
 
     fn reserve_empty(&self, span: usize) -> Result<Entry3> {
@@ -606,7 +597,8 @@ impl Subtrees {
                 match self[i].update(|v| v.reserve_partial(Self::almost_full(span), span)) {
                     Ok(pte) => return Ok(pte.with_idx(i)),
                     Err(pte) => {
-                        // Skip empty entries
+                        // Skip reserved and empty entries
+                        // They might be reserved by the put-reserve optimization
                         if !pte.reserved() && pte.free() == span {
                             lists.empty.push(self, i);
                         }
