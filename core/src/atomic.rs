@@ -371,7 +371,7 @@ where
             next: self.next,
             buf: self.buf,
         };
-        for (i, _) in iter.take(1000) {
+        for (i, _) in iter.take(100) {
             dbg.entry(&i);
         }
         dbg.finish()

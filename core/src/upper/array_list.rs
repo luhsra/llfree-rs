@@ -512,16 +512,10 @@ impl Index<usize> for Subtrees {
 
 impl fmt::Debug for Subtrees {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (empty, partial) = {
-            let lists = self.lists.lock();
-            (
-                lists.empty.iter(self).take(1000).count(),
-                lists.partial.iter(self).take(1000).count(),
-            )
-        };
         writeln!(f, "    total: {}", self.entries.len())?;
-        writeln!(f, "    empty: {empty}")?;
-        writeln!(f, "    partial: {partial}")?;
+        let lists = self.lists.lock();
+        writeln!(f, "    empty: {:?}", lists.empty.iter(self))?;
+        writeln!(f, "    partial: {:?}", lists.partial.iter(self))?;
         Ok(())
     }
 }
