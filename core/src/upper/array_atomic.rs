@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use log::{error, info, warn};
 
 use super::{Alloc, Local, MAGIC, MAX_PAGES};
-use crate::atomic::{ANode, AStack, AStackDbg, Atomic};
+use crate::atomic::{ANode, AStack, AStackDbg, Atomic, Next};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
@@ -156,13 +156,13 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
         // Add all entries to the empty list
         let pte3_num = self.pages().div_ceil(L::N);
         for i in 0..pte3_num - 1 {
-            self[i].store(Entry3::empty(L::N));
+            self[i].store(Entry3::empty(L::N).with_next(Next::Outside));
             self.empty.push(self, i);
         }
 
         // The last one may be cut off
         let max = (self.pages() - (pte3_num - 1) * L::N).min(L::N);
-        self[pte3_num - 1].store(Entry3::new().with_free(max));
+        self[pte3_num - 1].store(Entry3::new().with_free(max).with_next(Next::Outside));
 
         self.enqueue(pte3_num - 1, max);
 
@@ -182,11 +182,11 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
         // Set all entries to zero
         let pte3_num = self.pages().div_ceil(L::N);
         for i in 0..pte3_num {
-            self[i].store(Entry3::new().with_next(None));
+            self[i].store(Entry3::new().with_next(Next::Outside));
         }
         // Clear the lists
-        self.empty.set(Entry3::new().with_next(None));
-        self.partial.set(Entry3::new().with_next(None));
+        self.empty.set(Entry3::new().with_next(Next::End));
+        self.partial.set(Entry3::new().with_next(Next::End));
 
         if !self.meta.is_null() {
             let meta = unsafe { &mut *self.meta };
@@ -314,7 +314,7 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
 
                     // Add to partially free list
                     // Only if not already in list
-                    if pte.idx() == Entry3::IDX_MAX && pte.free() <= Self::ALMOST_FULL {
+                    if pte.next() == Next::Outside && pte.free() <= Self::ALMOST_FULL {
                         self.partial.push(self, i);
                     }
                 }
@@ -467,7 +467,7 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
         let max = (self.pages() - i * L::N).min(L::N);
         if let Ok(v) = self[i].update(|v| v.unreserve_add(pte.free(), max)) {
             // Only if not already in list
-            if v.next().is_none() {
+            if v.next() == Next::Outside {
                 // Add to list
                 self.enqueue(i, v.free() + pte.free());
             }

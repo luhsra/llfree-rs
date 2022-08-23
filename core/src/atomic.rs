@@ -127,23 +127,53 @@ impl_atomic!(u32, AtomicU32);
 impl_atomic!(u16, AtomicU16);
 impl_atomic!(u8, AtomicU8);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    Some(usize),
+    End,
+    Outside,
+}
+
+impl Next {
+    fn opt(v: Option<usize>) -> Self {
+        match v {
+            Some(i) => Self::Some(i),
+            None => Self::End,
+        }
+    }
+    fn some(self) -> Option<usize> {
+        match self {
+            Next::Some(i) => Some(i),
+            Next::End => None,
+            Next::Outside => unreachable!(),
+        }
+    }
+}
+
 /// Node of an atomic stack
 pub trait ANode: AtomicValue + Default {
-    fn next(self) -> Option<usize>;
-    fn with_next(self, next: Option<usize>) -> Self;
+    fn next(self) -> Next;
+    fn with_next(self, next: Next) -> Self;
+    fn enqueue(self, next: Next) -> Option<Self> {
+        (self.next() == Next::Outside).then_some(self.with_next(next))
+    }
 }
 
 impl ANode for Entry3 {
-    fn next(self) -> Option<usize> {
-        if self.idx() < Entry3::IDX_MAX {
-            Some(self.idx())
-        } else {
-            None
+    fn next(self) -> Next {
+        match self.idx() {
+            Entry3::IDX_MAX => Next::Outside,
+            Entry3::IDX_END => Next::End,
+            i => Next::Some(i),
         }
     }
 
-    fn with_next(self, next: Option<usize>) -> Self {
-        self.with_idx(next.unwrap_or(Entry3::IDX_MAX))
+    fn with_next(self, next: Next) -> Self {
+        self.with_idx(match next {
+            Next::Some(i) => i,
+            Next::End => Entry3::IDX_END,
+            Next::Outside => Entry3::IDX_MAX,
+        })
     }
 }
 
@@ -160,7 +190,7 @@ unsafe impl<T: ANode> Sync for AStack<T> {}
 impl<T: ANode> Default for AStack<T> {
     fn default() -> Self {
         Self {
-            start: Atomic::new(T::default().with_next(None)),
+            start: Atomic::new(T::default().with_next(Next::End)),
         }
     }
 }
@@ -184,7 +214,7 @@ impl<T: ANode> AStack<T> {
             // CAS weak is important for fetch-update!
             match self
                 .start
-                .compare_exchange_weak(prev, prev.with_next(Some(idx)))
+                .compare_exchange_weak(prev, prev.with_next(Next::Some(idx)))
             {
                 Ok(_) => return,
                 Err(s) => prev = s,
@@ -200,13 +230,16 @@ impl<T: ANode> AStack<T> {
     {
         let mut prev = self.start.load();
         loop {
-            let idx = prev.next()?;
+            let idx = prev.next().some()?;
             let next = buf[idx].load().next();
             // CAS weak is important for fetch-update!
             match self.start.compare_exchange_weak(prev, prev.with_next(next)) {
                 Ok(old) => {
-                    let i = old.next()?;
-                    return Some((i, buf[i].update(|v| f(v).map(|v| v.with_next(None)))));
+                    let i = old.next().some()?;
+                    return Some((
+                        i,
+                        buf[i].update(|v| f(v).map(|v| v.with_next(Next::Outside))),
+                    ));
                 }
                 Err(s) => prev = s,
             }
@@ -237,13 +270,13 @@ where
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut dbg = f.debug_list();
 
-        if let Some(i) = self.0.start.load().next() {
+        if let Next::Some(i) = self.0.start.load().next() {
             let mut i = i as usize;
             let mut ended = false;
             for _ in 0..1000 {
                 dbg.entry(&i);
                 let elem = self.1[i].load();
-                if let Some(next) = elem.next() {
+                if let Next::Some(next) = elem.next() {
                     if i == next {
                         break;
                     }
@@ -282,9 +315,13 @@ impl<T: ANode> BufList<T> {
     where
         B: Index<usize, Output = Atomic<T>>,
     {
-        if buf[idx].update(|v| Some(v.with_next(self.start))).is_err() {
-            unreachable!();
+        if buf[idx]
+            .update(|v| v.enqueue(Next::opt(self.start)))
+            .is_err()
+        {
+            return;
         }
+
         if self.start.is_none() {
             self.end = Some(idx);
         }
@@ -295,11 +332,15 @@ impl<T: ANode> BufList<T> {
     where
         B: Index<usize, Output = Atomic<T>>,
     {
-        if buf[idx].update(|v| Some(v.with_next(None))).is_err() {
-            unreachable!();
+        if buf[idx].update(|v| v.enqueue(Next::End)).is_err() {
+            return;
         }
+
         if let Some(end) = self.end {
-            if buf[end].update(|v| Some(v.with_next(Some(idx)))).is_err() {
+            if buf[end]
+                .update(|v| Some(v.with_next(Next::Some(idx))))
+                .is_err()
+            {
                 unreachable!();
             }
         }
@@ -315,8 +356,8 @@ impl<T: ANode> BufList<T> {
         B: Index<usize, Output = Atomic<T>>,
     {
         let start = self.start?;
-        if let Ok(pte) = buf[start].update(|v| Some(v.with_next(None))) {
-            self.start = pte.next();
+        if let Ok(pte) = buf[start].update(|v| Some(v.with_next(Next::Outside))) {
+            self.start = pte.next().some();
             if self.start.is_none() {
                 self.end = None;
             }
@@ -352,7 +393,7 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(next) = self.next {
             let ret = self.buf[next].load();
-            self.next = ret.next();
+            self.next = ret.next().some();
             Some((next, ret))
         } else {
             None
@@ -387,14 +428,23 @@ mod test {
 
     use crate::{atomic::BufList, thread, util::black_box};
 
-    use super::{ANode, AStack, AStackDbg, Atomic};
+    use super::{ANode, AStack, AStackDbg, Atomic, Next};
 
     impl ANode for u64 {
-        fn next(self) -> Option<usize> {
-            (self != u64::MAX).then(|| self as _)
+        fn next(self) -> Next {
+            const END: u64 = u64::MAX - 1;
+            match self {
+                u64::MAX => Next::Outside,
+                END => Next::End,
+                v => Next::Some(v as _),
+            }
         }
-        fn with_next(self, next: Option<usize>) -> Self {
-            next.map(|v| v as u64).unwrap_or(u64::MAX)
+        fn with_next(self, next: Next) -> Self {
+            match next {
+                Next::Some(i) => i as _,
+                Next::End => u64::MAX - 1,
+                Next::Outside => u64::MAX,
+            }
         }
     }
 
@@ -449,7 +499,7 @@ mod test {
 
     #[test]
     fn buf_list() {
-        const DATA_V: Atomic<u64> = Atomic(AtomicU64::new(0));
+        const DATA_V: Atomic<u64> = Atomic(AtomicU64::new(u64::MAX));
         const N: usize = 64;
         let data: [Atomic<u64>; N] = [DATA_V; N];
 

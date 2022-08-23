@@ -9,7 +9,7 @@ use log::{error, info, warn};
 use spin::Mutex;
 
 use super::{Alloc, Local, MAGIC, MAX_PAGES};
-use crate::atomic::{ANode, Atomic, BufList};
+use crate::atomic::{ANode, Atomic, BufList, Next};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
@@ -135,13 +135,13 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
         // Add all entries to the empty list
         let pte3_num = self.pages().div_ceil(L::N);
         for i in 0..pte3_num - 1 {
-            self.subtrees[i].store(Entry3::empty(L::N));
+            self.subtrees[i].store(Entry3::empty(L::N).with_next(Next::Outside));
         }
         self.subtrees.push_empty_all((0..pte3_num - 1).into_iter());
 
         // The last one may be cut off
         let max = (self.pages() - (pte3_num - 1) * L::N).min(L::N);
-        self.subtrees[pte3_num - 1].store(Entry3::new().with_free(max));
+        self.subtrees[pte3_num - 1].store(Entry3::new().with_free(max).with_next(Next::Outside));
 
         self.subtrees.push(pte3_num - 1, max, L::N);
 
@@ -241,7 +241,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
 
                     // Add to partially free list
                     // Only if not already in list
-                    if pte.next().is_none() {
+                    if pte.next() == Next::Outside {
                         self.subtrees.push(i, new_pages, L::N);
                     }
                 }
@@ -470,7 +470,7 @@ impl<L: LowerAlloc> ArrayList<L> {
         let max = (self.pages() - i * L::N).min(L::N);
         if let Ok(v) = self.subtrees[i].update(|v| v.unreserve_add(pte.free(), max)) {
             // Only if not already in list
-            if v.next().is_none() {
+            if v.next() == Next::Outside {
                 if enqueue_back {
                     self.subtrees.push_back(i, v.free() + pte.free(), L::N);
                 } else {
@@ -536,7 +536,7 @@ impl Subtrees {
     fn clear(&self) {
         // Set all entries to zero
         for pte in &self.entries[..] {
-            pte.store(Entry3::new().with_next(None));
+            pte.store(Entry3::new().with_next(Next::Outside));
         }
         // Clear the lists
         let mut lists = self.lists.lock();

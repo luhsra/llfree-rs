@@ -31,6 +31,7 @@ impl AtomicValue for Entry3 {
 
 impl Entry3 {
     pub const IDX_MAX: usize = (1 << 41) - 1;
+    pub const IDX_END: usize = (1 << 41) - 2;
 
     pub fn empty(span: usize) -> Entry3 {
         Entry3::new().with_free(span)
@@ -41,7 +42,7 @@ impl Entry3 {
     }
     /// Decrements the free pages counter.
     pub fn dec(self, num_pages: usize) -> Option<Entry3> {
-        if self.idx() < Self::IDX_MAX && self.free() >= num_pages {
+        if self.idx() <= Self::IDX_END && self.free() >= num_pages {
             Some(self.with_free(self.free() - num_pages))
         } else {
             None

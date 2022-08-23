@@ -314,7 +314,6 @@ mod test {
         }
 
         warn!("allocated {}", 1 + pages.len());
-        warn!("{alloc:?}");
         warn!("check...");
 
         assert_eq!(alloc.dbg_allocated_pages(), 1 + pages.len());
@@ -337,7 +336,6 @@ mod test {
             alloc.put(0, *page, 0).unwrap();
         }
 
-        warn!("{alloc:?}");
         assert_eq!(
             alloc.dbg_allocated_pages(),
             1 + pages.len() - FREE_NUM,
