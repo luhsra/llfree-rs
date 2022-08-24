@@ -2,7 +2,6 @@
 //!
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
 #![no_std]
-#![feature(generic_const_exprs)]
 #![feature(new_uninit)]
 #![feature(int_roundings)]
 #![feature(int_log)]

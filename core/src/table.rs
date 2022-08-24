@@ -61,6 +61,9 @@ impl<T: AtomicValue, const LEN: usize> ATable<T, LEN> {
     pub fn update<F: FnMut(T) -> Option<T>>(&self, i: usize, f: F) -> Result<T, T> {
         self.entries[i].update(f)
     }
+    pub fn as_ptr(&self) -> *const Atomic<T> {
+        self.entries.as_ptr()
+    }
 }
 
 impl<T: AtomicValue + fmt::Debug, const LEN: usize> fmt::Debug for ATable<T, LEN> {
@@ -216,6 +219,20 @@ impl<const N: usize> Bitfield<N> {
         // memory ordering has to be enforced with a memory barrier
         atomic::fence(Ordering::SeqCst);
     }
+
+    /// Fill using cas
+    pub fn fill_safe(&self, v: bool) -> bool {
+        let v = if v { u64::MAX } else { 0 };
+
+        for e in &self.data {
+            if e.compare_exchange(!v, v, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
@@ -243,30 +260,6 @@ pub struct Mapping<const L: usize>(pub [usize; L]);
 
 impl<const L: usize> Mapping<L> {
     pub const LEVELS: usize = L;
-
-    pub const fn submap<const S: usize>(&self) -> Mapping<S> {
-        let mut levels = [0; S];
-        let mut l = 0;
-        while l < S {
-            levels[l] = self.0[l];
-            l += 1;
-        }
-        Mapping(levels)
-    }
-
-    pub const fn with_lower<const S: usize>(self, lower: &Mapping<S>) -> Mapping<{ L + S }> {
-        let mut levels = [0; L + S];
-        let mut l = 0;
-        while l < S {
-            levels[l] = lower.0[l];
-            l += 1;
-        }
-        while l < L + S {
-            levels[l] = self.0[l - S];
-            l += 1;
-        }
-        Mapping(levels)
-    }
 
     pub const fn levels(&self) -> usize {
         L

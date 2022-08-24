@@ -19,7 +19,7 @@ pub use list_local::ListLocal;
 mod list_locked;
 pub use list_locked::ListLocked;
 
-pub const CAS_RETRIES: usize = 8;
+pub const CAS_RETRIES: usize = 16;
 pub const MAGIC: usize = 0xdead_beef;
 pub const MIN_PAGES: usize = PT_LEN * PT_LEN;
 pub const MAX_PAGES: usize = Mapping([9; 4]).span(4);
