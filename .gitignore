@@ -8,6 +8,7 @@ memfile
 .vscode
 .devcontainer
 /test/
+.cache/
 
 /results/*
 !/results/remote_ma/
