@@ -12,7 +12,7 @@ use nvalloc::util::{div_ceil, Page, logging};
 #[clap(about, version, author)]
 struct Args {
     /// Number of threads
-    #[clap(short, long, default_value = "6")]
+    #[clap(short, long, default_value_t = 6)]
     threads: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
     #[clap(short, long, default_value_t = 16)]
@@ -33,10 +33,12 @@ fn main() {
 
     assert!(threads > 0 && memory > 0);
 
+    let t_map = Instant::now();
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
-    let pages = mapping.len();
+    let t_map = t_map.elapsed().as_millis();
 
-    let timer = Instant::now();
+    let pages = mapping.len();
+    let t_write = Instant::now();
     let handles = mapping
         .chunks_mut(div_ceil(pages, threads))
         .map(|chunk| {
@@ -53,14 +55,18 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
-    let mut time = 0;
+    let mut t_min = u128::MAX;
     for t in handles {
-        time += t.join().unwrap();
+        t_min = t_min.min(t.join().unwrap());
     }
-    time /= threads as u128;
+    let t_write = t_write.elapsed().as_millis();
 
-    warn!("avg: {time}");
-    warn!("total: {}", timer.elapsed().as_millis());
+    let t_unmap = Instant::now();
+    drop(mapping);
+    let t_unmap = t_unmap.elapsed().as_millis();
+
+    println!("map,min,max,unmap");
+    println!("{t_map},{t_min},{t_write},{t_unmap}");
 }
 
 #[allow(unused_variables)]

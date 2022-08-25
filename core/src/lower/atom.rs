@@ -78,8 +78,8 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
                 begin: memory.as_ptr() as usize,
                 pages: memory.len(),
                 // Allocate in volatile memory
-                l1: unsafe { Box::new_zeroed_slice(n1).assume_init() },
-                l2: unsafe { Box::new_zeroed_slice(n2).assume_init() },
+                l1: unsafe { Box::new_uninit_slice(n1).assume_init() },
+                l2: unsafe { Box::new_uninit_slice(n2).assume_init() },
                 persistent,
             }
         }

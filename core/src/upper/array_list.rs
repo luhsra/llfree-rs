@@ -188,7 +188,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
 
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
         if order > L::MAX_ORDER {
-            error!("invalid order: !{order} <= {}", L::MAX_ORDER);
+            error!("invalid order: {order} > {}", L::MAX_ORDER);
             return Err(Error::Memory);
         }
 
@@ -352,7 +352,7 @@ impl<L: LowerAlloc> ArrayList<L> {
                         if let Err(pte) =
                             self.subtrees[pte.idx()].update(|v| v.inc(1 << order, max))
                         {
-                            error!("Counter reset failed o={order} {}: {pte:?}", pte.idx());
+                            error!("Counter reset failed o={order} {pte:?}");
                             Err(Error::Corruption)
                         } else {
                             // reserve new, pushing the old entry to the end of the partial list
@@ -378,20 +378,13 @@ impl<L: LowerAlloc> ArrayList<L> {
     /// If `retry`, tries to reserve a less fragmented subtree
     fn reserve_or_wait(&self, pte_a: &Atomic<Entry3>, old: Entry3, retry: bool) -> Result<Entry3> {
         // Set the reserved flag, locking the reservation
-        if !old.reserved()
-            && pte_a
-                .update(|v| (!v.reserved()).then_some(v.with_reserved(true)))
-                .is_ok()
-        {
+        if !old.reserved() && pte_a.update(|v| v.toggle_reserve(true)).is_ok() {
             // Try reserve new subtree
             let new_pte = match self.subtrees.reserve_from_list(L::N, retry) {
                 Ok(ret) => ret,
                 Err(e) => {
                     // Clear reserve flag
-                    if pte_a
-                        .update(|v| v.reserved().then_some(v.with_reserved(false)))
-                        .is_err()
-                    {
+                    if pte_a.update(|v| v.toggle_reserve(false)).is_err() {
                         error!("unexpected reserve state");
                         return Err(Error::Corruption);
                     }
@@ -407,14 +400,13 @@ impl<L: LowerAlloc> ArrayList<L> {
                 Err(e) => Err(e),
             }
         } else {
-            // Wait for reservation to end
+            // Wait for concurrent reservation to end
             for _ in 0..(2 * CAS_RETRIES) {
                 let new_pte = pte_a.load();
-                if new_pte.reserved() {
-                    hint::spin_loop() // pause cpu
-                } else {
+                if !new_pte.reserved() {
                     return Ok(new_pte);
                 }
+                hint::spin_loop(); // pause cpu
             }
             error!("Timeout reservation wait");
             Err(Error::Corruption)
@@ -423,7 +415,8 @@ impl<L: LowerAlloc> ArrayList<L> {
 
     fn reserve_entry(&self, pte_a: &Atomic<Entry3>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
-        if let Ok(new_pte) = self.subtrees[i].update(|v| v.reserve(Subtrees::almost_full(L::N))) {
+        if let Ok(new_pte) = self.subtrees[i].update(|v| v.reserve_min(Subtrees::almost_full(L::N)))
+        {
             match self.cas_reserved(pte_a, new_pte.with_idx(i), false, false) {
                 Ok(_) => Ok(true),
                 Err(Error::CAS) => {
@@ -486,20 +479,20 @@ impl<L: LowerAlloc> ArrayList<L> {
 }
 
 #[derive(Default)]
+struct Subtrees {
+    /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
+    entries: Box<[Atomic<Entry3>]>,
+    /// List of idx to subtrees
+    lists: Mutex<Lists>,
+}
+
+#[derive(Default)]
 struct Lists {
     /// List of subtrees where all pages are free
     empty: BufList<Entry3>,
     /// List of subtrees that are partially allocated.
     /// This list may also include reserved or 'empty' subtrees, which should be skipped.
     partial: BufList<Entry3>,
-}
-
-#[derive(Default)]
-struct Subtrees {
-    /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
-    entries: Box<[Atomic<Entry3>]>,
-    /// List of idx to subtrees
-    lists: Mutex<Lists>,
 }
 
 impl Index<usize> for Subtrees {
@@ -547,7 +540,7 @@ impl Subtrees {
         self.lists = Default::default();
     }
 
-    fn almost_full(span: usize) -> usize {
+    const fn almost_full(span: usize) -> usize {
         span / 8
     }
 
@@ -558,8 +551,8 @@ impl Subtrees {
         }
         // Clear the lists
         let mut lists = self.lists.lock();
-        lists.empty.clear(self);
-        lists.partial.clear(self);
+        lists.empty.clear();
+        lists.partial.clear();
     }
 
     fn push_empty_all(&self, entries: impl Iterator<Item = usize>) {
@@ -588,7 +581,6 @@ impl Subtrees {
 
     fn reserve_empty(&self, span: usize) -> Result<Entry3> {
         if let Some(i) = self.lists.lock().empty.pop(self) {
-            info!("reserve empty {i}");
             if let Ok(pte) = self[i].update(|v| v.reserve_empty(span)) {
                 Ok(pte.with_idx(i))
             } else {

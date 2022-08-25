@@ -304,11 +304,9 @@ pub struct BufList<T: ANode> {
 }
 
 impl<T: ANode> BufList<T> {
-    pub fn clear<B>(&mut self, buf: &B)
-    where
-        B: Index<usize, Output = Atomic<T>>,
-    {
-        while self.pop(buf).is_some() {}
+    pub fn clear(&mut self) {
+        self.start = None;
+        self.end = None;
     }
 
     pub fn push<B>(&mut self, buf: &B, idx: usize)

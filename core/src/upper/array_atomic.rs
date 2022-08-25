@@ -534,7 +534,7 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
 
     fn put_reserve(&self, local: &Local<PUTS_RESERVE>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
-        if let Ok(new_pte) = self[i].update(|v| v.reserve(Self::ALMOST_FULL)) {
+        if let Ok(new_pte) = self[i].update(|v| v.reserve_min(Self::ALMOST_FULL)) {
             match self.cas_reserved(&local.pte, false, new_pte.with_idx(i)) {
                 Ok(_) => {
                     local.start.store(i * L::N);

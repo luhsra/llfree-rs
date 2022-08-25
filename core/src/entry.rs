@@ -66,7 +66,7 @@ impl Entry3 {
         }
     }
     /// Reserves this entry.
-    pub fn reserve(self, min: usize) -> Option<Entry3> {
+    pub fn reserve_min(self, min: usize) -> Option<Entry3> {
         if !self.reserved() && self.free() > min {
             Some(self.with_reserved(true).with_free(0))
         } else {
@@ -89,14 +89,11 @@ impl Entry3 {
             None
         }
     }
-    /// Clears the reserve flag of this entry.
-    pub fn unreserve(self) -> Option<Entry3> {
-        if self.reserved() {
-            Some(self.with_reserved(false))
-        } else {
-            None
-        }
+    /// Updates the reserve flag to `new` if `old != new`.
+    pub fn toggle_reserve(self, new: bool) -> Option<Entry3> {
+        (self.reserved() != new).then_some(self.with_reserved(new))
     }
+
     /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
     pub fn unreserve_add(self, add: usize, max: usize) -> Option<Entry3> {

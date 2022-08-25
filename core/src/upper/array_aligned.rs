@@ -246,7 +246,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
             if self[i].update(|v| v.dec(1 << order)).is_err() {
                 start = self.reserve(order)?;
                 start_a.store(start);
-                if self[i].update(Entry3::unreserve).is_err() {
+                if self[i].update(|v| v.toggle_reserve(false)).is_err() {
                     error!("Unreserve failed");
                     return Err(Error::Corruption);
                 }
@@ -273,7 +273,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
                         }
                         Ok(pte3) => {
                             start_a.store(self.reserve(order)?);
-                            if self[i].update(Entry3::unreserve).is_err() {
+                            if self[i].update(|v| v.toggle_reserve(false)).is_err() {
                                 error!("Unreserve failed");
                                 return Err(Error::Corruption);
                             }
