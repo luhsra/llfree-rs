@@ -142,6 +142,10 @@ impl Alloc for ListLocal {
         Ok(())
     }
 
+    fn is_free(&self, _addr: u64, _order: usize) -> bool {
+        false
+    }
+
     fn pages(&self) -> usize {
         self.pages
     }

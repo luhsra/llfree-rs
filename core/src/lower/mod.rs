@@ -44,6 +44,8 @@ pub trait LowerAlloc: Default + fmt::Debug {
     fn get(&self, start: usize, order: usize) -> Result<usize>;
     /// Try freeing a page. Returns if it was huge.
     fn put(&self, page: usize, order: usize) -> Result<()>;
+    /// Returns if the page is free. This might be racy!
+    fn is_free(&self, page: usize, order: usize) -> bool;
 
     /// Debug function, returning the number of allocated pages and performing internal checks.
     fn dbg_allocated_pages(&self) -> usize;

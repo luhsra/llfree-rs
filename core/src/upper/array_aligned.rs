@@ -293,30 +293,14 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
     }
 
     fn put(&self, _core: usize, addr: u64, order: usize) -> Result<()> {
-        if order > L::MAX_ORDER {
-            error!("invalid order: !{order} <= {}", L::MAX_ORDER);
-            return Err(Error::Memory);
-        }
-        let num_pages = 1 << order;
-
-        if addr % (num_pages * Page::SIZE) as u64 != 0
-            || !self.lower.memory().contains(&(addr as _))
-        {
-            error!(
-                "invalid addr 0x{addr:x} r={:?} o={order}",
-                self.lower.memory()
-            );
-            return Err(Error::Address);
-        }
-
-        let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
+        let page = self.addr_to_page(addr, order)?;
 
         self.lower.put(page, order)?;
 
         let i = page / L::N;
         // The last page table might have fewer pages
         let max = (self.pages() - i * L::N).min(L::N);
-
+        let num_pages = 1 << order;
         match self[i].update(|v| v.inc(num_pages, max)) {
             Ok(pte3) => {
                 if !pte3.reserved() {
@@ -332,6 +316,14 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
                 error!("inc failed i{i}: {pte:?} o={order}");
                 Err(Error::Corruption)
             }
+        }
+    }
+
+    fn is_free(&self, addr: u64, order: usize) -> bool {
+        if let Ok(page) = self.addr_to_page(addr, order) {
+            self.lower.is_free(page, order)
+        } else {
+            false
         }
     }
 
@@ -407,6 +399,28 @@ impl<A: Entry, L: LowerAlloc> ArrayAligned<A, L> {
             total += pages;
         }
         Ok(total)
+    }
+
+    fn addr_to_page(&self, addr: u64, order: usize) -> Result<usize> {
+        if order > L::MAX_ORDER {
+            error!("invalid order: {order} > {}", L::MAX_ORDER);
+            return Err(Error::Memory);
+        }
+
+        let num_pages = 1 << order;
+
+        if addr % (num_pages * Page::SIZE) as u64 != 0
+            || !self.lower.memory().contains(&(addr as _))
+        {
+            error!(
+                "invalid addr 0x{addr:x} r={:?} o={order}",
+                self.lower.memory()
+            );
+            return Err(Error::Address);
+        }
+
+        let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
+        Ok(page)
     }
 
     /// Reserves a new subtree, prioritizing partially filled subtrees,

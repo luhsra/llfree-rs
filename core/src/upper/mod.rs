@@ -49,6 +49,8 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     fn get(&self, core: usize, order: usize) -> Result<u64>;
     /// Free the given page.
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()>;
+    /// Returns if the page is free. This might be racy!
+    fn is_free(&self, addr: u64, order: usize) -> bool;
 
     /// Return the number of pages that can be allocated.
     fn pages(&self) -> usize;

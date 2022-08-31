@@ -236,6 +236,37 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
         }
     }
 
+    fn is_free(&self, page: usize, order: usize) -> bool {
+        if let Some(huge_order) = order.checked_sub(Self::MAPPING.order(1)) {
+            let i2 = Self::MAPPING.idx(2, page);
+            let start = i2 % 8;
+            let end = start + (1 << huge_order);
+            let SEntry2T8(entries) = self.pt2_t::<SEntry2T8>(page)[i2 / 8].load();
+            entries
+                .into_iter()
+                .enumerate()
+                .all(|(i, e)| i >= start && i < end && e.free() == Self::MAPPING.span(1))
+        } else {
+            let pt2 = self.pt2(page);
+            let i2 = Self::MAPPING.idx(2, page);
+            let pte2 = pt2.get(i2);
+            let num_pages = 1 << order;
+
+            if pte2.free() < num_pages {
+                return false;
+            }
+
+            let pt = self.pt1(page);
+            let entry = pt.get_entry(page / Table1::ENTRY_BITS);
+            let mask = if num_pages >= u64::BITS as usize {
+                u64::MAX
+            } else {
+                ((1 << num_pages) - 1) << (page % Table1::ENTRY_BITS)
+            };
+            (entry & mask) == 0
+        }
+    }
+
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages;
         for i in 0..Self::MAPPING.num_pts(2, self.pages) {

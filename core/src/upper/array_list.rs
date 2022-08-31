@@ -187,24 +187,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
     }
 
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
-        if order > L::MAX_ORDER {
-            error!("invalid order: {order} > {}", L::MAX_ORDER);
-            return Err(Error::Memory);
-        }
-
-        let num_pages = 1 << order;
-
-        if addr % (num_pages * Page::SIZE) as u64 != 0
-            || !self.lower.memory().contains(&(addr as _))
-        {
-            error!(
-                "invalid addr 0x{addr:x} r={:?} o={order}",
-                self.lower.memory()
-            );
-            return Err(Error::Address);
-        }
-
-        let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
+        let page = self.addr_to_page(addr, order)?;
 
         self.lower.put(page, order)?;
 
@@ -216,6 +199,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
         let max = (self.pages() - i * L::N).min(L::N);
 
         // Try decrement own subtree first
+        let num_pages = 1 << order;
         if let Err(pte) = local.pte.update(|v| v.inc_idx(num_pages, i, max)) {
             if pte.idx() == i {
                 error!("inc failed L{i}: {pte:?} o={order}");
@@ -254,6 +238,14 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
                 error!("inc failed i{i}: {pte:?} o={order}");
                 Err(Error::Corruption)
             }
+        }
+    }
+
+    fn is_free(&self, addr: u64, order: usize) -> bool {
+        if let Ok(page) = self.addr_to_page(addr, order) {
+            self.lower.is_free(page, order)
+        } else {
+            false
         }
     }
 
@@ -324,6 +316,28 @@ impl<L: LowerAlloc> ArrayList<L> {
             total += pages;
         }
         Ok(total)
+    }
+
+    fn addr_to_page(&self, addr: u64, order: usize) -> Result<usize> {
+        if order > L::MAX_ORDER {
+            error!("invalid order: {order} > {}", L::MAX_ORDER);
+            return Err(Error::Memory);
+        }
+
+        let num_pages = 1 << order;
+
+        if addr % (num_pages * Page::SIZE) as u64 != 0
+            || !self.lower.memory().contains(&(addr as _))
+        {
+            error!(
+                "invalid addr 0x{addr:x} r={:?} o={order}",
+                self.lower.memory()
+            );
+            return Err(Error::Address);
+        }
+
+        let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
+        Ok(page)
     }
 
     fn get_inner(&self, core: usize, order: usize) -> Result<u64> {

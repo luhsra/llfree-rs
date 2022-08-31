@@ -128,6 +128,10 @@ impl<const N: usize> Bitfield<N> {
         self.data[di].load(Ordering::SeqCst) & bit != 0
     }
 
+    pub fn get_entry(&self, i: usize) -> u64 {
+        self.data[i].load(Ordering::SeqCst)
+    }
+
     pub fn toggle(&self, i: usize, order: usize, expected: bool) -> Result<(), ()> {
         let di = i / Self::ENTRY_BITS;
         let num_pages = 1 << order;

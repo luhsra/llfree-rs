@@ -135,6 +135,10 @@ impl Alloc for ListLocked {
         Ok(())
     }
 
+    fn is_free(&self, _addr: u64, _order: usize) -> bool {
+        false
+    }
+
     fn pages(&self) -> usize {
         unsafe { self.memory.end.offset_from(self.memory.start) as usize }
     }
