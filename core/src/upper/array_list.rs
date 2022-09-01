@@ -67,12 +67,14 @@ impl<L: LowerAlloc> fmt::Debug for ArrayList<L> {
             self.lower.memory(),
             self.lower.pages()
         )?;
+
+        write!(f, "{:?}", self.subtrees)?;
+        writeln!(f, "    free pages: {}", self.dbg_free_pages())?;
+
         for (t, local) in self.local.iter().enumerate() {
             writeln!(f, "    L{t:>2}: {:?}", local.pte.load())?;
         }
 
-        write!(f, "{:?}", self.subtrees)?;
-        writeln!(f, "    free pages: {}", self.dbg_free_pages())?;
         write!(f, "}}")?;
         Ok(())
     }
