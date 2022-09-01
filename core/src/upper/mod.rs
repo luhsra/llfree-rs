@@ -983,7 +983,7 @@ mod test {
             }
             rng.shuffle(&mut pages);
 
-            warn!("allocate {num_pages} pages up to order {MAX_ORDER}");
+            warn!("allocate {num_pages} pages up to order <{MAX_ORDER}");
             barrier.wait();
 
             for (order, page) in &mut pages {
@@ -1042,5 +1042,36 @@ mod test {
             }
         });
         assert_eq!(a.dbg_allocated_pages(), PAGES);
+    }
+
+    #[test]
+    fn fragmentation_retry() {
+        logging();
+
+        let mut mapping = mapping(0x1000_0000_0000, Lower::N * 2).unwrap();
+        let alloc = {
+            let mut a = Allocator::default();
+            a.init(1, &mut mapping, false).unwrap();
+            a.free_all().unwrap();
+            a
+        };
+
+        // Alloc a whole subtree
+        let mut pages = Vec::with_capacity(Lower::N / 2);
+        for i in 0..Lower::N {
+            if i % 2 == 0 {
+                pages.push(alloc.get(0, 0).unwrap());
+            } else {
+                alloc.get(0, 0).unwrap();
+            }
+        }
+        // Free every second one -> fragmentation
+        for page in pages {
+            alloc.put(0, page, 0).unwrap();
+        }
+
+        let huge = alloc.get(0, 9).unwrap();
+        warn!("huge = {huge}");
+        warn!("{alloc:?}");
     }
 }

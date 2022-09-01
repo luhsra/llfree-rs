@@ -135,17 +135,20 @@ pub enum Next {
 }
 
 impl Next {
-    fn opt(v: Option<usize>) -> Self {
-        match v {
-            Some(i) => Self::Some(i),
-            None => Self::End,
-        }
-    }
     fn some(self) -> Option<usize> {
         match self {
             Next::Some(i) => Some(i),
             Next::End => None,
-            Next::Outside => unreachable!(),
+            Next::Outside => panic!("invalid list element"),
+        }
+    }
+}
+
+impl From<Option<usize>> for Next {
+    fn from(v: Option<usize>) -> Self {
+        match v {
+            Some(i) => Self::Some(i),
+            None => Self::End,
         }
     }
 }
@@ -303,6 +306,15 @@ pub struct BufList<T: ANode> {
     _phantom: PhantomData<T>,
 }
 
+impl<T: ANode> fmt::Debug for BufList<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BufList")
+            .field("start", &self.start)
+            .field("end", &self.end)
+            .finish()
+    }
+}
+
 impl<T: ANode> BufList<T> {
     pub fn clear(&mut self) {
         self.start = None;
@@ -313,17 +325,14 @@ impl<T: ANode> BufList<T> {
     where
         B: Index<usize, Output = Atomic<T>>,
     {
-        if buf[idx]
-            .update(|v| v.enqueue(Next::opt(self.start)))
-            .is_err()
-        {
+        if buf[idx].update(|v| v.enqueue(self.start.into())).is_err() {
             return;
         }
 
-        if self.start.is_none() {
+        self.start = Some(idx);
+        if self.end.is_none() {
             self.end = Some(idx);
         }
-        self.start = Some(idx);
     }
 
     pub fn push_back<B>(&mut self, buf: &B, idx: usize)
@@ -410,7 +419,7 @@ where
             next: self.next,
             buf: self.buf,
         };
-        for (i, _) in iter.take(100) {
+        for (i, _) in iter.take(10) {
             dbg.entry(&i);
         }
         dbg.finish()

@@ -51,7 +51,7 @@ pub struct ArrayList<L: LowerAlloc> {
     /// Metadata of the lower alloc
     lower: L,
     /// Manages the allocators subtrees
-    subtrees: Subtrees,
+    trees: Trees,
 }
 
 unsafe impl<L: LowerAlloc> Send for ArrayList<L> {}
@@ -68,8 +68,13 @@ impl<L: LowerAlloc> fmt::Debug for ArrayList<L> {
             self.lower.pages()
         )?;
 
-        write!(f, "{:?}", self.subtrees)?;
-        writeln!(f, "    free pages: {}", self.dbg_free_pages())?;
+        writeln!(f, "    subtrees: {:?}", self.trees)?;
+        let free_pages = self.dbg_free_pages();
+        writeln!(
+            f,
+            "    free pages: {free_pages} ({} trees)",
+            free_pages.div_ceil(L::N)
+        )?;
 
         for (t, local) in self.local.iter().enumerate() {
             writeln!(f, "    L{t:>2}: {:?}", local.pte.load())?;
@@ -110,21 +115,24 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
 
         // Array with all pte3
         let pte3_num = self.pages().div_ceil(L::N);
-        self.subtrees.init(pte3_num);
+        self.trees.init(pte3_num);
 
         Ok(())
     }
 
     fn recover(&self) -> Result<()> {
-        if let Some(meta) = unsafe { self.meta.as_ref() }
-            && meta.pages.load(Ordering::SeqCst) == self.pages()
-            && meta.magic.load(Ordering::SeqCst) == MAGIC
-        {
-            info!("recover p={}", self.pages());
-            let deep = meta.active.load(Ordering::SeqCst) != 0;
-            self.recover_inner(deep)?;
-            meta.active.store(1, Ordering::SeqCst);
-            Ok(())
+        if let Some(meta) = unsafe { self.meta.as_ref() } {
+            if meta.pages.load(Ordering::SeqCst) == self.pages()
+                && meta.magic.load(Ordering::SeqCst) == MAGIC
+            {
+                info!("recover p={}", self.pages());
+                let deep = meta.active.load(Ordering::SeqCst) != 0;
+                self.recover_inner(deep)?;
+                meta.active.store(1, Ordering::SeqCst);
+                Ok(())
+            } else {
+                Err(Error::Initialization)
+            }
         } else {
             Err(Error::Initialization)
         }
@@ -137,15 +145,15 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
         // Add all entries to the empty list
         let pte3_num = self.pages().div_ceil(L::N);
         for i in 0..pte3_num - 1 {
-            self.subtrees[i].store(Entry3::empty(L::N).with_next(Next::Outside));
+            self.trees[i].store(Entry3::empty(L::N).with_next(Next::Outside));
         }
-        self.subtrees.push_empty_all((0..pte3_num - 1).into_iter());
+        self.trees.push_empty_all((0..pte3_num - 1).into_iter());
 
         // The last one may be cut off
         let max = (self.pages() - (pte3_num - 1) * L::N).min(L::N);
-        self.subtrees[pte3_num - 1].store(Entry3::new().with_free(max).with_next(Next::Outside));
+        self.trees[pte3_num - 1].store(Entry3::new().with_free(max).with_next(Next::Outside));
 
-        self.subtrees.push(pte3_num - 1, max, L::N);
+        self.trees.push(pte3_num - 1, max, L::N);
 
         if let Some(meta) = unsafe { self.meta.as_ref() } {
             meta.pages.store(self.pages(), Ordering::SeqCst);
@@ -160,7 +168,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
         self.lower.reserve_all();
 
         // Set all entries to zero
-        self.subtrees.clear();
+        self.trees.clear();
 
         if let Some(meta) = unsafe { self.meta.as_ref() } {
             meta.pages.store(self.pages(), Ordering::SeqCst);
@@ -215,10 +223,10 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
         };
 
         // Subtree not owned by us
-        match self.subtrees[i].update(|v| v.inc(num_pages, max)) {
+        match self.trees[i].update(|v| v.inc(num_pages, max)) {
             Ok(pte) => {
                 let new_pages = pte.free() + num_pages;
-                if !pte.reserved() && new_pages > Subtrees::almost_full(L::N) {
+                if !pte.reserved() && new_pages > Trees::almost_full(L::N) {
                     // put-reserve optimization:
                     // Try to reserve the subtree that was targeted by the recent frees
                     if core == c && local.frees_related(i) && self.reserve_entry(&local.pte, i)? {
@@ -228,7 +236,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
                     // Add to partially free list
                     // Only if not already in list
                     if pte.next() == Next::Outside {
-                        self.subtrees.push(i, new_pages, L::N);
+                        self.trees.push(i, new_pages, L::N);
                     }
                 }
                 if c == core {
@@ -268,7 +276,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
     fn dbg_free_pages(&self) -> usize {
         let mut pages = 0;
         for i in 0..self.pages().div_ceil(L::N) {
-            let pte = self.subtrees[i].load();
+            let pte = self.trees[i].load();
             pages += pte.free();
         }
         // Pages allocated in reserved subtrees
@@ -291,7 +299,7 @@ impl<L: LowerAlloc> Default for ArrayList<L> {
     fn default() -> Self {
         Self {
             meta: null_mut(),
-            subtrees: Default::default(),
+            trees: Default::default(),
             local: Default::default(),
             lower: Default::default(),
         }
@@ -311,10 +319,10 @@ impl<L: LowerAlloc> ArrayList<L> {
             let page = i * L::N;
             let pages = self.lower.recover(page, deep)?;
 
-            self.subtrees[i].store(Entry3::new_table(pages, false));
+            self.trees[i].store(Entry3::new_table(pages, false));
 
             // Add to lists
-            self.subtrees.push(i, pages, L::N);
+            self.trees.push(i, pages, L::N);
             total += pages;
         }
         Ok(total)
@@ -365,9 +373,7 @@ impl<L: LowerAlloc> ArrayList<L> {
                         warn!("alloc failed o={order} => retry");
                         let max = (self.pages() - align_down(start, L::N)).min(L::N);
                         // Increment global to prevent race condition with concurrent reservation
-                        if let Err(pte) =
-                            self.subtrees[pte.idx()].update(|v| v.inc(1 << order, max))
-                        {
+                        if let Err(pte) = self.trees[pte.idx()].update(|v| v.inc(1 << order, max)) {
                             error!("Counter reset failed o={order} {pte:?}");
                             Err(Error::Corruption)
                         } else {
@@ -396,7 +402,7 @@ impl<L: LowerAlloc> ArrayList<L> {
         // Set the reserved flag, locking the reservation
         if !old.reserved() && pte_a.update(|v| v.toggle_reserve(true)).is_ok() {
             // Try reserve new subtree
-            let new_pte = match self.subtrees.reserve_from_list(L::N, retry) {
+            let new_pte = match self.trees.reserve_from_list(L::N, retry) {
                 Ok(ret) => ret,
                 Err(e) => {
                     // Clear reserve flag
@@ -431,15 +437,14 @@ impl<L: LowerAlloc> ArrayList<L> {
 
     fn reserve_entry(&self, pte_a: &Atomic<Entry3>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
-        if let Ok(new_pte) = self.subtrees[i].update(|v| v.reserve_min(Subtrees::almost_full(L::N)))
-        {
+        if let Ok(new_pte) = self.trees[i].update(|v| v.reserve_min(Trees::almost_full(L::N))) {
             match self.cas_reserved(pte_a, new_pte.with_idx(i), false, false) {
                 Ok(_) => Ok(true),
                 Err(Error::CAS) => {
                     warn!("rollback {i}");
                     // Rollback reservation
                     let max = (self.pages() - i * L::N).min(L::N);
-                    if self.subtrees[i]
+                    if self.trees[i]
                         .update(|v| v.unreserve_add(new_pte.free(), max))
                         .is_err()
                     {
@@ -477,13 +482,13 @@ impl<L: LowerAlloc> ArrayList<L> {
         }
 
         let max = (self.pages() - i * L::N).min(L::N);
-        if let Ok(v) = self.subtrees[i].update(|v| v.unreserve_add(pte.free(), max)) {
+        if let Ok(v) = self.trees[i].update(|v| v.unreserve_add(pte.free(), max)) {
             // Only if not already in list
             if v.next() == Next::Outside {
                 if enqueue_back {
-                    self.subtrees.push_back(i, v.free() + pte.free(), L::N);
+                    self.trees.push_back(i, v.free() + pte.free(), L::N);
                 } else {
-                    self.subtrees.push(i, v.free() + pte.free(), L::N);
+                    self.trees.push(i, v.free() + pte.free(), L::N);
                 }
             }
             Ok(())
@@ -495,7 +500,7 @@ impl<L: LowerAlloc> ArrayList<L> {
 }
 
 #[derive(Default)]
-struct Subtrees {
+struct Trees {
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     entries: Box<[Atomic<Entry3>]>,
     /// List of idx to subtrees
@@ -511,7 +516,7 @@ struct Lists {
     partial: BufList<Entry3>,
 }
 
-impl Index<usize> for Subtrees {
+impl Index<usize> for Trees {
     type Output = Atomic<Entry3>;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -519,7 +524,7 @@ impl Index<usize> for Subtrees {
     }
 }
 
-impl fmt::Debug for Subtrees {
+impl fmt::Debug for Trees {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let max = self.entries.len();
         let (empty, partial) = {
@@ -530,24 +535,24 @@ impl fmt::Debug for Subtrees {
             )
         };
 
-        writeln!(f, "    total: {max}")?;
-        write!(f, "    empty: ")?;
+        write!(f, "(total: {max}, empty: ")?;
         if empty <= max {
-            writeln!(f, "{empty}")?;
+            write!(f, "{empty}")?;
         } else {
-            writeln!(f, "INVALID")?;
+            write!(f, "!!")?;
         }
-        write!(f, "    partial: ")?;
+        write!(f, ", partial: ")?;
         if partial <= max {
-            writeln!(f, "{partial}")?;
+            write!(f, "{partial}")?;
         } else {
-            writeln!(f, "INVALID")?;
+            write!(f, "!!")?;
         }
+        write!(f, ")")?;
         Ok(())
     }
 }
 
-impl Subtrees {
+impl Trees {
     fn init(&mut self, pte3_num: usize) {
         let mut pte3s = Vec::with_capacity(pte3_num);
         pte3s.resize_with(pte3_num, || Atomic::new(Entry3::new()));
@@ -596,7 +601,13 @@ impl Subtrees {
     }
 
     fn reserve_empty(&self, span: usize) -> Result<Entry3> {
-        if let Some(i) = self.lists.lock().empty.pop(self) {
+        if let Some(i) = {
+            let mut lists = self.lists.lock();
+            let r = lists.empty.pop(self);
+            drop(lists); // unlock immediately
+            r
+        } {
+            info!("reserve empty {i}");
             if let Ok(pte) = self[i].update(|v| v.reserve_empty(span)) {
                 Ok(pte.with_idx(i))
             } else {
@@ -604,26 +615,47 @@ impl Subtrees {
                 Err(Error::Corruption)
             }
         } else {
+            warn!("no empty tree {self:?}");
             Err(Error::Memory)
         }
     }
 
     fn reserve_partial(&self, span: usize) -> Result<Entry3> {
+        let mut skipped_empty = None;
         loop {
-            let mut lists = self.lists.lock();
-            if let Some(i) = lists.partial.pop(self) {
+            if let Some(i) = {
+                let mut lists = self.lists.lock();
+                let r = lists.partial.pop(self);
+                drop(lists); // unlock immediately
+                r
+            } {
                 info!("reserve partial {i}");
 
                 match self[i].update(|v| v.reserve_partial(Self::almost_full(span), span)) {
-                    Ok(pte) => return Ok(pte.with_idx(i)),
+                    Ok(pte) => {
+                        if let Some(empty) = skipped_empty {
+                            self.lists.lock().empty.push(self, empty);
+                        }
+                        return Ok(pte.with_idx(i));
+                    }
                     Err(pte) => {
                         // Skip reserved and empty entries
                         // They might be reserved by the put-reserve optimization
                         if !pte.reserved() && pte.free() == span {
-                            lists.empty.push(self, i);
+                            if let Some(empty) = skipped_empty.replace(i) {
+                                self.lists.lock().empty.push(self, empty);
+                            }
                         }
                     }
                 }
+            } else if let Some(i) = skipped_empty {
+                // Reserve the last skipped empty entry instead
+                return if let Ok(pte) = self[i].update(|v| v.reserve_empty(span)) {
+                    Ok(pte.with_idx(i))
+                } else {
+                    error!("reserve empty failed");
+                    Err(Error::Corruption)
+                };
             } else {
                 return Err(Error::Memory);
             }
@@ -632,6 +664,7 @@ impl Subtrees {
 
     /// Reserves a new subtree, prioritizing partially filled subtrees.
     fn reserve_from_list(&self, span: usize, prioritize_empty: bool) -> Result<Entry3> {
+        info!("reserve prio={prioritize_empty}");
         if prioritize_empty {
             match self.reserve_empty(span) {
                 Err(Error::Memory) => self.reserve_partial(span),
