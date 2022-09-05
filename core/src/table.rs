@@ -153,35 +153,8 @@ impl<const N: usize> Bitfield<N> {
         }
     }
 
-    /// Set the first 0 bit to 1 returning its bit index.
-    pub fn set_first_zero(&self, i: usize) -> Result<usize, Error> {
-        for j in 0..self.data.len() {
-            let i = (j + i) % self.data.len();
-
-            #[cfg(feature = "stop")]
-            {
-                // Skip full entries for the tests
-                if self.data[i].load(Ordering::SeqCst) == u64::MAX {
-                    continue;
-                }
-                crate::stop::stop().unwrap();
-            }
-
-            if let Ok(e) = self.data[i].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
-                let off = e.trailing_ones() as usize;
-                (off < Self::ENTRY_BITS).then(|| e | (1 << off))
-            }) {
-                return Ok(i * Self::ENTRY_BITS + e.trailing_ones() as usize);
-            }
-        }
-        Err(Error::Memory)
-    }
-
+    /// Set the first aligned 2^`order` zero bits, returning the bit offset
     pub fn set_first_zeros(&self, i: usize, order: usize) -> Result<usize, Error> {
-        if order == 0 {
-            return self.set_first_zero(i);
-        }
-
         debug_assert!(order <= 6);
 
         for j in 0..self.data.len() {
@@ -239,20 +212,51 @@ impl<const N: usize> Bitfield<N> {
     }
 }
 
+fn first_zeros_aligned_0(v: u64) -> Option<(u64, usize)> {
+    let off = v.trailing_ones();
+    (off < u64::BITS).then(|| (v | (1 << off), off as _))
+}
+
+fn first_zeros_aligned_1(v: u64) -> Option<(u64, usize)> {
+    let mask = 0xaaaa_aaaa_aaaa_aaaa_u64;
+    let or = (v | (v >> 1)) | mask;
+    let off = or.trailing_ones();
+    (off < (u64::BITS - 1)).then(|| (v | (0b11 << off), off as _))
+}
+
+fn first_zeros_aligned_2(v: u64) -> Option<(u64, usize)> {
+    let mask = 0xeeee_eeee_eeee_eeee_u64;
+    let or = (v | (v >> 1) | (v >> 2) | (v >> 3)) | mask;
+    let off = or.trailing_ones();
+    (off < (u64::BITS - 3)).then(|| (v | (0b1111 << off), off as _))
+}
+
+/// Set the first aligned 2^`order` zero bits, returning the bit offset
 fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
-    let num_pages = 1 << order;
-    debug_assert!(num_pages <= u64::BITS as usize);
-    if num_pages >= u64::BITS as usize {
-        return if v == 0 { Some((u64::MAX, 0)) } else { None };
-    }
-    for i in 0..64 / num_pages {
-        let i = i * num_pages;
-        let mask = ((1 << num_pages) - 1) << i;
-        if v & mask == 0 {
-            return Some((v | mask, i as usize));
+    match order {
+        0 => first_zeros_aligned_0(v),
+        1 => first_zeros_aligned_1(v),
+        2 => first_zeros_aligned_2(v),
+        3..=5 => {
+            let num_pages = 1 << order;
+            for i in 0..64 / num_pages {
+                let i = i * num_pages;
+                let mask = ((1 << num_pages) - 1) << i;
+                if v & mask == 0 {
+                    return Some((v | mask, i as usize));
+                }
+            }
+            None
         }
+        6 => {
+            if v == 0 {
+                Some((u64::MAX, 0))
+            } else {
+                None
+            }
+        }
+        _ => unreachable!(),
     }
-    None
 }
 
 /// Specifies the different table sizes from level 1 to N.
@@ -624,6 +628,31 @@ mod test {
         assert_eq!(
             super::first_zeros_aligned(0b1111_0000_1100_0011_1000_1111, 2),
             Some((0b1111_1111_1100_0011_1000_1111, 16))
+        );
+    }
+
+    #[test]
+    fn first_zeros_aligned_1() {
+        assert_eq!(super::first_zeros_aligned_1(0b0), Some((0b11, 0)));
+        assert_eq!(super::first_zeros_aligned_1(0b1), Some((0b1101, 2)));
+        assert_eq!(super::first_zeros_aligned_1(0b10011), Some((0b11111, 2)));
+        assert_eq!(
+            super::first_zeros_aligned_1(0b0001_1001_1011),
+            Some((0b1101_1001_1011, 10))
+        );
+    }
+
+    #[test]
+    fn first_zeros_aligned_2() {
+        assert_eq!(super::first_zeros_aligned_2(0b0), Some((0b1111, 0)));
+        assert_eq!(super::first_zeros_aligned_2(0b1), Some((0b11110001, 4)));
+        assert_eq!(
+            super::first_zeros_aligned_2(0b11_0000_0001),
+            Some((0b11_1111_0001, 4))
+        );
+        assert_eq!(
+            super::first_zeros_aligned_2(0b0000_0100_1000_0001_0010),
+            Some((0b1111_0100_1000_0001_0010, 16))
         );
     }
 }

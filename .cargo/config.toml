@@ -1,11 +1,6 @@
 [alias]
 perf = ["run", "-pnvalloc-bench", "-r", "--bin"]
 perf-build = ["build", "-pnvalloc-bench", "-r", "--bin"]
-module = [
-    "build", "-pnvalloc-module", "-r", "--target=x86_64-unknown-none",
-    "-Zbuild-std=core,alloc,compiler_builtins",
-    "-C -Zno-unique-section-names"
-]
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "target-cpu=native"]

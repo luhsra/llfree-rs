@@ -226,7 +226,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
         match self.trees[i].update(|v| v.inc(num_pages, max)) {
             Ok(pte) => {
                 let new_pages = pte.free() + num_pages;
-                if !pte.reserved() && new_pages > Trees::almost_full(L::N) {
+                if !pte.reserved() && new_pages > Trees::almost_full() {
                     // put-reserve optimization:
                     // Try to reserve the subtree that was targeted by the recent frees
                     if core == c && local.frees_related(i) && self.reserve_entry(&local.pte, i)? {
@@ -437,7 +437,7 @@ impl<L: LowerAlloc> ArrayList<L> {
 
     fn reserve_entry(&self, pte_a: &Atomic<Entry3>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
-        if let Ok(new_pte) = self.trees[i].update(|v| v.reserve_min(Trees::almost_full(L::N))) {
+        if let Ok(new_pte) = self.trees[i].update(|v| v.reserve_min(Trees::almost_full())) {
             match self.cas_reserved(pte_a, new_pte.with_idx(i), false, false) {
                 Ok(_) => Ok(true),
                 Err(Error::CAS) => {
@@ -561,8 +561,8 @@ impl Trees {
         self.lists = Default::default();
     }
 
-    const fn almost_full(span: usize) -> usize {
-        span / 8
+    const fn almost_full() -> usize {
+        1 << 10 // MAX_ORDER
     }
 
     fn clear(&self) {
@@ -587,7 +587,7 @@ impl Trees {
         // Add to list if new counter is small enough
         if new_pages == span {
             self.lists.lock().empty.push(self, i);
-        } else if new_pages > Self::almost_full(span) {
+        } else if new_pages > Self::almost_full() {
             self.lists.lock().partial.push(self, i);
         }
     }
@@ -595,7 +595,7 @@ impl Trees {
     fn push_back(&self, i: usize, new_pages: usize, span: usize) {
         if new_pages == span {
             self.lists.lock().empty.push(self, i);
-        } else if new_pages > Self::almost_full(span) {
+        } else if new_pages > Self::almost_full() {
             self.lists.lock().partial.push_back(self, i);
         }
     }
@@ -631,7 +631,7 @@ impl Trees {
             } {
                 info!("reserve partial {i}");
 
-                match self[i].update(|v| v.reserve_partial(Self::almost_full(span), span)) {
+                match self[i].update(|v| v.reserve_partial(Self::almost_full(), span)) {
                     Ok(pte) => {
                         if let Some(empty) = skipped_empty {
                             self.lists.lock().empty.push(self, empty);

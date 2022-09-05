@@ -354,7 +354,7 @@ impl<const T2N: usize> Atom<T2N> {
                 #[cfg(feature = "stop")]
                 {
                     let pte2 = pt2.get(i2);
-                    if pte2.page() || pte2.free() < 1 << order {
+                    if pte2.page() || pte2.free() < (1 << order) {
                         continue;
                     }
                     stop!();

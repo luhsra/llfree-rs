@@ -311,7 +311,7 @@ mod test {
             match alloc.get(0, 0) {
                 Ok(page) => pages.push(page),
                 Err(Error::Memory) => break,
-                Err(e) => panic!("{:?}", e),
+                Err(e) => panic!("{e:?}"),
             }
         }
 
