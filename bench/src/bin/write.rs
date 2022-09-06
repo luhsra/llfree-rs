@@ -5,7 +5,7 @@ use clap::Parser;
 use log::warn;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
-use nvalloc::util::{div_ceil, Page, logging};
+use nvalloc::util::{div_ceil, logging, Page};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]
@@ -20,6 +20,8 @@ struct Args {
     /// DAX file to be used for the allocator.
     #[clap(long)]
     dax: Option<String>,
+    #[clap(short, long)]
+    populate: bool,
 }
 
 fn main() {
@@ -27,6 +29,7 @@ fn main() {
         threads,
         memory,
         dax,
+        populate,
     } = Args::parse();
 
     logging();
@@ -34,7 +37,7 @@ fn main() {
     assert!(threads > 0 && memory > 0);
 
     let t_map = Instant::now();
-    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
+    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax, populate).unwrap();
     let t_map = t_map.elapsed().as_millis();
 
     let pages = mapping.len();
@@ -74,6 +77,7 @@ fn mapping(
     begin: usize,
     length: usize,
     dax: Option<String>,
+    populate: bool,
 ) -> core::result::Result<MMap<Page>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {
@@ -91,5 +95,5 @@ fn mapping(
             return MMap::dax(begin, length, f);
         }
     }
-    MMap::anon(begin, length)
+    MMap::anon(begin, length, populate)
 }

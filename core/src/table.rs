@@ -112,13 +112,27 @@ impl<const N: usize> Bitfield<N> {
     pub const ORDER: usize = Self::LEN.ilog2() as _;
     pub const SIZE: usize = Self::LEN / 8;
 
-    pub fn set(&self, i: usize, v: bool) {
-        let di = i / Self::ENTRY_BITS;
-        let bit = 1 << (i % Self::ENTRY_BITS);
-        if v {
-            self.data[di].fetch_or(bit, Ordering::SeqCst);
-        } else {
-            self.data[di].fetch_and(!bit, Ordering::SeqCst);
+    pub fn set(&self, range: Range<usize>, v: bool) {
+        assert!(range.start <= range.end && range.end <= Self::LEN);
+
+        let entries = range.end.div_ceil(Self::ENTRY_BITS) - range.start / Self::ENTRY_BITS;
+        let entry_off = range.start / Self::ENTRY_BITS;
+
+        for ei in entry_off..entry_off + entries {
+            let bit_off = ei * Self::ENTRY_BITS;
+            let bit_start = range.start.saturating_sub(bit_off).min(Self::ENTRY_BITS);
+            let bit_end = range.end.saturating_sub(bit_off).min(Self::ENTRY_BITS);
+            let bits = bit_end - bit_start;
+            let byte = if bits < Self::ENTRY_BITS {
+                ((1 << bits) - 1) << bit_start
+            } else {
+                u64::MAX
+            };
+            if v {
+                self.data[ei].fetch_or(byte, Ordering::SeqCst);
+            } else {
+                self.data[ei].fetch_and(!byte, Ordering::SeqCst);
+            }
         }
     }
 
@@ -212,23 +226,26 @@ impl<const N: usize> Bitfield<N> {
     }
 }
 
+/// Special case for finding single bits
 fn first_zeros_aligned_0(v: u64) -> Option<(u64, usize)> {
     let off = v.trailing_ones();
-    (off < u64::BITS).then(|| (v | (1 << off), off as _))
+    (off < u64::BITS).then(|| (v | (0b1 << off), off as _))
 }
 
+/// Special case for finding aligned bit pairs
 fn first_zeros_aligned_1(v: u64) -> Option<(u64, usize)> {
     let mask = 0xaaaa_aaaa_aaaa_aaaa_u64;
     let or = (v | (v >> 1)) | mask;
     let off = or.trailing_ones();
-    (off < (u64::BITS - 1)).then(|| (v | (0b11 << off), off as _))
+    (off < (u64::BITS)).then(|| (v | (0b11 << off), off as _))
 }
 
+/// Special case for finding aligned bit quadruples
 fn first_zeros_aligned_2(v: u64) -> Option<(u64, usize)> {
     let mask = 0xeeee_eeee_eeee_eeee_u64;
     let or = (v | (v >> 1) | (v >> 2) | (v >> 3)) | mask;
     let off = or.trailing_ones();
-    (off < (u64::BITS - 3)).then(|| (v | (0b1111 << off), off as _))
+    (off < (u64::BITS)).then(|| (v | (0b1111 << off), off as _))
 }
 
 /// Set the first aligned 2^`order` zero bits, returning the bit offset
@@ -255,6 +272,7 @@ fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
                 None
             }
         }
+        // All other orders are handled differently
         _ => unreachable!(),
     }
 }
@@ -587,6 +605,36 @@ mod test {
         let mut iter = MAPPING.iterate(3, 5 * MAPPING.span(2)).enumerate();
         assert_eq!(iter.next(), Some((0, 5 * MAPPING.span(2))));
         assert_eq!(iter.last(), Some((31, 4 * MAPPING.span(2))));
+    }
+
+    #[test]
+    fn bit_set() {
+        let bitset = super::Bitfield::<2>::default();
+        bitset.set(0..0, true);
+        assert_eq!(bitset.get_entry(0), 0);
+        assert_eq!(bitset.get_entry(1), 0);
+        bitset.set(0..1, true);
+        assert_eq!(bitset.get_entry(0), 0b1);
+        assert_eq!(bitset.get_entry(1), 0b0);
+        bitset.set(0..1, false);
+        assert_eq!(bitset.get_entry(0), 0b0);
+        assert_eq!(bitset.get_entry(1), 0b0);
+        bitset.set(0..2, true);
+        assert_eq!(bitset.get_entry(0), 0b11);
+        assert_eq!(bitset.get_entry(1), 0b0);
+        bitset.set(2..56, true);
+        assert_eq!(bitset.get_entry(0), 0x00ff_ffff_ffff_ffff);
+        assert_eq!(bitset.get_entry(1), 0b0);
+        bitset.set(60..73, true);
+        assert_eq!(bitset.get_entry(0), 0xf0ff_ffff_ffff_ffff);
+        assert_eq!(bitset.get_entry(1), 0x01ff);
+        bitset.set(96..128, true);
+        bitset.set(96..128, true);
+        assert_eq!(bitset.get_entry(0), 0xf0ff_ffff_ffff_ffff);
+        assert_eq!(bitset.get_entry(1), 0xffff_ffff_0000_01ff);
+        bitset.set(0..128, false);
+        assert_eq!(bitset.get_entry(0), 0);
+        assert_eq!(bitset.get_entry(1), 0);
     }
 
     #[test]

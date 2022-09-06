@@ -158,7 +158,7 @@ fn mapping(
             return MMap::dax(begin, length, f);
         }
     }
-    MMap::anon(begin, length)
+    MMap::anon(begin, length, false)
 }
 
 #[derive(Debug, Clone, Copy, ArgEnum)]

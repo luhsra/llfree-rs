@@ -56,7 +56,7 @@ fn main() {
             let out_size = align_up(allocs + 2, Page::SIZE) * threads;
             // Shared memory where the allocated pages are backupped
             // Layout: [ ( idx | repeat | pages... ) for each thread ]
-            let mut out_mapping = MMap::<u64>::anon(0x1100_0000_0000, out_size).unwrap();
+            let mut out_mapping = MMap::<u64>::anon(0x1100_0000_0000, out_size, true).unwrap();
             let out_size = out_size / threads;
             // Initialize with zero
             for t in 0..threads {
@@ -255,5 +255,5 @@ fn mapping(
             return MMap::dax(begin, length, f);
         }
     }
-    MMap::anon(begin, length)
+    MMap::anon(begin, length, false)
 }

@@ -114,10 +114,9 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
             if i + 1 < Self::MAPPING.num_pts(1, self.pages) {
                 pt1.fill(false);
             } else {
-                for j in 0..Self::MAPPING.len(1) {
-                    let page = i * Self::MAPPING.span(1) + j;
-                    pt1.set(j, page >= self.pages);
-                }
+                let end = self.pages - i * Self::MAPPING.span(1);
+                pt1.set(0..end, false);
+                pt1.set(end..Self::MAPPING.len(1), true);
             }
         }
     }

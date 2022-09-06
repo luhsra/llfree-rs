@@ -226,7 +226,7 @@ mod test {
                 .unwrap();
             return MMap::dax(begin, length, f);
         }
-        MMap::anon(begin, length)
+        MMap::anon(begin, length, true)
     }
 
     #[test]
@@ -298,6 +298,8 @@ mod test {
             a.free_all().unwrap();
             a
         });
+
+        assert_eq!(alloc.dbg_free_pages(), alloc.pages());
 
         warn!("start alloc...");
         let small = alloc.get(0, 0).unwrap();

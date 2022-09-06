@@ -65,7 +65,7 @@ impl<T> MMap<T> {
         }
     }
 
-    pub fn anon(begin: usize, len: usize) -> Result<MMap<T>, ()> {
+    pub fn anon(begin: usize, len: usize, populate: bool) -> Result<MMap<T>, ()> {
         if len == 0 {
             return Ok(MMap {
                 slice: unsafe { std::slice::from_raw_parts_mut(begin as _, len) },
@@ -78,7 +78,9 @@ impl<T> MMap<T> {
                 begin as _,
                 (len * size_of::<T>()) as _,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                libc::MAP_SHARED
+                    | libc::MAP_ANONYMOUS
+                    | if populate { libc::MAP_POPULATE } else { 0 },
                 -1,
                 0,
             )
@@ -213,7 +215,7 @@ mod test {
     fn anonymous() {
         logging();
 
-        let mut mapping = MMap::anon(0x0000_1000_0000_0000, Page::SIZE).unwrap();
+        let mut mapping = MMap::anon(0x0000_1000_0000_0000, Page::SIZE, true).unwrap();
 
         mapping[0] = 42;
         assert_eq!(mapping[0], 42);

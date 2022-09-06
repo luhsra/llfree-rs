@@ -191,5 +191,5 @@ fn mapping(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page
             return MMap::dax(begin, length, f);
         }
     }
-    MMap::anon(begin, length)
+    MMap::anon(begin, length, false)
 }
