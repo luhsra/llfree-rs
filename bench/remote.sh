@@ -1,10 +1,33 @@
+set -e
+
+################################################################################
+# Tune Performance
+################################################################################
+
+MIN_CPU=$(cat /sys/devices/system/cpu/intel_pstate/min_perf_pct)
+
+cleanup()
+{
+    echo reenable powersaving
+    echo powersave | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null
+    echo $MIN_CPU >> /sys/devices/system/cpu/intel_pstate/min_perf_pct
+}
+trap cleanup EXIT HUP INT QUIT KILL SEGV TERM
+
+echo disable powersaving
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor > /dev/null
+echo 100 >> /sys/devices/system/cpu/intel_pstate/min_perf_pct
+
+################################################################################
+# Benchmarks
+################################################################################
 export RUST_LOG=warn
 OUT=results/out
 mkdir -p $OUT
-set -e
 
 ALLOC="ArrayAtomicA128 ArrayAtomicA256 ArrayAtomicA512 ArrayListA128 ArrayListA256 ArrayListA512"
-THREADS="-x1 -x2 -x4 -x8 -x16 -x24 -x32 -x40 -x48 -x56 -x64 -x80 -x96"
+# THREADS="-x1 -x2 -x4 -x8 -x16 -x24 -x32 -x40 -x48 -x56 -x64 -x80 -x96"
+THREADS="-x1 -x2 -x4 -x8 -x16 -x24 -x32 -x40 -x48"
 FILL="-x0 -x10 -x20 -x30 -x40 -x50 -x60 -x70 -x80"
 
 # NVRAM
