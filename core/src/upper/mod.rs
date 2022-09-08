@@ -72,6 +72,7 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
 pub struct AllocName {
     base: &'static str,
     first: &'static str,
@@ -151,7 +152,7 @@ impl<const L: usize> Local<L> {
     }
     #[allow(clippy::mut_from_ref)]
     fn p(&self) -> &mut Inner<L> {
-        unsafe { &mut *self.inner.get() }
+        unsafe { self.inner.get().as_mut().unwrap_unchecked() }
     }
     /// Add a chunk (subtree) id to the history of chunks.
     pub fn frees_push(&self, chunk: usize) {
@@ -447,7 +448,7 @@ mod test {
 
         let a = alloc.clone();
         let barrier = Arc::new(Barrier::new(THREADS));
-        thread::parallel(THREADS, move |t| {
+        thread::parallel(0..THREADS, move |t| {
             thread::pin(t);
 
             barrier.wait();
@@ -596,19 +597,20 @@ mod test {
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
         let barrier = Arc::new(Barrier::new(THREADS));
-        let pages_begin = pages.as_ptr() as usize;
         let timer = Instant::now();
 
         let a = alloc.clone();
-        thread::parallel(THREADS as _, move |t| {
-            thread::pin(t);
-            barrier.wait();
+        thread::parallel(
+            pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
+            move |(t, pages)| {
+                thread::pin(t);
+                barrier.wait();
 
-            for i in 0..ALLOC_PER_THREAD {
-                let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
-                *dst = a.get(t, 0).unwrap();
-            }
-        });
+                for page in pages {
+                    *page = a.get(t, 0).unwrap();
+                }
+            },
+        );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
         assert_eq!(alloc.dbg_allocated_pages(), pages.len());
@@ -645,19 +647,20 @@ mod test {
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
         let barrier = Arc::new(Barrier::new(THREADS));
-        let pages_begin = pages.as_ptr() as usize;
         let timer = Instant::now();
 
         let a = alloc.clone();
-        thread::parallel(THREADS as _, move |t| {
-            thread::pin(t);
-            barrier.wait();
+        thread::parallel(
+            pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
+            move |(t, pages)| {
+                thread::pin(t);
+                barrier.wait();
 
-            for i in 0..ALLOC_PER_THREAD {
-                let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
-                *dst = a.get(t, 0).unwrap();
-            }
-        });
+                for page in pages {
+                    *page = a.get(t, 0).unwrap();
+                }
+            },
+        );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
         assert_eq!(alloc.dbg_allocated_pages(), pages.len());
@@ -674,15 +677,17 @@ mod test {
 
         let barrier = Arc::new(Barrier::new(THREADS));
         let a = alloc.clone();
-        thread::parallel(THREADS, move |t| {
-            thread::pin(t);
-            barrier.wait();
+        thread::parallel(
+            pages.chunks(ALLOC_PER_THREAD).enumerate(),
+            move |(t, pages)| {
+                thread::pin(t);
+                barrier.wait();
 
-            for i in 0..ALLOC_PER_THREAD {
-                let addr = unsafe { *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
-                a.put(t, addr, 0).unwrap();
-            }
-        });
+                for page in pages {
+                    a.put(t, *page, 0).unwrap();
+                }
+            },
+        );
 
         assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
@@ -708,19 +713,20 @@ mod test {
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
         let barrier = Arc::new(Barrier::new(THREADS));
-        let pages_begin = pages.as_ptr() as usize;
         let timer = Instant::now();
 
         let a = alloc.clone();
-        thread::parallel(THREADS as _, move |t| {
-            thread::pin(t);
-            barrier.wait();
+        thread::parallel(
+            pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
+            move |(t, pages)| {
+                thread::pin(t);
+                barrier.wait();
 
-            for i in 0..ALLOC_PER_THREAD {
-                let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
-                *dst = a.get(t, 9).unwrap();
-            }
-        });
+                for page in pages {
+                    *page = a.get(t, 9).unwrap();
+                }
+            },
+        );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
         assert_eq!(alloc.dbg_allocated_pages(), pages.len() * PT_LEN);
@@ -746,18 +752,16 @@ mod test {
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
-        let pages_begin = pages.as_ptr() as usize;
         let barrier = Arc::new(Barrier::new(THREADS));
         let timer = Instant::now();
 
-        thread::parallel(THREADS as _, move |t| {
+        thread::parallel(pages.chunks_mut(ALLOC_PER_THREAD).enumerate(), move |(t, pages)| {
             thread::pin(t);
             barrier.wait();
 
-            for i in 0..ALLOC_PER_THREAD {
-                let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
-                *dst = unsafe { libc::malloc(Page::SIZE) } as u64;
-                assert!(*dst != 0);
+            for page in pages {
+                *page = unsafe { libc::malloc(Page::SIZE) } as u64;
+                assert!(*page != 0);
             }
         });
 
@@ -784,17 +788,15 @@ mod test {
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
-        let pages_begin = pages.as_ptr() as usize;
         let barrier = Arc::new(Barrier::new(THREADS));
         let timer = Instant::now();
 
-        thread::parallel(THREADS as _, move |t| {
+        thread::parallel(pages.chunks_mut(ALLOC_PER_THREAD).enumerate(), move |(t, pages)| {
             thread::pin(t);
             barrier.wait();
 
-            for i in 0..ALLOC_PER_THREAD {
-                let dst = unsafe { &mut *(pages_begin as *mut u64).add(t * ALLOC_PER_THREAD + i) };
-                *dst = unsafe {
+            for page in pages {
+                *page = unsafe {
                     libc::mmap(
                         null_mut(),
                         Page::SIZE,
@@ -804,7 +806,7 @@ mod test {
                         0,
                     )
                 } as u64;
-                assert!(*dst != 0);
+                assert!(*page != 0);
             }
         });
 
@@ -842,7 +844,7 @@ mod test {
         let barrier = Arc::new(Barrier::new(THREADS));
 
         let a = alloc.clone();
-        thread::parallel(THREADS, move |t| {
+        thread::parallel(0..THREADS, move |t| {
             thread::pin(t);
             barrier.wait();
 
@@ -972,7 +974,7 @@ mod test {
 
         let barrier = Arc::new(Barrier::new(THREADS));
 
-        thread::parallel(THREADS, move |t| {
+        thread::parallel(0..THREADS, move |t| {
             thread::pin(t);
             let mut rng = WyRand::new(42 + t as u64);
             let mut num_pages = 0;
@@ -1037,7 +1039,7 @@ mod test {
         assert_eq!(alloc.dbg_allocated_pages(), 0);
 
         let a = alloc.clone();
-        thread::parallel(THREADS, move |core| {
+        thread::parallel(0..THREADS, move |core| {
             thread::pin(core);
             for _ in 0..(PAGES / THREADS) / (1 << Lower::MAX_ORDER) {
                 alloc.get(core, Lower::MAX_ORDER).unwrap();

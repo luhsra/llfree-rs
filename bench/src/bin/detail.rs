@@ -68,7 +68,7 @@ fn main() {
 
         let barrier = Arc::new(Barrier::new(threads));
         let a = alloc.clone();
-        let t_times = thread::parallel(threads as _, move |t| {
+        let t_times = thread::parallel(0..threads, move |t| {
             thread::pin(t);
             barrier.wait();
             let timer = Instant::now();

@@ -197,8 +197,7 @@ impl Node {
         self.0 = v;
     }
     fn pop(&mut self) -> Option<&mut Node> {
-        if !self.0.is_null() {
-            let curr = unsafe { &mut *self.0 };
+        if let Some(curr) = unsafe { self.0.as_mut() } {
             self.0 = curr.0;
             Some(curr)
         } else {

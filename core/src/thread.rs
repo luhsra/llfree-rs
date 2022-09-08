@@ -100,14 +100,16 @@ pub fn pin(core: usize) {
     });
 }
 
-/// Executed `f` on `n` parallel threads.
-pub fn parallel<T, F>(n: usize, f: F) -> Vec<T>
+/// Executed `f` for each element in `iter`.
+pub fn parallel<I, T, F>(iter: I, f: F) -> Vec<T>
 where
+    I: IntoIterator,
+    I::Item: Send,
     T: Send,
-    F: FnOnce(usize) -> T + Clone + Send,
+    F: FnOnce(I::Item) -> T + Clone + Send,
 {
     std::thread::scope(|scope| {
-        let handles = (0..n)
+        let handles = iter
             .into_iter()
             .map(|t| {
                 let f = f.clone();

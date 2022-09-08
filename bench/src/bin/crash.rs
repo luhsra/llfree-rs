@@ -105,7 +105,7 @@ fn execute(
 
     let barrier = Arc::new(Barrier::new(threads));
     let out_mapping_len = out_mapping.len();
-    thread::parallel(threads, move |t| {
+    thread::parallel(0..threads, move |t| {
         thread::pin(t);
 
         let out = unsafe {

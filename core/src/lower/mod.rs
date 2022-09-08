@@ -85,7 +85,7 @@ mod test {
 
             let stop = StopRand::new(THREADS, seed);
             let l = lower.clone();
-            thread::parallel(THREADS, move |t| {
+            thread::parallel(0..THREADS, move |t| {
                 let _stopper = Stopper::init(stop, t);
 
                 let mut pages = [0; 4];
@@ -125,7 +125,7 @@ mod test {
 
             let stop = StopRand::new(THREADS, seed);
             let l = lower.clone();
-            thread::parallel(THREADS, move |t| {
+            thread::parallel(0..THREADS, move |t| {
                 let _stopper = Stopper::init(stop, t);
 
                 if t < THREADS / 2 {

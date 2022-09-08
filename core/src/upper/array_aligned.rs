@@ -157,8 +157,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
 
     #[cold]
     fn recover(&self) -> Result<()> {
-        assert!(!self.meta.is_null());
-        let meta = unsafe { &mut *self.meta };
+        let meta = unsafe { self.meta.as_mut().unwrap() };
 
         if meta.pages.load(Ordering::SeqCst) == self.pages()
             && meta.magic.load(Ordering::SeqCst) == MAGIC
@@ -196,8 +195,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
             self.partial.push(self, pte3_num - 1);
         }
 
-        if !self.meta.is_null() {
-            let meta = unsafe { &mut *self.meta };
+        if let Some(meta) = unsafe { self.meta.as_mut() } {
             meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
             meta.active.store(1, Ordering::SeqCst);
@@ -220,8 +218,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
         self.empty.set(Entry3::default().with_next(Next::End));
         self.partial.set(Entry3::default().with_next(Next::End));
 
-        if !self.meta.is_null() {
-            let meta = unsafe { &mut *self.meta };
+        if let Some(meta) = unsafe { self.meta.as_mut() } {
             meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
             meta.active.store(1, Ordering::SeqCst);
@@ -353,8 +350,7 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
 
 impl<A: Entry, L: LowerAlloc> Drop for ArrayAligned<A, L> {
     fn drop(&mut self) {
-        if !self.meta.is_null() {
-            let meta = unsafe { &*self.meta };
+        if let Some(meta) = unsafe { self.meta.as_mut() } {
             meta.active.store(0, Ordering::SeqCst);
         }
     }

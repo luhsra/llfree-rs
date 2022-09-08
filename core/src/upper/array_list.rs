@@ -289,8 +289,7 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
 
 impl<L: LowerAlloc> Drop for ArrayList<L> {
     fn drop(&mut self) {
-        if !self.meta.is_null() {
-            let meta = unsafe { &*self.meta };
+        if let Some(meta) = unsafe { self.meta.as_mut() } {
             meta.active.store(0, Ordering::SeqCst);
         }
     }

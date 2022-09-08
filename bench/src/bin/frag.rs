@@ -92,7 +92,7 @@ fn main() {
         v
     });
     let a = alloc.clone();
-    thread::parallel(threads, move |t| {
+    thread::parallel(0..threads, move |t| {
         thread::pin(t);
 
         let mut rng = WyRand::new(t as u64 + 100);

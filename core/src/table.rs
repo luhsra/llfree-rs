@@ -1,7 +1,6 @@
 use core::fmt;
 use core::mem::{align_of, size_of};
 use core::ops::Range;
-use core::ptr::addr_of;
 use core::sync::atomic::{self, AtomicU64, Ordering};
 
 use crate::atomic::{Atomic, AtomicValue};
@@ -44,7 +43,7 @@ impl<T: AtomicValue, const LEN: usize> ATable<T, LEN> {
     pub fn fill(&self, e: T) {
         // cast to raw memory to let the compiler use vector instructions
         #[allow(clippy::cast_ref_to_mut)]
-        let mem = unsafe { &mut *(&self.entries as *const _ as *mut [T; LEN]) };
+        let mem = unsafe { &mut *(self.entries.as_ptr() as *mut [T; LEN]) };
         mem.fill(e);
         // memory ordering has to be enforced with a memory barrier
         atomic::fence(Ordering::SeqCst);
@@ -205,7 +204,7 @@ impl<const N: usize> Bitfield<N> {
         let v = if v { u64::MAX } else { 0 };
         // cast to raw memory to let the compiler use vector instructions
         #[allow(clippy::cast_ref_to_mut)]
-        let mem = unsafe { &mut *(addr_of!(self.data) as *mut [u64; N]) };
+        let mem = unsafe { &mut *(self.data.as_ptr() as *mut [u64; N]) };
         mem.fill(v);
         // memory ordering has to be enforced with a memory barrier
         atomic::fence(Ordering::SeqCst);

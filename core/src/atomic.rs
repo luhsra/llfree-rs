@@ -478,7 +478,7 @@ mod test {
         let barrier = Arc::new(Barrier::new(THREADS));
         let stack = Arc::new(stack);
         let copy = stack.clone();
-        thread::parallel(THREADS, |t| {
+        thread::parallel(0..THREADS, |t| {
             thread::pin(t);
             let mut idx: [usize; I] = [0; I];
             for i in 0..I {

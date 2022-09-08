@@ -93,26 +93,23 @@ fn main() {
     type A512 = Atom<512>;
     type A256 = Atom<256>;
     type A128 = Atom<128>;
-    let allocs: [Arc<dyn Alloc>; 8] = [
-        Arc::new(ArrayAtomic::<A128>::default()),
-        Arc::new(ArrayAtomic::<A256>::default()),
-        Arc::new(ArrayAtomic::<A512>::default()),
-        Arc::new(ArrayList::<A128>::default()),
-        Arc::new(ArrayList::<A256>::default()),
-        Arc::new(ArrayList::<A512>::default()),
-        Arc::new(ListLocal::default()),
-        Arc::new(ListLocked::default()),
+    let mut allocs: [Box<dyn Alloc>; 8] = [
+        Box::new(ArrayAtomic::<A128>::default()),
+        Box::new(ArrayAtomic::<A256>::default()),
+        Box::new(ArrayAtomic::<A512>::default()),
+        Box::new(ArrayList::<A128>::default()),
+        Box::new(ArrayList::<A256>::default()),
+        Box::new(ArrayList::<A512>::default()),
+        Box::new(ListLocal::default()),
+        Box::new(ListLocked::default()),
     ];
 
     // Additional constraints (perf)
-    let mut conditions = HashMap::<String, &'static dyn Fn(usize, usize) -> bool>::new();
-    conditions.insert(format!("{}", AllocName::new::<ListLocal>()), &|_, order| {
-        order == 0
+    let mut conditions = HashMap::<AllocName, &'static dyn Fn(usize, usize) -> bool>::new();
+    conditions.insert(AllocName::new::<ListLocal>(), &|_, order| order == 0);
+    conditions.insert(AllocName::new::<ListLocked>(), &|cores, order| {
+        order == 0 && (cores <= 16 || cores == 32)
     });
-    conditions.insert(
-        format!("{}", AllocName::new::<ListLocked>()),
-        &|cores, order| order == 0 && (cores <= 16 || cores == 32),
-    );
 
     for x in x {
         let t = bench.threads(threads, x);
@@ -120,13 +117,13 @@ fn main() {
             continue;
         }
 
-        for alloc in &allocs {
-            let name = format!("{}", alloc.name());
-            if alloc_names.contains(&name)
+        for alloc in &mut allocs {
+            let name = alloc.name();
+            if alloc_names.contains(&format!("{name}"))
                 && conditions.get(&name).map(|f| f(t, order)).unwrap_or(true)
             {
                 for i in 0..iterations {
-                    let perf = bench.run(alloc.clone(), &mut mapping, order, threads, x);
+                    let perf = bench.run(alloc.as_mut(), &mut mapping, order, threads, x);
                     writeln!(out, "{name},{x},{i},{memory},{perf}").unwrap();
                 }
             }
@@ -184,7 +181,7 @@ impl Benchmark {
 
     fn run(
         self,
-        alloc: Arc<dyn Alloc>,
+        alloc: &mut dyn Alloc,
         mapping: &mut [Page],
         order: usize,
         threads: usize,
@@ -202,23 +199,21 @@ impl Benchmark {
 }
 
 fn bulk(
-    alloc: Arc<dyn Alloc>,
+    alloc: &mut dyn Alloc,
     mapping: &mut [Page],
     order: usize,
     max_threads: usize,
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    unsafe { &mut *(Arc::as_ptr(&alloc) as *mut dyn Alloc) }
-        .init(threads, mapping, true)
-        .unwrap();
+    alloc.init(threads, mapping, true).unwrap();
     alloc.free_all().unwrap();
     let init = timer.elapsed().as_millis();
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
 
     let barrier = Arc::new(Barrier::new(threads));
-    let a = alloc.clone();
-    let mut perf = Perf::avg(thread::parallel(threads, move |t| {
+    let alloc = &*alloc;
+    let mut perf = Perf::avg(thread::parallel(0..threads, move |t| {
         thread::pin(t);
         barrier.wait();
         let mut pages = Vec::with_capacity(allocs);
@@ -249,7 +244,7 @@ fn bulk(
             allocs,
         }
     }));
-    assert_eq!(a.dbg_allocated_pages(), 0, "{a:?}");
+    assert_eq!(alloc.dbg_allocated_pages(), 0, "{alloc:?}");
 
     perf.init = init;
     perf.allocs = allocs;
@@ -257,23 +252,21 @@ fn bulk(
 }
 
 fn repeat(
-    alloc: Arc<dyn Alloc>,
+    alloc: &mut dyn Alloc,
     mapping: &mut [Page],
     order: usize,
     max_threads: usize,
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    unsafe { &mut *(Arc::as_ptr(&alloc) as *mut dyn Alloc) }
-        .init(threads, mapping, true)
-        .unwrap();
+    alloc.init(threads, mapping, true).unwrap();
     alloc.free_all().unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
     let barrier = Arc::new(Barrier::new(threads));
-    let a = alloc.clone();
-    let mut perf = Perf::avg(thread::parallel(threads, move |t| {
+    let alloc = &*alloc;
+    let mut perf = Perf::avg(thread::parallel(0..threads, move |t| {
         thread::pin(t);
         for _ in 0..allocs {
             alloc.get(t, order).unwrap();
@@ -300,7 +293,7 @@ fn repeat(
             allocs,
         }
     }));
-    assert_eq!(a.dbg_allocated_pages(), allocs * threads * (1 << order));
+    assert_eq!(alloc.dbg_allocated_pages(), allocs * threads * (1 << order));
 
     perf.init = init;
     perf.allocs = allocs;
@@ -308,33 +301,27 @@ fn repeat(
 }
 
 fn rand(
-    alloc: Arc<dyn Alloc>,
+    alloc: &mut dyn Alloc,
     mapping: &mut [Page],
     order: usize,
     max_threads: usize,
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    unsafe { &mut *(Arc::as_ptr(&alloc) as *mut dyn Alloc) }
-        .init(threads, mapping, true)
-        .unwrap();
+    alloc.init(threads, mapping, true).unwrap();
     alloc.free_all().unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
     let barrier = Arc::new(Barrier::new(threads));
-    let a = alloc.clone();
+    let alloc = &*alloc;
 
     let mut all_pages = vec![0u64; allocs * threads];
     let all_pages_ptr = all_pages.as_mut_ptr() as usize;
-    let pages_ptr = all_pages
-        .chunks_mut(allocs)
-        .map(|c| c.as_ptr() as usize)
-        .collect::<Vec<_>>();
 
-    let mut perf = Perf::avg(thread::parallel(threads, move |t| {
+    let chunks = all_pages.chunks_mut(allocs).enumerate();
+    let mut perf = Perf::avg(thread::parallel(chunks, |(t, pages)| {
         thread::pin(t);
-        let pages = unsafe { slice::from_raw_parts_mut(pages_ptr[t] as *mut u64, allocs) };
 
         for page in pages.iter_mut() {
             *page = alloc.get(t, order).unwrap();
@@ -373,7 +360,7 @@ fn rand(
             allocs,
         }
     }));
-    assert_eq!(a.dbg_allocated_pages(), allocs * threads * (1 << order));
+    assert_eq!(alloc.dbg_allocated_pages(), allocs * threads * (1 << order));
 
     perf.init = init;
     perf.allocs = allocs;
@@ -381,7 +368,7 @@ fn rand(
 }
 
 fn filling(
-    alloc: Arc<dyn Alloc>,
+    alloc: &mut dyn Alloc,
     mapping: &mut [Page],
     order: usize,
     threads: usize,
@@ -390,9 +377,7 @@ fn filling(
     assert!(x <= 90);
 
     let timer = Instant::now();
-    unsafe { &mut *(Arc::as_ptr(&alloc) as *mut dyn Alloc) }
-        .init(threads, mapping, true)
-        .unwrap();
+    alloc.init(threads, mapping, true).unwrap();
     alloc.free_all().unwrap();
     let init = timer.elapsed().as_millis();
 
@@ -406,8 +391,8 @@ fn filling(
     assert!((fill + allocs) * threads < alloc.pages());
 
     let barrier = Arc::new(Barrier::new(threads));
-    let a = alloc.clone();
-    let mut perf = Perf::avg(thread::parallel(threads, move |t| {
+    let alloc = &*alloc;
+    let mut perf = Perf::avg(thread::parallel(0..threads, move |t| {
         thread::pin(t);
         for _ in 0..fill {
             alloc.get(t, order).unwrap();
@@ -443,7 +428,7 @@ fn filling(
             allocs,
         }
     }));
-    assert_eq!(a.dbg_allocated_pages(), fill * threads * (1 << order));
+    assert_eq!(alloc.dbg_allocated_pages(), fill * threads * (1 << order));
 
     perf.init = init;
     perf.allocs = allocs;

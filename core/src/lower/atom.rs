@@ -567,7 +567,7 @@ mod test {
             let stop = StopVec::new(2, order);
 
             let l = lower.clone();
-            thread::parallel(2, move |t| {
+            thread::parallel(0..2, move |t| {
                 thread::pin(t);
                 let key = Stopper::init(stop, t as _);
 
@@ -601,7 +601,7 @@ mod test {
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
-            thread::parallel(2, move |t| {
+            thread::parallel(0..2, move |t| {
                 thread::pin(t);
                 let _stopper = Stopper::init(stop, t as _);
 
@@ -638,7 +638,7 @@ mod test {
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
-            thread::parallel(2, move |t| {
+            thread::parallel(0..2, move |t| {
                 thread::pin(t);
                 let _stopper = Stopper::init(stop, t as _);
 
@@ -675,7 +675,7 @@ mod test {
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
-            thread::parallel(2, {
+            thread::parallel(0..2, {
                 let pages = pages.clone();
                 move |t| {
                     let _stopper = Stopper::init(stop, t as _);
@@ -712,7 +712,7 @@ mod test {
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
-            thread::parallel(2, move |t| {
+            thread::parallel(0..2, move |t| {
                 let _stopper = Stopper::init(stop, t as _);
 
                 l.put(pages[t as usize], 0).unwrap();
@@ -806,7 +806,7 @@ mod test {
             let stop = StopVec::new(2, order);
 
             let l = lower.clone();
-            thread::parallel(2, move |t| {
+            thread::parallel(0..2, move |t| {
                 thread::pin(t);
                 let key = Stopper::init(stop, t as _);
 
@@ -847,7 +847,7 @@ mod test {
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
-            thread::parallel(2, {
+            thread::parallel(0..2, {
                 let pages = pages.clone();
                 move |t| {
                     let _stopper = Stopper::init(stop, t as _);
