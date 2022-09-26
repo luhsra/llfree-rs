@@ -47,7 +47,7 @@ fn main() {
     let allocs: [Arc<dyn Alloc>; 3] = [
         Arc::new(ArrayAligned::<CacheAligned, L>::default()),
         Arc::new(ArrayAligned::<Unaligned, L>::default()),
-        Arc::new(ArrayAtomic::<L>::default()),
+        Arc::new(ArrayAtomic::<4, L>::default()),
         // Arc::new(TableAlloc::<L>::default()),
     ];
     for a in allocs {

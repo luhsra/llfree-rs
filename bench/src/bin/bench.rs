@@ -17,6 +17,9 @@ use nvalloc::upper::*;
 use nvalloc::util::{black_box, Page, WyRand};
 use nvalloc::{thread, util};
 
+/// Number of allocations per block
+const RAND_BLOCK_SIZE: usize = 8;
+
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -90,16 +93,16 @@ fn main() {
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
 
-    type A512 = Atom<512>;
-    type A256 = Atom<256>;
     type A128 = Atom<128>;
-    let mut allocs: [Box<dyn Alloc>; 8] = [
-        Box::new(ArrayAtomic::<A128>::default()),
-        Box::new(ArrayAtomic::<A256>::default()),
-        Box::new(ArrayAtomic::<A512>::default()),
-        Box::new(ArrayList::<A128>::default()),
-        Box::new(ArrayList::<A256>::default()),
-        Box::new(ArrayList::<A512>::default()),
+    let mut allocs: [Box<dyn Alloc>; 10] = [
+        Box::new(ArrayAtomic::<0, A128>::default()),
+        Box::new(ArrayAtomic::<1, A128>::default()),
+        Box::new(ArrayAtomic::<3, A128>::default()),
+        Box::new(ArrayAtomic::<7, A128>::default()),
+        Box::new(ArrayList::<0, A128>::default()),
+        Box::new(ArrayList::<1, A128>::default()),
+        Box::new(ArrayList::<3, A128>::default()),
+        Box::new(ArrayList::<7, A128>::default()),
         Box::new(ListLocal::default()),
         Box::new(ListLocked::default()),
     ];
@@ -167,6 +170,8 @@ enum Benchmark {
     /// Initially allocate half the memory and then repeatedly free an random page
     /// and replace it with a newly allocated one
     Rand,
+    /// Like `rand`, but reallocating multiple pages in close proximity
+    RandBlock,
     /// Compute times for different filling levels
     Filling,
 }
@@ -193,6 +198,7 @@ impl Benchmark {
             Benchmark::Bulk => bulk(alloc, mapping, order, threads, x),
             Benchmark::Repeat => repeat(alloc, mapping, order, threads, x),
             Benchmark::Rand => rand(alloc, mapping, order, threads, x),
+            Benchmark::RandBlock => rand_block(alloc, mapping, order, threads, x),
             Benchmark::Filling => filling(alloc, mapping, order, threads, x),
         }
     }
@@ -347,6 +353,95 @@ fn rand(
         }
         black_box(pages);
 
+        let rand = timer.elapsed().as_nanos() / allocs as u128;
+        Perf {
+            get_min: rand,
+            get_avg: rand,
+            get_max: rand,
+            put_min: rand,
+            put_avg: rand,
+            put_max: rand,
+            init: 0,
+            total: timer.elapsed().as_millis(),
+            allocs,
+        }
+    }));
+    assert_eq!(alloc.dbg_allocated_pages(), allocs * threads * (1 << order));
+
+    perf.init = init;
+    perf.allocs = allocs;
+    perf
+}
+
+/// reallocate multiple in close proximity at once
+fn rand_block(
+    alloc: &mut dyn Alloc,
+    mapping: &mut [Page],
+    order: usize,
+    max_threads: usize,
+    threads: usize,
+) -> Perf {
+    let timer = Instant::now();
+    alloc.init(threads, mapping, true).unwrap();
+    alloc.free_all().unwrap();
+    let init = timer.elapsed().as_millis();
+
+    let allocs = alloc.pages() / max_threads / 2 / (1 << order);
+    let barrier = Arc::new(Barrier::new(threads));
+    let alloc = &*alloc;
+
+    let mut all_pages = vec![0u64; allocs * threads];
+    let all_pages_ptr = all_pages.as_mut_ptr() as usize;
+
+    let chunks = all_pages.chunks_mut(allocs).enumerate();
+    let mut perf = Perf::avg(thread::parallel(chunks, |(t, pages)| {
+        thread::pin(t);
+
+        for page in pages.iter_mut() {
+            *page = alloc.get(t, order).unwrap();
+        }
+
+        let mut rng = WyRand::new(t as _);
+
+        barrier.wait();
+
+        let blocks = allocs / RAND_BLOCK_SIZE;
+        assert!(blocks > 0);
+
+        if t == 0 {
+            // Shuffle blocks between all cores
+            let pages =
+                unsafe { slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads) };
+            for _ in 0..blocks {
+                let i = (rng.range(0..blocks as u64) as usize) * RAND_BLOCK_SIZE;
+                let j = (rng.range(0..blocks as u64) as usize) * RAND_BLOCK_SIZE;
+                if i != j {
+                    for k in 0..RAND_BLOCK_SIZE {
+                        pages.swap(i + k, j + k);
+                    }
+                }
+            }
+        }
+
+        barrier.wait();
+
+        let timer = Instant::now();
+
+        for _ in 0..blocks {
+            // reallocate block
+            let i =
+                (rng.range(0..(pages.len() / RAND_BLOCK_SIZE) as u64) as usize) * RAND_BLOCK_SIZE;
+            for j in 0..RAND_BLOCK_SIZE {
+                alloc.put(t, pages[i + j], order).unwrap();
+            }
+            for j in 0..RAND_BLOCK_SIZE {
+                pages[i + j] = alloc.get(t, order).unwrap();
+            }
+        }
+
+        black_box(pages);
+
+        let allocs = blocks * RAND_BLOCK_SIZE;
         let rand = timer.elapsed().as_nanos() / allocs as u128;
         Perf {
             get_min: rand,

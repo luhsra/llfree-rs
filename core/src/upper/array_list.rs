@@ -16,8 +16,6 @@ use crate::upper::CAS_RETRIES;
 use crate::util::{align_down, Page};
 use crate::{Error, Result};
 
-const PUTS_RESERVE: usize = 4;
-
 /// Non-Volatile global metadata
 struct Meta {
     magic: AtomicUsize,
@@ -43,21 +41,21 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
 #[repr(align(64))]
-pub struct ArrayList<L: LowerAlloc> {
+pub struct ArrayList<const PR: usize, L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
     /// CPU local data (only shared between CPUs if the memory area is too small)
-    local: Box<[Local<PUTS_RESERVE>]>,
+    local: Box<[Local<PR>]>,
     /// Metadata of the lower alloc
     lower: L,
     /// Manages the allocators subtrees
     trees: Trees,
 }
 
-unsafe impl<L: LowerAlloc> Send for ArrayList<L> {}
-unsafe impl<L: LowerAlloc> Sync for ArrayList<L> {}
+unsafe impl<const PR: usize, L: LowerAlloc> Send for ArrayList<PR, L> {}
+unsafe impl<const PR: usize, L: LowerAlloc> Sync for ArrayList<PR, L> {}
 
-impl<L: LowerAlloc> fmt::Debug for ArrayList<L> {
+impl<const PR: usize, L: LowerAlloc> fmt::Debug for ArrayList<PR, L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
 
@@ -85,7 +83,7 @@ impl<L: LowerAlloc> fmt::Debug for ArrayList<L> {
     }
 }
 
-impl<L: LowerAlloc> Alloc for ArrayList<L> {
+impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
     #[cold]
     fn init(&mut self, mut cores: usize, mut memory: &mut [Page], persistent: bool) -> Result<()> {
         info!(
@@ -287,14 +285,14 @@ impl<L: LowerAlloc> Alloc for ArrayList<L> {
     }
 }
 
-impl<L: LowerAlloc> Drop for ArrayList<L> {
+impl<const PR: usize, L: LowerAlloc> Drop for ArrayList<PR, L> {
     fn drop(&mut self) {
         if let Some(meta) = unsafe { self.meta.as_mut() } {
             meta.active.store(0, Ordering::SeqCst);
         }
     }
 }
-impl<L: LowerAlloc> Default for ArrayList<L> {
+impl<const PR: usize, L: LowerAlloc> Default for ArrayList<PR, L> {
     fn default() -> Self {
         Self {
             meta: null_mut(),
@@ -305,7 +303,7 @@ impl<L: LowerAlloc> Default for ArrayList<L> {
     }
 }
 
-impl<L: LowerAlloc> ArrayList<L> {
+impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
     /// Recover the allocator from NVM after reboot.
     /// If `deep` then the level 1 page tables are traversed and diverging counters are corrected.
     #[cold]

@@ -1,7 +1,7 @@
+use core::fmt;
 use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use core::{fmt, hint};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -12,10 +12,8 @@ use crate::atomic::{ANode, AStack, AStackDbg, Atomic, Next};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_down, Page};
+use crate::util::{align_down, spin_wait, Page};
 use crate::{Error, Result};
-
-const PUTS_RESERVE: usize = 4;
 
 /// Non-Volatile global metadata
 struct Meta {
@@ -42,13 +40,13 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
 #[repr(align(64))]
-pub struct ArrayAtomic<L: LowerAlloc> {
+pub struct ArrayAtomic<const PR: usize, L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
     subtrees: Box<[Atomic<Entry3>]>,
     /// CPU local data
-    local: Box<[Local<PUTS_RESERVE>]>,
+    local: Box<[Local<PR>]>,
     /// Metadata of the lower alloc
     lower: L,
 
@@ -58,10 +56,10 @@ pub struct ArrayAtomic<L: LowerAlloc> {
     partial: AStack<Entry3>,
 }
 
-unsafe impl<L: LowerAlloc> Send for ArrayAtomic<L> {}
-unsafe impl<L: LowerAlloc> Sync for ArrayAtomic<L> {}
+unsafe impl<const PR: usize, L: LowerAlloc> Send for ArrayAtomic<PR, L> {}
+unsafe impl<const PR: usize, L: LowerAlloc> Sync for ArrayAtomic<PR, L> {}
 
-impl<L: LowerAlloc> fmt::Debug for ArrayAtomic<L> {
+impl<const PR: usize, L: LowerAlloc> fmt::Debug for ArrayAtomic<PR, L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
 
@@ -86,7 +84,7 @@ impl<L: LowerAlloc> fmt::Debug for ArrayAtomic<L> {
     }
 }
 
-impl<L: LowerAlloc> Index<usize> for ArrayAtomic<L> {
+impl<const PR: usize, L: LowerAlloc> Index<usize> for ArrayAtomic<PR, L> {
     type Output = Atomic<Entry3>;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -94,7 +92,7 @@ impl<L: LowerAlloc> Index<usize> for ArrayAtomic<L> {
     }
 }
 
-impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
+impl<const PR: usize, L: LowerAlloc> Alloc for ArrayAtomic<PR, L> {
     #[cold]
     fn init(&mut self, mut cores: usize, mut memory: &mut [Page], persistent: bool) -> Result<()> {
         info!(
@@ -348,14 +346,14 @@ impl<L: LowerAlloc> Alloc for ArrayAtomic<L> {
     }
 }
 
-impl<L: LowerAlloc> Drop for ArrayAtomic<L> {
+impl<const PR: usize, L: LowerAlloc> Drop for ArrayAtomic<PR, L> {
     fn drop(&mut self) {
         if let Some(meta) = unsafe { self.meta.as_mut() } {
             meta.active.store(0, Ordering::SeqCst);
         }
     }
 }
-impl<L: LowerAlloc> Default for ArrayAtomic<L> {
+impl<const PR: usize, L: LowerAlloc> Default for ArrayAtomic<PR, L> {
     fn default() -> Self {
         Self {
             meta: null_mut(),
@@ -368,7 +366,7 @@ impl<L: LowerAlloc> Default for ArrayAtomic<L> {
     }
 }
 
-impl<L: LowerAlloc> ArrayAtomic<L> {
+impl<const PR: usize, L: LowerAlloc> ArrayAtomic<PR, L> {
     const ALMOST_FULL: usize = 1 << L::MAX_ORDER;
 
     /// Recover the allocator from NVM after reboot.
@@ -492,7 +490,7 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
     /// Try to reserve a new subtree or wait for concurrent reservations to finish
     fn get_reserve(
         &self,
-        local: &Local<PUTS_RESERVE>,
+        local: &Local<PR>,
         pte: Entry3,
         order: usize,
     ) -> Result<Option<(Entry3, usize)>> {
@@ -531,19 +529,16 @@ impl<L: LowerAlloc> ArrayAtomic<L> {
             Ok(Some((new_pte, start)))
         } else {
             // Wait for reservation to end
-            for _ in 0..(2 * CAS_RETRIES) {
-                if local.pte.load().reserved() {
-                    hint::spin_loop()
-                } else {
-                    return Ok(None);
-                }
+            if spin_wait(2 * CAS_RETRIES, || !local.pte.load().reserved()) {
+                Ok(None)
+            } else {
+                error!("Timeout reservation wait");
+                Err(Error::Corruption)
             }
-            error!("Timeout reservation wait");
-            Err(Error::Corruption)
         }
     }
 
-    fn put_reserve(&self, local: &Local<PUTS_RESERVE>, i: usize) -> Result<bool> {
+    fn put_reserve(&self, local: &Local<PR>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
         if let Ok(new_pte) = self[i].update(|v| v.reserve_min(Self::ALMOST_FULL)) {
             match self.cas_reserved(&local.pte, false, new_pte.with_idx(i)) {

@@ -205,7 +205,7 @@ impl AtomicValue for Entry2Pair {
     type V = u32;
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct SEntry2(u8);
 
 impl AtomicValue for SEntry2 {

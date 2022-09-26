@@ -156,8 +156,11 @@ impl<const L: usize> Local<L> {
     }
     /// Add a chunk (subtree) id to the history of chunks.
     pub fn frees_push(&self, chunk: usize) {
-        self.p().frees_i = (self.p().frees_i + 1) % self.p().frees.len();
-        self.p().frees[self.p().frees_i] = chunk;
+        if L > 0 {
+            let inner = self.p();
+            inner.frees_i = (inner.frees_i + 1) % inner.frees.len();
+            inner.frees[inner.frees_i] = chunk;
+        }
     }
     /// Calls frees_push on exiting scope.
     /// NOTE: Bind the return value to a variable!
@@ -167,7 +170,7 @@ impl<const L: usize> Local<L> {
     }
     /// Checks if the previous frees were in the given chunk.
     pub fn frees_related(&self, chunk: usize) -> bool {
-        self.p().frees.iter().all(|p| *p == chunk)
+        L > 0 && self.p().frees.iter().all(|p| *p == chunk)
     }
 }
 
@@ -208,13 +211,13 @@ mod test {
     use crate::mmap::MMap;
     use crate::table::PT_LEN;
     use crate::thread;
-    use crate::upper::array_aligned::{CacheAligned, Unaligned};
+    use crate::upper::array_aligned::CacheAligned;
     use crate::upper::*;
     use crate::util::{logging, Page, WyRand};
     use crate::Error;
 
     type Lower = Atom<128>;
-    type Allocator = ArrayList<Lower>;
+    type Allocator = ArrayList<4, Lower>;
 
     fn mapping(begin: usize, length: usize) -> core::result::Result<MMap<Page>, ()> {
         #[cfg(target_os = "linux")]
@@ -234,8 +237,8 @@ mod test {
     fn names() {
         println!(
             "{}\n -> {}",
-            type_name::<ArrayAtomic<Lower>>(),
-            AllocName::new::<ArrayAtomic<Lower>>()
+            type_name::<ArrayAtomic<4, Lower>>(),
+            AllocName::new::<ArrayAtomic<4, Lower>>()
         );
         println!(
             "{}\n -> {}",
@@ -244,8 +247,8 @@ mod test {
         );
         println!(
             "{}\n -> {}",
-            type_name::<ArrayAligned<Unaligned, Lower>>(),
-            AllocName::new::<ArrayAligned<Unaligned, Lower>>()
+            type_name::<ArrayList<4, Lower>>(),
+            AllocName::new::<ArrayList<4, Lower>>()
         );
         println!(
             "{}\n -> {}",
@@ -755,15 +758,18 @@ mod test {
         let barrier = Arc::new(Barrier::new(THREADS));
         let timer = Instant::now();
 
-        thread::parallel(pages.chunks_mut(ALLOC_PER_THREAD).enumerate(), move |(t, pages)| {
-            thread::pin(t);
-            barrier.wait();
+        thread::parallel(
+            pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
+            move |(t, pages)| {
+                thread::pin(t);
+                barrier.wait();
 
-            for page in pages {
-                *page = unsafe { libc::malloc(Page::SIZE) } as u64;
-                assert!(*page != 0);
-            }
-        });
+                for page in pages {
+                    *page = unsafe { libc::malloc(Page::SIZE) } as u64;
+                    assert!(*page != 0);
+                }
+            },
+        );
 
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
         warn!("allocated pages: {}", pages.len());
@@ -791,24 +797,27 @@ mod test {
         let barrier = Arc::new(Barrier::new(THREADS));
         let timer = Instant::now();
 
-        thread::parallel(pages.chunks_mut(ALLOC_PER_THREAD).enumerate(), move |(t, pages)| {
-            thread::pin(t);
-            barrier.wait();
+        thread::parallel(
+            pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
+            move |(t, pages)| {
+                thread::pin(t);
+                barrier.wait();
 
-            for page in pages {
-                *page = unsafe {
-                    libc::mmap(
-                        null_mut(),
-                        Page::SIZE,
-                        libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                        -1,
-                        0,
-                    )
-                } as u64;
-                assert!(*page != 0);
-            }
-        });
+                for page in pages {
+                    *page = unsafe {
+                        libc::mmap(
+                            null_mut(),
+                            Page::SIZE,
+                            libc::PROT_READ | libc::PROT_WRITE,
+                            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                            -1,
+                            0,
+                        )
+                    } as u64;
+                    assert!(*page != 0);
+                }
+            },
+        );
 
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
         warn!("allocated pages: {}", pages.len());

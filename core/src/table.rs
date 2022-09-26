@@ -236,7 +236,7 @@ fn first_zeros_aligned_1(v: u64) -> Option<(u64, usize)> {
     let mask = 0xaaaa_aaaa_aaaa_aaaa_u64;
     let or = (v | (v >> 1)) | mask;
     let off = or.trailing_ones();
-    (off < (u64::BITS)).then(|| (v | (0b11 << off), off as _))
+    (off < u64::BITS).then(|| (v | (0b11 << off), off as _))
 }
 
 /// Special case for finding aligned bit quadruples
@@ -244,7 +244,7 @@ fn first_zeros_aligned_2(v: u64) -> Option<(u64, usize)> {
     let mask = 0xeeee_eeee_eeee_eeee_u64;
     let or = (v | (v >> 1) | (v >> 2) | (v >> 3)) | mask;
     let off = or.trailing_ones();
-    (off < (u64::BITS)).then(|| (v | (0b1111 << off), off as _))
+    (off < u64::BITS).then(|| (v | (0b1111 << off), off as _))
 }
 
 /// Set the first aligned 2^`order` zero bits, returning the bit offset

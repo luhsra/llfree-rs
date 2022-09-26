@@ -10,7 +10,7 @@ use crate::atomic::Atomic;
 use crate::entry::{SEntry2, SEntry2T2, SEntry2T4, SEntry2T8, SEntry2Tuple};
 use crate::table::{ATable, Bitfield, Mapping};
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_up, Page};
+use crate::util::{align_up, Page, spin_wait};
 use crate::{Error, Result};
 
 use super::LowerAlloc;
@@ -466,15 +466,7 @@ impl<const T2N: usize> Atom<T2N> {
                 return Err(Error::Corruption);
             }
         } else {
-            let mut success = false;
-            for _ in 0..CAS_RETRIES {
-                if !pt2.get(i2).page() {
-                    success = true;
-                    break;
-                }
-                core::hint::spin_loop();
-            }
-            if !success {
+            if !spin_wait(CAS_RETRIES, || !pt2.get(i2).page()) {
                 error!("Exceeding retries");
                 return Err(Error::Corruption);
             }

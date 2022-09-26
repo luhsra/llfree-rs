@@ -21,7 +21,7 @@ type Allocator = ArrayAtomic<3, Atom<128>>;
 struct Args {
     #[clap(short, long, default_value_t = 1)]
     threads: usize,
-    #[clap(short, long, default_value = "results/out/detail.csv")]
+    #[clap(short, long, default_value = "results/out/dist.csv")]
     outfile: PathBuf,
     #[clap(long)]
     dax: Option<String>,
@@ -29,6 +29,12 @@ struct Args {
     iterations: usize,
     #[clap(short, long, default_value_t = 0)]
     order: usize,
+    #[clap(short, long, default_value_t = 500)]
+    buckets: usize,
+    #[clap(short, long, default_value_t = 50)]
+    start: usize,
+    #[clap(short, long, default_value_t = 1050)]
+    end: usize,
 }
 
 fn main() {
@@ -38,6 +44,9 @@ fn main() {
         dax,
         iterations,
         order,
+        buckets,
+        start,
+        end,
     } = Args::parse();
 
     logging();
@@ -56,7 +65,11 @@ fn main() {
         }
     });
 
-    let mut times = vec![Perf::default(); 2 * PT_LEN];
+    assert!(start < end);
+    let mut get_buckets = vec![0usize; buckets];
+    let mut put_buckets = vec![0usize; buckets];
+    let bucket_size = (end - start) / buckets;
+    assert!(bucket_size > 0);
 
     for _ in 0..iterations {
         let timer = Instant::now();
@@ -74,108 +87,59 @@ fn main() {
         warn!("\n\n>>> bench t={threads} o={order:?} {allocs}\n");
 
         let barrier = Arc::new(Barrier::new(threads));
-        let t_times = thread::parallel(0..threads, move |t| {
+        let t_buckets = thread::parallel(0..threads, move |t| {
             thread::pin(t);
             barrier.wait();
 
             let timer = Instant::now();
             let mut pages = Vec::with_capacity(allocs);
-            let mut perf = vec![Perf::default(); 2 * PT_LEN];
 
-            let t_get = &mut perf[0..PT_LEN];
-            for i in 0..allocs {
+            let mut get_buckets = vec![0usize; buckets];
+            let mut put_buckets = vec![0usize; buckets];
+
+            for _ in 0..allocs {
                 let timer = Instant::now();
                 let page = alloc.get(t, order).unwrap();
-                let t = timer.elapsed().as_nanos() as f64;
+                let t = timer.elapsed().as_nanos() as usize;
 
-                t_get[i % PT_LEN].add_time(t);
+                let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
+                get_buckets[n] += 1;
                 pages.push(page);
             }
 
             barrier.wait();
 
-            let t_put = &mut perf[PT_LEN..];
-            for (i, page) in pages.into_iter().enumerate() {
+            for page in pages {
                 let timer = Instant::now();
                 alloc.put(t, page, order).unwrap();
-                let t = timer.elapsed().as_nanos() as f64;
+                let t = timer.elapsed().as_nanos() as usize;
+                let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
 
-                t_put[i % PT_LEN].add_time(t);
-            }
-
-            let n = (allocs / PT_LEN) as f64;
-            for t in &mut perf {
-                t.finalize(n);
+                put_buckets[n] += 1;
             }
 
             warn!("time {}ms", timer.elapsed().as_millis());
-            perf
+            (get_buckets, put_buckets)
         });
 
         assert_eq!(alloc.dbg_allocated_pages(), 0);
         drop(a);
 
-        for t in t_times {
-            for i in 0..2 * PT_LEN {
-                times[i].avg += t[i].avg / (threads * iterations) as f64;
-                times[i].std += t[i].std / (threads * iterations) as f64;
-                times[i].min = times[i].min.min(t[i].min);
-                times[i].max = times[i].max.max(t[i].max);
+        for (get_b, put_b) in t_buckets {
+            for i in 0..buckets {
+                get_buckets[i] += get_b[i];
+                put_buckets[i] += put_b[i];
             }
         }
     }
 
-    let name = Allocator::default().name();
     let mut outfile = File::create(outfile).unwrap();
-    writeln!(outfile, "alloc,threads,op,num,avg,std,min,max").unwrap();
-    for (num, Perf { avg, std, min, max }) in times.into_iter().enumerate() {
-        if num < 512 {
-            writeln!(
-                outfile,
-                "{name},{threads},get,{num},{avg},{std},{min},{max}"
-            )
-            .unwrap();
-        } else {
-            let num = num - 512;
-            writeln!(
-                outfile,
-                "{name},{threads},put,{num},{avg},{std},{min},{max}"
-            )
-            .unwrap();
-        }
+    writeln!(outfile, "op,bucket,count").unwrap();
+    for (i, count) in get_buckets.into_iter().enumerate() {
+        writeln!(outfile, "get,{},{count}", i * bucket_size + start).unwrap();
     }
-}
-
-#[derive(Clone, Copy)]
-struct Perf {
-    avg: f64,
-    std: f64,
-    min: f64,
-    max: f64,
-}
-
-impl Default for Perf {
-    fn default() -> Self {
-        Self {
-            avg: 0.0,
-            std: 0.0,
-            min: f64::INFINITY,
-            max: 0.0,
-        }
-    }
-}
-
-impl Perf {
-    fn add_time(&mut self, t: f64) {
-        self.avg += t;
-        self.std += t * t;
-        self.min = self.min.min(t);
-        self.max = self.max.max(t);
-    }
-    fn finalize(&mut self, n: f64) {
-        self.avg /= n;
-        // https://en.wikipedia.org/wiki/Standard_deviation#Identities_and_mathematical_properties
-        self.std = (self.std / n - self.avg * self.avg).sqrt()
+    for (i, count) in put_buckets.into_iter().enumerate() {
+        writeln!(outfile, "put,{},{count}", i * bucket_size + start).unwrap();
     }
 }
 

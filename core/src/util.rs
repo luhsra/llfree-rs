@@ -199,6 +199,19 @@ impl WyRand {
     }
 }
 
+/// Retries the condition n times and returns if it was successfull.
+/// This pauses the CPU between retries if possible.
+#[inline(always)]
+pub fn spin_wait<F: FnMut() -> bool>(n: usize, mut cond: F) -> bool {
+    for _ in 0..n {
+        if cond() {
+            return true;
+        }
+        core::hint::spin_loop()
+    }
+    false
+}
+
 #[cfg(all(test, feature = "std"))]
 mod test {
     use super::{Cycles, WyRand};

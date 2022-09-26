@@ -35,6 +35,11 @@ test = false
 bench = false
 
 [[bin]]
+name = "dist"
+test = false
+bench = false
+
+[[bin]]
 name = "mmap"
 test = false
 bench = false
