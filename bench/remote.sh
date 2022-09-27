@@ -25,7 +25,7 @@ export RUST_LOG=warn
 OUT=results/out
 mkdir -p $OUT
 
-ALLOC="ArrayAtomicA128 ArrayAtomicA256 ArrayAtomicA512 ArrayListA128 ArrayListA256 ArrayListA512"
+ALLOC="Array0A128 Array1A128 Array3A128 ArrayList0A128 ArrayList1A128 ArrayList3A128"
 # THREADS="-x1 -x2 -x4 -x8 -x16 -x24 -x32 -x40 -x48 -x56 -x64 -x80 -x96"
 THREADS="-x1 -x2 -x4 -x8 -x16 -x24 -x32 -x40 -x48"
 FILL="-x0 -x10 -x20 -x30 -x40 -x50 -x60 -x70 -x80"
@@ -42,6 +42,9 @@ chrt 99 target/release/bench repeat $ALLOC $FLAGS $THREADS \
 echo ">>> check p rand"
 chrt 99 target/release/bench rand $FLAGS $ALLOC $THREADS \
     -o $OUT/rand_p.csv
+echo ">>> check p rand-block"
+chrt 99 target/release/bench rand-block $FLAGS $ALLOC $THREADS \
+    -o $OUT/rand_block_p.csv
 
 # DRAM
 FLAGS="-t96 -i4 -s0 -m192 --stride 1"
@@ -55,3 +58,6 @@ chrt 99 target/release/bench repeat $ALLOC $FLAGS $THREADS \
 echo ">>> check v rand"
 chrt 99 target/release/bench rand $FLAGS $ALLOC $THREADS \
     -o $OUT/rand_v.csv
+echo ">>> check p rand-block"
+chrt 99 target/release/bench rand-block $FLAGS $ALLOC $THREADS \
+    -o $OUT/rand_block_v.csv

@@ -16,7 +16,7 @@ memfile
 !/results/*.ipynb
 !/results/remote.sh
 
-# linux kernel
+# linux kernel module
 *.cmd
 *.o
 *.ko
@@ -27,3 +27,5 @@ memfile
 modules.order
 hda.qcow2
 Module.symvers
+.clang-format
+compile_commands.json

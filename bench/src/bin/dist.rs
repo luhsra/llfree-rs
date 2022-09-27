@@ -10,10 +10,10 @@ use nvalloc::lower::Atom;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
-use nvalloc::upper::{Alloc, ArrayAtomic};
+use nvalloc::upper::{Alloc, Array};
 use nvalloc::util::{div_ceil, logging, Page};
 
-type Allocator = ArrayAtomic<3, Atom<128>>;
+type Allocator = Array<3, Atom<128>>;
 
 /// Benchmarking an allocator in more detail.
 #[derive(Parser, Debug)]

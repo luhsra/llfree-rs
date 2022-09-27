@@ -94,15 +94,16 @@ fn main() {
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
 
     type A128 = Atom<128>;
-    let mut allocs: [Box<dyn Alloc>; 10] = [
+    let mut allocs: [Box<dyn Alloc>; 11] = [
+        Box::new(Array::<0, A128>::default()),
+        Box::new(Array::<1, A128>::default()),
+        Box::new(Array::<3, A128>::default()),
         Box::new(ArrayAtomic::<0, A128>::default()),
         Box::new(ArrayAtomic::<1, A128>::default()),
         Box::new(ArrayAtomic::<3, A128>::default()),
-        Box::new(ArrayAtomic::<7, A128>::default()),
         Box::new(ArrayList::<0, A128>::default()),
         Box::new(ArrayList::<1, A128>::default()),
         Box::new(ArrayList::<3, A128>::default()),
-        Box::new(ArrayList::<7, A128>::default()),
         Box::new(ListLocal::default()),
         Box::new(ListLocked::default()),
     ];
