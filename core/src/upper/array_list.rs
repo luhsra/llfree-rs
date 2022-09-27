@@ -605,7 +605,7 @@ impl Trees {
             r
         } {
             info!("reserve empty {i}");
-            if let Ok(pte) = self[i].update(|v| v.reserve_empty(span)) {
+            if let Ok(pte) = self[i].update(|v| v.reserve_min(span)) {
                 Ok(pte.with_idx(i))
             } else {
                 error!("reserve empty failed");
@@ -628,7 +628,7 @@ impl Trees {
             } {
                 info!("reserve partial {i}");
 
-                match self[i].update(|v| v.reserve_partial(Self::almost_full(), span)) {
+                match self[i].update(|v| v.reserve_partial(Self::almost_full()..span)) {
                     Ok(pte) => {
                         if let Some(empty) = skipped_empty {
                             self.lists.lock().empty.push(self, empty);
@@ -647,7 +647,7 @@ impl Trees {
                 }
             } else if let Some(i) = skipped_empty {
                 // Reserve the last skipped empty entry instead
-                return if let Ok(pte) = self[i].update(|v| v.reserve_empty(span)) {
+                return if let Ok(pte) = self[i].update(|v| v.reserve_min(span)) {
                     Ok(pte.with_idx(i))
                 } else {
                     error!("reserve empty failed");

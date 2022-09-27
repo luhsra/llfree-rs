@@ -543,6 +543,10 @@ impl<const LN: usize> Trees<LN> {
         1 << 10 // MAX_ORDER
     }
 
+    const fn almost_empty() -> usize {
+        LN - (1 << 10) // MAX_ORDER
+    }
+
     fn clear(&self) {
         // Set all entries to zero
         for pte in &self.entries[..] {
@@ -568,7 +572,7 @@ impl<const LN: usize> Trees<LN> {
     fn reserve_empty(&self, start: usize) -> Result<Entry3> {
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
-            if let Ok(pte) = self[i].update(|v| v.reserve_empty(LN)) {
+            if let Ok(pte) = self[i].update(|v| v.reserve_min(Self::almost_empty())) {
                 return Ok(pte.with_idx(i));
             }
         }
@@ -577,9 +581,15 @@ impl<const LN: usize> Trees<LN> {
     }
 
     fn reserve_partial(&self, start: usize) -> Result<Entry3> {
+        let start = align_down(start + self.entries.len() - 4, 8);
+
         for i in 0..self.entries.len() {
+            // start with the previous cache line
+            // -> rechecking previous entries reduces fragmentation
             let i = (i + start) % self.entries.len();
-            if let Ok(pte) = self[i].update(|v| v.reserve_partial(Self::almost_full(), LN)) {
+            if let Ok(pte) =
+                self[i].update(|v| v.reserve_partial(Self::almost_full()..Self::almost_empty()))
+            {
                 return Ok(pte.with_idx(i));
             }
         }

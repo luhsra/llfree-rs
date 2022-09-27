@@ -1,5 +1,6 @@
 use core::fmt;
 use core::mem::{align_of, size_of};
+use core::ops::Range;
 
 use bitfield_struct::bitfield;
 use log::error;
@@ -65,25 +66,17 @@ impl Entry3 {
             None
         }
     }
-    /// Reserves this entry.
+    /// Reserves this entry if it has at least `min` pages.
     pub fn reserve_min(self, min: usize) -> Option<Entry3> {
-        if !self.reserved() && self.free() > min {
+        if !self.reserved() && self.free() >= min {
             Some(self.with_reserved(true).with_free(0))
         } else {
             None
         }
     }
-    /// Reserves this entry if it is partially filled.
-    pub fn reserve_partial(self, min: usize, span: usize) -> Option<Entry3> {
-        if !self.reserved() && self.free() > min && self.free() < span {
-            Some(self.with_reserved(true).with_free(0))
-        } else {
-            None
-        }
-    }
-    /// Reserves this entry if it is completely empty.
-    pub fn reserve_empty(self, span: usize) -> Option<Entry3> {
-        if !self.reserved() && self.free() == span {
+    /// Reserves this entry if its page count is in `range`.
+    pub fn reserve_partial(self, range: Range<usize>) -> Option<Entry3> {
+        if !self.reserved() && range.contains(&self.free()) {
             Some(self.with_reserved(true).with_free(0))
         } else {
             None

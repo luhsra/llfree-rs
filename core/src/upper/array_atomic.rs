@@ -417,7 +417,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayAtomic<PR, L> {
     fn reserve(&self, order: usize) -> Result<(Entry3, usize)> {
         while let Some((i, r)) = self
             .partial
-            .pop_update(self, |v| v.reserve_partial(Self::ALMOST_FULL, L::N))
+            .pop_update(self, |v| v.reserve_partial(Self::ALMOST_FULL..L::N))
         {
             info!("reserve partial {i}");
             match r {
@@ -434,7 +434,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayAtomic<PR, L> {
             }
         }
 
-        while let Some((i, r)) = self.empty.pop_update(self, |v| v.reserve_empty(L::N)) {
+        while let Some((i, r)) = self.empty.pop_update(self, |v| v.reserve_min(L::N)) {
             info!("reserve empty {i}");
             if let Ok(pte) = r {
                 let pte = pte.with_idx(i).dec(1 << order).unwrap();
