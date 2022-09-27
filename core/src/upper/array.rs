@@ -403,7 +403,8 @@ where
         // Set the reserved flag, locking the reservation
         if !old.reserved() && pte_a.update(|v| v.toggle_reserve(true)).is_ok() {
             // Try reserve new subtree
-            let new_pte = match self.trees.reserve(old.idx(), retry) {
+            let start = if old.has_idx() { old.idx() } else { 0 };
+            let new_pte = match self.trees.reserve(start, retry) {
                 Ok(pte) => pte,
                 Err(e) => {
                     // Clear reserve flag
@@ -581,11 +582,11 @@ impl<const LN: usize> Trees<LN> {
     }
 
     fn reserve_partial(&self, start: usize) -> Result<Entry3> {
+        // rechecking previous entries reduces fragmentation
+        //  -> start with the previous cache line
         let start = align_down(start + self.entries.len() - 4, 8);
 
         for i in 0..self.entries.len() {
-            // start with the previous cache line
-            // -> rechecking previous entries reduces fragmentation
             let i = (i + start) % self.entries.len();
             if let Ok(pte) =
                 self[i].update(|v| v.reserve_partial(Self::almost_full()..Self::almost_empty()))

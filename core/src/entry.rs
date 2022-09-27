@@ -41,6 +41,10 @@ impl Entry3 {
     pub fn new_table(pages: usize, reserved: bool) -> Entry3 {
         Entry3::new().with_free(pages).with_reserved(reserved)
     }
+    /// If this entry has a valid idx.
+    pub fn has_idx(self) -> bool {
+        self.idx() < Self::IDX_END
+    }
     /// Decrements the free pages counter.
     pub fn dec(self, num_pages: usize) -> Option<Entry3> {
         if self.idx() <= Self::IDX_END && self.free() >= num_pages {
