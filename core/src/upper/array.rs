@@ -371,7 +371,7 @@ where
                     }
                     Err(Error::Memory) => {
                         // counter reset
-                        warn!("alloc failed o={order} => retry");
+                        info!("alloc failed o={order} => retry");
                         let max = (self.pages() - align_down(start, L::N)).min(L::N);
                         // Increment global to prevent race condition with concurrent reservation
                         if let Err(pte) = self.trees[pte.idx()].update(|v| v.inc(1 << order, max)) {
