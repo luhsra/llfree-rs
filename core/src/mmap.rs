@@ -96,6 +96,37 @@ impl<T> MMap<T> {
         }
     }
 
+    pub fn anon_private(begin: usize, len: usize, populate: bool) -> Result<MMap<T>, ()> {
+        if len == 0 {
+            return Ok(MMap {
+                slice: unsafe { std::slice::from_raw_parts_mut(begin as _, len) },
+                fd: None,
+            });
+        }
+
+        let addr = unsafe {
+            libc::mmap(
+                begin as _,
+                (len * size_of::<T>()) as _,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE
+                    | libc::MAP_ANONYMOUS
+                    | if populate { libc::MAP_POPULATE } else { 0 },
+                -1,
+                0,
+            )
+        };
+        if addr != libc::MAP_FAILED {
+            Ok(MMap {
+                slice: unsafe { std::slice::from_raw_parts_mut(addr as _, len) },
+                fd: None,
+            })
+        } else {
+            unsafe { libc::perror(b"mmap failed\0".as_ptr().cast()) };
+            Err(())
+        }
+    }
+
     pub fn f_sync(&self) {
         unsafe {
             if let Some(fd) = self.fd {
