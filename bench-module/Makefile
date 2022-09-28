@@ -3,8 +3,9 @@ LINUX_BUILD_DIR ?= $(PWD)/../../nvalloc-linux
 obj-m += alloc.o
 
 all:
-	ln -s $(LINUX_BUILD_DIR)/.clang-format .clang-format
-	$(LINUX_BUILD_DIR)/scripts/clang-tools/gen_compile_commands.py
+	ln -fs $(LINUX_BUILD_DIR)/.clang-format .clang-format
+	cd $(LINUX_BUILD_DIR) && ./scripts/clang-tools/gen_compile_commands.py && cd $(PWD)
+	ln -fs $(LINUX_BUILD_DIR)/compile_commands.json compile_commands.json
 	make -C $(LINUX_BUILD_DIR) M=$(PWD) modules
 
 clean:
