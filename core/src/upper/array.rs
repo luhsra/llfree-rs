@@ -501,33 +501,17 @@ impl<const LN: usize> Index<usize> for Trees<LN> {
 impl<const LN: usize> fmt::Debug for Trees<LN> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let max = self.entries.len();
-        let (empty, partial) = {
-            let mut empty = 0;
-            let mut partial = 0;
-            for e in &*self.entries {
-                let pte = e.load();
-                if pte.free() == LN {
-                    empty += 1;
-                } else if pte.free() > Self::almost_full() {
-                    partial += 1;
-                }
+        let mut empty = 0;
+        let mut partial = 0;
+        for e in &*self.entries {
+            let free = e.load().free();
+            if free == LN {
+                empty += 1;
+            } else if free > Self::almost_full() {
+                partial += 1;
             }
-            (empty, partial)
-        };
-
-        write!(f, "(total: {max}, empty: ")?;
-        if empty <= max {
-            write!(f, "{empty}")?;
-        } else {
-            write!(f, "!!")?;
         }
-        write!(f, ", partial: ")?;
-        if partial <= max {
-            write!(f, "{partial}")?;
-        } else {
-            write!(f, "!!")?;
-        }
-        write!(f, ")")?;
+        write!(f, "(total: {max}, empty: {empty}, partial: {partial})")?;
         Ok(())
     }
 }

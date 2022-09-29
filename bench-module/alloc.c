@@ -19,6 +19,7 @@ static __read_mostly u64 num_allocs = 512 * 512;
 static __read_mostly u64 num_iterations = 4;
 static __read_mostly u64 *num_threads = NULL;
 static __read_mostly u64 num_threads_len = 0;
+static atomic64_t curr_threads;
 
 static DEFINE_PER_CPU(struct task_struct *, per_cpu_tasks);
 
@@ -31,8 +32,8 @@ static DECLARE_COMPLETION(worker_barrier0);
 static bool running = false;
 
 struct thread_perf {
-	atomic64_t get;
-	atomic64_t put;
+	u64 get;
+	u64 put;
 };
 static DEFINE_PER_CPU(struct thread_perf, thread_perf);
 
@@ -46,6 +47,8 @@ struct perf {
 };
 static struct perf *measurements;
 static u64 out_index = 0;
+
+__maybe_unused static struct page **rand_pages;
 
 __maybe_unused static u64 cycles(void)
 {
@@ -82,8 +85,7 @@ __maybe_unused static void bulk()
 			pr_err("alloc_page failed");
 		}
 	}
-	timer = (ktime_get_ns() - timer) / num_allocs;
-	atomic64_set(&t_perf->get, timer);
+	t_perf->get = (ktime_get_ns() - timer) / num_allocs;
 
 	complete(worker_complete);
 
@@ -94,8 +96,7 @@ __maybe_unused static void bulk()
 	for (j = 0; j < num_allocs; j++) {
 		__free_page(pages[j]);
 	}
-	timer = (ktime_get_ns() - timer) / num_allocs;
-	atomic64_set(&t_perf->put, timer);
+	t_perf->put = (ktime_get_ns() - timer) / num_allocs;
 	kfree(pages);
 }
 
@@ -124,30 +125,39 @@ __maybe_unused static void repeat()
 		__free_page(page);
 	}
 	timer = (ktime_get_ns() - timer) / num_allocs;
-	atomic64_set(&t_perf->get, timer);
-	atomic64_set(&t_perf->put, timer);
+	t_perf->get = timer;
+	t_perf->put = timer;
 }
 
 /// Random free and realloc
 __maybe_unused static void rand()
 {
-	u64 i, j;
 	u64 timer;
-	u64 rng = raw_smp_processor_id();
 	struct completion *worker_complete = this_cpu_ptr(&worker_completes);
 	struct thread_perf *t_perf = this_cpu_ptr(&thread_perf);
+	struct page **pages;
+	u64 threads = atomic64_read(&curr_threads);
 
-	struct page **pages =
-		kmalloc_array(num_allocs, sizeof(struct page *), GFP_KERNEL);
-	if (pages == NULL) {
-		pr_err("kmalloc failed");
-		return;
-	}
+	if (raw_smp_processor_id() == 0) {
+		u64 rng;
 
-	for (j = 0; j < num_allocs; j++) {
-		pages[j] = alloc_page(GFP_USER);
-		if (pages == NULL) {
-			pr_err("alloc_page failed");
+		rand_pages = kmalloc_array(num_allocs * threads,
+					   sizeof(struct page *), GFP_KERNEL);
+		if (rand_pages == NULL) {
+			pr_err("kmalloc failed");
+			return;
+		}
+		for (u64 j = 0; j < num_allocs * threads; j++) {
+			rand_pages[j] = alloc_page(GFP_USER);
+			if (rand_pages[j] == NULL) {
+				pr_err("alloc_page failed");
+			}
+		}
+		// shuffle between all threads
+		rng = raw_smp_processor_id();
+		for (u64 i = 0; i < num_allocs * threads; i++) {
+			u64 j = nanorand_random_range(&rng, 0, num_allocs * threads);
+			swap(rand_pages[i], rand_pages[j]);
 		}
 	}
 
@@ -157,23 +167,15 @@ __maybe_unused static void rand()
 	// Start reallocs
 	wait_for_completion(&worker_barrier);
 
+	pages = rand_pages + (raw_smp_processor_id() * num_allocs);
+
 	timer = ktime_get_ns();
-	for (j = 0; j < num_allocs; j++) {
-		i = nanorand_random_range(&rng, 0, num_allocs);
-
-		__free_page(pages[i]);
-		pages[i] = alloc_page(GFP_USER);
-		if (pages[i] == NULL) {
-			pr_err("alloc_page failed");
-		}
-	}
-	timer = (ktime_get_ns() - timer) / num_allocs;
-	atomic64_set(&t_perf->get, timer);
-	atomic64_set(&t_perf->put, timer);
-
-	for (j = 0; j < num_allocs; j++) {
+	for (u64 j = 0; j < num_allocs; j++) {
 		__free_page(pages[j]);
 	}
+	timer = (ktime_get_ns() - timer) / num_allocs;
+	t_perf->get = timer;
+	t_perf->put = timer;
 
 	kfree(pages);
 }
@@ -253,8 +255,8 @@ static ssize_t out_show(struct kobject *kobj, struct kobj_attribute *attr,
 ssize_t iteration(u32 bench, u64 i, u64 iter)
 {
 	struct perf *p;
-	u64 get, put;
 	u64 threads = num_threads[i];
+	atomic64_set(&curr_threads, threads);
 
 	pr_info("Start threads %llu\n", threads);
 	for (u64 t = 0; t < threads; t++) {
@@ -300,12 +302,13 @@ ssize_t iteration(u32 bench, u64 i, u64 iter)
 		struct completion *worker_complete =
 			per_cpu_ptr(&worker_completes, t);
 		struct thread_perf *t_perf = per_cpu_ptr(&thread_perf, t);
+		u64 get, put;
 
 		wait_for_completion(worker_complete);
 		reinit_completion(worker_complete);
 
-		get = atomic64_read(&t_perf->get);
-		put = atomic64_read(&t_perf->put);
+		get = t_perf->get;
+		put = t_perf->put;
 
 		p->get_min = min(p->get_min, get);
 		p->get_avg += get;
@@ -457,6 +460,8 @@ static ssize_t threads_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 	if (running)
 		return -EINPROGRESS;
+
+	// just parsing a list of integers...
 
 	// count number of thread counts
 	for (size_t i = 0; i < len; i++) {

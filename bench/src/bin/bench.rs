@@ -329,39 +329,36 @@ fn rand(
     let chunks = all_pages.chunks_mut(allocs).enumerate();
     let mut perf = Perf::avg(thread::parallel(chunks, |(t, pages)| {
         thread::pin(t);
+        barrier.wait();
 
+        let timer = Instant::now();
         for page in pages.iter_mut() {
             *page = alloc.get(t, order).unwrap();
         }
-
-        let mut rng = WyRand::new(t as _);
+        let get = timer.elapsed().as_nanos() / allocs as u128;
 
         barrier.wait();
         if t == 0 {
             // Shuffle between all cores
             let pages =
                 unsafe { slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads) };
-            rng.shuffle(pages);
+            WyRand::new(0).shuffle(pages);
         }
         barrier.wait();
 
         let timer = Instant::now();
-
-        for _ in 0..allocs {
-            let i = rng.range(0..allocs as u64) as usize;
-            alloc.put(t, pages[i], order).unwrap();
-            pages[i] = alloc.get(t, order).unwrap();
+        for page in pages {
+            alloc.put(t, *page, order).unwrap();
         }
-        black_box(pages);
+        let put = timer.elapsed().as_nanos() / allocs as u128;
 
-        let rand = timer.elapsed().as_nanos() / allocs as u128;
         Perf {
-            get_min: rand,
-            get_avg: rand,
-            get_max: rand,
-            put_min: rand,
-            put_avg: rand,
-            put_max: rand,
+            get_min: get,
+            get_avg: get,
+            get_max: get,
+            put_min: put,
+            put_avg: put,
+            put_max: put,
             init: 0,
             total: timer.elapsed().as_millis(),
             allocs,
@@ -405,11 +402,9 @@ fn rand_block(
         let mut rng = WyRand::new(t as _);
 
         barrier.wait();
-
-        let blocks = allocs / RAND_BLOCK_SIZE;
-        assert!(blocks > 0);
-
         if t == 0 {
+            let blocks = allocs / RAND_BLOCK_SIZE;
+            assert!(blocks > 0);
             // Shuffle blocks between all cores
             let pages =
                 unsafe { slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads) };
@@ -423,34 +418,21 @@ fn rand_block(
                 }
             }
         }
-
         barrier.wait();
 
         let timer = Instant::now();
-
-        for _ in 0..blocks {
-            // reallocate block
-            let i =
-                (rng.range(0..(pages.len() / RAND_BLOCK_SIZE) as u64) as usize) * RAND_BLOCK_SIZE;
-            for j in 0..RAND_BLOCK_SIZE {
-                alloc.put(t, pages[i + j], order).unwrap();
-            }
-            for j in 0..RAND_BLOCK_SIZE {
-                pages[i + j] = alloc.get(t, order).unwrap();
-            }
+        for page in pages {
+            alloc.put(t, *page, order).unwrap();
         }
+        let put = timer.elapsed().as_nanos() / allocs as u128;
 
-        black_box(pages);
-
-        let allocs = blocks * RAND_BLOCK_SIZE;
-        let rand = timer.elapsed().as_nanos() / allocs as u128;
         Perf {
-            get_min: rand,
-            get_avg: rand,
-            get_max: rand,
-            put_min: rand,
-            put_avg: rand,
-            put_max: rand,
+            get_min: 0,
+            get_avg: 0,
+            get_max: 0,
+            put_min: put,
+            put_avg: put,
+            put_max: put,
             init: 0,
             total: timer.elapsed().as_millis(),
             allocs,

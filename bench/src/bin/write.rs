@@ -5,7 +5,7 @@ use log::warn;
 use nvalloc::mmap::{madvise, MAdvise, MMap};
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
-use nvalloc::util::{div_ceil, logging, Page, avg_bounds};
+use nvalloc::util::{avg_bounds, div_ceil, logging, Page};
 
 /// Benchmarking the page-fault performance of a mapped memory region.
 #[derive(Parser, Debug)]
@@ -72,14 +72,22 @@ fn main() {
         timer.elapsed().as_millis()
     });
 
-    let (t_min, t_avg, t_max) = avg_bounds(times).unwrap_or_default();
+    let (t_amin, t_aavg, t_amax) = avg_bounds(times).unwrap_or_default();
+
+    let times = thread::parallel(mapping.chunks_mut(chunk_size), |chunk| {
+        let timer = Instant::now();
+        madvise(chunk, MAdvise::DontNeed);
+        timer.elapsed().as_millis()
+    });
+
+    let (t_fmin, t_favg, t_fmax) = avg_bounds(times).unwrap_or_default();
 
     let t_unmap = Instant::now();
     drop(mapping);
     let t_unmap = t_unmap.elapsed().as_millis();
 
-    println!("map,min,avg,max,unmap");
-    println!("{t_map},{t_min},{t_avg},{t_max},{t_unmap}");
+    println!("map,amin,aavg,amax,fmin,favg,fmax,unmap");
+    println!("{t_map},{t_amin},{t_aavg},{t_amax},{t_fmin},{t_favg},{t_fmax},{t_unmap}");
 }
 
 #[allow(unused_variables)]
