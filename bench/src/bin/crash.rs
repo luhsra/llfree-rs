@@ -14,18 +14,18 @@ use nvalloc::util::{self, align_up, Page, WyRand};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]
-#[clap(about, version, author)]
+#[command(about, version, author)]
 struct Args {
     alloc: String,
     /// Max number of threads
-    #[clap(short, long, default_value = "6")]
+    #[arg(short, long, default_value = "6")]
     threads: usize,
-    #[clap(long)]
+    #[arg(long)]
     dax: Option<String>,
-    #[clap(short, long, default_value_t = 0)]
+    #[arg(short, long, default_value_t = 0)]
     order: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
-    #[clap(short, long, default_value_t = 16)]
+    #[arg(short, long, default_value_t = 16)]
     memory: usize,
 }
 

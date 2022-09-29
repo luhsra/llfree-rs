@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
-use clap::{ArgEnum, Parser};
+use clap::{Parser, ValueEnum};
 use log::warn;
 
 use nvalloc::lower::*;
@@ -22,35 +22,35 @@ const RAND_BLOCK_SIZE: usize = 8;
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
-#[clap(about, version, author)]
+#[command(about, version, author)]
 struct Args {
-    #[clap(arg_enum)]
+    #[arg(value_enum)]
     bench: Benchmark,
     allocs: Vec<String>,
     /// Tested number of threads / allocations / filling levels, depending on benchmark.
-    #[clap(short, long, default_value = "1")]
+    #[arg(short, long, default_value = "1")]
     x: Vec<usize>,
     /// Max number of threads
-    #[clap(short, long, default_value = "6")]
+    #[arg(short, long, default_value = "6")]
     threads: usize,
     /// Where to store the benchmark results in csv format.
-    #[clap(short, long, default_value = "bench/out/bench.csv")]
+    #[arg(short, long, default_value = "bench/out/bench.csv")]
     outfile: String,
     /// DAX file to be used for the allocator.
-    #[clap(long)]
+    #[arg(long)]
     dax: Option<String>,
-    #[clap(short, long, default_value_t = 1)]
+    #[arg(short, long, default_value_t = 1)]
     iterations: usize,
     /// Specifies how many pages should be allocated: #pages = 2^order
-    #[clap(short = 's', long, default_value_t = 0)]
+    #[arg(short = 's', long, default_value_t = 0)]
     order: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
-    #[clap(short, long, default_value_t = 16)]
+    #[arg(short, long, default_value_t = 16)]
     memory: usize,
-    #[clap(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     stride: usize,
     /// Write into every page before benchmarking.
-    #[clap(long)]
+    #[arg(long)]
     warmup: bool,
 }
 
@@ -162,7 +162,7 @@ fn mapping(
     MMap::anon(begin, length, false)
 }
 
-#[derive(Debug, Clone, Copy, ArgEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum Benchmark {
     /// Allocate half the memory at once and free it afterwards
     Bulk,

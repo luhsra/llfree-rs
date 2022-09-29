@@ -1,6 +1,6 @@
 use core::mem::transmute;
 use core::mem::{align_of, size_of};
-use core::ops::Range;
+use core::ops::{Add, Div, Range};
 
 /// Correctly sized and aligned page.
 #[derive(Clone)]
@@ -210,6 +210,34 @@ pub fn spin_wait<F: FnMut() -> bool>(n: usize, mut cond: F) -> bool {
         core::hint::spin_loop()
     }
     false
+}
+
+pub fn avg_bounds<T>(iter: impl IntoIterator<Item = T>) -> Option<(T, T, T)>
+where
+    T: Ord + Add<T, Output = T> + Div<T, Output = T> + TryFrom<usize> + Copy,
+{
+    let mut iter = iter.into_iter();
+    if let Some(first) = iter.next() {
+        let mut min = first;
+        let mut max = first;
+        let mut mean = first;
+        let mut count = 1;
+
+        for x in iter {
+            min = min.min(x);
+            max = max.max(x);
+            mean = mean + x;
+            count += 1;
+        }
+        let count = match T::try_from(count) {
+            Ok(c) => c,
+            Err(_) => unreachable!("overflow"),
+        };
+
+        Some((min, mean / count, max))
+    } else {
+        None
+    }
 }
 
 #[cfg(all(test, feature = "std"))]

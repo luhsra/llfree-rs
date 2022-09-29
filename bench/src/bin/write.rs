@@ -2,29 +2,32 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::mmap::MMap;
+use nvalloc::mmap::{madvise, MAdvise, MMap};
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
-use nvalloc::util::{div_ceil, logging, Page};
+use nvalloc::util::{div_ceil, logging, Page, avg_bounds};
 
-/// Crash testing an allocator.
+/// Benchmarking the page-fault performance of a mapped memory region.
 #[derive(Parser, Debug)]
-#[clap(about, version, author)]
+#[command(about, version, author)]
 struct Args {
     /// Number of threads
-    #[clap(short, long, default_value_t = 6)]
+    #[arg(short, long, default_value_t = 6)]
     threads: usize,
-    /// Max amount of memory in GiB. Is by the max thread count.
-    #[clap(short, long, default_value_t = 16)]
+    /// Max amount of memory in GiB. Is by the max thread count
+    #[arg(short, long, default_value_t = 16)]
     memory: usize,
-    /// DAX file to be used for the allocator.
-    #[clap(long)]
+    /// DAX file to be used for the allocator
+    #[arg(long)]
     dax: Option<String>,
-    #[clap(long)]
+    /// Create a private mapping (incompatible with `--dax`)
+    #[arg(long)]
     private: bool,
-    #[clap(long)]
+    /// Populate on mmap
+    #[arg(long)]
     populate: bool,
-    #[clap(long)]
+    /// Use hugepages
+    #[arg(long)]
     huge: bool,
 }
 
@@ -53,9 +56,12 @@ fn main() {
     .unwrap();
     let t_map = t_map.elapsed().as_millis();
 
-    if huge {
-        madvise(&mut mapping, MAdvise::Hugepage);
-    }
+    let adv = if huge {
+        MAdvise::Hugepage
+    } else {
+        MAdvise::NoHugepage
+    };
+    madvise(&mut mapping, adv);
 
     let chunk_size = div_ceil(mapping.len(), threads);
     let times = thread::parallel(mapping.chunks_mut(chunk_size), |chunk| {
@@ -66,16 +72,14 @@ fn main() {
         timer.elapsed().as_millis()
     });
 
-    let (t_min, t_max) = times
-        .into_iter()
-        .fold((u128::MAX, 0), |(min, max), x| (min.min(x), max.max(x)));
+    let (t_min, t_avg, t_max) = avg_bounds(times).unwrap_or_default();
 
     let t_unmap = Instant::now();
     drop(mapping);
     let t_unmap = t_unmap.elapsed().as_millis();
 
-    println!("map,min,max,unmap");
-    println!("{t_map},{t_min},{t_max},{t_unmap}");
+    println!("map,min,avg,max,unmap");
+    println!("{t_map},{t_min},{t_avg},{t_max},{t_unmap}");
 }
 
 #[allow(unused_variables)]
@@ -106,40 +110,5 @@ fn mapping(
         MMap::anon_private(begin, length, populate)
     } else {
         MMap::anon(begin, length, populate)
-    }
-}
-
-#[allow(dead_code)]
-#[repr(i32)]
-enum MAdvise {
-    Normal = libc::MADV_NORMAL,
-    Random = libc::MADV_RANDOM,
-    Sequential = libc::MADV_SEQUENTIAL,
-    Willneed = libc::MADV_WILLNEED,
-    DontNeed = libc::MADV_DONTNEED,
-    Free = libc::MADV_FREE,
-    Remove = libc::MADV_REMOVE,
-    DontFork = libc::MADV_DONTFORK,
-    DoFork = libc::MADV_DOFORK,
-    Mergeable = libc::MADV_MERGEABLE,
-    Unmergeable = libc::MADV_UNMERGEABLE,
-    Hugepage = libc::MADV_HUGEPAGE,
-    NoHugepage = libc::MADV_NOHUGEPAGE,
-    DontDump = libc::MADV_DONTDUMP,
-    DoDump = libc::MADV_DODUMP,
-    HwPoison = libc::MADV_HWPOISON,
-}
-
-fn madvise(mem: &mut [Page], advise: MAdvise) {
-    let ret = unsafe {
-        libc::madvise(
-            mem.as_mut_ptr() as *mut _,
-            Page::SIZE * mem.len(),
-            advise as _,
-        )
-    };
-    if ret != 0 {
-        unsafe { libc::perror(b"madvice\0" as *const u8 as *const _) };
-        panic!("madvice {ret}");
     }
 }

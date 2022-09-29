@@ -17,23 +17,23 @@ type Allocator = Array<3, Atom<128>>;
 
 /// Benchmarking an allocator in more detail.
 #[derive(Parser, Debug)]
-#[clap(about, version, author)]
+#[command(about, version, author)]
 struct Args {
-    #[clap(short, long, default_value_t = 1)]
+    #[arg(short, long, default_value_t = 1)]
     threads: usize,
-    #[clap(short, long, default_value = "results/out/dist.csv")]
+    #[arg(short, long, default_value = "results/out/dist.csv")]
     outfile: PathBuf,
-    #[clap(long)]
+    #[arg(long)]
     dax: Option<String>,
-    #[clap(short, long, default_value_t = 1)]
+    #[arg(short, long, default_value_t = 1)]
     iterations: usize,
-    #[clap(short, long, default_value_t = 0)]
+    #[arg(short, long, default_value_t = 0)]
     order: usize,
-    #[clap(short, long, default_value_t = 500)]
+    #[arg(short, long, default_value_t = 500)]
     buckets: usize,
-    #[clap(short, long, default_value_t = 50)]
+    #[arg(short, long, default_value_t = 50)]
     start: usize,
-    #[clap(short, long, default_value_t = 1050)]
+    #[arg(short, long, default_value_t = 1050)]
     end: usize,
 }
 

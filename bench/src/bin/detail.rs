@@ -17,17 +17,17 @@ type Allocator = ArrayAtomic<3, Atom<128>>;
 
 /// Benchmarking an allocator in more detail.
 #[derive(Parser, Debug)]
-#[clap(about, version, author)]
+#[command(about, version, author)]
 struct Args {
-    #[clap(short, long, default_value_t = 1)]
+    #[arg(short, long, default_value_t = 1)]
     threads: usize,
-    #[clap(short, long, default_value = "results/out/detail.csv")]
+    #[arg(short, long, default_value = "results/out/detail.csv")]
     outfile: PathBuf,
-    #[clap(long)]
+    #[arg(long)]
     dax: Option<String>,
-    #[clap(short, long, default_value_t = 1)]
+    #[arg(short, long, default_value_t = 1)]
     iterations: usize,
-    #[clap(short, long, default_value_t = 0)]
+    #[arg(short, long, default_value_t = 0)]
     order: usize,
 }
 

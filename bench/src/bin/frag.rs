@@ -15,27 +15,27 @@ use nvalloc::{thread, util};
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
-#[clap(about, version, author)]
+#[command(about, version, author)]
 struct Args {
     /// Max number of threads
-    #[clap(short, long, default_value = "6")]
+    #[arg(short, long, default_value = "6")]
     threads: usize,
     /// Where to store the benchmark results in csv format.
-    #[clap(short, long, default_value = "results/bench.csv")]
+    #[arg(short, long, default_value = "results/bench.csv")]
     outfile: String,
     /// DAX file to be used for the allocator.
-    #[clap(long)]
+    #[arg(long)]
     dax: Option<String>,
     /// Specifies how many pages should be allocated: #pages = 2^order
-    #[clap(short = 's', long, default_value_t = 0)]
+    #[arg(short = 's', long, default_value_t = 0)]
     order: usize,
     /// Number of iterations
-    #[clap(short, long, default_value_t = 8)]
+    #[arg(short, long, default_value_t = 8)]
     iterations: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
-    #[clap(short, long, default_value_t = 16)]
+    #[arg(short, long, default_value_t = 16)]
     memory: usize,
-    #[clap(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1)]
     stride: usize,
 }
 

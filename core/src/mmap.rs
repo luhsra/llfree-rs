@@ -186,6 +186,46 @@ impl<T> Drop for MMap<T> {
     }
 }
 
+#[repr(i32)]
+pub enum MAdvise {
+    Normal = libc::MADV_NORMAL,
+    Random = libc::MADV_RANDOM,
+    Sequential = libc::MADV_SEQUENTIAL,
+    WillNeed = libc::MADV_WILLNEED,
+    /// Warn: This is not an advise. This will free the memory range immediately!
+    DontNeed = libc::MADV_DONTNEED,
+    Free = libc::MADV_FREE,
+    Remove = libc::MADV_REMOVE,
+    DontFork = libc::MADV_DONTFORK,
+    DoFork = libc::MADV_DOFORK,
+    Mergeable = libc::MADV_MERGEABLE,
+    Unmergeable = libc::MADV_UNMERGEABLE,
+    Hugepage = libc::MADV_HUGEPAGE,
+    NoHugepage = libc::MADV_NOHUGEPAGE,
+    DontDump = libc::MADV_DONTDUMP,
+    DoDump = libc::MADV_DODUMP,
+    HwPoison = libc::MADV_HWPOISON,
+
+    /// see /usr/include/bits/mman-linux.h
+    Cold = 20,
+    /// see /usr/include/bits/mman-linux.h
+    PageOut = 21,
+}
+
+pub fn madvise(mem: &mut [Page], advise: MAdvise) {
+    let ret = unsafe {
+        libc::madvise(
+            mem.as_mut_ptr() as *mut _,
+            Page::SIZE * mem.len(),
+            advise as _,
+        )
+    };
+    if ret != 0 {
+        unsafe { libc::perror(b"madvice\0".as_ptr().cast()) };
+        panic!("madvice {ret}");
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod test {
     use crate::util::logging;
