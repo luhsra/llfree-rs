@@ -339,10 +339,11 @@ fn rand(
 
         barrier.wait();
         if t == 0 {
+            assert_eq!(alloc.dbg_allocated_pages(), allocs * threads);
             // Shuffle between all cores
             let pages =
                 unsafe { slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads) };
-            WyRand::new(0).shuffle(pages);
+            WyRand::new(42).shuffle(pages);
         }
         barrier.wait();
 
@@ -364,7 +365,7 @@ fn rand(
             allocs,
         }
     }));
-    assert_eq!(alloc.dbg_allocated_pages(), allocs * threads * (1 << order));
+    assert_eq!(alloc.dbg_allocated_pages(), 0);
 
     perf.init = init;
     perf.allocs = allocs;
@@ -438,7 +439,7 @@ fn rand_block(
             allocs,
         }
     }));
-    assert_eq!(alloc.dbg_allocated_pages(), allocs * threads * (1 << order));
+    assert_eq!(alloc.dbg_allocated_pages(), 0);
 
     perf.init = init;
     perf.allocs = allocs;
