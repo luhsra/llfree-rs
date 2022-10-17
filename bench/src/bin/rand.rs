@@ -70,7 +70,7 @@ fn main() {
 
     let chunk_size = div_ceil(mapping.len(), threads);
 
-    let mut pages = mapping.iter_mut().map(|p| DoSend(p)).collect::<Vec<_>>();
+    let mut pages = mapping.iter_mut().map(DoSend).collect::<Vec<_>>();
     WyRand::new(42).shuffle(&mut pages);
     let times = thread::parallel(pages.chunks_mut(chunk_size), |chunk| {
         let timer = Instant::now();

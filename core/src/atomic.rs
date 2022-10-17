@@ -273,8 +273,7 @@ where
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut dbg = f.debug_list();
 
-        if let Next::Some(i) = self.0.start.load().next() {
-            let mut i = i as usize;
+        if let Next::Some(mut i) = self.0.start.load().next() {
             let mut ended = false;
             for _ in 0..1000 {
                 dbg.entry(&i);

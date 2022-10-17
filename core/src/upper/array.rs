@@ -568,7 +568,7 @@ impl<const LN: usize> Trees<LN> {
     fn reserve_partial(&self, start: usize) -> Result<Entry3> {
         // rechecking previous entries reduces fragmentation
         //  -> start with the previous cache line
-        let start = align_down(start + self.entries.len() - 4, 8);
+        let start = align_down(start + self.entries.len().saturating_sub(4), 8);
 
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();

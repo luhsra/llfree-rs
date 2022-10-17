@@ -10,7 +10,7 @@ use crate::atomic::Atomic;
 use crate::entry::{SEntry2, SEntry2T2, SEntry2T4, SEntry2T8, SEntry2Tuple};
 use crate::table::{ATable, Bitfield, Mapping};
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_up, Page, spin_wait};
+use crate::util::{align_up, spin_wait, Page};
 use crate::{Error, Result};
 
 use super::LowerAlloc;
@@ -465,11 +465,9 @@ impl<const T2N: usize> Atom<T2N> {
                 error!("Failed partial clear");
                 return Err(Error::Corruption);
             }
-        } else {
-            if !spin_wait(CAS_RETRIES, || !pt2.get(i2).page()) {
-                error!("Exceeding retries");
-                return Err(Error::Corruption);
-            }
+        } else if !spin_wait(CAS_RETRIES, || !pt2.get(i2).page()) {
+            error!("Exceeding retries");
+            return Err(Error::Corruption);
         }
 
         self.put_small(page, order)

@@ -22,10 +22,10 @@ pub fn pin(core: usize) {
     use core::mem::{size_of, zeroed};
 
     let max = cores();
-    assert!(core < max as usize, "not enough cores {core} < {max}");
+    assert!(core < max, "not enough cores {core} < {max}");
 
     let core = core * STRIDE.load(Ordering::Relaxed);
-    let core = (core / max as usize) + (core % max as usize); // wrap around
+    let core = (core / max) + (core % max); // wrap around
 
     let mut set = unsafe { zeroed::<libc::cpu_set_t>() };
     unsafe { libc::CPU_SET(core, &mut set) };
