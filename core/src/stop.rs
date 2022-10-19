@@ -152,7 +152,7 @@ impl Stop for StopVec {
     }
 }
 
-/// Stops and continues threads base seeded rng.
+/// Stops and continues threads based on a seeded rng.
 pub struct StopRand {
     threads: usize,
     barrier: Barrier,

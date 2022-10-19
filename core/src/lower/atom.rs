@@ -48,36 +48,39 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
         let n1 = Self::MAPPING.num_pts(1, memory.len());
         let n2 = Self::MAPPING.num_pts(2, memory.len());
         if persistent {
+            // Reserve memory within the managed NVM for the l1 and l2 tables
+            // These tables are stored at the end of the NVM
             let s1 = n1 * Table1::SIZE;
             let s1 = align_up(s1, ATable::<SEntry2, T2N>::SIZE); // correct alignment
             let s2 = n1 * ATable::<SEntry2, T2N>::SIZE;
-
+            // Num of pages occupied by the tables
             let pages = (s1 + s2).div_ceil(Page::SIZE);
 
             assert!(pages < memory.len());
 
             let mut offset = memory.as_ptr() as usize + (memory.len() - pages) * Page::SIZE;
 
+            // Start of the l1 table array
             let l1 = unsafe { Box::from_raw(slice::from_raw_parts_mut(offset as *mut _, n1)) };
 
             offset += n1 * Table1::SIZE;
             offset = align_up(offset, ATable::<SEntry2, T2N>::SIZE); // correct alignment
 
+            // Start of the l2 table array
             let l2 = unsafe { Box::from_raw(slice::from_raw_parts_mut(offset as *mut _, n2)) };
 
             Self {
                 begin: memory.as_ptr() as usize,
                 pages: memory.len() - pages,
-                // level 1 and 2 tables are stored at the end of the NVM
                 l1,
                 l2,
                 persistent,
             }
         } else {
+            // Allocate l1 and l2 tables in volatile memory
             Self {
                 begin: memory.as_ptr() as usize,
                 pages: memory.len(),
-                // Allocate in volatile memory
                 l1: unsafe { Box::new_uninit_slice(n1).assume_init() },
                 l2: unsafe { Box::new_uninit_slice(n2).assume_init() },
                 persistent,
@@ -441,8 +444,6 @@ impl<const T2N: usize> Atom<T2N> {
         let i2 = Self::MAPPING.idx(2, page) / T::N;
         info!("Put o={order} i={i2}");
 
-        // TODO: set pt1s to 1?
-
         if let Err(old) = pt2[i2].compare_exchange(
             T::new(SEntry2::new_page()),
             T::new(SEntry2::new_free(Self::MAPPING.span(1))),
@@ -496,6 +497,7 @@ impl<const T2N: usize> Atom<T2N> {
 impl<const T2N: usize> Drop for Atom<T2N> {
     fn drop(&mut self) {
         if self.persistent {
+            // The chunks are part of the allocators managed memory
             Box::leak(core::mem::take(&mut self.l1));
             Box::leak(core::mem::take(&mut self.l2));
         }
