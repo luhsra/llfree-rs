@@ -26,20 +26,31 @@ static DECLARE_COMPLETION(worker_barrier);
 static DECLARE_COMPLETION(worker_barrier0);
 
 enum alloc_bench {
+	/// Allocate a large number of pages and free them in sequential order
 	BENCH_BULK,
+	/// Reallocate a single page and free it immediately over and over
 	BENCH_REPEAT,
+	/// Allocate a large number of pages and free them in random order
 	BENCH_RAND,
 };
 
 /// Benchmark args
 struct alloc_config {
+	/// Benchmark (see enum alloc_bench)
 	u64 bench;
+	/// Array of thread counts
 	u64 *threads;
+	/// Len of threads array
 	u64 threads_len;
+	/// Number of repetitions
 	u64 iterations;
+	/// Number of allocations per thread
 	u64 allocs;
+	/// Size of the allocations
+	u64 order;
 };
-static struct alloc_config alloc_config = { 0, NULL, 0, 0, 0 };
+
+static struct alloc_config alloc_config = { 0, NULL, 0, 0, 0, 0 };
 
 static bool running = false;
 
@@ -89,7 +100,7 @@ __maybe_unused static void bulk(u64 num_allocs)
 
 	timer = ktime_get_ns();
 	for (j = 0; j < num_allocs; j++) {
-		pages[j] = alloc_page(GFP_USER);
+		pages[j] = alloc_pages(GFP_USER, alloc_config.order);
 		BUG_ON(pages[j] == NULL);
 	}
 	t_perf->get = (ktime_get_ns() - timer) / num_allocs;
@@ -101,7 +112,7 @@ __maybe_unused static void bulk(u64 num_allocs)
 
 	timer = ktime_get_ns();
 	for (j = 0; j < num_allocs; j++) {
-		__free_page(pages[j]);
+		__free_pages(pages[j], alloc_config.order);
 	}
 	t_perf->put = (ktime_get_ns() - timer) / num_allocs;
 	kfree(pages);
@@ -125,9 +136,9 @@ __maybe_unused static void repeat(u64 num_allocs)
 
 	timer = ktime_get_ns();
 	for (j = 0; j < num_allocs; j++) {
-		page = alloc_page(GFP_USER);
+		page = alloc_pages(GFP_USER, alloc_config.order);
 		BUG_ON(page == NULL);
-		__free_page(page);
+		__free_pages(page, alloc_config.order);
 	}
 	timer = (ktime_get_ns() - timer) / num_allocs;
 	t_perf->get = timer;
@@ -147,7 +158,7 @@ __maybe_unused static void rand(u64 num_allocs)
 	BUG_ON(pages == NULL);
 
 	for (u64 j = 0; j < num_allocs; j++) {
-		pages[j] = alloc_page(GFP_USER);
+		pages[j] = alloc_pages(GFP_USER, alloc_config.order);
 		BUG_ON(pages[j] == NULL);
 	}
 	rand_pages[raw_smp_processor_id()] = pages;
@@ -178,7 +189,7 @@ __maybe_unused static void rand(u64 num_allocs)
 
 	timer = ktime_get_ns();
 	for (u64 j = 0; j < num_allocs; j++) {
-		__free_page(pages[j]);
+		__free_pages(pages[j], alloc_config.order);
 	}
 	timer = (ktime_get_ns() - timer) / num_allocs;
 	t_perf->get = timer;
@@ -424,13 +435,14 @@ static const char *next_uint_list(const char *buf, const char *end, u64 **list,
 	return buf;
 }
 
-/// Usage: <bench> <threads> <iterations> <allocs>
+/// Usage: <bench> <threads> <iterations> <allocs> <order>
 static bool argparse(const char *buf, size_t len, struct alloc_config *args)
 {
 	u64 *threads;
 	u64 threads_len;
 	u64 iterations;
 	u64 allocs;
+	u64 order;
 	const char *end = buf + len;
 
 	if (len == 0 || buf == NULL || args == NULL) {
@@ -464,6 +476,10 @@ static bool argparse(const char *buf, size_t len, struct alloc_config *args)
 		pr_err("Invalid <allocs>");
 		return false;
 	}
+	if ((buf = next_uint(buf, end, &order)) == NULL) {
+		pr_err("Invalid <order>");
+		return false;
+	}
 
 	buf = str_skip(buf, end, true);
 	if (buf != end)
@@ -475,6 +491,7 @@ static bool argparse(const char *buf, size_t len, struct alloc_config *args)
 	args->threads_len = threads_len;
 	args->iterations = iterations;
 	args->allocs = allocs;
+	args->order = order;
 	return true;
 }
 

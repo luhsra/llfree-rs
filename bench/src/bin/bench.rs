@@ -339,7 +339,8 @@ fn rand(
 
         barrier.wait();
         if t == 0 {
-            assert_eq!(alloc.dbg_allocated_pages(), allocs * threads);
+            assert_eq!(pages.len(), allocs);
+            assert_eq!(alloc.dbg_allocated_pages(), allocs * threads * (1 << order));
             // Shuffle between all cores
             let pages =
                 unsafe { slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads) };
@@ -400,13 +401,12 @@ fn rand_block(
             *page = alloc.get(t, order).unwrap();
         }
 
-        let mut rng = WyRand::new(t as _);
-
         barrier.wait();
         if t == 0 {
             let blocks = allocs / RAND_BLOCK_SIZE;
             assert!(blocks > 0);
             // Shuffle blocks between all cores
+            let mut rng = WyRand::new(t as _);
             let pages =
                 unsafe { slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads) };
             for _ in 0..blocks {
