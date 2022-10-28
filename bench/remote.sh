@@ -7,7 +7,7 @@ export RUST_LOG=warn
 OUT="results/out-$(date '+%y%m%d_%H%M')"
 mkdir -p $OUT
 
-ALLOC="Array0A128 Array1A128 Array3A128 ArrayList0A128 ArrayList1A128 ArrayList3A128"
+ALLOC="Array3A128 ArrayList3A128 Array3C32 ArrayList3C32"
 THREADS="-x1 -x2 -x4 -x8 -x16 -x24 -x32 -x40 -x48"
 FILL="-x0 -x10 -x20 -x30 -x40 -x50 -x60 -x70 -x80"
 FLAGS="-t96 -i4 -s0 -m192 --stride 1"

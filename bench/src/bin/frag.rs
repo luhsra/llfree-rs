@@ -83,7 +83,6 @@ fn main() {
     // Operate on half of the avaliable memory
     let allocs = (pages / 2) / (1 << order) / threads;
     warn!("allocs={allocs}");
-    let alloc = Arc::new(alloc); // move into sharable reference counter.
     let barrier = Arc::new(Barrier::new(threads));
 
     let all_pages = Arc::new({
@@ -91,8 +90,8 @@ fn main() {
         v.resize_with(threads, || Mutex::new(Vec::<u64>::new()));
         v
     });
-    let a = alloc.clone();
-    thread::parallel(0..threads, move |t| {
+
+    thread::parallel(0..threads, |t| {
         thread::pin(t);
 
         let mut rng = WyRand::new(t as u64 + 100);
@@ -141,7 +140,7 @@ fn main() {
 
         if barrier.wait().is_leader() {
             warn!("stats 0");
-            stats(&mut out.lock().unwrap(), alloc.as_ref(), 0).unwrap();
+            stats(&mut out.lock().unwrap(), &alloc, 0).unwrap();
         }
         barrier.wait();
 
@@ -157,13 +156,13 @@ fn main() {
             };
             if barrier.wait().is_leader() {
                 warn!("stats {i}");
-                stats(&mut out.lock().unwrap(), alloc.as_ref(), i).unwrap();
+                stats(&mut out.lock().unwrap(), &alloc, i).unwrap();
             }
             barrier.wait();
         }
     });
 
-    warn!("{a:?}");
+    warn!("{alloc:?}");
 }
 
 static mut FREE_PAGES: [usize; PT_LEN + 1] = [0; PT_LEN + 1];

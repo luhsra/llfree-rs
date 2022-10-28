@@ -226,6 +226,23 @@ pub fn madvise(mem: &mut [Page], advise: MAdvise) {
     }
 }
 
+#[cfg(test)]
+pub fn test_mapping(begin: usize, length: usize) -> core::result::Result<MMap<Page>, ()> {
+    use log::warn;
+
+    #[cfg(target_os = "linux")]
+    if let Ok(file) = std::env::var("NVM_FILE") {
+        warn!("MMap file {file} l={}G", (length * Page::SIZE) >> 30);
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(file)
+            .unwrap();
+        return MMap::dax(begin, length, f);
+    }
+    MMap::anon(begin, length, true)
+}
+
 #[cfg(all(test, feature = "std"))]
 mod test {
     use crate::util::logging;

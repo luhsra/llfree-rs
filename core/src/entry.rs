@@ -114,25 +114,39 @@ impl fmt::Debug for Entry3 {
     }
 }
 
-#[bitfield(u16)]
-pub struct Entry2 {
-    /// Number of free pages.
-    #[bits(15)]
-    pub free: usize,
-    /// If this is allocated as large page.
-    pub page: bool,
-}
+#[derive(Clone, Copy)]
+pub struct Entry2(u16);
 
 impl AtomicValue for Entry2 {
     type V = u16;
 }
 
 impl Entry2 {
+    pub fn new() -> Self {
+        Self(0)
+    }
     pub fn new_page() -> Self {
-        Self::new().with_page(true)
+        Self(u16::MAX)
     }
     pub fn new_free(free: usize) -> Self {
-        Self::new().with_free(free)
+        Self(free as u16)
+    }
+
+    pub fn page(self) -> bool {
+        self.0 == u16::MAX
+    }
+    pub fn with_page(self, page: bool) -> Self {
+        Self(if page { u16::MAX } else { 0 })
+    }
+    pub fn free(self) -> usize {
+        if self.0 < u16::MAX {
+            self.0 as _
+        } else {
+            0
+        }
+    }
+    pub fn with_free(self, free: usize) -> Self {
+        Self(free as _)
     }
 
     pub fn mark_huge(self, span: usize) -> Option<Self> {
@@ -160,6 +174,17 @@ impl Entry2 {
     }
 }
 
+impl From<u16> for Entry2 {
+    fn from(value: u16) -> Self {
+        Self(value)
+    }
+}
+impl From<Entry2> for u16 {
+    fn from(value: Entry2) -> Self {
+        value.0
+    }
+}
+
 impl fmt::Debug for Entry2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry2")
@@ -178,11 +203,14 @@ const _: () = assert!(size_of::<Entry2Pair>() == 2 * size_of::<Entry2>());
 const _: () = assert!(align_of::<Entry2Pair>() == size_of::<Entry2Pair>());
 
 impl Entry2Pair {
-    pub fn all<F: Fn(Entry2) -> Option<Entry2>>(self, f: F) -> Option<Entry2Pair> {
+    pub fn map<F: Fn(Entry2) -> Option<Entry2>>(self, f: F) -> Option<Entry2Pair> {
         match (f(self.0), f(self.1)) {
             (Some(a), Some(b)) => Some(Entry2Pair(a, b)),
             _ => None,
         }
+    }
+    pub fn all<F: Fn(Entry2) -> bool>(self, f: F) -> bool {
+        f(self.0) && f(self.1)
     }
 }
 
@@ -284,7 +312,7 @@ impl fmt::Debug for SEntry2 {
 pub trait SEntry2Tuple: AtomicValue + fmt::Debug {
     const N: usize;
     fn new(v: SEntry2) -> Self;
-    fn all<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self>;
+    fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self>;
 }
 
 impl SEntry2Tuple for SEntry2 {
@@ -292,7 +320,7 @@ impl SEntry2Tuple for SEntry2 {
     fn new(v: SEntry2) -> Self {
         v
     }
-    fn all<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
+    fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
         f(self)
     }
 }
@@ -326,7 +354,7 @@ impl SEntry2Tuple for SEntry2T8 {
     fn new(v: SEntry2) -> Self {
         Self([v; 8])
     }
-    fn all<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
+    fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
         match self.0.map(f) {
             [Some(r0), Some(r1), Some(r2), Some(r3), Some(r4), Some(r5), Some(r6), Some(r7)] => {
                 Some(Self([r0, r1, r2, r3, r4, r5, r6, r7]))
@@ -365,7 +393,7 @@ impl SEntry2Tuple for SEntry2T4 {
     fn new(v: SEntry2) -> Self {
         Self([v; 4])
     }
-    fn all<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
+    fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
         match self.0.map(f) {
             [Some(r0), Some(r1), Some(r2), Some(r3)] => Some(Self([r0, r1, r2, r3])),
             _ => None,
@@ -402,7 +430,7 @@ impl SEntry2Tuple for SEntry2T2 {
     fn new(v: SEntry2) -> Self {
         Self([v; 2])
     }
-    fn all<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
+    fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
         match self.0.map(f) {
             [Some(r0), Some(r1)] => Some(Self([r0, r1])),
             _ => None,

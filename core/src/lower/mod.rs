@@ -17,6 +17,8 @@ macro_rules! stop {
 
 mod atom;
 pub use atom::Atom;
+mod cache;
+pub use cache::Cache;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug {

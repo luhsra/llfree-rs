@@ -210,7 +210,7 @@ mod test {
 
     use super::Local;
     use crate::lower::*;
-    use crate::mmap::MMap;
+    use crate::mmap::test_mapping;
     use crate::table::PT_LEN;
     use crate::thread;
     use crate::upper::array_aligned::CacheAligned;
@@ -218,22 +218,8 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::Error;
 
-    type Lower = Atom<128>;
+    type Lower = Cache<32>;
     type Allocator = Array<4, Lower>;
-
-    fn mapping(begin: usize, length: usize) -> core::result::Result<MMap<Page>, ()> {
-        #[cfg(target_os = "linux")]
-        if let Ok(file) = std::env::var("NVM_FILE") {
-            warn!("MMap file {file} l={}G", (length * Page::SIZE) >> 30);
-            let f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(file)
-                .unwrap();
-            return MMap::dax(begin, length, f);
-        }
-        MMap::anon(begin, length, true)
-    }
 
     #[test]
     fn names() {
@@ -294,7 +280,7 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
-        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
@@ -373,7 +359,7 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 4 << 30;
-        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
@@ -439,7 +425,7 @@ mod test {
         const ALLOCS: usize = ((MEM_SIZE / THREADS) / 4) * 3;
 
         logging();
-        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE).unwrap();
         let range = mapping.as_ptr_range();
         info!("mmap {MEM_SIZE} bytes at {range:?}");
         let range = range.start as u64..range.end as u64;
@@ -510,7 +496,7 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
-        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
@@ -590,7 +576,7 @@ mod test {
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
         const PAGES: usize = 2 * THREADS * PT_LEN * PT_LEN;
 
-        let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
@@ -640,7 +626,7 @@ mod test {
         const PAGES: usize = 4096;
         const ALLOC_PER_THREAD: usize = PAGES / THREADS - THREADS;
 
-        let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
@@ -706,7 +692,7 @@ mod test {
         // additional space for the allocators metadata
         const PAGES: usize = THREADS * (ALLOC_PER_THREAD + 2) * PT_LEN;
 
-        let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
@@ -842,7 +828,7 @@ mod test {
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
         const MEM_SIZE: usize = 2 * THREADS * PT_LEN * PT_LEN * Page::SIZE;
 
-        let mut mapping = mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
@@ -883,7 +869,7 @@ mod test {
         const THREADS: usize = 2;
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 10) / 2;
 
-        let mut mapping = mapping(0x1000_0000_0000, 4 * PT_LEN * PT_LEN).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, 4 * PT_LEN * PT_LEN).unwrap();
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
@@ -933,7 +919,7 @@ mod test {
     fn recover() {
         logging();
 
-        let mut mapping = mapping(0x1000_0000_0000, 8 << 18).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, 8 << 18).unwrap();
         thread::pin(0);
 
         let expected_pages = (PT_LEN + 2) * (1 + (1 << 9));
@@ -974,7 +960,7 @@ mod test {
 
         logging();
 
-        let mut mapping = mapping(0x1000_0000_0000, Lower::N * (THREADS * 2 + 1)).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * (THREADS * 2 + 1)).unwrap();
         let alloc = Arc::new({
             let mut a = Allocator::default();
             a.init(THREADS, &mut mapping, false).unwrap();
@@ -1034,7 +1020,7 @@ mod test {
         const THREADS: usize = 2;
         const PAGES: usize = 8 << 18;
 
-        let mut mapping = mapping(0x1000_0000_0000, PAGES).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
@@ -1063,7 +1049,7 @@ mod test {
     fn fragmentation_retry() {
         logging();
 
-        let mut mapping = mapping(0x1000_0000_0000, Lower::N * 2).unwrap();
+        let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * 2).unwrap();
         let alloc = {
             let mut a = Allocator::default();
             a.init(1, &mut mapping, false).unwrap();

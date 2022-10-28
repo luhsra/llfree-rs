@@ -22,7 +22,7 @@ These lower allocators are responsible for managing the level one and level two-
 They allocate pages of 4K up to 4M in these subtrees.
 Currently, there is only one lower allocator implementation:
 
-- ~[`Cache`](core/src/lower/cache.rs)~: This allocator has a 512 bit large bitset at the lowes level. It stores which 4K pages are allocated. The second level cosists of tables with N 16 bit entries, one for each bitset. These entries contain a counter of free pages in the related bitset and a flag if the whole subtree is allocated as a 2M huge page.
+- [`Cache`](core/src/lower/cache.rs): This allocator has a 512 bit large bitset at the lowes level. It stores which 4K pages are allocated. The second level cosists of tables with N 16 bit entries, one for each bitset. These entries contain a counter of free pages in the related bitset and a flag if the whole subtree is allocated as a 2M huge page.
 The number of entries N in the second level tables can be defined at compile-time.
 - [`Atom`](core/src/lower/atom.rs): This allocator has a 128 bit large bitset at the lowest level (storing what pages are allocated). At this level 2^0 up to 2^6 pages can be allocated with a single 64 bit CAS. The second level consists of N 8 bit entries, one for each bitset. Up to 8 entries can be allocated at once using a single 64 bit CAS, allowing the allocation of 2^7 to 2^10 pages at once.
 The number of entries N in the second level tables can be defined at compile-time.
@@ -60,7 +60,7 @@ This runs the `bulk` benchmark for 1, 2, and 4 threads (`-t4` max 4 threads) on 
 To execute the benchmark on NVM, use the `--dax` flag to specify a DAX file to be mmaped.
 
 > For more info on the cli arguments run `cargo perf bench -- -h`.
-> 
+>
 > The debug output can be suppressed with setting `RUST_LOG=error`.
 
 ## Integrating into the Linux Kernel
