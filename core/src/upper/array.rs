@@ -23,12 +23,12 @@ struct Meta {
 }
 const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
-/// This allocator splits its memory range into 1G chunks.
+/// This allocator splits its memory range into chunks.
 /// Giant pages are directly allocated in it.
-/// For smaller pages, however, the 1G chunk is handed over to the
+/// For smaller pages, however, the chunk is handed over to the
 /// lower allocator, managing these smaller allocations.
-/// These 1G chunks are, due to the inner workins of the lower allocator,
-/// called 1G *subtrees*.
+/// These chunks are, due to the inner workins of the lower allocator,
+/// called *subtrees*.
 ///
 /// This allocator stores the level three entries (subtree roots) in a
 /// packed array.
@@ -69,11 +69,17 @@ where
             self.lower.pages()
         )?;
 
-        writeln!(f, "    subtrees: {:?}", self.trees)?;
-        let free_pages = self.dbg_free_pages();
         writeln!(
             f,
-            "    free pages: {free_pages} ({} trees)",
+            "    subtrees: {:?} ({} pages per tree)",
+            self.trees,
+            L::N
+        )?;
+        let free_pages = self.dbg_free_pages();
+        let free_huge_pages = self.dbg_free_huge_pages();
+        writeln!(
+            f,
+            "    free pages: {free_pages} ({free_huge_pages} huge, {} trees)",
             free_pages.div_ceil(L::N)
         )?;
 
@@ -97,8 +103,8 @@ where
             memory.as_ptr_range(),
             memory.len()
         );
-        if memory.len() < self.pages_needed(cores) {
-            warn!("memory {} < {}", memory.len(), self.pages_needed(cores));
+        if memory.len() < L::N * cores {
+            warn!("memory {} < {}", memory.len(), L::N * cores);
             cores = 1.max(memory.len() / L::N);
         }
 
@@ -135,9 +141,11 @@ where
                 meta.active.store(1, Ordering::SeqCst);
                 Ok(())
             } else {
+                error!("No metadata found");
                 Err(Error::Initialization)
             }
         } else {
+            error!("Allocator not persistent");
             Err(Error::Initialization)
         }
     }
@@ -254,17 +262,8 @@ where
         }
     }
 
-    fn pages_needed(&self, cores: usize) -> usize {
-        L::N * cores
-    }
-
     fn pages(&self) -> usize {
         self.lower.pages()
-    }
-
-    #[cold]
-    fn dbg_for_each_huge_page(&self, f: fn(usize)) {
-        self.lower.dbg_for_each_huge_page(f)
     }
 
     #[cold]
@@ -279,6 +278,22 @@ where
             pages += local.pte.load().free();
         }
         pages
+    }
+
+    #[cold]
+    fn dbg_free_huge_pages(&self) -> usize {
+        let mut counter = 0;
+        self.lower.dbg_for_each_huge_page(|c| {
+            if c == 0 {
+                counter += 1;
+            }
+        });
+        counter
+    }
+
+    #[cold]
+    fn dbg_for_each_huge_page(&self, f: fn(usize)) {
+        self.lower.dbg_for_each_huge_page(f)
     }
 }
 

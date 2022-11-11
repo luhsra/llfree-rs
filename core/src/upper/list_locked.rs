@@ -160,10 +160,6 @@ impl Alloc for ListLocked {
         unsafe { self.memory.end.offset_from(self.memory.start) as usize }
     }
 
-    fn pages_needed(&self, cores: usize) -> usize {
-        cores
-    }
-
     #[cold]
     fn dbg_for_each_huge_page(&self, _f: fn(usize)) {}
 

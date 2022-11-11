@@ -8,6 +8,9 @@ use std::os::unix::prelude::AsRawFd;
 use crate::util::{align_down, Page};
 
 /// Chunk of mapped memory.
+/// Wrapper for POSIX mmap syscalls.
+///
+/// Tested on Linux and MacOS.
 pub struct MMap<T: 'static> {
     slice: &'static mut [T],
     fd: Option<i32>,

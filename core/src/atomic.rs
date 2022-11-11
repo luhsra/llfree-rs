@@ -187,9 +187,6 @@ pub struct AStack<T: ANode> {
     start: Atomic<T>,
 }
 
-unsafe impl<T: ANode> Send for AStack<T> {}
-unsafe impl<T: ANode> Sync for AStack<T> {}
-
 impl<T: ANode> Default for AStack<T> {
     fn default() -> Self {
         Self {

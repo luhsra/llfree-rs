@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Barrier};
+use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
@@ -26,11 +26,12 @@ const RAND_BLOCK_SIZE: usize = 8;
 struct Args {
     #[arg(value_enum)]
     bench: Benchmark,
+    /// Names of the allocators to be benchmarked.
     allocs: Vec<String>,
     /// Tested number of threads / allocations / filling levels, depending on benchmark.
     #[arg(short, long, default_value = "1")]
     x: Vec<usize>,
-    /// Max number of threads
+    /// Max number of threads.
     #[arg(short, long, default_value = "6")]
     threads: usize,
     /// Where to store the benchmark results in csv format.
@@ -39,14 +40,16 @@ struct Args {
     /// DAX file to be used for the allocator.
     #[arg(long)]
     dax: Option<String>,
+    /// Number of repetitions.
     #[arg(short, long, default_value_t = 1)]
     iterations: usize,
     /// Specifies how many pages should be allocated: #pages = 2^order
     #[arg(short = 's', long, default_value_t = 0)]
     order: usize,
-    /// Max amount of memory in GiB. Is by the max thread count.
+    /// Max amount of memory in GiB.
     #[arg(short, long, default_value_t = 16)]
     memory: usize,
+    /// Use every n-th cpu.
     #[arg(long, default_value_t = 1)]
     stride: usize,
     /// Write into every page before benchmarking.
@@ -96,20 +99,20 @@ fn main() {
     type A128 = Atom<128>;
     type C32 = Cache<32>;
     let mut allocs: [Box<dyn Alloc>; 14] = [
-        Box::new(Array::<0, A128>::default()),
-        Box::new(Array::<3, A128>::default()),
-        Box::new(ArrayAtomic::<0, A128>::default()),
-        Box::new(ArrayAtomic::<3, A128>::default()),
-        Box::new(ArrayList::<0, A128>::default()),
-        Box::new(ArrayList::<3, A128>::default()),
-        Box::new(Array::<0, C32>::default()),
-        Box::new(Array::<3, C32>::default()),
-        Box::new(ArrayAtomic::<0, C32>::default()),
-        Box::new(ArrayAtomic::<3, C32>::default()),
-        Box::new(ArrayList::<0, C32>::default()),
-        Box::new(ArrayList::<3, C32>::default()),
-        Box::new(ListLocal::default()),
-        Box::new(ListLocked::default()),
+        Box::<Array<0, A128>>::default(),
+        Box::<Array<3, A128>>::default(),
+        Box::<ArrayAtomic<0, A128>>::default(),
+        Box::<ArrayAtomic<3, A128>>::default(),
+        Box::<ArrayList<0, A128>>::default(),
+        Box::<ArrayList<3, A128>>::default(),
+        Box::<Array<0, C32>>::default(),
+        Box::<Array<3, C32>>::default(),
+        Box::<ArrayAtomic<0, C32>>::default(),
+        Box::<ArrayAtomic<3, C32>>::default(),
+        Box::<ArrayList<0, C32>>::default(),
+        Box::<ArrayList<3, C32>>::default(),
+        Box::<ListLocal>::default(),
+        Box::<ListLocked>::default(),
     ];
 
     // Additional constraints (perf)
@@ -222,9 +225,8 @@ fn bulk(
     let init = timer.elapsed().as_millis();
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
 
-    let barrier = Arc::new(Barrier::new(threads));
-    let alloc = &*alloc;
-    let mut perf = Perf::avg(thread::parallel(0..threads, move |t| {
+    let barrier = Barrier::new(threads);
+    let mut perf = Perf::avg(thread::parallel(0..threads, |t| {
         thread::pin(t);
         barrier.wait();
         let mut pages = Vec::with_capacity(allocs);
@@ -275,9 +277,8 @@ fn repeat(
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
-    let barrier = Arc::new(Barrier::new(threads));
-    let alloc = &*alloc;
-    let mut perf = Perf::avg(thread::parallel(0..threads, move |t| {
+    let barrier = Barrier::new(threads);
+    let mut perf = Perf::avg(thread::parallel(0..threads, |t| {
         thread::pin(t);
         for _ in 0..allocs {
             alloc.get(t, order).unwrap();
@@ -324,8 +325,7 @@ fn rand(
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
-    let barrier = Arc::new(Barrier::new(threads));
-    let alloc = &*alloc;
+    let barrier = Barrier::new(threads);
 
     let mut all_pages = vec![0u64; allocs * threads];
     let all_pages_ptr = all_pages.as_mut_ptr() as usize;
@@ -391,8 +391,7 @@ fn rand_block(
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
-    let barrier = Arc::new(Barrier::new(threads));
-    let alloc = &*alloc;
+    let barrier = Barrier::new(threads);
 
     let mut all_pages = vec![0u64; allocs * threads];
     let all_pages_ptr = all_pages.as_mut_ptr() as usize;
@@ -473,9 +472,8 @@ fn filling(
 
     assert!((fill + allocs) * threads < alloc.pages());
 
-    let barrier = Arc::new(Barrier::new(threads));
-    let alloc = &*alloc;
-    let mut perf = Perf::avg(thread::parallel(0..threads, move |t| {
+    let barrier = Barrier::new(threads);
+    let mut perf = Perf::avg(thread::parallel(0..threads, |t| {
         thread::pin(t);
         for _ in 0..fill {
             alloc.get(t, order).unwrap();

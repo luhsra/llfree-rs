@@ -16,6 +16,7 @@ use nvalloc::util::{div_ceil, logging, Page};
 type Allocator = ArrayAtomic<3, Atom<128>>;
 
 /// Benchmarking an allocator in more detail.
+/// This benchmark measures the time per allocation and the standard deviation.
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
 struct Args {

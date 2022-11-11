@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Barrier};
+use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::Parser;
@@ -15,7 +15,7 @@ use nvalloc::util::{div_ceil, logging, Page};
 
 type Allocator = Array<3, Atom<128>>;
 
-/// Benchmarking an allocator in more detail.
+/// Measuring the allocation times and collect them into time buckets for a time distribution analysis.
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
 struct Args {
@@ -86,8 +86,8 @@ fn main() {
         assert!(allocs % PT_LEN == 0);
         warn!("\n\n>>> bench t={threads} o={order:?} {allocs}\n");
 
-        let barrier = Arc::new(Barrier::new(threads));
-        let t_buckets = thread::parallel(0..threads, move |t| {
+        let barrier = Barrier::new(threads);
+        let t_buckets = thread::parallel(0..threads, |t| {
             thread::pin(t);
             barrier.wait();
 

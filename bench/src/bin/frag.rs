@@ -73,7 +73,6 @@ fn main() {
 
     let mut alloc = Allocator::default();
     let pages = memory * PT_LEN * PT_LEN;
-    assert!(alloc.pages_needed(threads) <= (pages * 3 / 4));
 
     // Map memory for the allocator and initialize it
     let mut mapping = mapping(0x1000_0000_0000, pages, dax).unwrap();
@@ -83,7 +82,7 @@ fn main() {
     // Operate on half of the avaliable memory
     let allocs = (pages / 2) / (1 << order) / threads;
     warn!("allocs={allocs}");
-    let barrier = Arc::new(Barrier::new(threads));
+    let barrier = Barrier::new(threads);
 
     let all_pages = Arc::new({
         let mut v = Vec::with_capacity(threads);

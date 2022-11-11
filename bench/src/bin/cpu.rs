@@ -16,6 +16,7 @@ fn getcpu() -> (usize, usize) {
     (cpu as _, node as _)
 }
 
+/// Checking certain cpu features.
 #[cfg(target_arch = "x86_64")]
 fn main() {
     use nvalloc::thread;

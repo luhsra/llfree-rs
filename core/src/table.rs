@@ -11,7 +11,7 @@ use crate::Error;
 pub const PT_ORDER: usize = 9;
 pub const PT_LEN: usize = 1 << PT_ORDER;
 
-/// Page table with atomic entries
+/// Table with atomic entries
 #[repr(align(64))]
 pub struct ATable<T: AtomicValue, const LEN: usize = { PT_LEN }> {
     entries: [Atomic<T>; LEN],
@@ -75,7 +75,7 @@ impl<T: AtomicValue + fmt::Debug, const LEN: usize> fmt::Debug for ATable<T, LEN
     }
 }
 
-/// Bitfield replacing the level one-page table.
+/// Bitfield replacing the level one table.
 pub struct Bitfield<const N: usize> {
     data: [AtomicU64; N],
 }

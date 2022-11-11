@@ -28,6 +28,7 @@ impl Page {
     }
 }
 
+/// Correctly sized and aligned cache line
 #[derive(Clone)]
 #[repr(align(64))]
 pub struct CacheLine {

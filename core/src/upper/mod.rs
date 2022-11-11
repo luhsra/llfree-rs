@@ -21,26 +21,28 @@ pub use list_local::ListLocal;
 mod list_locked;
 pub use list_locked::ListLocked;
 
+/// Number of retries if an atomic operation fails.
 pub const CAS_RETRIES: usize = 16;
+/// Magic marking the meta page.
 pub const MAGIC: usize = 0xdead_beef;
+/// Minimal number of pages an allocator needs (1G).
 pub const MIN_PAGES: usize = PT_LEN * PT_LEN;
+/// Maximal number of pages an allocator can manage (about 256TiB).
 pub const MAX_PAGES: usize = Mapping([9; 4]).span(4);
 
+/// The general interface of the allocator implementations.
 pub trait Alloc: Sync + Send + fmt::Debug {
     /// Initialize the allocator.
     /// When `persistent` is set all level 1 and 2 page tables are allocated
-    /// at the end of `memory` together with an meta page.
+    /// at the end of `memory` together with an metadata page.
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], persistent: bool) -> Result<()>;
-
     /// Init as entirely free area.
     #[cold]
     fn free_all(&self) -> Result<()>;
-
     /// Init as fully reserved area.
     #[cold]
     fn reserve_all(&self) -> Result<()>;
-
     /// Recover the allocator from persistent memory.
     #[cold]
     fn recover(&self) -> Result<()> {
@@ -54,26 +56,35 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     /// Returns if the page is free. This might be racy!
     fn is_free(&self, addr: u64, order: usize) -> bool;
 
-    /// Return the number of pages that can be allocated.
+    /// Return the total number of pages the allocator manages.
     fn pages(&self) -> usize;
 
-    /// Returns the minimal number of pages the allocator needs.
-    fn pages_needed(&self, cores: usize) -> usize;
     /// Return the number of allocated pages.
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {
         self.pages() - self.dbg_free_pages()
     }
     #[cold]
+    /// Return the number of free pages.
     fn dbg_free_pages(&self) -> usize;
     #[cold]
+    /// Return the number of free huge pages or 0 if the allocator cannot allocate huge pages.
+    fn dbg_free_huge_pages(&self) -> usize {
+        return 0;
+    }
+    /// Execute f for each huge page with the number of free pages
+    /// in this huge page as parameter.
+    #[cold]
     fn dbg_for_each_huge_page(&self, f: fn(usize));
+    /// Return the name of the allocator.
     #[cold]
     fn name(&self) -> AllocName {
         AllocName::new::<Self>()
     }
 }
 
+/// The short name of an allocator.
+/// E.g.: `ArrayAtomic4C32` for `nvalloc::upper::array_atomic::ArrayAtomic<4, nvalloc::lower::cache::Cache<32>>`
 #[derive(PartialEq, Eq, Hash)]
 pub struct AllocName {
     base: &'static str,
@@ -128,15 +139,18 @@ impl AllocName {
 
 /// Per core data.
 pub struct Local<const L: usize> {
+    /// Page index of the last allocated page -> starting point for the next allocation
     start: Atomic<usize>,
+    /// Local copy of the reserved level 3 entry
     pte: Atomic<Entry3>,
     /// # Safety
     /// This should only be accessed from the corresponding (virtual) CPU core!
-    inner: UnsafeCell<Inner<L>>,
+    inner: UnsafeCell<RecentFrees<L>>,
 }
 
+/// Ringbuffer storing the locations of recent frees for the free-reserve heuristic.
 #[repr(align(64))]
-struct Inner<const L: usize> {
+struct RecentFrees<const L: usize> {
     frees: [usize; L],
     frees_i: usize,
 }
@@ -146,22 +160,26 @@ impl<const L: usize> Local<L> {
         Self {
             start: Atomic::new(usize::MAX),
             pte: Atomic::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
-            inner: UnsafeCell::new(Inner {
+            inner: UnsafeCell::new(RecentFrees {
                 frees_i: 0,
                 frees: [usize::MAX; L],
             }),
         }
     }
     #[allow(clippy::mut_from_ref)]
-    fn p(&self) -> &mut Inner<L> {
+    fn p(&self) -> &mut RecentFrees<L> {
         unsafe { self.inner.get().as_mut().unwrap_unchecked() }
     }
     /// Add a chunk (subtree) id to the history of chunks.
     pub fn frees_push(&self, chunk: usize) {
-        if L > 0 {
+        if L > 1 {
             let inner = self.p();
             inner.frees_i = (inner.frees_i + 1) % inner.frees.len();
             inner.frees[inner.frees_i] = chunk;
+        } else if L == 1 {
+            // We don't have to update the index if there is only one element
+            let inner = self.p();
+            inner.frees[0] = 0;
         }
     }
     /// Calls frees_push on exiting scope.
@@ -281,6 +299,8 @@ mod test {
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
         let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let range = mapping.as_ptr_range();
+        let range = range.start as u64..range.end as u64;
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
@@ -317,11 +337,9 @@ mod test {
         pages.sort_unstable();
 
         // Check that the same page was not allocated twice
-        for i in 0..pages.len() - 1 {
-            let p1 = pages[i];
-            let p2 = pages[i + 1];
-            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
-            assert!(p1 != p2);
+        for &[a, b] in pages.array_windows() {
+            assert_ne!(a, b);
+            assert!(range.contains(&a) && range.contains(&b));
         }
 
         warn!("realloc...");
@@ -360,6 +378,8 @@ mod test {
         // 8GiB
         const MEM_SIZE: usize = 4 << 30;
         let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let range = mapping.as_ptr_range();
+        let range = range.start as u64..range.end as u64;
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
@@ -382,11 +402,9 @@ mod test {
         assert_eq!(alloc.dbg_allocated_pages(), pages.len());
         // Check that the same page was not allocated twice
         pages.sort_unstable();
-        for i in 0..pages.len() - 1 {
-            let p1 = pages[i];
-            let p2 = pages[i + 1];
-            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
-            assert!(p1 != p2);
+        for &[a, b] in pages.array_windows() {
+            assert_ne!(a, b);
+            assert!(range.contains(&a) && range.contains(&b));
         }
 
         warn!("reallocate rand...");
@@ -403,11 +421,9 @@ mod test {
         assert_eq!(alloc.dbg_allocated_pages(), pages.len());
         // Check that the same page was not allocated twice
         pages.sort_unstable();
-        for i in 0..pages.len() - 1 {
-            let p1 = pages[i];
-            let p2 = pages[i + 1];
-            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
-            assert!(p1 != p2);
+        for &[a, b] in pages.array_windows() {
+            assert_ne!(a, b);
+            assert!(range.contains(&a) && range.contains(&b));
         }
 
         warn!("free...");
@@ -453,11 +469,9 @@ mod test {
             warn!("check...");
             // Check that the same page was not allocated twice
             pages.sort_unstable();
-            for i in 0..pages.len() - 1 {
-                let p1 = pages[i];
-                let p2 = pages[i + 1];
-                assert!(range.contains(&p1), "{} not in {:?}", p1, range);
-                assert!(p1 != p2, "{}", p1);
+            for &[a, b] in pages.array_windows() {
+                assert_ne!(a, b);
+                assert!(range.contains(&a) && range.contains(&b));
             }
 
             barrier.wait();
@@ -474,11 +488,9 @@ mod test {
             warn!("check...");
             // Check that the same page was not allocated twice
             pages.sort_unstable();
-            for i in 0..pages.len() - 1 {
-                let p1 = pages[i];
-                let p2 = pages[i + 1];
-                assert!(range.contains(&p1), "{} not in {:?}", p1, range);
-                assert!(p1 != p2, "{}", p1);
+            for &[a, b] in pages.array_windows() {
+                assert_ne!(a, b);
+                assert!(range.contains(&a) && range.contains(&b));
             }
 
             warn!("free...");
@@ -497,6 +509,8 @@ mod test {
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
         let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let range = mapping.as_ptr_range();
+        let range = range.start as u64..range.end as u64;
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
@@ -532,11 +546,9 @@ mod test {
         pages.sort_unstable();
 
         // Check that the same page was not allocated twice
-        for i in 0..pages.len() - 1 {
-            let p1 = pages[i];
-            let p2 = pages[i + 1];
-            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
-            assert!(p1 != p2);
+        for &[a, b] in pages.array_windows() {
+            assert_ne!(a, b);
+            assert!(range.contains(&a) && range.contains(&b));
         }
 
         warn!("free some...");
@@ -577,6 +589,8 @@ mod test {
         const PAGES: usize = 2 * THREADS * PT_LEN * PT_LEN;
 
         let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
+        let range = mapping.as_ptr_range();
+        let range = range.start as u64..range.end as u64;
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
@@ -609,11 +623,9 @@ mod test {
 
         // Check that the same page was not allocated twice
         pages.sort_unstable();
-        for i in 0..pages.len() - 1 {
-            let p1 = pages[i];
-            let p2 = pages[i + 1];
-            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
-            assert!(p1 != p2);
+        for &[a, b] in pages.array_windows() {
+            assert_ne!(a, b);
+            assert!(range.contains(&a) && range.contains(&b));
         }
     }
 
@@ -627,6 +639,8 @@ mod test {
         const ALLOC_PER_THREAD: usize = PAGES / THREADS - THREADS;
 
         let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
+        let range = mapping.as_ptr_range();
+        let range = range.start as u64..range.end as u64;
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
@@ -659,11 +673,9 @@ mod test {
 
         // Check that the same page was not allocated twice
         pages.sort_unstable();
-        for i in 0..pages.len() - 1 {
-            let p1 = pages[i];
-            let p2 = pages[i + 1];
-            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
-            assert!(p1 != p2);
+        for &[a, b] in pages.array_windows() {
+            assert_ne!(a, b);
+            assert!(range.contains(&a) && range.contains(&b));
         }
 
         let barrier = Arc::new(Barrier::new(THREADS));
@@ -693,6 +705,8 @@ mod test {
         const PAGES: usize = THREADS * (ALLOC_PER_THREAD + 2) * PT_LEN;
 
         let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
+        let range = mapping.as_ptr_range();
+        let range = range.start as u64..range.end as u64;
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
@@ -725,11 +739,9 @@ mod test {
 
         // Check that the same page was not allocated twice
         pages.sort_unstable();
-        for i in 0..pages.len() - 1 {
-            let p1 = pages[i];
-            let p2 = pages[i + 1];
-            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
-            assert!(p1 != p2);
+        for &[a, b] in pages.array_windows() {
+            assert_ne!(a, b);
+            assert!(range.contains(&a) && range.contains(&b));
         }
     }
 

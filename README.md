@@ -13,6 +13,23 @@ To compile and test the allocator, you have to [install rust](https://www.rust-l
 
 The `nightly` version `1.62.0` (or newer) is required to have access to inline assembly and custom compiler toolchains.
 
+```sh
+# Release build
+cargo build -r
+
+# Running unit-tests
+cargo test
+# Running race condition tests
+cargo test --features stop -- lower
+
+# Running a benchmark (see down below for more infos on benchmarking)
+cargo perf <benchmark> -- <args>
+# For example print help for the `bench` benchmark
+cargo perf bench -- -h
+```
+
+> Note: This project uses certian UNIX features directly (for memory mapping and thread pinning) and doesn't work on Windows without modifications.
+
 ## Project structure
 
 The [core](core/) directory contains the main `nvalloc` crate and all the allocators.

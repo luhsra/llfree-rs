@@ -1,21 +1,20 @@
-use std::slice;
-use std::sync::Arc;
 use std::sync::Barrier;
 use std::time::Duration;
 
 use clap::Parser;
 use log::{error, warn};
-use nvalloc::upper::*;
-use nvalloc::lower::Atom;
+use nvalloc::lower::*;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
+use nvalloc::upper::*;
 use nvalloc::util::{self, align_up, Page, WyRand};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
 struct Args {
+    /// Names of the allocators to be tested.
     alloc: String,
     /// Max number of threads
     #[arg(short, long, default_value = "6")]
@@ -43,28 +42,30 @@ fn main() {
     let pages = memory * PT_LEN * PT_LEN;
     assert!(pages >= MIN_PAGES * threads);
 
-    type L = Atom<128>;
-    let allocs: [Arc<dyn Alloc>; 3] = [
-        Arc::new(ArrayAligned::<CacheAligned, L>::default()),
-        Arc::new(ArrayAligned::<Unaligned, L>::default()),
-        Arc::new(ArrayAtomic::<4, L>::default()),
-        // Arc::new(TableAlloc::<L>::default()),
+    type A = Atom<128>;
+    type C = Cache<32>;
+    let allocs: [Box<dyn Alloc>; 4] = [
+        Box::<ArrayAtomic<4, A>>::default(),
+        Box::<Array<4, A>>::default(),
+        Box::<ArrayAtomic<4, C>>::default(),
+        Box::<Array<4, C>>::default(),
     ];
     for a in allocs {
         if format!("{}", a.name()) == alloc {
             let allocs = pages / threads / 2 / (1 << order);
             let out_size = align_up(allocs + 2, Page::SIZE) * threads;
             // Shared memory where the allocated pages are backupped
-            // Layout: [ ( idx | repeat | pages... ) for each thread ]
+            // Layout: [ ( idx | realloc | pages... ) for each thread ]
             let mut out_mapping = MMap::<u64>::anon(0x1100_0000_0000, out_size, true).unwrap();
             let out_size = out_size / threads;
             // Initialize with zero
-            for t in 0..threads {
-                out_mapping[t * out_size] = 0; // idx = 0
-                out_mapping[t * out_size + 1] = 0; // repeat = 0
+            for out in out_mapping.chunks_mut(out_size) {
+                out[0] = 0; // idx = 0
+                out[1] = 0; // realloc = 0
             }
             // Allocator mapping
             let mapping = mapping(0x1000_0000_0000, pages, dax).unwrap();
+            warn!("Alloc manages {pages} with {} allocs", allocs * threads);
 
             let pid = unsafe { libc::fork() };
             if pid < 0 {
@@ -73,7 +74,15 @@ fn main() {
             } else if pid == 0 {
                 execute(a, allocs, threads, order, mapping, out_mapping);
             } else {
-                monitor(a, allocs, threads, order, pid, mapping, out_mapping);
+                monitor(
+                    a,
+                    allocs,
+                    threads,
+                    order,
+                    pid,
+                    mapping,
+                    out_mapping,
+                );
             }
             return;
         }
@@ -83,49 +92,44 @@ fn main() {
 
 /// Allocate and free memory indefinitely
 fn execute(
-    alloc: Arc<dyn Alloc>,
+    mut alloc: Box<dyn Alloc>,
     allocs: usize,
     threads: usize,
     order: usize,
     mut mapping: MMap<Page>,
     mut out_mapping: MMap<u64>,
 ) {
+    // Align to prevent false-sharing
     let out_size = align_up(allocs + 2, Page::SIZE);
-    let out_begin = out_mapping.as_mut_ptr() as usize;
 
     // Warmup
     for page in &mut mapping[..] {
         *page.cast_mut::<usize>() = 1;
     }
 
-    unsafe { &mut *(Arc::as_ptr(&alloc) as *mut dyn Alloc) }
-        .init(threads, &mut mapping, true)
-        .unwrap();
+    alloc.init(threads, &mut mapping, true).unwrap();
+    alloc.free_all().unwrap();
     warn!("initialized");
 
-    let barrier = Arc::new(Barrier::new(threads));
-    let out_mapping_len = out_mapping.len();
-    thread::parallel(0..threads, move |t| {
+    let barrier = Barrier::new(threads);
+    thread::parallel(out_mapping.chunks_mut(out_size).enumerate(), |(t, out)| {
         thread::pin(t);
 
-        let out = unsafe {
-            slice::from_raw_parts_mut((out_begin as *mut u64).add(t * out_size), out_size)
-        };
-        assert!(t * out_size <= out_mapping_len);
-
+        // Currently modified index
         let (idx, data) = out.split_first_mut().unwrap();
-        let (repeat, data) = data.split_first_mut().unwrap();
+        // If the benchmark already started reallocating pages
+        let (realloc, data) = data.split_first_mut().unwrap();
 
         barrier.wait();
-        warn!("alloc");
+        warn!("alloc {allocs}");
 
         for i in 0..allocs {
             *idx = i as _;
             data[i] = alloc.get(t, order).unwrap();
         }
 
-        *repeat = 1;
-        warn!("repeat {:?} -> {}", repeat as *mut u64, repeat);
+        warn!("repeat");
+        *realloc = 1;
 
         let mut rng = WyRand::new(t as _);
         for _ in 0.. {
@@ -140,7 +144,7 @@ fn execute(
 
 /// Wait for the allocator to allocate memory, kill it and check if recovery is successful.
 fn monitor(
-    alloc: Arc<dyn Alloc>,
+    mut alloc: Box<dyn Alloc>,
     allocs: usize,
     threads: usize,
     order: usize,
@@ -152,23 +156,20 @@ fn monitor(
 
     // Wait for the allocator to finish initialization
     warn!("wait");
-
     let mut initializing = true;
     while initializing {
         std::thread::sleep(Duration::from_millis(1000));
 
         initializing = false;
-        for t in 0..threads {
-            let data = &out_mapping[t * out_size..(t + 1) * out_size];
-            let (_idx, data) = data.split_at(1);
-            let (repeat, _) = data.split_at(1);
-            if repeat[0] != 1 {
+        for data in out_mapping.chunks(out_size) {
+            if data[1] != 1 {
                 initializing = true;
                 break;
             }
         }
         warn!("initializing {initializing}");
 
+        // Check that the child is still running
         let mut status = unsafe { std::mem::zeroed() };
         let result = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
         if result == -1 {
@@ -194,34 +195,30 @@ fn monitor(
     warn!("check");
 
     // Recover allocator
-    unsafe { &mut *(Arc::as_ptr(&alloc) as *mut dyn Alloc) }
-        .init(threads, &mut mapping, false)
-        .unwrap();
+    alloc.init(threads, &mut mapping, true).unwrap();
+    alloc.recover().unwrap();
 
     let expected = allocs * threads - threads;
     let actual = alloc.dbg_allocated_pages();
     warn!("expected={expected} actual={actual}");
     assert!(expected <= actual && actual <= expected + threads);
 
-    for t in 0..threads {
-        let data = &out_mapping[t * out_size..(t + 1) * out_size];
+    for (t, data) in out_mapping.chunks(out_size).enumerate() {
         let (idx, data) = data.split_first().unwrap();
-        let (repeat, _) = data.split_first().unwrap();
+        let (realloc, _) = data.split_first().unwrap();
 
-        warn!("Out t{t} idx={} repeat={}", idx, repeat);
-        assert_eq!(*repeat, 1);
+        warn!("Out t{t} idx={idx} realloc={realloc}");
+        assert_eq!(*realloc, 1);
     }
 
     // Try to free all allocated pages
     // Except those that were allocated/freed during the crash
     warn!("try free");
-    for t in 0..threads {
-        let data = &out_mapping[t * out_size..(t + 1) * out_size];
+    for (t, data) in out_mapping.chunks(out_size).enumerate() {
         let (idx, data) = data.split_first().unwrap();
-        let (repeat, data) = data.split_first().unwrap();
+        let (_realloc, data) = data.split_first().unwrap();
 
-        let max = if *repeat == 0 { *idx as usize } else { allocs };
-        for (i, addr) in data[0..max].iter().enumerate() {
+        for (i, addr) in data[0..allocs].iter().enumerate() {
             if i != *idx as usize {
                 alloc.put(t, *addr, order).unwrap();
             }
@@ -231,6 +228,7 @@ fn monitor(
     // is less equal to the number of concurrent threads (upper bound).
     assert!(alloc.dbg_allocated_pages() <= threads);
     warn!("Ok");
+    drop(alloc); // Free alloc first
 }
 
 #[allow(unused_variables)]

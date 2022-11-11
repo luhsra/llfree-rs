@@ -5,7 +5,10 @@
 #![feature(new_uninit)]
 #![feature(int_roundings)]
 #![feature(int_log)]
+#![feature(array_windows)]
 #![feature(generic_const_exprs)]
+
+#![allow(clippy::assertions_on_constants)]
 
 #[cfg(feature = "std")]
 #[macro_use]

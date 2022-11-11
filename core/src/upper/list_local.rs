@@ -155,10 +155,6 @@ impl Alloc for ListLocal {
         self.pages
     }
 
-    fn pages_needed(&self, cores: usize) -> usize {
-        cores
-    }
-
     #[cold]
     fn dbg_for_each_huge_page(&self, _f: fn(usize)) {}
 

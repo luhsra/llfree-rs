@@ -22,12 +22,12 @@ struct Meta {
 }
 const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
-/// This allocator splits its memory range into 1G chunks.
+/// This allocator splits its memory range into chunks.
 /// Giant pages are directly allocated in it.
-/// For smaller pages, however, the 1G chunk is handed over to the
+/// For smaller pages, however, the chunk is handed over to the
 /// lower allocator, managing these smaller allocations.
-/// These 1G chunks are, due to the inner workins of the lower allocator,
-/// called 1G *subtrees*.
+/// These chunks are, due to the inner workins of the lower allocator,
+/// called *subtrees*.
 ///
 /// This allocator uses a cache-line aligned array to store the subtrees
 /// (level 3 entries).
@@ -328,15 +328,6 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
         self.lower.pages()
     }
 
-    fn pages_needed(&self, cores: usize) -> usize {
-        L::N * cores
-    }
-
-    #[cold]
-    fn dbg_for_each_huge_page(&self, f: fn(usize)) {
-        self.lower.dbg_for_each_huge_page(f)
-    }
-
     #[cold]
     fn dbg_free_pages(&self) -> usize {
         let mut pages = 0;
@@ -345,6 +336,22 @@ impl<A: Entry, L: LowerAlloc> Alloc for ArrayAligned<A, L> {
             pages += pte.free();
         }
         pages
+    }
+
+    #[cold]
+    fn dbg_free_huge_pages(&self) -> usize {
+        let mut counter = 0;
+        self.lower.dbg_for_each_huge_page(|c| {
+            if c == 0 {
+                counter += 1;
+            }
+        });
+        counter
+    }
+
+    #[cold]
+    fn dbg_for_each_huge_page(&self, f: fn(usize)) {
+        self.lower.dbg_for_each_huge_page(f)
     }
 }
 
