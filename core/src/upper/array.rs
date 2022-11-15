@@ -69,12 +69,7 @@ where
             self.lower.pages()
         )?;
 
-        writeln!(
-            f,
-            "    subtrees: {:?} ({} pages per tree)",
-            self.trees,
-            L::N
-        )?;
+        writeln!(f, "    subtrees: {:?} ({} pages)", self.trees, L::N)?;
         let free_pages = self.dbg_free_pages();
         let free_huge_pages = self.dbg_free_huge_pages();
         writeln!(

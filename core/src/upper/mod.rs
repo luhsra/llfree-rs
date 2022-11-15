@@ -33,8 +33,6 @@ pub const MAX_PAGES: usize = Mapping([9; 4]).span(4);
 /// The general interface of the allocator implementations.
 pub trait Alloc: Sync + Send + fmt::Debug {
     /// Initialize the allocator.
-    /// When `persistent` is set all level 1 and 2 page tables are allocated
-    /// at the end of `memory` together with an metadata page.
     #[cold]
     fn init(&mut self, cores: usize, memory: &mut [Page], persistent: bool) -> Result<()>;
     /// Init as entirely free area.
@@ -70,7 +68,7 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     #[cold]
     /// Return the number of free huge pages or 0 if the allocator cannot allocate huge pages.
     fn dbg_free_huge_pages(&self) -> usize {
-        return 0;
+        0
     }
     /// Execute f for each huge page with the number of free pages
     /// in this huge page as parameter.
@@ -83,8 +81,52 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     }
 }
 
+/// Defines if the allocator should be allocated persistently
+/// and if it in that case should try to recover from the persistent memory.
+#[derive(PartialEq, Eq)]
+pub enum Persistency {
+    /// Not persistent
+    Volatile,
+    /// Persistent and try recovery
+    TryRecover,
+    /// Overwrite the persistent memory
+    Overwrite,
+}
+
+/// Wrapper for creating a new allocator instance
+pub trait AllocNew: Sized + Alloc + Default {
+    /// Create and initialize the allocator.
+    #[cold]
+    fn new(
+        cores: usize,
+        memory: &mut [Page],
+        persistency: Persistency,
+        free_all: bool,
+    ) -> Result<Self> {
+        let mut a = Self::default();
+        a.init(cores, memory, persistency != Persistency::Volatile)?;
+        // Try recovery if persistent
+        if persistency == Persistency::TryRecover {
+            match a.recover() {
+                Ok(_) => return Ok(a),
+                Err(Error::Initialization) => {} // continue
+                Err(e) => return Err(e),
+            }
+        }
+        if free_all {
+            a.free_all()?;
+        } else {
+            a.reserve_all()?;
+        }
+        Ok(a)
+    }
+}
+// Implement for all default initializable allocators
+impl<A: Sized + Alloc + Default> AllocNew for A {}
+
 /// The short name of an allocator.
-/// E.g.: `ArrayAtomic4C32` for `nvalloc::upper::array_atomic::ArrayAtomic<4, nvalloc::lower::cache::Cache<32>>`
+/// E.g.: `ArrayAtomic4C32` for
+/// `nvalloc::upper::array_atomic::ArrayAtomic<4, nvalloc::lower::cache::Cache<32>>`
 #[derive(PartialEq, Eq, Hash)]
 pub struct AllocName {
     base: &'static str,
@@ -168,7 +210,7 @@ impl<const L: usize> Local<L> {
     }
     #[allow(clippy::mut_from_ref)]
     fn p(&self) -> &mut RecentFrees<L> {
-        unsafe { self.inner.get().as_mut().unwrap_unchecked() }
+        unsafe { &mut *self.inner.get() }
     }
     /// Add a chunk (subtree) id to the history of chunks.
     pub fn frees_push(&self, chunk: usize) {
@@ -218,7 +260,6 @@ mod test {
 
     use core::any::type_name;
     use core::ptr::null_mut;
-    use std::sync::Arc;
     use std::time::Instant;
 
     use alloc::vec::Vec;
@@ -226,7 +267,6 @@ mod test {
 
     use log::{info, warn};
 
-    use super::Local;
     use crate::lower::*;
     use crate::mmap::test_mapping;
     use crate::table::PT_LEN;
@@ -304,12 +344,7 @@ mod test {
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(1, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        });
+        let alloc = Allocator::new(1, &mut mapping, Persistency::Volatile, true).unwrap();
 
         assert_eq!(alloc.dbg_free_pages(), alloc.pages());
 
@@ -383,12 +418,7 @@ mod test {
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(1, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        });
+        let alloc = Allocator::new(1, &mut mapping, Persistency::Volatile, true).unwrap();
 
         warn!("start alloc...");
         const ALLOCS: usize = MEM_SIZE / Page::SIZE / 4 * 3;
@@ -446,16 +476,10 @@ mod test {
         info!("mmap {MEM_SIZE} bytes at {range:?}");
         let range = range.start as u64..range.end as u64;
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        });
+        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
 
-        let a = alloc.clone();
-        let barrier = Arc::new(Barrier::new(THREADS));
-        thread::parallel(0..THREADS, move |t| {
+        let barrier = Barrier::new(THREADS);
+        thread::parallel(0..THREADS, |t| {
             thread::pin(t);
 
             barrier.wait();
@@ -500,7 +524,7 @@ mod test {
             }
         });
 
-        assert_eq!(a.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
 
     #[test]
@@ -514,12 +538,7 @@ mod test {
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(1, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        });
+        let alloc = Allocator::new(1, &mut mapping, Persistency::Volatile, true).unwrap();
 
         assert_eq!(alloc.dbg_allocated_pages(), 0);
 
@@ -592,27 +611,21 @@ mod test {
         let range = mapping.as_ptr_range();
         let range = range.start as u64..range.end as u64;
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        });
+        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
-        let barrier = Arc::new(Barrier::new(THREADS));
+        let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
-        let a = alloc.clone();
         thread::parallel(
             pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            move |(t, pages)| {
+            |(t, pages)| {
                 thread::pin(t);
                 barrier.wait();
 
                 for page in pages {
-                    *page = a.get(t, 0).unwrap();
+                    *page = alloc.get(t, 0).unwrap();
                 }
             },
         );
@@ -642,27 +655,21 @@ mod test {
         let range = mapping.as_ptr_range();
         let range = range.start as u64..range.end as u64;
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        });
+        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
-        let barrier = Arc::new(Barrier::new(THREADS));
+        let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
-        let a = alloc.clone();
         thread::parallel(
             pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            move |(t, pages)| {
+            |(t, pages)| {
                 thread::pin(t);
                 barrier.wait();
 
                 for page in pages {
-                    *page = a.get(t, 0).unwrap();
+                    *page = alloc.get(t, 0).unwrap();
                 }
             },
         );
@@ -678,19 +685,14 @@ mod test {
             assert!(range.contains(&a) && range.contains(&b));
         }
 
-        let barrier = Arc::new(Barrier::new(THREADS));
-        let a = alloc.clone();
-        thread::parallel(
-            pages.chunks(ALLOC_PER_THREAD).enumerate(),
-            move |(t, pages)| {
-                thread::pin(t);
-                barrier.wait();
+        thread::parallel(pages.chunks(ALLOC_PER_THREAD).enumerate(), |(t, pages)| {
+            thread::pin(t);
+            barrier.wait();
 
-                for page in pages {
-                    a.put(t, *page, 0).unwrap();
-                }
-            },
-        );
+            for page in pages {
+                alloc.put(t, *page, 0).unwrap();
+            }
+        });
 
         assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
@@ -708,27 +710,21 @@ mod test {
         let range = mapping.as_ptr_range();
         let range = range.start as u64..range.end as u64;
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        });
+        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
-        let barrier = Arc::new(Barrier::new(THREADS));
+        let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
-        let a = alloc.clone();
         thread::parallel(
             pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            move |(t, pages)| {
+            |(t, pages)| {
                 thread::pin(t);
                 barrier.wait();
 
                 for page in pages {
-                    *page = a.get(t, 9).unwrap();
+                    *page = alloc.get(t, 9).unwrap();
                 }
             },
         );
@@ -755,12 +751,12 @@ mod test {
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
-        let barrier = Arc::new(Barrier::new(THREADS));
+        let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
         thread::parallel(
             pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            move |(t, pages)| {
+            |(t, pages)| {
                 thread::pin(t);
                 barrier.wait();
 
@@ -794,12 +790,12 @@ mod test {
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
-        let barrier = Arc::new(Barrier::new(THREADS));
+        let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
         thread::parallel(
             pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            move |(t, pages)| {
+            |(t, pages)| {
                 thread::pin(t);
                 barrier.wait();
 
@@ -842,18 +838,11 @@ mod test {
 
         let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        });
+        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
+        let barrier = Barrier::new(THREADS);
 
         // Stress test
-        let barrier = Arc::new(Barrier::new(THREADS));
-
-        let a = alloc.clone();
-        thread::parallel(0..THREADS, move |t| {
+        thread::parallel(0..THREADS, |t| {
             thread::pin(t);
             barrier.wait();
 
@@ -872,7 +861,7 @@ mod test {
         });
 
         warn!("check");
-        assert_eq!(a.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
 
     #[test]
@@ -883,14 +872,7 @@ mod test {
 
         let mut mapping = test_mapping(0x1000_0000_0000, 4 * PT_LEN * PT_LEN).unwrap();
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        });
-
-        let barrier = Arc::new(Barrier::new(THREADS));
+        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
 
         // Alloc on first thread
         thread::pin(0);
@@ -899,29 +881,26 @@ mod test {
             *page = alloc.get(0, 0).unwrap();
         }
 
-        let handle = {
-            let barrier = barrier.clone();
-            let alloc = alloc.clone();
-            std::thread::spawn(move || {
+        let barrier = Barrier::new(THREADS);
+        std::thread::scope(|s| {
+            s.spawn(|| {
                 thread::pin(1);
                 barrier.wait();
                 // Free on another thread
                 for page in &pages {
                     alloc.put(1, *page, 0).unwrap();
                 }
-            })
-        };
+            });
 
-        let mut pages = vec![0; ALLOC_PER_THREAD];
+            let mut pages = vec![0; ALLOC_PER_THREAD];
 
-        barrier.wait();
+            barrier.wait();
 
-        // Simultaneously alloc on first thread
-        for page in &mut pages {
-            *page = alloc.get(0, 0).unwrap();
-        }
-
-        handle.join().unwrap();
+            // Simultaneously alloc on first thread
+            for page in &mut pages {
+                *page = alloc.get(0, 0).unwrap();
+            }
+        });
 
         warn!("check");
         assert_eq!(alloc.dbg_allocated_pages(), ALLOC_PER_THREAD);
@@ -937,12 +916,7 @@ mod test {
         let expected_pages = (PT_LEN + 2) * (1 + (1 << 9));
 
         {
-            let alloc = Arc::new({
-                let mut a = Allocator::default();
-                a.init(1, &mut mapping, true).unwrap();
-                a.free_all().unwrap();
-                a
-            });
+            let alloc = Allocator::new(1, &mut mapping, Persistency::Overwrite, true).unwrap();
 
             for _ in 0..PT_LEN + 2 {
                 alloc.get(0, 0).unwrap();
@@ -951,17 +925,13 @@ mod test {
 
             assert_eq!(alloc.dbg_allocated_pages(), expected_pages);
 
-            // leak
-            let _ = Arc::into_raw(alloc);
+            // leak (crash)
+            std::mem::forget(alloc);
         }
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(1, &mut mapping, true).unwrap();
-            a.recover().unwrap();
-            a
-        });
-
+        let mut alloc = Allocator::default();
+        alloc.init(1, &mut mapping, true).unwrap();
+        alloc.recover().unwrap();
         assert_eq!(alloc.dbg_allocated_pages(), expected_pages);
     }
 
@@ -973,17 +943,11 @@ mod test {
         logging();
 
         let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * (THREADS * 2 + 1)).unwrap();
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        });
-        let a = alloc.clone();
+        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
 
-        let barrier = Arc::new(Barrier::new(THREADS));
+        let barrier = Barrier::new(THREADS);
 
-        thread::parallel(0..THREADS, move |t| {
+        thread::parallel(0..THREADS, |t| {
             thread::pin(t);
             let mut rng = WyRand::new(42 + t as u64);
             let mut num_pages = 0;
@@ -1022,7 +986,7 @@ mod test {
             }
         });
 
-        assert_eq!(a.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.dbg_allocated_pages(), 0);
     }
 
     #[test]
@@ -1034,12 +998,7 @@ mod test {
 
         let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(THREADS, &mut mapping, false).unwrap();
-            a.reserve_all().unwrap();
-            a
-        });
+        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, false).unwrap();
         assert_eq!(alloc.dbg_allocated_pages(), PAGES);
 
         for pages in mapping.chunks_exact(1 << Lower::MAX_ORDER) {
@@ -1047,14 +1006,13 @@ mod test {
         }
         assert_eq!(alloc.dbg_allocated_pages(), 0);
 
-        let a = alloc.clone();
-        thread::parallel(0..THREADS, move |core| {
+        thread::parallel(0..THREADS, |core| {
             thread::pin(core);
             for _ in 0..(PAGES / THREADS) / (1 << Lower::MAX_ORDER) {
                 alloc.get(core, Lower::MAX_ORDER).unwrap();
             }
         });
-        assert_eq!(a.dbg_allocated_pages(), PAGES);
+        assert_eq!(alloc.dbg_allocated_pages(), PAGES);
     }
 
     #[test]
@@ -1062,12 +1020,7 @@ mod test {
         logging();
 
         let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * 2).unwrap();
-        let alloc = {
-            let mut a = Allocator::default();
-            a.init(1, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
-            a
-        };
+        let alloc = Allocator::new(1, &mut mapping, Persistency::Volatile, true).unwrap();
 
         // Alloc a whole subtree
         let mut pages = Vec::with_capacity(Lower::N / 2);

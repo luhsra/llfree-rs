@@ -88,8 +88,9 @@ const _: () = assert!(Bitfield::<2>::ORDER == 7);
 
 impl<const N: usize> Default for Bitfield<N> {
     fn default() -> Self {
-        const D: AtomicU64 = AtomicU64::new(0);
-        Self { data: [D; N] }
+        Self {
+            data: unsafe { core::mem::zeroed() },
+        }
     }
 }
 
