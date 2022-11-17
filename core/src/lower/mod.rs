@@ -26,6 +26,7 @@ pub trait LowerAlloc: Default + fmt::Debug {
     const N: usize;
     /// The maximal allowed order of this allocator
     const MAX_ORDER: usize;
+    const HUGE_ORDER: usize;
 
     /// Create a new lower allocator.
     fn new(cores: usize, memory: &mut [Page], persistent: bool) -> Self;

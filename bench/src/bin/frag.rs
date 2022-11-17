@@ -39,7 +39,7 @@ struct Args {
     stride: usize,
 }
 
-type Allocator = Array<4, Atom<128>>;
+type Allocator = Array<4, Cache<32>>;
 
 fn main() {
     let Args {

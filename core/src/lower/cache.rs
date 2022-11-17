@@ -47,6 +47,7 @@ where
 {
     const N: usize = Self::MAPPING.span(2);
     const MAX_ORDER: usize = Self::MAPPING.order(1) + 1;
+    const HUGE_ORDER: usize = Self::MAPPING.order(1);
 
     fn new(_cores: usize, memory: &mut [Page], persistent: bool) -> Self {
         let n1 = Self::MAPPING.num_pts(1, memory.len());

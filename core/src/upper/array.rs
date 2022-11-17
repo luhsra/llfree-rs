@@ -279,7 +279,7 @@ where
     fn dbg_free_huge_pages(&self) -> usize {
         let mut counter = 0;
         self.lower.dbg_for_each_huge_page(|c| {
-            if c == 0 {
+            if c == (1 << L::HUGE_ORDER) {
                 counter += 1;
             }
         });
