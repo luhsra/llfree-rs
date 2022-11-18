@@ -463,7 +463,7 @@ impl<const T2N: usize> Atom<T2N> {
         let i2 = Self::MAPPING.idx(2, page);
         let pt2 = self.pt2(page);
         let pt1 = self.pt1(page);
-        if pt1.fill_safe(true) {
+        if pt1.fill_cas(true) {
             if pt2.cas(i2, old, SEntry2::new()).is_err() {
                 error!("Failed partial clear");
                 return Err(Error::Corruption);

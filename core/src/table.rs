@@ -112,11 +112,12 @@ impl<const N: usize> Bitfield<N> {
     pub const ORDER: usize = Self::LEN.ilog2() as _;
     pub const SIZE: usize = Self::LEN / 8;
 
+    /// Overwrite the `range` of bits with `v`
     pub fn set(&self, range: Range<usize>, v: bool) {
         assert!(range.start <= range.end && range.end <= Self::LEN);
 
-        let entries = range.end.div_ceil(Self::ENTRY_BITS) - range.start / Self::ENTRY_BITS;
         let entry_off = range.start / Self::ENTRY_BITS;
+        let entries = range.end.div_ceil(Self::ENTRY_BITS) - entry_off;
 
         for ei in entry_off..entry_off + entries {
             let bit_off = ei * Self::ENTRY_BITS;
@@ -136,16 +137,19 @@ impl<const N: usize> Bitfield<N> {
         }
     }
 
+    /// Return if the `i`-th bit is set
     pub fn get(&self, i: usize) -> bool {
         let di = i / Self::ENTRY_BITS;
         let bit = 1 << (i % Self::ENTRY_BITS);
         self.data[di].load(Ordering::SeqCst) & bit != 0
     }
 
+    /// Return the  `i`-th entry
     pub fn get_entry(&self, i: usize) -> u64 {
         self.data[i].load(Ordering::SeqCst)
     }
 
+    /// Toggle 2^`order` bits at the `i`-th place if they are all zero or one as expected
     pub fn toggle(&self, i: usize, order: usize, expected: bool) -> Result<(), ()> {
         let di = i / Self::ENTRY_BITS;
         let num_pages = 1 << order;
@@ -201,6 +205,7 @@ impl<const N: usize> Bitfield<N> {
         Err(Error::Memory)
     }
 
+    /// Fill this bitset with `v` ignoring any previous data
     pub fn fill(&self, v: bool) {
         let v = if v { u64::MAX } else { 0 };
         // cast to raw memory to let the compiler use vector instructions
@@ -211,8 +216,8 @@ impl<const N: usize> Bitfield<N> {
         atomic::fence(Ordering::SeqCst);
     }
 
-    /// Fill using cas
-    pub fn fill_safe(&self, v: bool) -> bool {
+    /// Fills the bitset using atomic compare exchage, returning false on failure
+    pub fn fill_cas(&self, v: bool) -> bool {
         let v = if v { u64::MAX } else { 0 };
 
         for e in &self.data {

@@ -37,7 +37,6 @@ The persistent lower allocators can be found in [lower](core/src/lower/).
 Their interface is defined in [lower.rs](core/src/lower.rs).
 These lower allocators are responsible for managing the level one and level two-page tables that are persisted on the non-volatile memory.
 They allocate pages of 4K up to 4M in these subtrees.
-Currently, there is only one lower allocator implementation:
 
 - [`Cache`](core/src/lower/cache.rs): This allocator has a 512 bit large bitset at the lowes level. It stores which 4K pages are allocated. The second level cosists of tables with N 16 bit entries, one for each bitset. These entries contain a counter of free pages in the related bitset and a flag if the whole subtree is allocated as a 2M huge page.
 The number of entries N in the second level tables can be defined at compile-time.
