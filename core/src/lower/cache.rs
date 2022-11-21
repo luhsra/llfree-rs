@@ -280,11 +280,8 @@ where
                 // small allocations
                 let pt = self.pt1(page);
                 let entry = pt.get_entry(page / Table1::ENTRY_BITS);
-                let mask = if num_pages >= u64::BITS as usize {
-                    u64::MAX
-                } else {
-                    ((1 << num_pages) - 1) << (page % Table1::ENTRY_BITS)
-                };
+                let mask =
+                    (u64::MAX >> (u64::BITS as usize - num_pages)) << (page % Table1::ENTRY_BITS);
                 (entry & mask) == 0
             }
         }

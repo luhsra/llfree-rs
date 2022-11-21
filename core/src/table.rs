@@ -146,14 +146,10 @@ impl<const N: usize> Bitfield<N> {
 
     /// Toggle 2^`order` bits at the `i`-th place if they are all zero or one as expected
     pub fn toggle(&self, i: usize, order: usize, expected: bool) -> Result<(), ()> {
-        let di = i / Self::ENTRY_BITS;
         let num_pages = 1 << order;
         debug_assert!(num_pages <= u64::BITS);
-        let mask = if num_pages >= u64::BITS {
-            u64::MAX
-        } else {
-            ((1 << num_pages) - 1) << (i % Self::ENTRY_BITS)
-        };
+        let mask = (u64::MAX >> (u64::BITS - num_pages)) << (i % Self::ENTRY_BITS);
+        let di = i / Self::ENTRY_BITS;
         match self.data[di].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
             if expected {
                 (e & mask == mask).then_some(e & !mask)
@@ -173,7 +169,7 @@ impl<const N: usize> Bitfield<N> {
         for j in 0..self.data.len() {
             let i = (j + i) % self.data.len();
 
-            #[cfg(feature = "stop")]
+            #[cfg(all(test, feature = "stop"))]
             {
                 // Skip full entries for the tests
                 if self.data[i].load(Ordering::SeqCst) == u64::MAX {
@@ -258,7 +254,7 @@ fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
             let num_pages = 1 << order;
             for i in 0..64 / num_pages {
                 let i = i * num_pages;
-                let mask = ((1 << num_pages) - 1) << i;
+                let mask = (u64::MAX >> (u64::BITS - num_pages)) << i;
                 if v & mask == 0 {
                     return Some((v | mask, i as usize));
                 }
@@ -609,32 +605,52 @@ mod test {
 
     #[test]
     fn bit_set() {
-        let bitset = super::Bitfield::<2>::default();
-        bitset.set(0..0, true);
-        assert_eq!(bitset.get_entry(0), 0);
-        assert_eq!(bitset.get_entry(1), 0);
-        bitset.set(0..1, true);
-        assert_eq!(bitset.get_entry(0), 0b1);
-        assert_eq!(bitset.get_entry(1), 0b0);
-        bitset.set(0..1, false);
-        assert_eq!(bitset.get_entry(0), 0b0);
-        assert_eq!(bitset.get_entry(1), 0b0);
-        bitset.set(0..2, true);
-        assert_eq!(bitset.get_entry(0), 0b11);
-        assert_eq!(bitset.get_entry(1), 0b0);
-        bitset.set(2..56, true);
-        assert_eq!(bitset.get_entry(0), 0x00ff_ffff_ffff_ffff);
-        assert_eq!(bitset.get_entry(1), 0b0);
-        bitset.set(60..73, true);
-        assert_eq!(bitset.get_entry(0), 0xf0ff_ffff_ffff_ffff);
-        assert_eq!(bitset.get_entry(1), 0x01ff);
-        bitset.set(96..128, true);
-        bitset.set(96..128, true);
-        assert_eq!(bitset.get_entry(0), 0xf0ff_ffff_ffff_ffff);
-        assert_eq!(bitset.get_entry(1), 0xffff_ffff_0000_01ff);
-        bitset.set(0..128, false);
-        assert_eq!(bitset.get_entry(0), 0);
-        assert_eq!(bitset.get_entry(1), 0);
+        let bitfield = super::Bitfield::<2>::default();
+        bitfield.set(0..0, true);
+        assert_eq!(bitfield.get_entry(0), 0);
+        assert_eq!(bitfield.get_entry(1), 0);
+        bitfield.set(0..1, true);
+        assert_eq!(bitfield.get_entry(0), 0b1);
+        assert_eq!(bitfield.get_entry(1), 0b0);
+        bitfield.set(0..1, false);
+        assert_eq!(bitfield.get_entry(0), 0b0);
+        assert_eq!(bitfield.get_entry(1), 0b0);
+        bitfield.set(0..2, true);
+        assert_eq!(bitfield.get_entry(0), 0b11);
+        assert_eq!(bitfield.get_entry(1), 0b0);
+        bitfield.set(2..56, true);
+        assert_eq!(bitfield.get_entry(0), 0x00ff_ffff_ffff_ffff);
+        assert_eq!(bitfield.get_entry(1), 0b0);
+        bitfield.set(60..73, true);
+        assert_eq!(bitfield.get_entry(0), 0xf0ff_ffff_ffff_ffff);
+        assert_eq!(bitfield.get_entry(1), 0x01ff);
+        bitfield.set(96..128, true);
+        assert_eq!(bitfield.get_entry(0), 0xf0ff_ffff_ffff_ffff);
+        assert_eq!(bitfield.get_entry(1), 0xffff_ffff_0000_01ff);
+        bitfield.set(0..128, false);
+        assert_eq!(bitfield.get_entry(0), 0);
+        assert_eq!(bitfield.get_entry(1), 0);
+    }
+
+    #[test]
+    fn bit_toggle() {
+        let bitfield = super::Bitfield::<2>::default();
+        bitfield.toggle(8, 3, false).unwrap();
+        assert_eq!(bitfield.get_entry(0), 0xff00);
+        assert_eq!(bitfield.get_entry(1), 0);
+        bitfield.toggle(16, 2, false).unwrap();
+        assert_eq!(bitfield.get_entry(0), 0xfff00);
+        assert_eq!(bitfield.get_entry(1), 0);
+        bitfield.toggle(20, 2, false).unwrap();
+        assert_eq!(bitfield.get_entry(0), 0xffff00);
+        assert_eq!(bitfield.get_entry(1), 0);
+        bitfield.toggle(8, 4, false).expect_err("");
+        bitfield.toggle(8, 4, true).unwrap();
+        assert_eq!(bitfield.get_entry(0), 0);
+        assert_eq!(bitfield.get_entry(1), 0);
+        bitfield.toggle(0, 6, false).unwrap();
+        assert_eq!(bitfield.get_entry(0), u64::MAX);
+        assert_eq!(bitfield.get_entry(1), 0);
     }
 
     #[test]
