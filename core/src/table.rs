@@ -116,23 +116,18 @@ impl<const N: usize> Bitfield<N> {
     pub fn set(&self, range: Range<usize>, v: bool) {
         assert!(range.start <= range.end && range.end <= Self::LEN);
 
-        let entry_off = range.start / Self::ENTRY_BITS;
-        let entries = range.end.div_ceil(Self::ENTRY_BITS) - entry_off;
-
-        for ei in entry_off..entry_off + entries {
-            let bit_off = ei * Self::ENTRY_BITS;
-            let bit_start = range.start.saturating_sub(bit_off).min(Self::ENTRY_BITS);
-            let bit_end = range.end.saturating_sub(bit_off).min(Self::ENTRY_BITS);
-            let bits = bit_end - bit_start;
-            let byte = if bits < Self::ENTRY_BITS {
-                ((1 << bits) - 1) << bit_start
-            } else {
-                u64::MAX
-            };
-            if v {
-                self.data[ei].fetch_or(byte, Ordering::SeqCst);
-            } else {
-                self.data[ei].fetch_and(!byte, Ordering::SeqCst);
+        if range.start != range.end {
+            for ei in range.start / Self::ENTRY_BITS..=(range.end - 1) / Self::ENTRY_BITS {
+                let bit_off = ei * Self::ENTRY_BITS;
+                let bit_start = range.start.saturating_sub(bit_off);
+                let bit_end = (range.end - bit_off).min(Self::ENTRY_BITS);
+                let bits = bit_end - bit_start;
+                let byte = (u64::MAX >> (Self::ENTRY_BITS - bits)) << bit_start;
+                if v {
+                    self.data[ei].fetch_or(byte, Ordering::SeqCst);
+                } else {
+                    self.data[ei].fetch_and(!byte, Ordering::SeqCst);
+                }
             }
         }
     }
