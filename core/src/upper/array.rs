@@ -397,13 +397,45 @@ where
                 }
             }
             Err(pte) => {
-                // TODO: try sync with global
+                // Try sync with global
+                self.try_sync_with_global(&local.pte, pte)?;
 
                 // reserve new
                 self.reserve_or_wait(&local.pte, pte, false)?;
                 Err(Error::CAS)
             }
         }
+    }
+
+    /// Frees from other CPUs update the global entry -> sync free counters.
+    ///
+    /// If successful returns `Error::CAS` -> retry.
+    /// Returns Ok if the global counter was not large enough -> fallback to normal reservation.
+    fn try_sync_with_global(&self, pte_a: &Atomic<Entry3>, old: Entry3) -> Result<()> {
+        let i = old.idx();
+        if i < self.trees.entries.len()
+            && old.free() + self.trees[i].load().free() > Trees::<{ L::N }>::almost_full()
+        {
+            if let Ok(pte) = self.trees[i].update(|e| e.reserved().then_some(e.with_free(0))) {
+                if pte_a
+                    .update(|e| (e.idx() == i).then_some(e.with_free(e.free() + pte.free())))
+                    .is_ok()
+                {
+                    // Sync successfull -> retry allocation
+                    return Err(Error::CAS);
+                } else {
+                    // undo global change
+                    if self.trees[i]
+                        .update(|e| Some(e.with_free(e.free() + pte.free())))
+                        .is_err()
+                    {
+                        error!("Failed undo sync");
+                        return Err(Error::Corruption);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Try to reserve a new subtree or wait for concurrent reservations to finish.
@@ -534,10 +566,12 @@ impl<const LN: usize> Trees<LN> {
         self.entries = pte3s.into();
     }
 
+    /// Almost no free pages left
     const fn almost_full() -> usize {
         1 << 10 // MAX_ORDER
     }
 
+    /// Almost all pages are free
     const fn almost_empty() -> usize {
         LN - (1 << 10) // MAX_ORDER
     }
@@ -564,6 +598,7 @@ impl<const LN: usize> Trees<LN> {
         }
     }
 
+    /// Find and reserve an empty tree
     fn reserve_empty(&self, start: usize) -> Result<Entry3> {
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
@@ -575,6 +610,7 @@ impl<const LN: usize> Trees<LN> {
         Err(Error::Memory)
     }
 
+    /// Find and reserve a partially filled tree in the vicinity
     fn reserve_partial(&self, start: usize) -> Result<Entry3> {
         // rechecking previous entries reduces fragmentation
         //  -> start with the previous cache line
