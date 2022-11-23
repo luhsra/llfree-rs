@@ -57,6 +57,12 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     /// Return the total number of pages the allocator manages.
     fn pages(&self) -> usize;
 
+    /// Unreserve cpu-local pages
+    #[cold]
+    fn drain(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Return the number of allocated pages.
     #[cold]
     fn dbg_allocated_pages(&self) -> usize {
@@ -94,7 +100,7 @@ pub enum Persistency {
 }
 
 /// Wrapper for creating a new allocator instance
-pub trait AllocNew: Sized + Alloc + Default {
+pub trait AllocExt: Sized + Alloc + Default {
     /// Create and initialize the allocator.
     #[cold]
     fn new(
@@ -122,7 +128,7 @@ pub trait AllocNew: Sized + Alloc + Default {
     }
 }
 // Implement for all default initializable allocators
-impl<A: Sized + Alloc + Default> AllocNew for A {}
+impl<A: Sized + Alloc + Default> AllocExt for A {}
 
 /// The short name of an allocator.
 /// E.g.: `ArrayAtomic4C32` for
@@ -1039,5 +1045,26 @@ mod test {
         let huge = alloc.get(0, 9).unwrap();
         warn!("huge = {huge}");
         warn!("{alloc:?}");
+    }
+
+    #[test]
+    fn drain() {
+        let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * 2).unwrap();
+        let alloc = Allocator::new(2, &mut mapping, Persistency::Volatile, true).unwrap();
+
+        // allocate on second core => reserve a subtree
+        alloc.get(1, 0).unwrap();
+
+        // completely the subtree of the first core
+        for _ in 0..Lower::N {
+            alloc.get(0, 0).unwrap();
+        }
+        // next allocation should trigger a reservation
+        alloc.get(0, 0).expect_err("expecting oom");
+        // drain (unreserve subtree of second core)
+        alloc.drain().unwrap();
+        // reserve subtree of second core (which now has none)
+        alloc.get(0, 0).unwrap();
+        alloc.get(1, 0).expect_err("expecting oom");
     }
 }

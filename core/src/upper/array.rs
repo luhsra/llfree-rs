@@ -1,7 +1,7 @@
+use core::fmt;
 use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use core::{fmt, hint};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -12,7 +12,7 @@ use crate::atomic::{ANode, Atomic, Next};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_down, Page};
+use crate::util::{align_down, spin_wait, Page};
 use crate::{Error, Result};
 
 /// Non-Volatile global metadata
@@ -262,6 +262,14 @@ where
     }
 
     #[cold]
+    fn drain(&self) -> Result<()> {
+        for local in &self.local[..] {
+            self.cas_reserved(&local.pte, Entry3::new().with_idx(Entry3::IDX_MAX), false)?;
+        }
+        Ok(())
+    }
+
+    #[cold]
     fn dbg_free_pages(&self) -> usize {
         let mut pages = 0;
         for i in 0..self.pages().div_ceil(L::N) {
@@ -467,15 +475,12 @@ where
             }
         } else {
             // Wait for concurrent reservation to end
-            for _ in 0..(2 * CAS_RETRIES) {
-                let new_pte = pte_a.load();
-                if !new_pte.reserved() {
-                    return Ok(());
-                }
-                hint::spin_loop(); // pause cpu
+            if spin_wait(2 * CAS_RETRIES, || !pte_a.load().reserved()) {
+                Ok(())
+            } else {
+                error!("Timeout reservation wait");
+                Err(Error::Corruption)
             }
-            error!("Timeout reservation wait");
-            Err(Error::Corruption)
         }
     }
 
@@ -584,11 +589,11 @@ impl<const LN: usize> Trees<LN> {
     }
 
     fn unreserve(&self, pte: Entry3, pages: usize) -> Result<()> {
-        let i = pte.idx();
-        if i >= Entry3::IDX_MAX {
+        if !pte.has_idx() {
             return Ok(());
         }
 
+        let i = pte.idx();
         let max = (pages - i * LN).min(LN);
         if let Ok(_) = self[i].update(|v| v.unreserve_add(pte.free(), max)) {
             Ok(())

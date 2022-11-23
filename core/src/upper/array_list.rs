@@ -262,6 +262,19 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
     }
 
     #[cold]
+    fn drain(&self) -> Result<()> {
+        for local in &self.local[..] {
+            self.cas_reserved(
+                &local.pte,
+                Entry3::new().with_idx(Entry3::IDX_MAX),
+                false,
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[cold]
     fn dbg_free_pages(&self) -> usize {
         let mut pages = 0;
         for i in 0..self.pages().div_ceil(L::N) {
@@ -480,11 +493,11 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
         let pte = pte_a
             .update(|v| (v.reserved() == expect_reserved).then_some(new_pte))
             .map_err(|_| Error::CAS)?;
-        let i = pte.idx();
-        if i >= Entry3::IDX_MAX {
+        if !pte.has_idx() {
             return Ok(());
         }
 
+        let i = pte.idx();
         let max = (self.pages() - i * L::N).min(L::N);
         if let Ok(v) = self.trees[i].update(|v| v.unreserve_add(pte.free(), max)) {
             // Only if not already in list

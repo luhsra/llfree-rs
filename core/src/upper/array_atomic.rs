@@ -323,6 +323,14 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayAtomic<PR, L> {
     }
 
     #[cold]
+    fn drain(&self) -> Result<()> {
+        for local in &self.local[..] {
+            self.cas_reserved(&local.pte, false, Entry3::new().with_idx(Entry3::IDX_MAX))?;
+        }
+        Ok(())
+    }
+
+    #[cold]
     fn dbg_free_pages(&self) -> usize {
         let mut pages = 0;
         for i in 0..self.pages().div_ceil(L::N) {

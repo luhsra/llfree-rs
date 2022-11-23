@@ -4,7 +4,6 @@
 #![no_std]
 #![feature(new_uninit)]
 #![feature(int_roundings)]
-#![feature(int_log)]
 #![feature(array_windows)]
 #![feature(generic_const_exprs)]
 
