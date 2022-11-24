@@ -3,6 +3,8 @@ use core::mem::{align_of, size_of};
 use core::ops::Range;
 use core::sync::atomic::{self, AtomicU64, Ordering};
 
+use log::error;
+
 use crate::atomic::{Atomic, AtomicValue};
 use crate::util::Page;
 use crate::util::{align_down, align_up, CacheLine};
@@ -145,20 +147,51 @@ impl<const N: usize> Bitfield<N> {
     }
 
     /// Toggle 2^`order` bits at the `i`-th place if they are all zero or one as expected
-    pub fn toggle(&self, i: usize, order: usize, expected: bool) -> Result<(), ()> {
+    pub fn toggle(&self, i: usize, order: usize, expected: bool) -> Result<(), Error> {
         let num_pages = 1 << order;
-        debug_assert!(num_pages <= u64::BITS);
-        let mask = (u64::MAX >> (u64::BITS - num_pages)) << (i % Self::ENTRY_BITS);
-        let di = i / Self::ENTRY_BITS;
-        match self.data[di].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
-            if expected {
-                (e & mask == mask).then_some(e & !mask)
-            } else {
-                (e & mask == 0).then_some(e | mask)
+        debug_assert!(i % num_pages == 0, "not aligned");
+        if num_pages < Self::ENTRY_BITS {
+            // Updates within a single entry
+            let mask = (u64::MAX >> (Self::ENTRY_BITS - num_pages)) << (i % Self::ENTRY_BITS);
+            let di = i / Self::ENTRY_BITS;
+            match self.data[di].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
+                if expected {
+                    (e & mask == mask).then_some(e & !mask)
+                } else {
+                    (e & mask == 0).then_some(e | mask)
+                }
+            }) {
+                Ok(_) => Ok(()),
+                Err(_) => Err(Error::CAS),
             }
-        }) {
-            Ok(_) => Ok(()),
-            Err(_) => Err(()),
+        } else {
+            // Update multiple entries
+            let num_entries = num_pages / Self::ENTRY_BITS;
+            let di = i / Self::ENTRY_BITS;
+            for i in di..di + num_entries {
+                let expected = if expected { u64::MAX } else { 0 };
+                if let Err(_) = self.data[i].compare_exchange(
+                    expected,
+                    !expected,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    // Undo changes
+                    for j in (di..i).rev() {
+                        if let Err(_) = self.data[j].compare_exchange(
+                            !expected,
+                            expected,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            error!("Failed undo toggle");
+                            return Err(Error::Corruption);
+                        }
+                    }
+                    return Err(Error::CAS);
+                }
+            }
+            Ok(())
         }
     }
 
@@ -644,12 +677,19 @@ mod test {
         bitfield.toggle(20, 2, false).unwrap();
         assert_eq!(bitfield.get_entry(0), 0xffff00);
         assert_eq!(bitfield.get_entry(1), 0);
-        bitfield.toggle(8, 4, false).expect_err("");
-        bitfield.toggle(8, 4, true).unwrap();
+        bitfield.toggle(8, 3, false).expect_err("");
+        bitfield.toggle(8, 3, true).unwrap();
+        bitfield.toggle(16, 3, true).unwrap();
         assert_eq!(bitfield.get_entry(0), 0);
         assert_eq!(bitfield.get_entry(1), 0);
         bitfield.toggle(0, 6, false).unwrap();
         assert_eq!(bitfield.get_entry(0), u64::MAX);
+        assert_eq!(bitfield.get_entry(1), 0);
+        bitfield.toggle(64, 6, false).unwrap();
+        assert_eq!(bitfield.get_entry(0), u64::MAX);
+        assert_eq!(bitfield.get_entry(1), u64::MAX);
+        bitfield.toggle(0, 7, true).unwrap();
+        assert_eq!(bitfield.get_entry(0), 0);
         assert_eq!(bitfield.get_entry(1), 0);
     }
 

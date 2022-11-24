@@ -59,7 +59,7 @@ pub trait Alloc: Sync + Send + fmt::Debug {
 
     /// Unreserve cpu-local pages
     #[cold]
-    fn drain(&self) -> Result<()> {
+    fn drain(&self, _core: usize) -> Result<()> {
         Ok(())
     }
 
@@ -1051,6 +1051,9 @@ mod test {
     fn drain() {
         let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * 2).unwrap();
         let alloc = Allocator::new(2, &mut mapping, Persistency::Volatile, true).unwrap();
+        // should not change anything
+        alloc.drain(0).unwrap();
+        alloc.drain(1).unwrap();
 
         // allocate on second core => reserve a subtree
         alloc.get(1, 0).unwrap();
@@ -1059,11 +1062,11 @@ mod test {
         for _ in 0..Lower::N {
             alloc.get(0, 0).unwrap();
         }
-        // next allocation should trigger a reservation
+        // next allocation should trigger a reservation (no subtree left)
         alloc.get(0, 0).expect_err("expecting oom");
         // drain (unreserve subtree of second core)
-        alloc.drain().unwrap();
-        // reserve subtree of second core (which now has none)
+        alloc.drain(1).unwrap();
+        // reserve drained subtree of second core
         alloc.get(0, 0).unwrap();
         alloc.get(1, 0).expect_err("expecting oom");
     }

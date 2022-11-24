@@ -323,11 +323,13 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayAtomic<PR, L> {
     }
 
     #[cold]
-    fn drain(&self) -> Result<()> {
-        for local in &self.local[..] {
-            self.cas_reserved(&local.pte, false, Entry3::new().with_idx(Entry3::IDX_MAX))?;
+    fn drain(&self, core: usize) -> Result<()> {
+        let c = core % self.local.len();
+        let local = &self.local[c];
+        match self.cas_reserved(&local.pte, false, Entry3::new().with_idx(Entry3::IDX_MAX)) {
+            Err(Error::CAS) => Ok(()), // ignore cas errors
+            r => r,
         }
-        Ok(())
     }
 
     #[cold]
