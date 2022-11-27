@@ -83,7 +83,7 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
             let pages = (s1 + s2).div_ceil(Page::SIZE);
 
             assert!(pages < area.len());
-            let (area, tables) = area.split_at_mut(pages);
+            let (area, tables) = area.split_at_mut(area.len() - pages);
 
             let tables: *mut u8 = tables.as_mut_ptr().cast();
 
