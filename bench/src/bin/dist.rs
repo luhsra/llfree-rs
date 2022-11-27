@@ -1,3 +1,5 @@
+#![feature(int_roundings)]
+
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -11,7 +13,7 @@ use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::upper::{Alloc, Array};
-use nvalloc::util::{div_ceil, logging, Page};
+use nvalloc::util::{logging, Page};
 
 type Allocator = Array<3, Atom<128>>;
 
@@ -58,7 +60,7 @@ fn main() {
 
     // Populate mapping
     warn!("populate {} pages", mapping.len());
-    let chunk_size = div_ceil(mapping.len(), 4);
+    let chunk_size = mapping.len().div_ceil(4);
     thread::parallel(mapping.chunks_mut(chunk_size), |chunk| {
         for page in chunk {
             *page.cast_mut::<usize>() = 1;

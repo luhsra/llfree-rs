@@ -1,3 +1,5 @@
+#![feature(int_roundings)]
+
 use std::time::Instant;
 
 use clap::Parser;
@@ -5,7 +7,7 @@ use log::warn;
 use nvalloc::mmap::{madvise, MAdvise, MMap};
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
-use nvalloc::util::{avg_bounds, div_ceil, logging, Page};
+use nvalloc::util::{avg_bounds, logging, Page};
 
 /// Benchmarking the page-fault performance of a mapped memory region.
 #[derive(Parser, Debug)]
@@ -63,7 +65,7 @@ fn main() {
     };
     madvise(&mut mapping, adv);
 
-    let chunk_size = div_ceil(mapping.len(), threads);
+    let chunk_size = mapping.len().div_ceil(threads);
     let times = thread::parallel(mapping.chunks_mut(chunk_size), |chunk| {
         let timer = Instant::now();
         for page in chunk {

@@ -9,7 +9,7 @@ use log::{error, info, warn};
 use crate::entry::{Entry2, Entry2Pair};
 use crate::table::{ATable, Bitfield, Mapping};
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_up, div_ceil, spin_wait, Page};
+use crate::util::{align_up, spin_wait, Page};
 use crate::{Error, Result};
 
 use super::LowerAlloc;
@@ -53,11 +53,13 @@ where
         let n1 = Self::MAPPING.num_pts(1, memory.len());
         let n2 = Self::MAPPING.num_pts(2, memory.len());
         if persistent {
+            // Reserve memory within the managed NVM for the l1 and l2 tables
+            // These tables are stored at the end of the NVM
             let s1 = n1 * Table1::SIZE;
             let s1 = align_up(s1, ATable::<Entry2, T2N>::SIZE); // correct alignment
             let s2 = n1 * ATable::<Entry2, T2N>::SIZE;
-
-            let pages = div_ceil(s1 + s2, Page::SIZE);
+            // Num of pages occupied by the tables
+            let pages = (s1 + s2).div_ceil(Page::SIZE);
 
             assert!(pages < memory.len());
 
@@ -68,21 +70,21 @@ where
             offset += n1 * Table1::SIZE;
             offset = align_up(offset, ATable::<Entry2, T2N>::SIZE); // correct alignment
 
+            // Start of the l2 table array
             let l2 = unsafe { Box::from_raw(slice::from_raw_parts_mut(offset as *mut _, n2)) };
 
             Self {
                 begin: memory.as_ptr() as usize,
                 pages: memory.len() - pages,
-                // level 1 and 2 tables are stored at the end of the NVM
                 l1,
                 l2,
                 persistent,
             }
         } else {
+            // Allocate l1 and l2 tables in volatile memory
             Self {
                 begin: memory.as_ptr() as usize,
                 pages: memory.len(),
-                // Allocate in volatile memory
                 l1: unsafe { Box::new_uninit_slice(n1).assume_init() },
                 l2: unsafe { Box::new_uninit_slice(n2).assume_init() },
                 persistent,
@@ -175,6 +177,7 @@ where
 
             let pte = pt.get(i);
             if deep && pte.free() > 0 {
+                // Deep recovery updates the counter
                 let p = self.recover_l1(start);
                 if pte.free() != p {
                     warn!("Invalid PTE2 start=0x{start:x} i{i}: {} != {p}", pte.free());
@@ -247,7 +250,7 @@ where
 
     fn is_free(&self, page: usize, order: usize) -> bool {
         debug_assert!(page % (1 << order) == 0);
-        if page >= self.pages || order > Self::MAX_ORDER {
+        if order > Self::MAX_ORDER || page + (1 << order) > self.pages {
             return false;
         }
 
@@ -270,11 +273,11 @@ where
                 return true;
             }
 
-            if order > u64::BITS.ilog2() as usize {
+            if num_pages > u64::BITS as usize {
                 // larger than 64 pages (often allocated as huge page)
                 let pt = self.pt1(page);
                 let start = page / Table1::ENTRY_BITS;
-                let end = (page + (1 << order)) / Table1::ENTRY_BITS;
+                let end = (page + num_pages) / Table1::ENTRY_BITS;
                 (start..end).all(|i| pt.get_entry(i) == 0)
             } else {
                 // small allocations

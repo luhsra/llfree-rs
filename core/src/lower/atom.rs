@@ -1,4 +1,4 @@
-use core::fmt::Write;
+use core::fmt::{self, Write};
 use core::ops::Range;
 
 use alloc::boxed::Box;
@@ -31,23 +31,48 @@ type Table1 = Bitfield<2>;
 /// ```text
 /// RAM: [ Pages ], PT1s and PT2s are allocated elswhere
 /// ```
-#[derive(Default, Debug)]
 pub struct Atom<const T2N: usize> {
-    pub begin: usize,
-    pub pages: usize,
+    area: &'static mut [Page],
     l1: Box<[Table1]>,
     l2: Box<[ATable<SEntry2, T2N>]>,
     persistent: bool,
 }
+
+impl<const T2N: usize> Default for Atom<T2N> {
+    fn default() -> Self {
+        Self {
+            area: &mut [],
+            l1: Default::default(),
+            l2: Default::default(),
+            persistent: Default::default(),
+        }
+    }
+}
+
+impl<const T2N: usize> fmt::Debug for Atom<T2N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Atom")
+            .field("area", &self.area.as_ptr_range())
+            .field("l1", &self.l1)
+            .field("l2", &self.l2)
+            .field("persistent", &self.persistent)
+            .finish()
+    }
+}
+
+unsafe impl<const T2N: usize> Send for Atom<T2N> {}
+unsafe impl<const T2N: usize> Sync for Atom<T2N> {}
 
 impl<const T2N: usize> LowerAlloc for Atom<T2N> {
     const N: usize = Self::MAPPING.span(2);
     const MAX_ORDER: usize = Self::MAPPING.order(1) + 3;
     const HUGE_ORDER: usize = Self::MAPPING.order(1) + 2;
 
-    fn new(_cores: usize, memory: &mut [Page], persistent: bool) -> Self {
-        let n1 = Self::MAPPING.num_pts(1, memory.len());
-        let n2 = Self::MAPPING.num_pts(2, memory.len());
+    fn new(_cores: usize, area: &mut [Page], persistent: bool) -> Self {
+        let area = unsafe { slice::from_raw_parts_mut(area.as_mut_ptr(), area.len()) };
+        // FIXME: Lifetime hack!
+        let n1 = Self::MAPPING.num_pts(1, area.len());
+        let n2 = Self::MAPPING.num_pts(2, area.len());
         if persistent {
             // Reserve memory within the managed NVM for the l1 and l2 tables
             // These tables are stored at the end of the NVM
@@ -57,22 +82,23 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
             // Num of pages occupied by the tables
             let pages = (s1 + s2).div_ceil(Page::SIZE);
 
-            assert!(pages < memory.len());
+            assert!(pages < area.len());
+            let (area, tables) = area.split_at_mut(pages);
 
-            let mut offset = memory.as_ptr() as usize + (memory.len() - pages) * Page::SIZE;
+            let tables: *mut u8 = tables.as_mut_ptr().cast();
 
             // Start of the l1 table array
-            let l1 = unsafe { Box::from_raw(slice::from_raw_parts_mut(offset as *mut _, n1)) };
+            let l1 = unsafe { Box::from_raw(slice::from_raw_parts_mut(tables.cast(), n1)) };
 
-            offset += n1 * Table1::SIZE;
+            let mut offset = n1 * Table1::SIZE;
             offset = align_up(offset, ATable::<SEntry2, T2N>::SIZE); // correct alignment
 
             // Start of the l2 table array
-            let l2 = unsafe { Box::from_raw(slice::from_raw_parts_mut(offset as *mut _, n2)) };
+            let l2 =
+                unsafe { Box::from_raw(slice::from_raw_parts_mut(tables.add(offset).cast(), n2)) };
 
             Self {
-                begin: memory.as_ptr() as usize,
-                pages: memory.len() - pages,
+                area,
                 l1,
                 l2,
                 persistent,
@@ -80,8 +106,7 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
         } else {
             // Allocate l1 and l2 tables in volatile memory
             Self {
-                begin: memory.as_ptr() as usize,
-                pages: memory.len(),
+                area,
                 l1: unsafe { Box::new_uninit_slice(n1).assume_init() },
                 l2: unsafe { Box::new_uninit_slice(n2).assume_init() },
                 persistent,
@@ -90,35 +115,35 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
     }
 
     fn pages(&self) -> usize {
-        self.pages
+        self.area.len()
     }
 
     fn memory(&self) -> Range<*const Page> {
-        self.begin as *const Page..(self.begin + self.pages * Page::SIZE) as *const Page
+        self.area.as_ptr_range()
     }
 
     fn free_all(&self) {
         // Init pt2
-        for i in 0..Self::MAPPING.num_pts(2, self.pages) {
+        for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
             let pt2 = self.pt2(i * Self::MAPPING.span(2));
-            if i + 1 < Self::MAPPING.num_pts(2, self.pages) {
+            if i + 1 < Self::MAPPING.num_pts(2, self.pages()) {
                 pt2.fill(SEntry2::new().with_free(Self::MAPPING.span(1)));
             } else {
                 for j in 0..Self::MAPPING.len(2) {
                     let page = i * Self::MAPPING.span(2) + j * Self::MAPPING.span(1);
-                    let max = Self::MAPPING.span(1).min(self.pages.saturating_sub(page));
+                    let max = Self::MAPPING.span(1).min(self.pages().saturating_sub(page));
                     pt2.set(j, SEntry2::new().with_free(max));
                 }
             }
         }
         // Init pt1
-        for i in 0..Self::MAPPING.num_pts(1, self.pages) {
+        for i in 0..Self::MAPPING.num_pts(1, self.pages()) {
             let pt1 = self.pt1(i * Self::MAPPING.span(1));
 
-            if i + 1 < Self::MAPPING.num_pts(1, self.pages) {
+            if i + 1 < Self::MAPPING.num_pts(1, self.pages()) {
                 pt1.fill(false);
             } else {
-                let end = self.pages - i * Self::MAPPING.span(1);
+                let end = self.pages() - i * Self::MAPPING.span(1);
                 pt1.set(0..end, false);
                 pt1.set(end..Self::MAPPING.len(1), true);
             }
@@ -127,10 +152,10 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
 
     fn reserve_all(&self) {
         // Init pt2
-        for i in 0..Self::MAPPING.num_pts(2, self.pages) {
+        for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
             let pt2 = self.pt2(i * Self::MAPPING.span(2));
             let end = (i + 1) * Self::MAPPING.span(2);
-            if self.pages >= end {
+            if self.pages() >= end {
                 // Table is fully included in the memory range
                 // -> Allocated as full pages
                 pt2.fill(SEntry2::new_page());
@@ -138,7 +163,7 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
                 // Table is only partially included in the memory range
                 for j in 0..Self::MAPPING.len(2) {
                     let end = i * Self::MAPPING.span(2) + (j + 1) * Self::MAPPING.span(1);
-                    if self.pages >= end {
+                    if self.pages() >= end {
                         pt2.set(j, SEntry2::new_page());
                     } else {
                         // Remainder is allocated as small pages
@@ -148,10 +173,10 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
             }
         }
         // Init pt1
-        for i in 0..Self::MAPPING.num_pts(1, self.pages) {
+        for i in 0..Self::MAPPING.num_pts(1, self.pages()) {
             let pt1 = self.pt1(i * Self::MAPPING.span(1));
             let end = (i + 1) * Self::MAPPING.span(1);
-            if self.pages >= end {
+            if self.pages() >= end {
                 // Table is fully included in the memory range
                 pt1.fill(false);
             } else {
@@ -167,7 +192,7 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
         let pt = self.pt2(start);
         for i in 0..Self::MAPPING.len(2) {
             let start = Self::MAPPING.page(2, start, i);
-            if start > self.pages {
+            if start > self.pages() {
                 pt.set(i, SEntry2::new());
                 continue;
             }
@@ -210,7 +235,7 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
     /// Free single page and returns if the page was huge
     fn put(&self, page: usize, order: usize) -> Result<()> {
         debug_assert!(order <= Self::MAX_ORDER);
-        debug_assert!(page < self.pages);
+        debug_assert!(page < self.pages());
         stop!();
 
         if order >= Self::MAPPING.order(1) {
@@ -241,6 +266,11 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
     }
 
     fn is_free(&self, page: usize, order: usize) -> bool {
+        debug_assert!(page % (1 << order) == 0);
+        if order > Self::MAX_ORDER || page + (1 << order) > self.pages() {
+            return false;
+        }
+
         if let Some(huge_order) = order.checked_sub(Self::MAPPING.order(1)) {
             let i2 = Self::MAPPING.idx(2, page);
             let start = i2 % 8;
@@ -269,11 +299,11 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
     }
 
     fn dbg_allocated_pages(&self) -> usize {
-        let mut pages = self.pages;
-        for i in 0..Self::MAPPING.num_pts(2, self.pages) {
+        let mut pages = self.pages();
+        for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
             let start = i * Self::MAPPING.span(2);
             let pt2 = self.pt2(start);
-            for i2 in Self::MAPPING.range(2, start..self.pages) {
+            for i2 in Self::MAPPING.range(2, start..self.pages()) {
                 let start = Self::MAPPING.page(2, start, i2);
                 let pte2 = pt2.get(i2);
 
@@ -282,7 +312,7 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
                 } else {
                     let pt1 = self.pt1(start);
                     let mut free = 0;
-                    for i1 in Self::MAPPING.range(1, start..self.pages) {
+                    for i1 in Self::MAPPING.range(1, start..self.pages()) {
                         free += !pt1.get(i1) as usize;
                     }
                     assert_eq!(free, pte2.free(), "{pte2:?}: {pt1:?}");
@@ -294,10 +324,10 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
     }
 
     fn dbg_for_each_huge_page<F: FnMut(usize)>(&self, mut f: F) {
-        for i2 in 0..(self.pages / Self::MAPPING.span(2)) {
+        for i2 in 0..(self.pages() / Self::MAPPING.span(2)) {
             let start = i2 * Self::MAPPING.span(2);
             let pt2 = self.pt2_t::<SEntry2T4>(start);
-            for i1 in Self::MAPPING.range(2, start..self.pages).step_by(4) {
+            for i1 in Self::MAPPING.range(2, start..self.pages()).step_by(4) {
                 let SEntry2T4([e0, e1, e2, e3]) = pt2[i1 / 4].load();
                 f(e0.free() + e1.free() + e2.free() + e3.free());
             }
@@ -314,7 +344,7 @@ impl<const T2N: usize> Atom<T2N> {
     /// ```
     fn pt1(&self, page: usize) -> &Table1 {
         let i = page / Self::MAPPING.span(1);
-        debug_assert!(i < Self::MAPPING.num_pts(1, self.pages));
+        debug_assert!(i < Self::MAPPING.num_pts(1, self.pages()));
         &self.l1[i]
     }
 
@@ -324,7 +354,7 @@ impl<const T2N: usize> Atom<T2N> {
     /// ```
     fn pt2(&self, page: usize) -> &ATable<SEntry2, T2N> {
         let i = page / Self::MAPPING.span(2);
-        debug_assert!(i < Self::MAPPING.num_pts(2, self.pages));
+        debug_assert!(i < Self::MAPPING.num_pts(2, self.pages()));
         &self.l2[i]
     }
 
@@ -338,7 +368,7 @@ impl<const T2N: usize> Atom<T2N> {
     fn recover_l1(&self, start: usize) -> usize {
         let pt = self.pt1(start);
         let mut pages = 0;
-        for i in Self::MAPPING.range(1, start..self.pages) {
+        for i in Self::MAPPING.range(1, start..self.pages()) {
             pages += !pt.get(i) as usize;
         }
         pages
@@ -480,7 +510,7 @@ impl<const T2N: usize> Atom<T2N> {
         let pt2 = self.pt2(start);
         for i2 in 0..Self::MAPPING.len(2) {
             let start = Self::MAPPING.page(2, start, i2);
-            if start > self.pages {
+            if start > self.pages() {
                 return;
             }
 
@@ -518,7 +548,7 @@ mod test {
     use crate::thread;
     use crate::util::{logging, Page, WyRand};
 
-    type Allocator = Atom<128>;
+    type Allocator<'a> = Atom<128>;
     const MAPPING: Mapping<2> = Allocator::MAPPING;
 
     fn count(pt: &Table1) -> usize {
@@ -729,7 +759,7 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(Allocator::new(2, &mut buffer, true));
+            let lower = Allocator::new(2, &mut buffer, true);
             lower.free_all();
 
             for page in &mut pages[..MAPPING.span(1) - 1] {
@@ -737,23 +767,18 @@ mod test {
             }
             let stop = StopVec::new(2, order);
 
-            let handle = std::thread::spawn({
-                let stop = Arc::clone(&stop);
-                let lower = lower.clone();
-                move || {
-                    let _stopper = Stopper::init(stop, 1);
+            std::thread::scope(|s| {
+                let st = stop.clone();
+                s.spawn(|| {
+                    let _stopper = Stopper::init(st, 1);
 
                     lower.get(0, 0).unwrap();
-                }
-            });
+                });
 
-            {
                 let _stopper = Stopper::init(stop, 0);
 
                 lower.put(pages[0], 0).unwrap();
-            }
-
-            handle.join().unwrap();
+            });
 
             let pt2 = lower.pt2(0);
             if pt2.get(0).free() == 1 {
@@ -892,13 +917,14 @@ mod test {
         const MAX_ORDER: usize = Allocator::MAX_ORDER;
 
         let mut buffer = vec![Page::new(); MAPPING.span(2) - 1];
+        let num_max_pages = buffer.len() / (1 << MAX_ORDER);
 
         let lower = Arc::new(Allocator::new(1, &mut buffer, false));
         lower.reserve_all();
 
         assert_eq!(lower.dbg_allocated_pages(), MAPPING.span(2) - 1);
 
-        for (i, _) in buffer.chunks_exact(1 << MAX_ORDER).enumerate() {
+        for i in 0..num_max_pages {
             lower.put(i * (1 << MAX_ORDER), MAX_ORDER).unwrap();
         }
 

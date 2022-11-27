@@ -8,12 +8,8 @@ use crate::table::{Mapping, PT_LEN};
 use crate::util::Page;
 use crate::{Error, Result};
 
-mod array_aligned;
-pub use array_aligned::{ArrayAligned, CacheAligned, Unaligned};
 mod array;
 pub use array::Array;
-mod array_atomic;
-pub use array_atomic::ArrayAtomic;
 mod array_list;
 pub use array_list::ArrayList;
 mod list_local;
@@ -128,7 +124,7 @@ pub trait AllocExt: Sized + Alloc + Default {
     }
 }
 // Implement for all default initializable allocators
-impl<A: Sized + Alloc + Default> AllocExt for A {}
+impl<'a, A: Sized + Alloc + Default> AllocExt for A {}
 
 /// The short name of an allocator.
 /// E.g.: `ArrayAtomic4C32` for
@@ -148,7 +144,7 @@ impl fmt::Display for AllocName {
 }
 
 impl AllocName {
-    pub fn new<A: Alloc + ?Sized>() -> Self {
+    pub fn new<'a, A: Alloc + ?Sized>() -> Self {
         let name = type_name::<A>();
         // Add first letter of generic type as suffix
         let (name, first, second, size) = if let Some((prefix, suffix)) = name.split_once('<') {
@@ -182,6 +178,23 @@ impl AllocName {
             second,
             size,
         }
+    }
+}
+
+impl PartialEq<&str> for AllocName {
+    fn eq(&self, other: &&str) -> bool {
+        other
+            .strip_prefix(self.base)
+            .and_then(|o| o.strip_prefix(self.first))
+            .and_then(|o| o.strip_prefix(self.second))
+            .and_then(|o| o.strip_prefix(self.size))
+            == Some("")
+    }
+}
+
+impl PartialEq<AllocName> for &str {
+    fn eq(&self, other: &AllocName) -> bool {
+        other.eq(self)
     }
 }
 
@@ -277,7 +290,6 @@ mod test {
     use crate::mmap::test_mapping;
     use crate::table::PT_LEN;
     use crate::thread;
-    use crate::upper::array_aligned::CacheAligned;
     use crate::upper::*;
     use crate::util::{logging, Page, WyRand};
     use crate::Error;
@@ -289,8 +301,8 @@ mod test {
     fn names() {
         println!(
             "{}\n -> {}",
-            type_name::<ArrayAtomic<4, Lower>>(),
-            AllocName::new::<ArrayAtomic<4, Lower>>()
+            type_name::<Array<4, Lower>>(),
+            AllocName::new::<Array<4, Lower>>()
         );
         println!(
             "{}\n -> {}",
@@ -301,11 +313,6 @@ mod test {
             "{}\n -> {}",
             type_name::<ArrayList<4, Lower>>(),
             AllocName::new::<ArrayList<4, Lower>>()
-        );
-        println!(
-            "{}\n -> {}",
-            type_name::<ArrayAligned<CacheAligned, Lower>>(),
-            AllocName::new::<ArrayAligned<CacheAligned, Lower>>()
         );
     }
 
@@ -1003,12 +1010,16 @@ mod test {
         const PAGES: usize = 8 << 18;
 
         let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
+        let pages = mapping
+            .chunks_exact(1 << Lower::MAX_ORDER)
+            .map(|p| p.as_ptr() as u64)
+            .collect::<Vec<_>>();
 
         let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, false).unwrap();
         assert_eq!(alloc.dbg_allocated_pages(), PAGES);
 
-        for pages in mapping.chunks_exact(1 << Lower::MAX_ORDER) {
-            alloc.put(0, pages.as_ptr() as _, Lower::MAX_ORDER).unwrap();
+        for page in pages {
+            alloc.put(0, page, Lower::MAX_ORDER).unwrap();
         }
         assert_eq!(alloc.dbg_allocated_pages(), 0);
 

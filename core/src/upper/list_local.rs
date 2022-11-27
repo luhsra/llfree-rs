@@ -36,7 +36,7 @@ impl fmt::Debug for ListLocal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", self.name())?;
         for (t, l) in self.local.iter().enumerate() {
-            let local = unsafe { &mut *l.get() };
+            let local = unsafe { &*l.get() };
             writeln!(f, "    L {t:>2} C={}", local.counter)?;
         }
         writeln!(f, "}}")?;

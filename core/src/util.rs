@@ -54,15 +54,13 @@ impl CacheLine {
     }
 }
 
-pub const fn div_ceil(v: usize, d: usize) -> usize {
-    (v + d - 1) / d
-}
-
 pub const fn align_up(v: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two());
     (v + align - 1) & !(align - 1)
 }
 
 pub const fn align_down(v: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two());
     v & !(align - 1)
 }
 

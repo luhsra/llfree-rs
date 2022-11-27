@@ -1,3 +1,5 @@
+#![feature(int_roundings)]
+
 use std::fs::File;
 use std::io::{self, Write};
 use std::sync::atomic::Ordering;
@@ -10,7 +12,7 @@ use nvalloc::lower::*;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::upper::*;
-use nvalloc::util::{div_ceil, Page, WyRand};
+use nvalloc::util::{Page, WyRand};
 use nvalloc::{thread, util};
 
 /// Benchmarking the allocators against each other.
@@ -117,7 +119,7 @@ fn main() {
 
             rng.shuffle(&mut all);
             for (chunk, pages) in all
-                .chunks(div_ceil(all.len(), threads))
+                .chunks(all.len().div_ceil(threads))
                 .zip(all_pages.iter())
             {
                 let mut pages = pages.lock().unwrap();

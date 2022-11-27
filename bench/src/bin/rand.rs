@@ -1,3 +1,5 @@
+#![feature(int_roundings)]
+
 use std::time::Instant;
 
 use clap::Parser;
@@ -5,7 +7,7 @@ use log::warn;
 use nvalloc::mmap::{madvise, MAdvise, MMap};
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
-use nvalloc::util::{avg_bounds, div_ceil, logging, Page, WyRand};
+use nvalloc::util::{avg_bounds, logging, Page, WyRand};
 
 /// Benchmark for freeing randomly allocated memory regions.
 #[derive(Parser, Debug)]
@@ -68,7 +70,7 @@ fn main() {
     };
     madvise(&mut mapping, adv);
 
-    let chunk_size = div_ceil(mapping.len(), threads);
+    let chunk_size = mapping.len().div_ceil(threads);
 
     let mut pages = mapping.iter_mut().map(DoSend).collect::<Vec<_>>();
     WyRand::new(42).shuffle(&mut pages);

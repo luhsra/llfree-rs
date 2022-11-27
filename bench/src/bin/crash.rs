@@ -45,10 +45,10 @@ fn main() {
     type A = Atom<128>;
     type C = Cache<32>;
     let allocs: [Box<dyn Alloc>; 4] = [
-        Box::<ArrayAtomic<4, A>>::default(),
         Box::<Array<4, A>>::default(),
-        Box::<ArrayAtomic<4, C>>::default(),
+        Box::<ArrayList<4, A>>::default(),
         Box::<Array<4, C>>::default(),
+        Box::<ArrayList<4, C>>::default(),
     ];
     for a in allocs {
         if format!("{}", a.name()) == alloc {
