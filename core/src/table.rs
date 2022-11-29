@@ -263,34 +263,26 @@ impl<const N: usize> Bitfield<N> {
     }
 }
 
-/// Special case for finding single bits
-fn first_zeros_aligned_0(v: u64) -> Option<(u64, usize)> {
-    let off = v.trailing_ones();
-    (off < u64::BITS).then(|| (v | (0b1 << off), off as _))
-}
-
-/// Special case for finding aligned bit pairs
-fn first_zeros_aligned_1(v: u64) -> Option<(u64, usize)> {
-    let mask = 0xaaaa_aaaa_aaaa_aaaa_u64;
-    let or = (v | (v >> 1)) | mask;
-    let off = or.trailing_ones();
-    (off < u64::BITS).then(|| (v | (0b11 << off), off as _))
-}
-
-/// Special case for finding aligned bit quadruples
-fn first_zeros_aligned_2(v: u64) -> Option<(u64, usize)> {
-    let mask = 0x1111_1111_1111_1111_u64;
-    let off = (((v.wrapping_sub(mask) & !v) >> 3) & mask).trailing_zeros();
-    (off < u64::BITS).then(|| (v | (0b1111 << off), off as _))
-}
-
 /// Set the first aligned 2^`order` zero bits, returning the bit offset
 fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
     match order {
-        0 => first_zeros_aligned_0(v),
-        1 => first_zeros_aligned_1(v),
-        2 => first_zeros_aligned_2(v),
+        0 => {
+            let off = v.trailing_ones();
+            (off < u64::BITS).then(|| (v | (0b1 << off), off as _))
+        }
+        1 => {
+            let mask = 0xaaaa_aaaa_aaaa_aaaa_u64;
+            let or = (v | (v >> 1)) | mask;
+            let off = or.trailing_ones();
+            (off < u64::BITS).then(|| (v | (0b11 << off), off as _))
+        }
+        2 => {
+            let mask = 0x1111_1111_1111_1111_u64;
+            let off = (((v.wrapping_sub(mask) & !v) >> 3) & mask).trailing_zeros();
+            (off < u64::BITS).then(|| (v | (0b1111 << off), off as _))
+        }
         3 => {
+            // https://graphics.stanford.edu/~seander/bithacks.html#ZeroInWord
             let mask = 0x0101_0101_0101_0101_u64;
             let off = (((v.wrapping_sub(mask) & !v) >> 7) & mask).trailing_zeros();
             (off < u64::BITS).then(|| (v | (0xff << off), off as _))
@@ -301,14 +293,12 @@ fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
             (off < u64::BITS).then(|| (v | (0xffff << off), off as _))
         }
         5 => {
-            let bits = 0xffff_ffff_u64;
+            let mask = 0xffff_ffff_u64;
             if v as u32 == 0 {
-                Some((v | bits, 0))
-            }
-            else if v >> 32 == 0 {
-                Some((v | (bits << 32), 32))
-            }
-            else {
+                Some((v | mask, 0))
+            } else if v >> 32 == 0 {
+                Some((v | (mask << 32), 32))
+            } else {
                 None
             }
         }
@@ -755,25 +745,25 @@ mod test {
 
     #[test]
     fn first_zeros_aligned_1() {
-        assert_eq!(super::first_zeros_aligned_1(0b0), Some((0b11, 0)));
-        assert_eq!(super::first_zeros_aligned_1(0b1), Some((0b1101, 2)));
-        assert_eq!(super::first_zeros_aligned_1(0b10011), Some((0b11111, 2)));
+        assert_eq!(super::first_zeros_aligned(0b0, 1), Some((0b11, 0)));
+        assert_eq!(super::first_zeros_aligned(0b1, 1), Some((0b1101, 2)));
+        assert_eq!(super::first_zeros_aligned(0b10011, 1), Some((0b11111, 2)));
         assert_eq!(
-            super::first_zeros_aligned_1(0b0001_1001_1011),
+            super::first_zeros_aligned(0b0001_1001_1011, 1),
             Some((0b1101_1001_1011, 10))
         );
     }
 
     #[test]
     fn first_zeros_aligned_2() {
-        assert_eq!(super::first_zeros_aligned_2(0b0), Some((0b1111, 0)));
-        assert_eq!(super::first_zeros_aligned_2(0b1), Some((0b11110001, 4)));
+        assert_eq!(super::first_zeros_aligned(0b0, 2), Some((0b1111, 0)));
+        assert_eq!(super::first_zeros_aligned(0b1, 2), Some((0b11110001, 4)));
         assert_eq!(
-            super::first_zeros_aligned_2(0b11_0000_0001),
+            super::first_zeros_aligned(0b11_0000_0001, 2),
             Some((0b11_1111_0001, 4))
         );
         assert_eq!(
-            super::first_zeros_aligned_2(0b0000_0100_1000_0001_0010),
+            super::first_zeros_aligned(0b0000_0100_1000_0001_0010, 2),
             Some((0b1111_0100_1000_0001_0010, 16))
         );
     }
