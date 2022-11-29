@@ -271,9 +271,8 @@ fn first_zeros_aligned_1(v: u64) -> Option<(u64, usize)> {
 
 /// Special case for finding aligned bit quadruples
 fn first_zeros_aligned_2(v: u64) -> Option<(u64, usize)> {
-    let mask = 0xeeee_eeee_eeee_eeee_u64;
-    let or = (v | (v >> 1) | (v >> 2) | (v >> 3)) | mask;
-    let off = or.trailing_ones();
+    let mask = 0x1111_1111_1111_1111_u64;
+    let off = (((v.wrapping_sub(mask) & !v) >> 3) & mask).trailing_zeros();
     (off < u64::BITS).then(|| (v | (0b1111 << off), off as _))
 }
 
@@ -283,16 +282,27 @@ fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
         0 => first_zeros_aligned_0(v),
         1 => first_zeros_aligned_1(v),
         2 => first_zeros_aligned_2(v),
-        3..=5 => {
-            let num_pages = 1 << order;
-            for i in 0..64 / num_pages {
-                let i = i * num_pages;
-                let mask = (u64::MAX >> (u64::BITS - num_pages)) << i;
-                if v & mask == 0 {
-                    return Some((v | mask, i as usize));
-                }
+        3 => {
+            let mask = 0x0101_0101_0101_0101_u64;
+            let off = (((v.wrapping_sub(mask) & !v) >> 7) & mask).trailing_zeros();
+            (off < u64::BITS).then(|| (v | (0xff << off), off as _))
+        }
+        4 => {
+            let mask = 0x0001_0001_0001_0001_u64;
+            let off = (((v.wrapping_sub(mask) & !v) >> 15) & mask).trailing_zeros();
+            (off < u64::BITS).then(|| (v | (0xffff << off), off as _))
+        }
+        5 => {
+            let bits = 0xffff_ffff_u64;
+            if v as u32 == 0 {
+                Some((v | bits, 0))
             }
-            None
+            else if v >> 32 == 0 {
+                Some((v | (bits << 32), 32))
+            }
+            else {
+                None
+            }
         }
         6 => {
             if v == 0 {
