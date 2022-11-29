@@ -12,7 +12,7 @@ use nvalloc::lower::Atom;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
-use nvalloc::upper::{Alloc, Array};
+use nvalloc::upper::{Alloc, Array, Init};
 use nvalloc::util::{logging, Page};
 
 type Allocator = Array<3, Atom<128>>;
@@ -76,10 +76,11 @@ fn main() {
     for _ in 0..iterations {
         let timer = Instant::now();
 
-        let mut a = Allocator::default();
-        a.init(threads, &mut mapping, true).unwrap();
-        a.free_all().unwrap();
-        let alloc = &a;
+        let mut alloc = Allocator::default();
+        alloc
+            .init(threads, &mut mapping, Init::Overwrite, true)
+            .unwrap();
+        let alloc = &alloc;
 
         warn!("init time {}ms", timer.elapsed().as_millis());
 
@@ -125,7 +126,7 @@ fn main() {
         });
 
         assert_eq!(alloc.dbg_allocated_pages(), 0);
-        drop(a);
+        drop(alloc);
 
         for (get_b, put_b) in t_buckets {
             for i in 0..buckets {

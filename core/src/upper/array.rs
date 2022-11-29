@@ -7,8 +7,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info, warn};
 
-use super::{Alloc, Local, MAGIC, MAX_PAGES};
-use crate::atomic::{ANode, Atomic, Next};
+use super::{Alloc, Init, Local, MAGIC, MAX_PAGES};
+use crate::atomic::Atomic;
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
@@ -92,7 +92,13 @@ where
     [(); L::N]:,
 {
     #[cold]
-    fn init(&mut self, mut cores: usize, mut memory: &mut [Page], persistent: bool) -> Result<()> {
+    fn init(
+        &mut self,
+        mut cores: usize,
+        mut memory: &mut [Page],
+        init: Init,
+        free_all: bool,
+    ) -> Result<()> {
         info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -103,7 +109,7 @@ where
             cores = 1.max(memory.len() / L::N);
         }
 
-        if persistent {
+        if init != Init::Volatile {
             // Last frame is reserved for metadata
             let (m, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
             let meta = rem[0].cast_mut::<Meta>();
@@ -116,69 +122,23 @@ where
         self.local = local.into();
 
         // Create lower allocator
-        self.lower = L::new(cores, memory, persistent);
+        self.lower = L::new(cores, memory, init, free_all);
 
-        // Array with all pte3
-        let pte3_num = self.pages().div_ceil(L::N);
-        self.trees.init(pte3_num);
-
-        Ok(())
-    }
-
-    fn recover(&self) -> Result<()> {
-        if let Some(meta) = unsafe { self.meta.as_ref() } {
-            if meta.pages.load(Ordering::SeqCst) == self.pages()
-                && meta.magic.load(Ordering::SeqCst) == MAGIC
-            {
-                info!("recover p={}", self.pages());
-                let deep = meta.active.load(Ordering::SeqCst) != 0;
-                self.recover_inner(deep)?;
-                meta.active.store(1, Ordering::SeqCst);
-                Ok(())
-            } else {
-                error!("No metadata found");
-                Err(Error::Initialization)
+        if init == Init::Recover {
+            match self.recover() {
+                Err(Error::Initialization) => {}
+                r => return r,
             }
-        } else {
-            error!("Allocator not persistent");
-            Err(Error::Initialization)
-        }
-    }
-
-    fn free_all(&self) -> Result<()> {
-        info!("free all p={}", self.pages());
-        self.lower.free_all();
-
-        // Add all entries to the empty list
-        let pte3_num = self.pages().div_ceil(L::N);
-        for i in 0..pte3_num - 1 {
-            self.trees[i].store(Entry3::empty(L::N).with_next(Next::Outside));
         }
 
-        // The last one may be cut off
-        let max = (self.pages() - (pte3_num - 1) * L::N).min(L::N);
-        self.trees[pte3_num - 1].store(Entry3::new().with_free(max).with_next(Next::Outside));
+        self.trees.init(self.pages(), free_all);
 
         if let Some(meta) = unsafe { self.meta.as_ref() } {
             meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
             meta.active.store(1, Ordering::SeqCst);
         }
-        Ok(())
-    }
 
-    fn reserve_all(&self) -> Result<()> {
-        info!("reserve all p={}", self.pages());
-        self.lower.reserve_all();
-
-        // Set all entries to zero
-        self.trees.clear();
-
-        if let Some(meta) = unsafe { self.meta.as_ref() } {
-            meta.pages.store(self.pages(), Ordering::SeqCst);
-            meta.magic.store(MAGIC, Ordering::SeqCst);
-            meta.active.store(1, Ordering::SeqCst);
-        }
         Ok(())
     }
 
@@ -331,22 +291,37 @@ where
     [(); L::N]:,
 {
     /// Recover the allocator from NVM after reboot.
-    /// If `deep` then the level 1 page tables are traversed and diverging counters are corrected.
-    #[cold]
-    fn recover_inner(&self, deep: bool) -> Result<usize> {
-        if deep {
-            warn!("Try recover crashed allocator!");
-        }
-        let mut total = 0;
-        for i in 0..self.pages().div_ceil(L::N) {
-            let page = i * L::N;
-            let pages = self.lower.recover(page, deep)?;
+    /// If crashed then the level 1 page tables are traversed and diverging counters are corrected.
+    fn recover(&mut self) -> Result<()> {
+        if let Some(meta) = unsafe { self.meta.as_ref() } {
+            if meta.pages.load(Ordering::SeqCst) == self.pages()
+                && meta.magic.load(Ordering::SeqCst) == MAGIC
+            {
+                info!("recover p={}", self.pages());
+                let deep = meta.active.load(Ordering::SeqCst) != 0;
+                if deep {
+                    warn!("Try recover crashed allocator!");
+                }
 
-            self.trees[i].store(Entry3::new_table(pages, false));
+                let mut trees = Vec::with_capacity(self.pages().div_ceil(L::N));
 
-            total += pages;
+                for i in 0..self.pages().div_ceil(L::N) {
+                    let page = i * L::N;
+                    let pages = self.lower.recover(page, deep)?;
+                    trees.push(Atomic::new(Entry3::new_table(pages, false)));
+                }
+                self.trees.entries = trees.into();
+
+                meta.active.store(1, Ordering::SeqCst);
+                Ok(())
+            } else {
+                error!("No metadata found");
+                Err(Error::Initialization)
+            }
+        } else {
+            error!("Allocator not persistent");
+            Err(Error::Initialization)
         }
-        Ok(total)
     }
 
     fn addr_to_page(&self, addr: u64, order: usize) -> Result<usize> {
@@ -566,10 +541,17 @@ impl<const LN: usize> fmt::Debug for Trees<LN> {
 }
 
 impl<const LN: usize> Trees<LN> {
-    fn init(&mut self, pte3_num: usize) {
+    fn init(&mut self, pages: usize, free_all: bool) {
+        let pte3_num = pages.div_ceil(LN);
         let mut pte3s = Vec::with_capacity(pte3_num);
-        pte3s.resize_with(pte3_num, || Atomic::new(Entry3::new()));
-
+        if free_all {
+            pte3s.resize_with(pte3_num - 1, || Atomic::new(Entry3::new_table(LN, false)));
+            // The last one might be cut off
+            let max = if pages % LN == 0 { LN } else { pages % LN };
+            pte3s.push(Atomic::new(Entry3::new_table(max, false)));
+        } else {
+            pte3s.resize_with(pte3_num, || Atomic::new(Entry3::new()));
+        }
         self.entries = pte3s.into();
     }
 
@@ -581,13 +563,6 @@ impl<const LN: usize> Trees<LN> {
     /// Almost all pages are free
     const fn almost_empty() -> usize {
         LN - (1 << 10) // MAX_ORDER
-    }
-
-    fn clear(&self) {
-        // Set all entries to zero
-        for pte in &self.entries[..] {
-            pte.store(Entry3::new().with_next(Next::Outside));
-        }
     }
 
     fn unreserve(&self, pte: Entry3, pages: usize) -> Result<()> {

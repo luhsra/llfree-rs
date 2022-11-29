@@ -253,6 +253,14 @@ impl<const N: usize> Bitfield<N> {
         }
         true
     }
+
+    /// Returns the number of ones in this bitfield
+    pub fn count_zeros(&self) -> usize {
+        self.data
+            .iter()
+            .map(|v| v.load(Ordering::SeqCst).count_zeros() as usize)
+            .sum()
+    }
 }
 
 /// Special case for finding single bits
@@ -392,7 +400,7 @@ impl<const L: usize> Mapping<L> {
     pub const fn num_pts(&self, level: usize, pages: usize) -> usize {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
-        (pages + self.span(level) - 1) / self.span(level)
+        pages.div_ceil(self.span(level))
     }
 
     /// Computes the index range for the given page range

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use log::{error, info, warn};
 use spin::Mutex;
 
-use super::{Alloc, Local, MAGIC, MAX_PAGES};
+use super::{Alloc, Local, Init, MAGIC, MAX_PAGES};
 use crate::atomic::{ANode, Atomic, BufList, Next};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
@@ -85,7 +85,13 @@ impl<const PR: usize, L: LowerAlloc> fmt::Debug for ArrayList<PR, L> {
 
 impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
     #[cold]
-    fn init(&mut self, mut cores: usize, mut memory: &mut [Page], persistent: bool) -> Result<()> {
+    fn init(
+        &mut self,
+        mut cores: usize,
+        mut memory: &mut [Page],
+        init: Init,
+        free_all: bool,
+    ) -> Result<()> {
         info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -96,7 +102,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
             cores = 1.max(memory.len() / L::N);
         }
 
-        if persistent {
+        if init != Init::Volatile {
             // Last frame is reserved for metadata
             let (m, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
             let meta = rem[0].cast_mut::<Meta>();
@@ -109,70 +115,23 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
         self.local = local.into();
 
         // Create lower allocator
-        self.lower = L::new(cores, memory, persistent);
+        self.lower = L::new(cores, memory, init, free_all);
 
-        // Array with all pte3
-        let pte3_num = self.pages().div_ceil(L::N);
-        self.trees.init(pte3_num);
-
-        Ok(())
-    }
-
-    fn recover(&self) -> Result<()> {
-        if let Some(meta) = unsafe { self.meta.as_ref() } {
-            if meta.pages.load(Ordering::SeqCst) == self.pages()
-                && meta.magic.load(Ordering::SeqCst) == MAGIC
-            {
-                info!("recover p={}", self.pages());
-                let deep = meta.active.load(Ordering::SeqCst) != 0;
-                self.recover_inner(deep)?;
-                meta.active.store(1, Ordering::SeqCst);
-                Ok(())
-            } else {
-                Err(Error::Initialization)
+        if init == Init::Recover {
+            match self.recover() {
+                Err(Error::Initialization) => {},
+                r => return r,
             }
-        } else {
-            Err(Error::Initialization)
         }
-    }
 
-    fn free_all(&self) -> Result<()> {
-        info!("free all p={}", self.pages());
-        self.lower.free_all();
-
-        // Add all entries to the empty list
-        let pte3_num = self.pages().div_ceil(L::N);
-        for i in 0..pte3_num - 1 {
-            self.trees[i].store(Entry3::empty(L::N).with_next(Next::Outside));
-        }
-        self.trees.push_empty_all((0..pte3_num - 1).into_iter());
-
-        // The last one may be cut off
-        let max = (self.pages() - (pte3_num - 1) * L::N).min(L::N);
-        self.trees[pte3_num - 1].store(Entry3::new().with_free(max).with_next(Next::Outside));
-
-        self.trees.push(pte3_num - 1, max, L::N);
+        self.trees.init(self.pages(), L::N, free_all);
 
         if let Some(meta) = unsafe { self.meta.as_ref() } {
             meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
             meta.active.store(1, Ordering::SeqCst);
         }
-        Ok(())
-    }
 
-    fn reserve_all(&self) -> Result<()> {
-        info!("reserve all p={}", self.pages());
-        self.lower.reserve_all();
-
-        // Set all entries to zero
-        self.trees.clear();
-
-        if let Some(meta) = unsafe { self.meta.as_ref() } {
-            meta.pages.store(self.pages(), Ordering::SeqCst);
-            meta.magic.store(MAGIC, Ordering::SeqCst);
-            meta.active.store(1, Ordering::SeqCst);
-        }
         Ok(())
     }
 
@@ -328,23 +287,37 @@ impl<const PR: usize, L: LowerAlloc> Default for ArrayList<PR, L> {
 impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
     /// Recover the allocator from NVM after reboot.
     /// If `deep` then the level 1 page tables are traversed and diverging counters are corrected.
-    #[cold]
-    fn recover_inner(&self, deep: bool) -> Result<usize> {
-        if deep {
-            warn!("Try recover crashed allocator!");
-        }
-        let mut total = 0;
-        for i in 0..self.pages().div_ceil(L::N) {
-            let page = i * L::N;
-            let pages = self.lower.recover(page, deep)?;
+    fn recover(&mut self) -> Result<()> {
+        if let Some(meta) = unsafe { self.meta.as_ref() } {
+            if meta.pages.load(Ordering::SeqCst) == self.pages()
+                && meta.magic.load(Ordering::SeqCst) == MAGIC
+            {
+                info!("recover p={}", self.pages());
+                let deep = meta.active.load(Ordering::SeqCst) != 0;
+                if deep {
+                    warn!("Try recover crashed allocator!");
+                }
+                let mut trees = Vec::with_capacity(self.pages().div_ceil(L::N));
+                trees.resize_with(self.pages().div_ceil(L::N), || Atomic::new(Entry3::new()));
+                self.trees.entries = trees.into();
 
-            self.trees[i].store(Entry3::new_table(pages, false));
+                for i in 0..self.pages().div_ceil(L::N) {
+                    let page = i * L::N;
+                    let pages = self.lower.recover(page, deep)?;
 
-            // Add to lists
-            self.trees.push(i, pages, L::N);
-            total += pages;
+                    self.trees[i].store(Entry3::new_table(pages, false));
+                    // Add to lists
+                    self.trees.push(i, pages, L::N);
+                }
+
+                meta.active.store(1, Ordering::SeqCst);
+                Ok(())
+            } else {
+                Err(Error::Initialization)
+            }
+        } else {
+            Err(Error::Initialization)
         }
-        Ok(total)
     }
 
     fn addr_to_page(&self, addr: u64, order: usize) -> Result<usize> {
@@ -572,27 +545,41 @@ impl fmt::Debug for Trees {
 }
 
 impl Trees {
-    fn init(&mut self, pte3_num: usize) {
+    fn init(&mut self, pages: usize, span: usize, free_all: bool) {
+        let pte3_num = pages.div_ceil(span);
         let mut pte3s = Vec::with_capacity(pte3_num);
-        pte3s.resize_with(pte3_num, || Atomic::new(Entry3::new()));
 
-        self.entries = pte3s.into();
-        self.lists = Default::default();
+        if free_all {
+            let pte3_num = pages.div_ceil(span);
+            pte3s.resize_with(pte3_num - 1, || {
+                Atomic::new(Entry3::empty(span).with_next(Next::Outside))
+            });
+
+            // The last one may be cut off
+            let max = if pages % span == 0 {
+                span
+            } else {
+                pages % span
+            };
+            pte3s.push(Atomic::new(
+                Entry3::new().with_free(max).with_next(Next::Outside),
+            ));
+
+            self.entries = pte3s.into();
+
+            self.push_empty_all((0..pte3_num - 1).into_iter());
+            self.push(pte3_num - 1, max, span);
+        } else {
+            pte3s.resize_with(pte3_num, || {
+                Atomic::new(Entry3::new().with_next(Next::Outside))
+            });
+            self.lists = Default::default();
+            self.entries = pte3s.into();
+        }
     }
 
     const fn almost_full() -> usize {
         1 << 10 // MAX_ORDER
-    }
-
-    fn clear(&self) {
-        // Set all entries to zero
-        for pte in &self.entries[..] {
-            pte.store(Entry3::new().with_next(Next::Outside));
-        }
-        // Clear the lists
-        let mut lists = self.lists.lock();
-        lists.empty.clear();
-        lists.partial.clear();
     }
 
     fn push_empty_all(&self, entries: impl Iterator<Item = usize>) {

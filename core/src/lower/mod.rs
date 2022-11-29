@@ -1,6 +1,7 @@
 use core::fmt;
 use core::ops::Range;
 
+use crate::upper::Init;
 use crate::util::Page;
 use crate::Result;
 
@@ -29,15 +30,11 @@ pub trait LowerAlloc: Default + fmt::Debug {
     const HUGE_ORDER: usize;
 
     /// Create a new lower allocator.
-    fn new(cores: usize, memory: &mut [Page], persistent: bool) -> Self;
+    fn new(cores: usize, area: &mut [Page], init: Init, free_all: bool) -> Self;
 
     fn pages(&self) -> usize;
     fn memory(&self) -> Range<*const Page>;
 
-    /// Free all pages.
-    fn free_all(&self);
-    /// Reserve all pages.
-    fn reserve_all(&self);
     /// Recover the level 2 page table at `start`.
     /// If deep, the level 1 pts are also traversed and false counters are corrected.
     /// Returns the number of recovered pages.
@@ -54,6 +51,8 @@ pub trait LowerAlloc: Default + fmt::Debug {
     fn dbg_allocated_pages(&self) -> usize;
     /// Debug function returning number of free pages in each order 9 chunk
     fn dbg_for_each_huge_page<F: FnMut(usize)>(&self, f: F);
+
+    fn size_per_gib() -> usize;
 }
 
 #[cfg(all(test, feature = "stop"))]
@@ -66,6 +65,7 @@ mod test {
     use crate::stop::{StopRand, Stopper};
     use crate::table::PT_LEN;
     use crate::thread;
+    use crate::upper::Init;
     use crate::util::{logging, Page};
 
     type Lower = super::atom::Atom<512>;
@@ -82,22 +82,25 @@ mod test {
             let seed = unsafe { libc::rand() } as u64;
             warn!("order: {seed:x}");
 
-            let lower = Arc::new(Lower::new(THREADS, &mut buffer, true));
-            lower.free_all();
+            let lower = Arc::new(Lower::new(
+                THREADS,
+                &mut buffer,
+                Init::Overwrite,
+                true,
+            ));
             assert_eq!(lower.dbg_allocated_pages(), 0);
 
             let stop = StopRand::new(THREADS, seed);
-            let l = lower.clone();
-            thread::parallel(0..THREADS, move |t| {
-                let _stopper = Stopper::init(stop, t);
+            thread::parallel(0..THREADS, |t| {
+                let _stopper = Stopper::init(stop.clone(), t);
 
                 let mut pages = [0; 4];
                 for p in &mut pages {
-                    *p = l.get(0, 0).unwrap();
+                    *p = lower.get(0, 0).unwrap();
                 }
                 pages.reverse();
                 for p in pages {
-                    l.put(p, 0).unwrap();
+                    lower.put(p, 0).unwrap();
                 }
             });
 
@@ -118,8 +121,12 @@ mod test {
             let seed = unsafe { libc::rand() } as u64;
             warn!("order: {seed:x}");
 
-            let lower = Arc::new(Lower::new(THREADS, &mut buffer, true));
-            lower.free_all();
+            let lower = Arc::new(Lower::new(
+                THREADS,
+                &mut buffer,
+                Init::Overwrite,
+                true,
+            ));
             assert_eq!(lower.dbg_allocated_pages(), 0);
 
             for page in &mut pages[..PT_LEN - 3] {
@@ -127,14 +134,13 @@ mod test {
             }
 
             let stop = StopRand::new(THREADS, seed);
-            let l = lower.clone();
-            thread::parallel(0..THREADS, move |t| {
-                let _stopper = Stopper::init(stop, t);
+            thread::parallel(0..THREADS, |t| {
+                let _stopper = Stopper::init(stop.clone(), t);
 
                 if t < THREADS / 2 {
-                    l.put(pages[t], 0).unwrap();
+                    lower.put(pages[t], 0).unwrap();
                 } else {
-                    l.get(0, 0).unwrap();
+                    lower.get(0, 0).unwrap();
                 }
             });
 

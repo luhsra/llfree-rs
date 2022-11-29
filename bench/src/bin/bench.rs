@@ -216,8 +216,7 @@ fn bulk(
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    alloc.init(threads, mapping, true).unwrap();
-    alloc.free_all().unwrap();
+    alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
     let init = timer.elapsed().as_millis();
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
 
@@ -268,8 +267,7 @@ fn repeat(
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    alloc.init(threads, mapping, true).unwrap();
-    alloc.free_all().unwrap();
+    alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
@@ -316,8 +314,7 @@ fn rand(
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    alloc.init(threads, mapping, true).unwrap();
-    alloc.free_all().unwrap();
+    alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
@@ -382,8 +379,7 @@ fn rand_block(
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    alloc.init(threads, mapping, true).unwrap();
-    alloc.free_all().unwrap();
+    alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / max_threads / 2 / (1 << order);
@@ -455,8 +451,7 @@ fn filling(
     assert!(x <= 90);
 
     let timer = Instant::now();
-    alloc.init(threads, mapping, true).unwrap();
-    alloc.free_all().unwrap();
+    alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.pages() / threads / (1 << order);

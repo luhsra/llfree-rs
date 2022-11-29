@@ -6,7 +6,7 @@ use crate::atomic::Atomic;
 use crate::entry::Entry3;
 use crate::table::{Mapping, PT_LEN};
 use crate::util::Page;
-use crate::{Error, Result};
+use crate::Result;
 
 mod array;
 pub use array::Array;
@@ -30,18 +30,13 @@ pub const MAX_PAGES: usize = Mapping([9; 4]).span(4);
 pub trait Alloc: Sync + Send + fmt::Debug {
     /// Initialize the allocator.
     #[cold]
-    fn init(&mut self, cores: usize, memory: &mut [Page], persistent: bool) -> Result<()>;
-    /// Init as entirely free area.
-    #[cold]
-    fn free_all(&self) -> Result<()>;
-    /// Init as fully reserved area.
-    #[cold]
-    fn reserve_all(&self) -> Result<()>;
-    /// Recover the allocator from persistent memory.
-    #[cold]
-    fn recover(&self) -> Result<()> {
-        Err(Error::Initialization)
-    }
+    fn init(
+        &mut self,
+        cores: usize,
+        memory: &mut [Page],
+        init: Init,
+        free_all: bool,
+    ) -> Result<()>;
 
     /// Allocate a new page.
     fn get(&self, core: usize, order: usize) -> Result<u64>;
@@ -85,12 +80,12 @@ pub trait Alloc: Sync + Send + fmt::Debug {
 
 /// Defines if the allocator should be allocated persistently
 /// and if it in that case should try to recover from the persistent memory.
-#[derive(PartialEq, Eq)]
-pub enum Persistency {
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum Init {
     /// Not persistent
     Volatile,
     /// Persistent and try recovery
-    TryRecover,
+    Recover,
     /// Overwrite the persistent memory
     Overwrite,
 }
@@ -102,24 +97,11 @@ pub trait AllocExt: Sized + Alloc + Default {
     fn new(
         cores: usize,
         memory: &mut [Page],
-        persistency: Persistency,
+        init: Init,
         free_all: bool,
     ) -> Result<Self> {
         let mut a = Self::default();
-        a.init(cores, memory, persistency != Persistency::Volatile)?;
-        // Try recovery if persistent
-        if persistency == Persistency::TryRecover {
-            match a.recover() {
-                Ok(_) => return Ok(a),
-                Err(Error::Initialization) => {} // continue
-                Err(e) => return Err(e),
-            }
-        }
-        if free_all {
-            a.free_all()?;
-        } else {
-            a.reserve_all()?;
-        }
+        a.init(cores, memory, init, free_all)?;
         Ok(a)
     }
 }
@@ -278,6 +260,7 @@ impl<'a, const L: usize> Drop for LocalFreePush<'a, L> {
 mod test {
 
     use core::any::type_name;
+    use core::mem::size_of;
     use core::ptr::null_mut;
     use std::time::Instant;
 
@@ -294,7 +277,7 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::Error;
 
-    type Lower = Cache<32>;
+    type Lower = Atom<128>;
     type Allocator = Array<4, Lower>;
 
     #[test]
@@ -314,6 +297,23 @@ mod test {
             type_name::<ArrayList<4, Lower>>(),
             AllocName::new::<ArrayList<4, Lower>>()
         );
+    }
+
+    #[test]
+    fn sizes() {
+        type C32 = Cache<32>;
+        type A4C32 = Array<4, C32>;
+        println!("{}:", AllocName::new::<A4C32>());
+        println!("  Static size {}B", size_of::<A4C32>());
+        println!("  Size per CPU: {}B", size_of::<Local<4>>());
+        println!("  Size per GiB: {}B", C32::size_per_gib());
+
+        type A128 = Atom<128>;
+        type A4A128 = Array<4, A128>;
+        println!("{}:", AllocName::new::<A4A128>());
+        println!("  Static size {}B", size_of::<A4A128>());
+        println!("  Size per CPU: {}B", size_of::<Local<4>>());
+        println!("  Size per GiB: {}B", A128::size_per_gib());
     }
 
     /// Testing the related pages heuristic for frees
@@ -357,7 +357,7 @@ mod test {
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
-        let alloc = Allocator::new(1, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
 
         assert_eq!(alloc.dbg_free_pages(), alloc.pages());
 
@@ -431,7 +431,7 @@ mod test {
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
-        let alloc = Allocator::new(1, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
 
         warn!("start alloc...");
         const ALLOCS: usize = MEM_SIZE / Page::SIZE / 4 * 3;
@@ -489,7 +489,7 @@ mod test {
         info!("mmap {MEM_SIZE} bytes at {range:?}");
         let range = range.start as u64..range.end as u64;
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
 
         let barrier = Barrier::new(THREADS);
         thread::parallel(0..THREADS, |t| {
@@ -551,7 +551,7 @@ mod test {
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
-        let alloc = Allocator::new(1, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
 
         assert_eq!(alloc.dbg_allocated_pages(), 0);
 
@@ -624,7 +624,7 @@ mod test {
         let range = mapping.as_ptr_range();
         let range = range.start as u64..range.end as u64;
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -668,7 +668,7 @@ mod test {
         let range = mapping.as_ptr_range();
         let range = range.start as u64..range.end as u64;
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -723,7 +723,7 @@ mod test {
         let range = mapping.as_ptr_range();
         let range = range.start as u64..range.end as u64;
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
 
         // Stress test
         let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -851,7 +851,7 @@ mod test {
 
         let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
         let barrier = Barrier::new(THREADS);
 
         // Stress test
@@ -885,7 +885,7 @@ mod test {
 
         let mut mapping = test_mapping(0x1000_0000_0000, 4 * PT_LEN * PT_LEN).unwrap();
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
 
         // Alloc on first thread
         thread::pin(0);
@@ -929,7 +929,7 @@ mod test {
         let expected_pages = (PT_LEN + 2) * (1 + (1 << 9));
 
         {
-            let alloc = Allocator::new(1, &mut mapping, Persistency::Overwrite, true).unwrap();
+            let alloc = Allocator::new(1, &mut mapping, Init::Overwrite, true).unwrap();
 
             for _ in 0..PT_LEN + 2 {
                 alloc.get(0, 0).unwrap();
@@ -943,8 +943,9 @@ mod test {
         }
 
         let mut alloc = Allocator::default();
-        alloc.init(1, &mut mapping, true).unwrap();
-        alloc.recover().unwrap();
+        alloc
+            .init(1, &mut mapping, Init::Recover, true)
+            .unwrap();
         assert_eq!(alloc.dbg_allocated_pages(), expected_pages);
     }
 
@@ -956,7 +957,7 @@ mod test {
         logging();
 
         let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * (THREADS * 2 + 1)).unwrap();
-        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
 
         let barrier = Barrier::new(THREADS);
 
@@ -1015,7 +1016,7 @@ mod test {
             .map(|p| p.as_ptr() as u64)
             .collect::<Vec<_>>();
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Persistency::Volatile, false).unwrap();
+        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, false).unwrap();
         assert_eq!(alloc.dbg_allocated_pages(), PAGES);
 
         for page in pages {
@@ -1037,7 +1038,7 @@ mod test {
         logging();
 
         let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * 2).unwrap();
-        let alloc = Allocator::new(1, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
 
         // Alloc a whole subtree
         let mut pages = Vec::with_capacity(Lower::N / 2);
@@ -1061,7 +1062,7 @@ mod test {
     #[test]
     fn drain() {
         let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * 2).unwrap();
-        let alloc = Allocator::new(2, &mut mapping, Persistency::Volatile, true).unwrap();
+        let alloc = Allocator::new(2, &mut mapping, Init::Volatile, true).unwrap();
         // should not change anything
         alloc.drain(0).unwrap();
         alloc.drain(1).unwrap();

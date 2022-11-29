@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Barrier};
+use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::Parser;
@@ -12,7 +12,7 @@ use nvalloc::lower::Atom;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
-use nvalloc::upper::{Alloc, Array};
+use nvalloc::upper::{Alloc, Array, Init};
 use nvalloc::util::{logging, Page};
 
 type Allocator = Array<3, Atom<128>>;
@@ -64,10 +64,11 @@ fn main() {
     for _ in 0..iterations {
         let timer = Instant::now();
 
-        let mut a = Allocator::default();
-        a.init(threads, &mut mapping, true).unwrap();
-        a.free_all().unwrap();
-        let alloc = &a;
+        let mut alloc = Allocator::default();
+        alloc
+            .init(threads, &mut mapping, Init::Overwrite, true)
+            .unwrap();
+        let alloc = &alloc;
 
         warn!("init time {}ms", timer.elapsed().as_millis());
 
@@ -76,8 +77,8 @@ fn main() {
         assert!(allocs % PT_LEN == 0);
         warn!("\n\n>>> bench t={threads} o={order:?} {allocs}\n");
 
-        let barrier = Arc::new(Barrier::new(threads));
-        let t_times = thread::parallel(0..threads, move |t| {
+        let barrier = Barrier::new(threads);
+        let t_times = thread::parallel(0..threads, |t| {
             thread::pin(t);
             barrier.wait();
 
@@ -116,7 +117,7 @@ fn main() {
         });
 
         assert_eq!(alloc.dbg_allocated_pages(), 0);
-        drop(a);
+        drop(alloc);
 
         for t in t_times {
             for i in 0..2 * PT_LEN {

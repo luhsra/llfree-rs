@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use log::{error, info};
 use spin::Mutex;
 
-use super::{Alloc, MIN_PAGES};
+use super::{Alloc, Init, MIN_PAGES};
 use crate::util::Page;
 use crate::{Error, Result};
 
@@ -60,7 +60,14 @@ impl Default for ListLocked {
 
 impl Alloc for ListLocked {
     #[cold]
-    fn init(&mut self, cores: usize, memory: &mut [Page], _persistent: bool) -> Result<()> {
+    fn init(
+        &mut self,
+        cores: usize,
+        memory: &mut [Page],
+        init: Init,
+        free_all: bool,
+    ) -> Result<()> {
+        debug_assert!(init == Init::Volatile);
         info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -83,43 +90,12 @@ impl Alloc for ListLocked {
         struct_pages.resize_with(memory.len(), || StructPage { next: null_mut() });
         self.struct_pages = struct_pages.into();
 
-        Ok(())
-    }
-
-    #[cold]
-    fn free_all(&self) -> Result<()> {
-        for local in self.local.iter() {
-            local.counter.store(0, Ordering::Relaxed);
+        if free_all {
+            self.free_all()?;
+        } else {
+            self.reserve_all()?;
         }
 
-        let mut next = self.next.lock(); // lock here to prevent races
-
-        let begin = self.struct_pages.as_ptr();
-
-        // Safety: The next pointer is locked
-        let struct_pages = unsafe {
-            core::slice::from_raw_parts_mut(
-                self.struct_pages.as_ptr().cast_mut(),
-                self.struct_pages.len(),
-            )
-        };
-        // build free lists
-        for i in 1..self.pages() {
-            struct_pages[i - 1].next = unsafe { begin.add(i) as _ };
-        }
-        struct_pages[self.pages() - 1].next = null_mut();
-
-        *next = Node::new(begin as _);
-        Ok(())
-    }
-
-    fn reserve_all(&self) -> Result<()> {
-        for local in self.local.iter() {
-            local
-                .counter
-                .store(self.pages() / self.local.len(), Ordering::Relaxed);
-        }
-        *self.next.lock() = Node::new(null_mut());
         Ok(())
     }
 
@@ -175,6 +151,43 @@ impl Alloc for ListLocked {
 }
 
 impl ListLocked {
+    #[cold]
+    fn free_all(&self) -> Result<()> {
+        for local in self.local.iter() {
+            local.counter.store(0, Ordering::Relaxed);
+        }
+
+        let mut next = self.next.lock(); // lock here to prevent races
+
+        let begin = self.struct_pages.as_ptr();
+
+        // Safety: The next pointer is locked
+        let struct_pages = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.struct_pages.as_ptr().cast_mut(),
+                self.struct_pages.len(),
+            )
+        };
+        // build free lists
+        for i in 1..self.pages() {
+            struct_pages[i - 1].next = unsafe { begin.add(i) as _ };
+        }
+        struct_pages[self.pages() - 1].next = null_mut();
+
+        *next = Node::new(begin as _);
+        Ok(())
+    }
+
+    fn reserve_all(&self) -> Result<()> {
+        for local in self.local.iter() {
+            local
+                .counter
+                .store(self.pages() / self.local.len(), Ordering::Relaxed);
+        }
+        *self.next.lock() = Node::new(null_mut());
+        Ok(())
+    }
+
     #[inline]
     fn to_struct_page(&self, v: *mut Page) -> *mut StructPage {
         debug_assert!(self.memory.contains(&(v as *const _)));
@@ -235,7 +248,7 @@ mod test {
 
     use crate::mmap::test_mapping;
     use crate::table::PT_LEN;
-    use crate::upper::Alloc;
+    use crate::upper::{Alloc, Init};
     use crate::util::{logging, Page};
     use crate::Error;
 
@@ -254,8 +267,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(1, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
+            a.init(1, &mut mapping, Init::Volatile, true)
+                .unwrap();
             a
         });
 

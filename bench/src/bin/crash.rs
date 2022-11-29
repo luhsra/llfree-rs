@@ -107,8 +107,7 @@ fn execute(
         *page.cast_mut::<usize>() = 1;
     }
 
-    alloc.init(threads, &mut mapping, true).unwrap();
-    alloc.free_all().unwrap();
+    alloc.init(threads, &mut mapping, Init::Overwrite, true).unwrap();
     warn!("initialized");
 
     let barrier = Barrier::new(threads);
@@ -195,8 +194,7 @@ fn monitor(
     warn!("check");
 
     // Recover allocator
-    alloc.init(threads, &mut mapping, true).unwrap();
-    alloc.recover().unwrap();
+    alloc.init(threads, &mut mapping, Init::Recover, true).unwrap();
 
     let expected = allocs * threads - threads;
     let actual = alloc.dbg_allocated_pages();

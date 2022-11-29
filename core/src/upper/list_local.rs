@@ -8,7 +8,7 @@ use alloc::slice;
 use alloc::vec::Vec;
 use log::{error, info};
 
-use super::{Alloc, MIN_PAGES};
+use super::{Alloc, Init, MIN_PAGES};
 use crate::util::Page;
 use crate::{Error, Result};
 
@@ -57,7 +57,14 @@ impl Default for ListLocal {
 
 impl Alloc for ListLocal {
     #[cold]
-    fn init(&mut self, cores: usize, memory: &mut [Page], _persistent: bool) -> Result<()> {
+    fn init(
+        &mut self,
+        cores: usize,
+        memory: &mut [Page],
+        init: Init,
+        free_all: bool,
+    ) -> Result<()> {
+        debug_assert!(init == Init::Volatile);
         info!(
             "initializing c={cores} {:?} {}",
             memory.as_ptr_range(),
@@ -78,41 +85,13 @@ impl Alloc for ListLocal {
         self.pages = (memory.len() / cores) * cores;
         self.memory = memory[..self.pages].as_ptr_range();
         self.local = local.into();
-        Ok(())
-    }
 
-    #[cold]
-    fn free_all(&self) -> Result<()> {
-        let cores = self.local.len();
-        let struct_pages = unsafe {
-            slice::from_raw_parts_mut(self.struct_pages.as_ptr() as *mut StructPage, self.pages)
-        };
-
-        let begin = self.struct_pages.as_ptr();
-        // build core local free lists
-        let p_core = self.pages / cores;
-        for core in 0..cores {
-            let l = unsafe { &mut *self.local[core].get() };
-            // build linked list
-            for i in core * p_core + 1..(core + 1) * p_core {
-                struct_pages[i - 1].next = unsafe { begin.add(i).cast_mut() };
-            }
-            struct_pages[(core + 1) * p_core - 1].next = null_mut();
-            l.next.set(unsafe { begin.add(core * p_core).cast_mut() });
-            l.counter = 0;
+        if free_all {
+            self.free_all()?;
+        } else {
+            self.reserve_all()?;
         }
-        Ok(())
-    }
 
-    #[cold]
-    fn reserve_all(&self) -> Result<()> {
-        let cores = self.local.len();
-
-        for core in 0..cores {
-            let l = unsafe { &mut *self.local[core].get() };
-            l.next.set(null_mut());
-            l.counter = self.pages() / cores;
-        }
         Ok(())
     }
 
@@ -170,6 +149,41 @@ impl Alloc for ListLocal {
 }
 
 impl ListLocal {
+    #[cold]
+    fn free_all(&self) -> Result<()> {
+        let cores = self.local.len();
+        let struct_pages = unsafe {
+            slice::from_raw_parts_mut(self.struct_pages.as_ptr() as *mut StructPage, self.pages)
+        };
+
+        let begin = self.struct_pages.as_ptr();
+        // build core local free lists
+        let p_core = self.pages / cores;
+        for core in 0..cores {
+            let l = unsafe { &mut *self.local[core].get() };
+            // build linked list
+            for i in core * p_core + 1..(core + 1) * p_core {
+                struct_pages[i - 1].next = unsafe { begin.add(i).cast_mut() };
+            }
+            struct_pages[(core + 1) * p_core - 1].next = null_mut();
+            l.next.set(unsafe { begin.add(core * p_core).cast_mut() });
+            l.counter = 0;
+        }
+        Ok(())
+    }
+
+    #[cold]
+    fn reserve_all(&self) -> Result<()> {
+        let cores = self.local.len();
+
+        for core in 0..cores {
+            let l = unsafe { &mut *self.local[core].get() };
+            l.next.set(null_mut());
+            l.counter = self.pages() / cores;
+        }
+        Ok(())
+    }
+
     #[inline]
     fn to_struct_page(&self, v: *mut Page) -> *mut StructPage {
         debug_assert!(self.memory.contains(&(v as *const _)));
@@ -248,7 +262,7 @@ mod test {
 
     use crate::mmap::test_mapping;
     use crate::table::PT_LEN;
-    use crate::upper::Alloc;
+    use crate::upper::{Alloc, Init};
     use crate::util::{logging, Page};
     use crate::Error;
 
@@ -267,8 +281,8 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(1, &mut mapping, false).unwrap();
-            a.free_all().unwrap();
+            a.init(1, &mut mapping, Init::Volatile, true)
+                .unwrap();
             a
         });
 
