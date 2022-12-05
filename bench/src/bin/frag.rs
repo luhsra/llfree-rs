@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{self, Write};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Barrier, Mutex};
 
 use clap::Parser;
 use log::warn;
@@ -41,7 +41,7 @@ struct Args {
     stride: usize,
 }
 
-type Allocator = Array<4, Cache<32>>;
+type Allocator = ArrayList<3, Cache<32>>;
 
 fn main() {
     let Args {
@@ -56,16 +56,6 @@ fn main() {
 
     util::logging();
 
-    let out = Arc::new(Mutex::new({
-        let mut out = File::create(outfile).unwrap();
-        write!(out, "i,num_pages,allocs").unwrap();
-        for i in 0..PT_LEN + 1 {
-            write!(out, ",{i}").unwrap();
-        }
-        writeln!(out).unwrap();
-        out
-    }));
-
     assert!(order <= 6, "This benchmark is for small pages");
 
     // `thread::pin` uses this to select every nth cpu
@@ -73,25 +63,31 @@ fn main() {
         thread::STRIDE.store(stride, Ordering::Relaxed);
     }
 
-    let mut alloc = Allocator::default();
-    let pages = memory * PT_LEN * PT_LEN;
-
     // Map memory for the allocator and initialize it
+    let pages = memory * PT_LEN * PT_LEN;
     let mut mapping = mapping(0x1000_0000_0000, pages, dax).unwrap();
-    alloc
-        .init(threads, &mut mapping, Init::Volatile, true)
-        .unwrap();
+    let alloc = Allocator::new(threads, &mut mapping, Init::Volatile, true).unwrap();
+
+    let out = Mutex::new({
+        let mut out = File::create(outfile).unwrap();
+        write!(out, "i,num_pages,allocs").unwrap();
+        for i in 0..alloc.pages().div_ceil(PT_LEN) {
+            write!(out, ",{i}").unwrap();
+        }
+        writeln!(out).unwrap();
+        out
+    });
 
     // Operate on half of the avaliable memory
     let allocs = (pages / 2) / (1 << order) / threads;
     warn!("allocs={allocs}");
     let barrier = Barrier::new(threads);
 
-    let all_pages = Arc::new({
+    let all_pages = {
         let mut v = Vec::with_capacity(threads);
         v.resize_with(threads, || Mutex::new(Vec::<u64>::new()));
         v
-    });
+    };
 
     thread::parallel(0..threads, |t| {
         thread::pin(t);
@@ -167,19 +163,19 @@ fn main() {
     warn!("{alloc:?}");
 }
 
-static mut FREE_PAGES: [usize; PT_LEN + 1] = [0; PT_LEN + 1];
+static mut FREE_PER_HUGE: Vec<u16> = Vec::new();
 
 fn count_pte2(free: usize) {
-    unsafe { FREE_PAGES[free] += 1 };
+    unsafe { FREE_PER_HUGE.push(free as _) };
 }
 
 /// count and output stats
 fn stats(out: &mut File, alloc: &Allocator, i: usize) -> io::Result<()> {
-    unsafe { FREE_PAGES.fill(0) };
+    unsafe { FREE_PER_HUGE.clear() };
     alloc.dbg_for_each_huge_page(count_pte2);
 
     write!(out, "{i},{},{}", alloc.pages(), alloc.dbg_allocated_pages(),)?;
-    for b in unsafe { &FREE_PAGES } {
+    for b in unsafe { &FREE_PER_HUGE } {
         write!(out, ",{b}")?;
     }
     writeln!(out)?;
