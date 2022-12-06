@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use log::{error, info, warn};
 use spin::Mutex;
 
-use super::{Alloc, Local, Init, MAGIC, MAX_PAGES};
+use super::{Alloc, Init, Local, MAGIC, MAX_PAGES};
 use crate::atomic::{ANode, Atomic, BufList, Next};
 use crate::entry::Entry3;
 use crate::lower::LowerAlloc;
@@ -75,7 +75,7 @@ impl<const PR: usize, L: LowerAlloc> fmt::Debug for ArrayList<PR, L> {
         )?;
 
         for (t, local) in self.local.iter().enumerate() {
-            writeln!(f, "    L{t:>2}: {:?}", local.pte.load())?;
+            writeln!(f, "    L{t:>2}: {:?}", local.entry.load())?;
         }
 
         write!(f, "}}")?;
@@ -119,11 +119,12 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
 
         if init == Init::Recover {
             match self.recover() {
-                Err(Error::Initialization) => {},
+                Err(Error::Initialization) => {}
                 r => return r,
             }
         }
 
+        self.trees = Default::default();
         self.trees.init(self.pages(), L::N, free_all);
 
         if let Some(meta) = unsafe { self.meta.as_ref() } {
@@ -167,9 +168,9 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
 
         // Try decrement own subtree first
         let num_pages = 1 << order;
-        if let Err(pte) = local.pte.update(|v| v.inc_idx(num_pages, i, max)) {
-            if pte.idx() == i {
-                error!("inc failed L{i}: {pte:?} o={order}");
+        if let Err(entry) = local.entry.update(|v| v.inc_idx(num_pages, i, max)) {
+            if entry.idx() == i {
+                error!("inc failed L{i}: {entry:?} o={order}");
                 return Err(Error::Corruption);
             }
         } else {
@@ -181,18 +182,18 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
 
         // Subtree not owned by us
         match self.trees[i].update(|v| v.inc(num_pages, max)) {
-            Ok(pte) => {
-                let new_pages = pte.free() + num_pages;
-                if !pte.reserved() && new_pages > Trees::almost_full() {
+            Ok(entry) => {
+                let new_pages = entry.free() + num_pages;
+                if !entry.reserved() && new_pages > Trees::almost_full() {
                     // put-reserve optimization:
                     // Try to reserve the subtree that was targeted by the recent frees
-                    if core == c && local.frees_related(i) && self.reserve_entry(&local.pte, i)? {
+                    if core == c && local.frees_related(i) && self.reserve_entry(&local.entry, i)? {
                         return Ok(());
                     }
 
                     // Add to partially free list
                     // Only if not already in list
-                    if pte.next() == Next::Outside {
+                    if entry.next() == Next::Outside {
                         self.trees.push(i, new_pages, L::N);
                     }
                 }
@@ -201,8 +202,8 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
                 }
                 Ok(())
             }
-            Err(pte) => {
-                error!("inc failed i{i}: {pte:?} o={order}");
+            Err(entry) => {
+                error!("inc failed i{i}: {entry:?} o={order}");
                 Err(Error::Corruption)
             }
         }
@@ -225,7 +226,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
         let c = core % self.local.len();
         let local = &self.local[c];
         match self.cas_reserved(
-            &local.pte,
+            &local.entry,
             Entry3::new().with_idx(Entry3::IDX_MAX),
             false,
             false,
@@ -244,7 +245,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
         }
         // Pages allocated in reserved subtrees
         for local in self.local.iter() {
-            pages += local.pte.load().free();
+            pages += local.entry.load().free();
         }
         pages
     }
@@ -347,11 +348,11 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
         let c = core % self.local.len();
         let local = &self.local[c];
 
-        match local.pte.update(|v| v.dec(1 << order)) {
-            Ok(pte) => {
+        match local.entry.update(|v| v.dec(1 << order)) {
+            Ok(entry) => {
                 let mut start = local.start.load();
-                if start / L::N != pte.idx() {
-                    start = pte.idx() * L::N
+                if start / L::N != entry.idx() {
+                    start = entry.idx() * L::N
                 }
                 match self.lower.get(start, order) {
                     Ok(page) => {
@@ -365,23 +366,24 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
                         warn!("alloc failed o={order} => retry");
                         let max = (self.pages() - align_down(start, L::N)).min(L::N);
                         // Increment global to prevent race condition with concurrent reservation
-                        if let Err(pte) = self.trees[pte.idx()].update(|v| v.inc(1 << order, max)) {
-                            error!("Counter reset failed o={order} {pte:?}");
+                        if let Err(old) = self.trees[entry.idx()].update(|v| v.inc(1 << order, max))
+                        {
+                            error!("Counter reset failed o={order} {old:?}");
                             Err(Error::Corruption)
                         } else {
                             // reserve new, pushing the old entry to the end of the partial list
-                            self.reserve_or_wait(&local.pte, pte, true)?;
+                            self.reserve_or_wait(&local.entry, entry, true)?;
                             Err(Error::CAS)
                         }
                     }
                     Err(e) => Err(e),
                 }
             }
-            Err(pte) => {
+            Err(entry) => {
                 // TODO: try sync with global
 
                 // reserve new
-                self.reserve_or_wait(&local.pte, pte, false)?;
+                self.reserve_or_wait(&local.entry, entry, false)?;
                 Err(Error::CAS)
             }
         }
@@ -390,23 +392,23 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
     /// Try to reserve a new subtree or wait for concurrent reservations to finish.
     ///
     /// If `retry`, tries to reserve a less fragmented subtree
-    fn reserve_or_wait(&self, pte_a: &Atomic<Entry3>, old: Entry3, retry: bool) -> Result<Entry3> {
+    fn reserve_or_wait(&self, local: &Atomic<Entry3>, old: Entry3, retry: bool) -> Result<Entry3> {
         // Set the reserved flag, locking the reservation
-        if !old.reserved() && pte_a.update(|v| v.toggle_reserve(true)).is_ok() {
+        if !old.reserved() && local.update(|v| v.toggle_reserve(true)).is_ok() {
             // Try reserve new subtree
-            let new_pte = match self.trees.reserve_from_list(L::N, retry) {
+            let new = match self.trees.reserve_from_list(L::N, retry) {
                 Ok(ret) => ret,
                 Err(e) => {
                     // Clear reserve flag
-                    if pte_a.update(|v| v.toggle_reserve(false)).is_err() {
+                    if local.update(|v| v.toggle_reserve(false)).is_err() {
                         error!("unexpected reserve state");
                         return Err(Error::Corruption);
                     }
                     return Err(e);
                 }
             };
-            match self.cas_reserved(pte_a, new_pte, true, retry) {
-                Ok(_) => Ok(new_pte),
+            match self.cas_reserved(local, new, true, retry) {
+                Ok(_) => Ok(new),
                 Err(Error::CAS) => {
                     error!("unexpected reserve state");
                     Err(Error::Corruption)
@@ -416,9 +418,9 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
         } else {
             // Wait for concurrent reservation to end
             for _ in 0..(2 * CAS_RETRIES) {
-                let new_pte = pte_a.load();
-                if !new_pte.reserved() {
-                    return Ok(new_pte);
+                let new = local.load();
+                if !new.reserved() {
+                    return Ok(new);
                 }
                 hint::spin_loop(); // pause cpu
             }
@@ -427,17 +429,17 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
         }
     }
 
-    fn reserve_entry(&self, pte_a: &Atomic<Entry3>, i: usize) -> Result<bool> {
+    fn reserve_entry(&self, local: &Atomic<Entry3>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
-        if let Ok(new_pte) = self.trees[i].update(|v| v.reserve_min(Trees::almost_full())) {
-            match self.cas_reserved(pte_a, new_pte.with_idx(i), false, false) {
+        if let Ok(new) = self.trees[i].update(|v| v.reserve_min(Trees::almost_full())) {
+            match self.cas_reserved(local, new.with_idx(i), false, false) {
                 Ok(_) => Ok(true),
                 Err(Error::CAS) => {
                     warn!("rollback {i}");
                     // Rollback reservation
                     let max = (self.pages() - i * L::N).min(L::N);
                     if self.trees[i]
-                        .update(|v| v.unreserve_add(new_pte.free(), max))
+                        .update(|v| v.unreserve_add(new.free(), max))
                         .is_err()
                     {
                         error!("put - reservation rollback failed");
@@ -458,29 +460,29 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
     /// If `enqueue_back`, the old unreserved entry is added to the back of the partial list.
     fn cas_reserved(
         &self,
-        pte_a: &Atomic<Entry3>,
-        new_pte: Entry3,
+        local: &Atomic<Entry3>,
+        new: Entry3,
         expect_reserved: bool,
         enqueue_back: bool,
     ) -> Result<()> {
-        debug_assert!(!new_pte.reserved());
+        debug_assert!(!new.reserved());
 
-        let pte = pte_a
-            .update(|v| (v.reserved() == expect_reserved).then_some(new_pte))
+        let local = local
+            .update(|v| (v.reserved() == expect_reserved).then_some(new))
             .map_err(|_| Error::CAS)?;
-        if !pte.has_idx() {
+        if !local.has_idx() {
             return Ok(());
         }
 
-        let i = pte.idx();
+        let i = local.idx();
         let max = (self.pages() - i * L::N).min(L::N);
-        if let Ok(v) = self.trees[i].update(|v| v.unreserve_add(pte.free(), max)) {
+        if let Ok(global) = self.trees[i].update(|v| v.unreserve_add(local.free(), max)) {
             // Only if not already in list
-            if v.next() == Next::Outside {
+            if global.next() == Next::Outside {
                 if enqueue_back {
-                    self.trees.push_back(i, v.free() + pte.free(), L::N);
+                    self.trees.push_back(i, global.free() + local.free(), L::N);
                 } else {
-                    self.trees.push(i, v.free() + pte.free(), L::N);
+                    self.trees.push(i, global.free() + local.free(), L::N);
                 }
             }
             Ok(())
@@ -546,35 +548,29 @@ impl fmt::Debug for Trees {
 
 impl Trees {
     fn init(&mut self, pages: usize, span: usize, free_all: bool) {
-        let pte3_num = pages.div_ceil(span);
-        let mut pte3s = Vec::with_capacity(pte3_num);
+        let len = pages.div_ceil(span);
+        let mut entries = Vec::with_capacity(len);
 
         if free_all {
-            let pte3_num = pages.div_ceil(span);
-            pte3s.resize_with(pte3_num - 1, || {
+            let len = pages.div_ceil(span);
+            entries.resize_with(len - 1, || {
                 Atomic::new(Entry3::empty(span).with_next(Next::Outside))
             });
 
-            // The last one may be cut off
-            let max = if pages % span == 0 {
-                span
-            } else {
-                pages % span
-            };
-            pte3s.push(Atomic::new(
+            // The last one might be cut off
+            let max = ((pages - 1) % span) + 1;
+            entries.push(Atomic::new(
                 Entry3::new().with_free(max).with_next(Next::Outside),
             ));
 
-            self.entries = pte3s.into();
+            self.entries = entries.into();
 
-            self.push_empty_all((0..pte3_num - 1).into_iter());
-            self.push(pte3_num - 1, max, span);
+            self.push_empty_all(0..len - 1);
+            self.push(len - 1, max, span);
         } else {
-            pte3s.resize_with(pte3_num, || {
-                Atomic::new(Entry3::new().with_next(Next::Outside))
-            });
+            entries.resize_with(len, || Atomic::new(Entry3::new().with_next(Next::Outside)));
             self.lists = Default::default();
-            self.entries = pte3s.into();
+            self.entries = entries.into();
         }
     }
 
@@ -614,8 +610,8 @@ impl Trees {
             r
         } {
             info!("reserve empty {i}");
-            if let Ok(pte) = self[i].update(|v| v.reserve_min(span)) {
-                Ok(pte.with_idx(i))
+            if let Ok(entry) = self[i].update(|v| v.reserve_min(span)) {
+                Ok(entry.with_idx(i))
             } else {
                 error!("reserve empty failed");
                 Err(Error::Corruption)
@@ -638,16 +634,16 @@ impl Trees {
                 info!("reserve partial {i}");
 
                 match self[i].update(|v| v.reserve_partial(Self::almost_full()..span)) {
-                    Ok(pte) => {
+                    Ok(entry) => {
                         if let Some(empty) = skipped_empty {
                             self.lists.lock().empty.push(self, empty);
                         }
-                        return Ok(pte.with_idx(i));
+                        return Ok(entry.with_idx(i));
                     }
-                    Err(pte) => {
+                    Err(entry) => {
                         // Skip reserved and empty entries
                         // They might be reserved by the put-reserve optimization
-                        if !pte.reserved() && pte.free() == span {
+                        if !entry.reserved() && entry.free() == span {
                             if let Some(empty) = skipped_empty.replace(i) {
                                 self.lists.lock().empty.push(self, empty);
                             }
@@ -656,8 +652,8 @@ impl Trees {
                 }
             } else if let Some(i) = skipped_empty {
                 // Reserve the last skipped empty entry instead
-                return if let Ok(pte) = self[i].update(|v| v.reserve_min(span)) {
-                    Ok(pte.with_idx(i))
+                return if let Ok(entry) = self[i].update(|v| v.reserve_min(span)) {
+                    Ok(entry.with_idx(i))
                 } else {
                     error!("reserve empty failed");
                     Err(Error::Corruption)

@@ -15,7 +15,6 @@ pub struct Entry3 {
     /// Metadata for the higher level allocators.
     #[bits(43)]
     pub idx: usize,
-    // TODO: huge-page counter?
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
 }
@@ -34,19 +33,19 @@ impl Entry3 {
     pub const IDX_MAX: usize = (1 << 41) - 1;
     pub const IDX_END: usize = (1 << 41) - 2;
 
-    pub fn empty(span: usize) -> Entry3 {
-        Entry3::new().with_free(span)
+    pub fn empty(span: usize) -> Self {
+        Self::new().with_free(span)
     }
     /// Creates a new entry referring to a level 2 page table.
-    pub fn new_table(pages: usize, reserved: bool) -> Entry3 {
-        Entry3::new().with_free(pages).with_reserved(reserved)
+    pub fn new_table(pages: usize, reserved: bool) -> Self {
+        Self::new().with_free(pages).with_reserved(reserved)
     }
     /// If this entry has a valid idx.
     pub fn has_idx(self) -> bool {
         self.idx() < Self::IDX_END
     }
     /// Decrements the free pages counter.
-    pub fn dec(self, num_pages: usize) -> Option<Entry3> {
+    pub fn dec(self, num_pages: usize) -> Option<Self> {
         if self.idx() <= Self::IDX_END && self.free() >= num_pages {
             Some(self.with_free(self.free() - num_pages))
         } else {
@@ -54,7 +53,7 @@ impl Entry3 {
         }
     }
     /// Increments the free pages counter.
-    pub fn inc(self, num_pages: usize, max: usize) -> Option<Entry3> {
+    pub fn inc(self, num_pages: usize, max: usize) -> Option<Self> {
         let pages = self.free() + num_pages;
         if pages <= max {
             Some(self.with_free(pages))
@@ -63,7 +62,7 @@ impl Entry3 {
         }
     }
     /// Increments the free pages counter and checks for `idx` to match.
-    pub fn inc_idx(self, num_pages: usize, idx: usize, max: usize) -> Option<Entry3> {
+    pub fn inc_idx(self, num_pages: usize, idx: usize, max: usize) -> Option<Self> {
         if self.idx() == idx {
             self.inc(num_pages, max)
         } else {
@@ -71,7 +70,7 @@ impl Entry3 {
         }
     }
     /// Reserves this entry if it has at least `min` pages.
-    pub fn reserve_min(self, min: usize) -> Option<Entry3> {
+    pub fn reserve_min(self, min: usize) -> Option<Self> {
         if !self.reserved() && self.free() >= min {
             Some(self.with_reserved(true).with_free(0))
         } else {
@@ -79,7 +78,7 @@ impl Entry3 {
         }
     }
     /// Reserves this entry if its page count is in `range`.
-    pub fn reserve_partial(self, range: Range<usize>) -> Option<Entry3> {
+    pub fn reserve_partial(self, range: Range<usize>) -> Option<Self> {
         if !self.reserved() && range.contains(&self.free()) {
             Some(self.with_reserved(true).with_free(0))
         } else {
@@ -87,13 +86,13 @@ impl Entry3 {
         }
     }
     /// Updates the reserve flag to `new` if `old != new`.
-    pub fn toggle_reserve(self, new: bool) -> Option<Entry3> {
+    pub fn toggle_reserve(self, new: bool) -> Option<Self> {
         (self.reserved() != new).then_some(self.with_reserved(new))
     }
 
     /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
-    pub fn unreserve_add(self, add: usize, max: usize) -> Option<Entry3> {
+    pub fn unreserve_add(self, add: usize, max: usize) -> Option<Self> {
         let pages = self.free() + add;
         if self.reserved() && pages <= max {
             Some(self.with_free(pages).with_reserved(false))
@@ -104,11 +103,113 @@ impl Entry3 {
     }
 }
 
+impl From<SEntry3> for Entry3 {
+    fn from(value: SEntry3) -> Self {
+        Self::new_table(value.free(), value.reserved())
+    }
+}
+
 impl fmt::Debug for Entry3 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Entry3")
             .field("free", &self.free())
             .field("idx", &self.idx())
+            .field("reserved", &self.reserved())
+            .finish()
+    }
+}
+
+#[bitfield(u32)]
+pub struct SEntry3 {
+    /// Number of free 4K pages.
+    #[bits(31)]
+    pub free: usize,
+    /// If this subtree is reserved by a CPU.
+    pub reserved: bool,
+}
+
+impl Default for SEntry3 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AtomicValue for SEntry3 {
+    type V = u32;
+}
+
+impl SEntry3 {
+    pub const IDX_MAX: usize = (1 << 41) - 1;
+    pub const IDX_END: usize = (1 << 41) - 2;
+
+    pub fn empty(span: usize) -> Self {
+        Self::new().with_free(span)
+    }
+    /// Creates a new entry referring to a level 2 page table.
+    pub fn new_table(pages: usize, reserved: bool) -> Self {
+        Self::new().with_free(pages).with_reserved(reserved)
+    }
+    /// Decrements the free pages counter.
+    pub fn dec(self, num_pages: usize) -> Option<Self> {
+        if self.free() >= num_pages {
+            Some(self.with_free(self.free() - num_pages))
+        } else {
+            None
+        }
+    }
+    /// Increments the free pages counter.
+    pub fn inc(self, num_pages: usize, max: usize) -> Option<Self> {
+        let pages = self.free() + num_pages;
+        if pages <= max {
+            Some(self.with_free(pages))
+        } else {
+            None
+        }
+    }
+    /// Reserves this entry if it has at least `min` pages.
+    pub fn reserve_min(self, min: usize) -> Option<Self> {
+        if !self.reserved() && self.free() >= min {
+            Some(self.with_reserved(true).with_free(0))
+        } else {
+            None
+        }
+    }
+    /// Reserves this entry if its page count is in `range`.
+    pub fn reserve_partial(self, range: Range<usize>) -> Option<Self> {
+        if !self.reserved() && range.contains(&self.free()) {
+            Some(self.with_reserved(true).with_free(0))
+        } else {
+            None
+        }
+    }
+    /// Updates the reserve flag to `new` if `old != new`.
+    pub fn toggle_reserve(self, new: bool) -> Option<Self> {
+        (self.reserved() != new).then_some(self.with_reserved(new))
+    }
+
+    /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
+    /// `self` is the entry in the global array / table.
+    pub fn unreserve_add(self, add: usize, max: usize) -> Option<Self> {
+        let pages = self.free() + add;
+        if self.reserved() && pages <= max {
+            Some(self.with_free(pages).with_reserved(false))
+        } else {
+            error!("{self:?} + {add}, {pages} <= {max}");
+            None
+        }
+    }
+}
+
+impl From<Entry3> for SEntry3 {
+    fn from(value: Entry3) -> Self {
+        Self::new_table(value.free(), value.reserved())
+    }
+}
+
+impl fmt::Debug for SEntry3 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Entry3")
+            .field("free", &self.free())
             .field("reserved", &self.reserved())
             .finish()
     }

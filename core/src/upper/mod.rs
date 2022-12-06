@@ -185,7 +185,7 @@ pub struct Local<const L: usize> {
     /// Page index of the last allocated page -> starting point for the next allocation
     start: Atomic<usize>,
     /// Local copy of the reserved level 3 entry
-    pte: Atomic<Entry3>,
+    entry: Atomic<Entry3>,
     /// # Safety
     /// This should only be accessed from the corresponding (virtual) CPU core!
     inner: UnsafeCell<RecentFrees<L>>,
@@ -202,7 +202,7 @@ impl<const L: usize> Local<L> {
     fn new() -> Self {
         Self {
             start: Atomic::new(usize::MAX),
-            pte: Atomic::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
+            entry: Atomic::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
             inner: UnsafeCell::new(RecentFrees {
                 frees_i: 0,
                 frees: [usize::MAX; L],
@@ -241,7 +241,7 @@ impl<const L: usize> fmt::Debug for Local<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Local")
             .field("start", &self.start.load())
-            .field("pte", &self.pte.load())
+            .field("pte", &self.entry.load())
             .field("frees", &self.p().frees)
             .field("frees_i", &self.p().frees_i)
             .finish()
@@ -277,7 +277,7 @@ mod test {
     use crate::util::{logging, Page, WyRand};
     use crate::Error;
 
-    type Lower = Atom<128>;
+    type Lower = Cache<32>;
     type Allocator = Array<4, Lower>;
 
     #[test]

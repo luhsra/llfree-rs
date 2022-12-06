@@ -1,4 +1,4 @@
-use core::fmt;
+use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 use core::ops::Index;
 use core::sync::atomic::*;
@@ -311,7 +311,7 @@ impl<T: ANode> fmt::Debug for BufList<T> {
     }
 }
 
-impl<T: ANode> BufList<T> {
+impl<T: ANode + Debug> BufList<T> {
     pub fn clear(&mut self) {
         self.start = None;
         self.end = None;

@@ -41,7 +41,7 @@ struct Args {
     stride: usize,
 }
 
-type Allocator = ArrayList<3, Cache<32>>;
+type Allocator = Array<3, Cache<32>>;
 
 fn main() {
     let Args {
