@@ -20,7 +20,7 @@ pub use list_locked::ListLocked;
 /// Number of retries if an atomic operation fails.
 pub const CAS_RETRIES: usize = 16;
 /// Magic marking the meta page.
-pub const MAGIC: usize = 0xdead_beef;
+pub const MAGIC: usize = 0x_dead_beef;
 /// Minimal number of pages an allocator needs (1G).
 pub const MIN_PAGES: usize = PT_LEN * PT_LEN;
 /// Maximal number of pages an allocator can manage (about 256TiB).
@@ -30,13 +30,8 @@ pub const MAX_PAGES: usize = Mapping([9; 4]).span(4);
 pub trait Alloc: Sync + Send + fmt::Debug {
     /// Initialize the allocator.
     #[cold]
-    fn init(
-        &mut self,
-        cores: usize,
-        memory: &mut [Page],
-        init: Init,
-        free_all: bool,
-    ) -> Result<()>;
+    fn init(&mut self, cores: usize, memory: &mut [Page], init: Init, free_all: bool)
+        -> Result<()>;
 
     /// Allocate a new page.
     fn get(&self, core: usize, order: usize) -> Result<u64>;
@@ -94,39 +89,32 @@ pub enum Init {
 pub trait AllocExt: Sized + Alloc + Default {
     /// Create and initialize the allocator.
     #[cold]
-    fn new(
-        cores: usize,
-        memory: &mut [Page],
-        init: Init,
-        free_all: bool,
-    ) -> Result<Self> {
+    fn new(cores: usize, memory: &mut [Page], init: Init, free_all: bool) -> Result<Self> {
         let mut a = Self::default();
         a.init(cores, memory, init, free_all)?;
         Ok(a)
     }
 }
 // Implement for all default initializable allocators
-impl<'a, A: Sized + Alloc + Default> AllocExt for A {}
+impl<A: Sized + Alloc + Default> AllocExt for A {}
 
 /// The short name of an allocator.
 /// E.g.: `ArrayAtomic4C32` for
 /// `nvalloc::upper::array_atomic::ArrayAtomic<4, nvalloc::lower::cache::Cache<32>>`
 #[derive(PartialEq, Eq, Hash)]
-pub struct AllocName {
-    base: &'static str,
-    first: &'static str,
-    second: &'static str,
-    size: &'static str,
-}
+pub struct AllocName([&'static str; 4]);
 
 impl fmt::Display for AllocName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}{}{}", self.base, self.first, self.second, self.size)
+        for part in self.0 {
+            write!(f, "{part}")?;
+        }
+        Ok(())
     }
 }
 
 impl AllocName {
-    pub fn new<'a, A: Alloc + ?Sized>() -> Self {
+    pub fn new<A: Alloc + ?Sized>() -> Self {
         let name = type_name::<A>();
         // Add first letter of generic type as suffix
         let (name, first, second, size) = if let Some((prefix, suffix)) = name.split_once('<') {
@@ -154,23 +142,21 @@ impl AllocName {
         // Strip namespaces
         let base = name.rsplit_once(':').map_or(name, |s| s.1);
         let base = base.strip_suffix("Alloc").unwrap_or(base);
-        Self {
-            base,
-            first,
-            second,
-            size,
-        }
+        Self([base, first, second, size])
     }
 }
 
 impl PartialEq<&str> for AllocName {
     fn eq(&self, other: &&str) -> bool {
-        other
-            .strip_prefix(self.base)
-            .and_then(|o| o.strip_prefix(self.first))
-            .and_then(|o| o.strip_prefix(self.second))
-            .and_then(|o| o.strip_prefix(self.size))
-            == Some("")
+        let mut remainder = *other;
+        for part in self.0 {
+            if let Some(r) = remainder.strip_prefix(part) {
+                remainder = r;
+            } else {
+                return false;
+            };
+        }
+        remainder.is_empty()
     }
 }
 
@@ -943,9 +929,7 @@ mod test {
         }
 
         let mut alloc = Allocator::default();
-        alloc
-            .init(1, &mut mapping, Init::Recover, true)
-            .unwrap();
+        alloc.init(1, &mut mapping, Init::Recover, true).unwrap();
         assert_eq!(alloc.dbg_allocated_pages(), expected_pages);
     }
 

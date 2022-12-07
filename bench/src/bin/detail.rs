@@ -68,7 +68,6 @@ fn main() {
         alloc
             .init(threads, &mut mapping, Init::Overwrite, true)
             .unwrap();
-        let alloc = &alloc;
 
         warn!("init time {}ms", timer.elapsed().as_millis());
 

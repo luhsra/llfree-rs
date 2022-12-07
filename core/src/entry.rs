@@ -8,6 +8,7 @@ use log::error;
 use crate::atomic::AtomicValue;
 
 #[bitfield(u64)]
+#[derive(Default)]
 pub struct Entry3 {
     /// Number of free 4K pages.
     #[bits(20)]
@@ -17,12 +18,6 @@ pub struct Entry3 {
     pub idx: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
-}
-
-impl Default for Entry3 {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl AtomicValue for Entry3 {
@@ -109,33 +104,18 @@ impl From<SEntry3> for Entry3 {
     }
 }
 
-impl fmt::Debug for Entry3 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Entry3")
-            .field("free", &self.free())
-            .field("idx", &self.idx())
-            .field("reserved", &self.reserved())
-            .finish()
-    }
-}
-
-#[bitfield(u32)]
+#[bitfield(u16)]
+#[derive(Default)]
 pub struct SEntry3 {
     /// Number of free 4K pages.
-    #[bits(31)]
+    #[bits(15)]
     pub free: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
 }
 
-impl Default for SEntry3 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl AtomicValue for SEntry3 {
-    type V = u32;
+    type V = u16;
 }
 
 impl SEntry3 {
@@ -143,10 +123,12 @@ impl SEntry3 {
     pub const IDX_END: usize = (1 << 41) - 2;
 
     pub fn empty(span: usize) -> Self {
+        debug_assert!(span < (1 << 15));
         Self::new().with_free(span)
     }
     /// Creates a new entry referring to a level 2 page table.
     pub fn new_table(pages: usize, reserved: bool) -> Self {
+        debug_assert!(pages < (1 << 15));
         Self::new().with_free(pages).with_reserved(reserved)
     }
     /// Decrements the free pages counter.
@@ -203,15 +185,6 @@ impl SEntry3 {
 impl From<Entry3> for SEntry3 {
     fn from(value: Entry3) -> Self {
         Self::new_table(value.free(), value.reserved())
-    }
-}
-
-impl fmt::Debug for SEntry3 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Entry3")
-            .field("free", &self.free())
-            .field("reserved", &self.reserved())
-            .finish()
     }
 }
 

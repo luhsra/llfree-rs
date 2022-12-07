@@ -11,7 +11,7 @@ fn getcpu() -> (usize, usize) {
     let mut node: c_uint = 0;
     let ret = unsafe { getcpu(&mut cpu, &mut node, null_mut()) };
     if ret != 0 {
-        panic!("getcpu error {}", ret);
+        panic!("getcpu error {ret}");
     }
     (cpu as _, node as _)
 }

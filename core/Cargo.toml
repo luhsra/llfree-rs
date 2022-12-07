@@ -6,8 +6,8 @@ edition = "2021"
 [dependencies]
 cfg-if = "1.0"
 libc = { version = "0.2", optional = true }
-bitfield-struct = "0.1.7"
-env_logger = { version = "0.9", default-features = false, optional = true }
+bitfield-struct = "0.1.8"
+env_logger = { version = "0.10", default-features = false, optional = true }
 spin = { version = "0.9", default-features = false, features = ["spin_mutex", "barrier"] }
 log = { version = "0.4", default-features = false }
 

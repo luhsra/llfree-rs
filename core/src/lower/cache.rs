@@ -74,6 +74,8 @@ where
     const HUGE_ORDER: usize = Self::MAPPING.order(1);
 
     fn new(_cores: usize, area: &mut [Page], init: Init, free_all: bool) -> Self {
+        assert!(T2N < (1 << (u16::BITS as usize - Self::MAPPING.order(1))));
+
         // FIXME: Lifetime hack!
         let area = unsafe { slice::from_raw_parts_mut(area.as_mut_ptr(), area.len()) };
         let n1 = Self::MAPPING.num_pts(1, area.len());
