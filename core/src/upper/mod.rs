@@ -181,45 +181,45 @@ impl PartialEq<AllocName> for &str {
 }
 
 /// Per core data.
-pub struct Local<const L: usize> {
+pub struct Local<const F: usize> {
     /// Page index of the last allocated page -> starting point for the next allocation
     start: Atomic<usize>,
     /// Local copy of the reserved level 3 entry
     entry: Atomic<Entry3>,
     /// # Safety
     /// This should only be accessed from the corresponding (virtual) CPU core!
-    inner: UnsafeCell<RecentFrees<L>>,
+    inner: UnsafeCell<RecentFrees<F>>,
 }
 
 /// Ringbuffer storing the locations of recent frees for the free-reserve heuristic.
 #[repr(align(64))]
-struct RecentFrees<const L: usize> {
-    frees: [usize; L],
+struct RecentFrees<const F: usize> {
+    frees: [usize; F],
     frees_i: usize,
 }
 
-impl<const L: usize> Local<L> {
+impl<const F: usize> Local<F> {
     fn new() -> Self {
         Self {
             start: Atomic::new(usize::MAX),
             entry: Atomic::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
             inner: UnsafeCell::new(RecentFrees {
                 frees_i: 0,
-                frees: [usize::MAX; L],
+                frees: [usize::MAX; F],
             }),
         }
     }
     #[allow(clippy::mut_from_ref)]
-    fn p(&self) -> &mut RecentFrees<L> {
+    fn p(&self) -> &mut RecentFrees<F> {
         unsafe { &mut *self.inner.get() }
     }
     /// Add a chunk (subtree) id to the history of chunks.
     pub fn frees_push(&self, chunk: usize) {
-        if L > 1 {
+        if F > 1 {
             let inner = self.p();
             inner.frees_i = (inner.frees_i + 1) % inner.frees.len();
             inner.frees[inner.frees_i] = chunk;
-        } else if L == 1 {
+        } else if F == 1 {
             // We don't have to update the index if there is only one element
             let inner = self.p();
             inner.frees[0] = 0;
@@ -228,16 +228,16 @@ impl<const L: usize> Local<L> {
     /// Calls frees_push on exiting scope.
     /// NOTE: Bind the return value to a variable!
     #[must_use]
-    pub fn defer_frees_push(&self, chunk: usize) -> LocalFreePush<'_, L> {
+    pub fn defer_frees_push(&self, chunk: usize) -> LocalFreePush<'_, F> {
         LocalFreePush(self, chunk)
     }
     /// Checks if the previous frees were in the given chunk.
     pub fn frees_related(&self, chunk: usize) -> bool {
-        L > 0 && self.p().frees.iter().all(|p| *p == chunk)
+        F > 0 && self.p().frees.iter().all(|p| *p == chunk)
     }
 }
 
-impl<const L: usize> fmt::Debug for Local<L> {
+impl<const F: usize> fmt::Debug for Local<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Local")
             .field("start", &self.start.load())
@@ -249,7 +249,7 @@ impl<const L: usize> fmt::Debug for Local<L> {
 }
 
 /// Calls `frees_push` on drop.
-pub struct LocalFreePush<'a, const L: usize>(&'a Local<L>, usize);
+pub struct LocalFreePush<'a, const F: usize>(&'a Local<F>, usize);
 impl<'a, const L: usize> Drop for LocalFreePush<'a, L> {
     fn drop(&mut self) {
         self.0.frees_push(self.1);

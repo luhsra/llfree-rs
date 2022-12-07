@@ -39,24 +39,24 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
 #[repr(align(64))]
-pub struct Array<const PR: usize, L: LowerAlloc>
+pub struct Array<const F: usize, L: LowerAlloc>
 where
     [(); L::N]:,
 {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
     /// CPU local data (only shared between CPUs if the memory area is too small)
-    local: Box<[Local<PR>]>,
+    local: Box<[Local<F>]>,
     /// Metadata of the lower alloc
     lower: L,
     /// Manages the allocators subtrees
     trees: Trees<{ L::N }>,
 }
 
-unsafe impl<const PR: usize, L: LowerAlloc> Send for Array<PR, L> where [(); L::N]: {}
-unsafe impl<const PR: usize, L: LowerAlloc> Sync for Array<PR, L> where [(); L::N]: {}
+unsafe impl<const F: usize, L: LowerAlloc> Send for Array<F, L> where [(); L::N]: {}
+unsafe impl<const F: usize, L: LowerAlloc> Sync for Array<F, L> where [(); L::N]: {}
 
-impl<const PR: usize, L: LowerAlloc> fmt::Debug for Array<PR, L>
+impl<const F: usize, L: LowerAlloc> fmt::Debug for Array<F, L>
 where
     [(); L::N]:,
 {
@@ -88,7 +88,7 @@ where
     }
 }
 
-impl<const PR: usize, L: LowerAlloc> Alloc for Array<PR, L>
+impl<const F: usize, L: LowerAlloc> Alloc for Array<F, L>
 where
     [(); L::N]:,
 {
@@ -263,7 +263,7 @@ where
     }
 }
 
-impl<const PR: usize, L: LowerAlloc> Drop for Array<PR, L>
+impl<const F: usize, L: LowerAlloc> Drop for Array<F, L>
 where
     [(); L::N]:,
 {
@@ -273,7 +273,7 @@ where
         }
     }
 }
-impl<const PR: usize, L: LowerAlloc> Default for Array<PR, L>
+impl<const F: usize, L: LowerAlloc> Default for Array<F, L>
 where
     [(); L::N]:,
 {
@@ -287,7 +287,7 @@ where
     }
 }
 
-impl<const PR: usize, L: LowerAlloc> Array<PR, L>
+impl<const F: usize, L: LowerAlloc> Array<F, L>
 where
     [(); L::N]:,
 {
