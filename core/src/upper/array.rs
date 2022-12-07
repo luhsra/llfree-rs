@@ -1,4 +1,5 @@
 use core::fmt;
+use core::mem::size_of;
 use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -12,7 +13,7 @@ use crate::atomic::Atomic;
 use crate::entry::{Entry3, SEntry3};
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_down, spin_wait, Page};
+use crate::util::{align_down, spin_wait, CacheLine, Page};
 use crate::{Error, Result};
 
 /// Non-Volatile global metadata
@@ -374,7 +375,7 @@ where
                             Err(Error::Corruption)
                         } else {
                             // reserve new, pushing the old entry to the end of the partial list
-                            self.reserve_or_wait(&local.entry, old, true)?;
+                            self.reserve_or_wait(core, &local.entry, old, true)?;
                             Err(Error::CAS)
                         }
                     }
@@ -386,7 +387,7 @@ where
                 self.try_sync_with_global(&local.entry, old)?;
 
                 // reserve new
-                self.reserve_or_wait(&local.entry, old, false)?;
+                self.reserve_or_wait(core, &local.entry, old, false)?;
                 Err(Error::CAS)
             }
         }
@@ -426,11 +427,22 @@ where
     /// Try to reserve a new subtree or wait for concurrent reservations to finish.
     ///
     /// If `retry`, tries to reserve a less fragmented subtree
-    fn reserve_or_wait(&self, local: &Atomic<Entry3>, old: Entry3, retry: bool) -> Result<()> {
+    fn reserve_or_wait(
+        &self,
+        core: usize,
+        local: &Atomic<Entry3>,
+        old: Entry3,
+        retry: bool,
+    ) -> Result<()> {
         // Set the reserved flag, locking the reservation
         if !old.reserved() && local.update(|v| v.toggle_reserve(true)).is_ok() {
             // Try reserve new subtree
-            let start = if old.has_idx() { old.idx() } else { 0 };
+            let start = if old.has_idx() {
+                old.idx()
+            } else {
+                // Different starting point for every core
+                self.trees.entries.len() / self.local.len() * core
+            };
             let new = match self.trees.reserve(start, retry) {
                 Ok(entry) => entry,
                 Err(e) => {
@@ -582,6 +594,7 @@ impl<const LN: usize> Trees<LN> {
 
     /// Find and reserve an empty tree
     fn reserve_empty(&self, start: usize) -> Result<Entry3> {
+        // Just search linearly through the array
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
             if let Ok(entry) = self[i].update(|v| v.reserve_min(Self::almost_empty())) {
@@ -594,15 +607,34 @@ impl<const LN: usize> Trees<LN> {
 
     /// Find and reserve a partially filled tree in the vicinity
     fn reserve_partial(&self, start: usize) -> Result<Entry3> {
-        // rechecking previous entries reduces fragmentation
-        //  -> start with the previous cache line
-        let start = align_down(
-            start + self.entries.len().saturating_sub(self.entries.len() / 32),
-            8,
-        );
+        const ENTRIES_PER_CACHELINE: usize = size_of::<CacheLine>() / size_of::<SEntry3>();
+        const VICINITY: usize = 2 * ENTRIES_PER_CACHELINE - 1;
 
-        for i in 0..self.entries.len() {
-            let i = (i + start) % self.entries.len();
+        // Positive modulo and cacheline alignment
+        let start = align_down(start + self.entries.len(), ENTRIES_PER_CACHELINE) as isize;
+
+        // Find the best subtrees in close neighborhood
+        let mut best = None;
+        for i in 1..VICINITY.min(self.entries.len() / 2) as isize {
+            let off = if i % 2 == 0 { -i.div_ceil(2) } else { i / 2 };
+            let i = (start + off) as usize % self.entries.len();
+            let free = self[i].load().free();
+            if free > Self::almost_full() && free < best.unwrap_or_default() {
+                best = Some(i);
+            }
+        }
+        if let Some(i) = best {
+            if let Ok(entry) =
+                self[i].update(|v| v.reserve_partial(Self::almost_full()..Self::almost_empty()))
+            {
+                return Ok(Entry3::from(entry).with_idx(i));
+            }
+        }
+
+        // Search the whole array for a partially filled subtree
+        for i in 1..=self.entries.len() as isize {
+            let off = if i % 2 == 0 { -i.div_ceil(2) } else { i / 2 };
+            let i = (start + off) as usize % self.entries.len();
             if let Ok(entry) =
                 self[i].update(|v| v.reserve_partial(Self::almost_full()..Self::almost_empty()))
             {
