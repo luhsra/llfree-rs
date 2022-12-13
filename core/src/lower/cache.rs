@@ -411,8 +411,16 @@ where
         let pt2 = self.pt2(start);
 
         for _ in 0..CAS_RETRIES {
-            for newstart in Self::MAPPING.iterate(2, start) {
-                let i2 = Self::MAPPING.idx(2, newstart);
+            // Begin iteration by start idx
+            let off = Self::MAPPING.idx(2, start);
+            for j2 in 0..Self::MAPPING.len(2) {
+                let i2 = (j2 + off) % Self::MAPPING.len(2);
+
+                let newstart = if j2 == 0 {
+                    start // Don't round the start pfn
+                } else {
+                    Self::MAPPING.page(2, start, i2)
+                };
 
                 #[cfg(feature = "stop")]
                 {

@@ -425,7 +425,7 @@ impl<const L: usize> Mapping<L> {
     }
 
     /// Computes the index range for the given page range
-    pub fn range(&self, level: usize, pages: Range<usize>) -> Range<usize> {
+    pub const fn range(&self, level: usize, pages: Range<usize>) -> Range<usize> {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
         if pages.start < pages.end {
@@ -449,6 +449,7 @@ impl<const L: usize> Mapping<L> {
 
     /// Iterates over the table pages beginning with `start`.
     /// It wraps around the end and ends one before `start`.
+    #[deprecated = "generates non-optimal code"]
     pub fn iterate(&self, level: usize, start: usize) -> impl Iterator<Item = usize> {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
@@ -612,6 +613,8 @@ mod test {
 
     #[test]
     fn iterate() {
+        #![allow(deprecated)]
+
         const MAPPING: Mapping<3> = Mapping([9, 9, 9]);
 
         let mut iter = MAPPING.iterate(1, 0).enumerate();
@@ -651,6 +654,8 @@ mod test {
 
     #[test]
     fn iterate_varying() {
+        #![allow(deprecated)]
+
         const MAPPING: Mapping<3> = Mapping([9, 6, 5]);
 
         let mut iter = MAPPING.iterate(1, 0).enumerate();
