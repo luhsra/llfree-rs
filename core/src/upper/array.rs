@@ -191,7 +191,7 @@ where
         match self.trees[i].update(|v| v.inc(num_pages, max)) {
             Ok(entry) => {
                 let new_pages = entry.free() + num_pages;
-                if !entry.reserved() && new_pages > Trees::<{ L::N }>::almost_full() {
+                if !entry.reserved() && new_pages > Trees::<{ L::N }>::almost_allocated() {
                     // put-reserve optimization:
                     // Try to reserve the subtree that was targeted by the recent frees
                     if core == c && local.frees_related(i) && self.reserve_entry(&local.entry, i)? {
@@ -400,7 +400,7 @@ where
     fn try_sync_with_global(&self, local: &Atomic<Entry3>, old: Entry3) -> Result<()> {
         let i = old.idx();
         if i < self.trees.entries.len()
-            && old.free() + self.trees[i].load().free() > Trees::<{ L::N }>::almost_full()
+            && old.free() + self.trees[i].load().free() > Trees::<{ L::N }>::almost_allocated()
         {
             if let Ok(entry) = self.trees[i].update(|e| e.reserved().then_some(e.with_free(0))) {
                 if local
@@ -475,7 +475,8 @@ where
 
     fn reserve_entry(&self, local: &Atomic<Entry3>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
-        if let Ok(entry) = self.trees[i].update(|v| v.reserve_min(Trees::<{ L::N }>::almost_full()))
+        if let Ok(entry) =
+            self.trees[i].update(|v| v.reserve(Trees::<{ L::N }>::almost_allocated()..))
         {
             let entry = Entry3::from(entry).with_idx(i);
             match self.cas_reserved(local, entry, false) {
@@ -543,7 +544,7 @@ impl<const LN: usize> fmt::Debug for Trees<LN> {
             let free = e.load().free();
             if free == LN {
                 empty += 1;
-            } else if free > Self::almost_full() {
+            } else if free > Self::almost_allocated() {
                 partial += 1;
             }
         }
@@ -568,12 +569,12 @@ impl<const LN: usize> Trees<LN> {
     }
 
     /// Almost no free pages left
-    const fn almost_full() -> usize {
+    const fn almost_allocated() -> usize {
         1 << 10 // MAX_ORDER
     }
 
     /// Almost all pages are free
-    const fn almost_empty() -> usize {
+    const fn almost_free() -> usize {
         LN - (1 << 10) // MAX_ORDER
     }
 
@@ -597,7 +598,7 @@ impl<const LN: usize> Trees<LN> {
         // Just search linearly through the array
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
-            if let Ok(entry) = self[i].update(|v| v.reserve_min(Self::almost_empty())) {
+            if let Ok(entry) = self[i].update(|v| v.reserve(Self::almost_free()..)) {
                 return Ok(Entry3::from(entry).with_idx(i));
             }
         }
@@ -608,35 +609,36 @@ impl<const LN: usize> Trees<LN> {
     /// Find and reserve a partially filled tree in the vicinity
     fn reserve_partial(&self, start: usize) -> Result<Entry3> {
         const ENTRIES_PER_CACHELINE: usize = size_of::<CacheLine>() / size_of::<SEntry3>();
-        const VICINITY: usize = 2 * ENTRIES_PER_CACHELINE - 1;
+        const VICINITY: usize = ENTRIES_PER_CACHELINE;
 
         // Positive modulo and cacheline alignment
         let start = align_down(start + self.entries.len(), ENTRIES_PER_CACHELINE) as isize;
 
-        // Find the best subtrees in close neighborhood
-        let mut best = None;
-        for i in 1..VICINITY.min(self.entries.len() / 2) as isize {
-            let off = if i % 2 == 0 { -i.div_ceil(2) } else { i / 2 };
-            let i = (start + off) as usize % self.entries.len();
-            let free = self[i].load().free();
-            if free > Self::almost_full() && free < best.unwrap_or_default() {
-                best = Some(i);
+        if VICINITY < self.entries.len() {
+            // Find the best subtree in the close neighborhood
+            let mut best = None;
+            let mut best_free: usize = usize::MAX;
+            for i in 1..VICINITY {
+                let i = (start as usize + i) % self.entries.len();
+                let free = self[i].load().free();
+                if free > Self::almost_allocated() && free < best_free {
+                    best = Some(i);
+                    best_free = free;
+                }
             }
-        }
-        if let Some(i) = best {
-            if let Ok(entry) =
-                self[i].update(|v| v.reserve_partial(Self::almost_full()..Self::almost_empty()))
-            {
-                return Ok(Entry3::from(entry).with_idx(i));
+            if let Some(i) = best {
+                if let Ok(entry) = self[i].update(|v| v.reserve(Self::almost_allocated()..)) {
+                    return Ok(Entry3::from(entry).with_idx(i));
+                }
             }
         }
 
-        // Search the whole array for a partially filled subtree
+        // Search the rest of the array for a partially filled subtrees
         for i in 1..=self.entries.len() as isize {
-            let off = if i % 2 == 0 { -i.div_ceil(2) } else { i / 2 };
+            let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
             if let Ok(entry) =
-                self[i].update(|v| v.reserve_partial(Self::almost_full()..Self::almost_empty()))
+                self[i].update(|v| v.reserve(Self::almost_allocated()..Self::almost_free()))
             {
                 return Ok(Entry3::from(entry).with_idx(i));
             }

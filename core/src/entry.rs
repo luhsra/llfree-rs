@@ -1,6 +1,6 @@
 use core::fmt;
 use core::mem::{align_of, size_of};
-use core::ops::Range;
+use core::ops::{Range, RangeBounds};
 
 use bitfield_struct::bitfield;
 use log::error;
@@ -148,17 +148,9 @@ impl SEntry3 {
             None
         }
     }
-    /// Reserves this entry if it has at least `min` pages.
-    pub fn reserve_min(self, min: usize) -> Option<Self> {
-        if !self.reserved() && self.free() >= min {
-            Some(self.with_reserved(true).with_free(0))
-        } else {
-            None
-        }
-    }
     /// Reserves this entry if its page count is in `range`.
-    pub fn reserve_partial(self, range: Range<usize>) -> Option<Self> {
-        if !self.reserved() && range.contains(&self.free()) {
+    pub fn reserve<R: RangeBounds<usize>>(self, free: R) -> Option<Self> {
+        if !self.reserved() && free.contains(&self.free()) {
             Some(self.with_reserved(true).with_free(0))
         } else {
             None

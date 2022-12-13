@@ -4,7 +4,7 @@ use core::fmt;
 
 use crate::atomic::Atomic;
 use crate::entry::Entry3;
-use crate::table::{Mapping, PT_LEN};
+use crate::table::PT_LEN;
 use crate::util::Page;
 use crate::Result;
 
@@ -24,7 +24,7 @@ pub const MAGIC: usize = 0x_dead_beef;
 /// Minimal number of pages an allocator needs (1G).
 pub const MIN_PAGES: usize = PT_LEN * PT_LEN;
 /// Maximal number of pages an allocator can manage (about 256TiB).
-pub const MAX_PAGES: usize = Mapping([9; 4]).span(4);
+pub const MAX_PAGES: usize = PT_LEN * PT_LEN * PT_LEN * PT_LEN;
 
 /// The general interface of the allocator implementations.
 pub trait Alloc: Sync + Send + fmt::Debug {

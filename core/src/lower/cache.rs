@@ -170,15 +170,15 @@ where
     fn get(&self, start: usize, order: usize) -> Result<usize> {
         debug_assert!(order <= Self::MAX_ORDER);
 
-        if order > Self::MAPPING.order(1) {
+        if order == Self::MAX_ORDER {
             self.get_max(start)
-        } else if (1 << order) > u64::BITS {
-            if order != Self::MAPPING.order(1) {
-                warn!("Unoptimized alloc {order}!");
-            }
+        } else if order == Self::HUGE_ORDER {
             self.get_huge(start)
-        } else {
+        } else if order < Self::HUGE_ORDER {
             self.get_small(start, order)
+        } else {
+            error!("Invalid order");
+            Err(Error::Corruption)
         }
     }
 
@@ -188,13 +188,26 @@ where
         debug_assert!(page < self.pages());
         stop!();
 
-        if order > Self::MAPPING.order(1) {
-            return self.put_max(page, order);
-        }
+        if order == Self::MAX_ORDER {
+            self.put_max(page)
+        } else if order == Self::HUGE_ORDER {
+            let i2 = Self::MAPPING.idx(2, page);
+            let pt2 = self.pt2(page);
 
-        let pt2 = self.pt2(page);
-        let i2 = Self::MAPPING.idx(2, page);
-        if (1 << order) <= u64::BITS {
+            if let Err(old) = pt2.cas(
+                i2,
+                Entry2::new_page(),
+                Entry2::new_free(Self::MAPPING.span(1)),
+            ) {
+                error!("Addr p={page:x} o={order} {old:?}");
+                Err(Error::Address)
+            } else {
+                Ok(())
+            }
+        } else if order < Self::HUGE_ORDER {
+            let i2 = Self::MAPPING.idx(2, page);
+            let pt2 = self.pt2(page);
+
             let old = pt2.get(i2);
             if old.page() {
                 self.partial_put_huge(old, page, order)
@@ -205,21 +218,8 @@ where
                 Err(Error::Address)
             }
         } else {
-            // try free huge
-            if let Err(old) = pt2.cas(
-                i2,
-                Entry2::new_page(),
-                Entry2::new_free(Self::MAPPING.span(1)),
-            ) {
-                if order < Self::MAPPING.order(1) {
-                    self.partial_put_huge(old, page, order)
-                } else {
-                    error!("Addr p={page:x} o={order} {old:?}");
-                    Err(Error::Address)
-                }
-            } else {
-                Ok(())
-            }
+            error!("Invalid order!");
+            Err(Error::Corruption)
         }
     }
 
@@ -404,8 +404,10 @@ where
         }
     }
 
-    /// Allocate a single page
+    /// Allocate pages up to order 8
     fn get_small(&self, start: usize, order: usize) -> Result<usize> {
+        debug_assert!(order < Self::MAPPING.order(1));
+
         let pt2 = self.pt2(start);
 
         for _ in 0..CAS_RETRIES {
@@ -422,17 +424,18 @@ where
                 }
 
                 if pt2.update(i2, |v| v.dec(1 << order)).is_ok() {
-                    match self.get_table(newstart, order) {
+                    let i1 = Self::MAPPING.idx(1, newstart);
+                    let pt1 = self.pt1(newstart);
+
+                    if let Ok(offset) = pt1.set_first_zeros(i1, order) {
+                        return Ok(Self::MAPPING.page(1, newstart, offset));
+                    } else {
                         // Revert conter
-                        Err(Error::Memory) => {
-                            if let Err(e) =
-                                pt2.update(i2, |v| v.inc(Self::MAPPING.span(1), 1 << order))
-                            {
-                                error!("Rollback failed {e:?}");
-                                return Err(Error::Corruption);
-                            }
+                        if let Err(_) = pt2.update(i2, |v| v.inc(Self::MAPPING.span(1), 1 << order))
+                        {
+                            error!("Undo failed");
+                            return Err(Error::Corruption);
                         }
-                        ret => return ret,
                     }
                 }
             }
@@ -441,27 +444,13 @@ where
         Err(Error::Memory)
     }
 
-    /// Search free page table entry.
-    fn get_table(&self, start: usize, order: usize) -> Result<usize> {
-        let i = Self::MAPPING.idx(1, start);
-        let pt1 = self.pt1(start);
-
-        for _ in 0..CAS_RETRIES {
-            if let Ok(i) = pt1.set_first_zeros(i, order) {
-                return Ok(Self::MAPPING.page(1, start, i));
-            }
-            stop!();
-        }
-        info!("Nothing found o={order}");
-        Err(Error::Memory)
-    }
-
     /// Allocate huge page
     fn get_huge(&self, start: usize) -> Result<usize> {
         let pt2 = self.pt2(start);
+        let start_i = Self::MAPPING.idx(2, start);
         for _ in 0..CAS_RETRIES {
-            for page in Self::MAPPING.iterate(2, start) {
-                let i2 = Self::MAPPING.idx(2, page);
+            for i2 in 0..Self::MAPPING.len(2) {
+                let i2 = (start_i + i2) % Self::MAPPING.len(2);
                 if pt2
                     .update(i2, |v| v.mark_huge(Self::MAPPING.span(1)))
                     .is_ok()
@@ -469,17 +458,19 @@ where
                     return Ok(Self::MAPPING.page(2, start, i2));
                 }
             }
+            core::hint::spin_loop();
         }
-        info!("Nothing found o=7..9");
+        info!("Nothing found o=9");
         Err(Error::Memory)
     }
 
     /// Allocate multiple huge pages
     fn get_max(&self, start: usize) -> Result<usize> {
         let pt2_pair = self.pt2_pair(start);
+        let start_i = Self::MAPPING.idx(2, start) / 2;
         for _ in 0..CAS_RETRIES {
-            for page in Self::MAPPING.iterate(2, start).step_by(2) {
-                let i2 = Self::MAPPING.idx(2, page) / 2;
+            for i2 in 0..Self::MAPPING.len(2) / 2 {
+                let i2 = (start_i + i2) % (Self::MAPPING.len(2) / 2);
                 if pt2_pair
                     .update(i2, |v| v.map(|v| v.mark_huge(Self::MAPPING.span(1))))
                     .is_ok()
@@ -487,12 +478,15 @@ where
                     return Ok(Self::MAPPING.page(2, start, i2 * 2));
                 }
             }
+            core::hint::spin_loop();
         }
         info!("Nothing found o=10");
         Err(Error::Memory)
     }
 
     fn put_small(&self, page: usize, order: usize) -> Result<()> {
+        debug_assert!(order < Self::HUGE_ORDER);
+
         stop!();
 
         let pt1 = self.pt1(page);
@@ -514,10 +508,10 @@ where
         Ok(())
     }
 
-    pub fn put_max(&self, page: usize, order: usize) -> Result<()> {
+    pub fn put_max(&self, page: usize) -> Result<()> {
         let pt2_pair = self.pt2_pair(page);
         let i2 = Self::MAPPING.idx(2, page) / 2;
-        info!("Put o={order} i={i2}");
+
         if let Err(old) = pt2_pair.cas(
             i2,
             Entry2Pair(Entry2::new_page(), Entry2::new_page()),
@@ -526,7 +520,7 @@ where
                 Entry2::new_free(Self::MAPPING.span(1)),
             ),
         ) {
-            error!("Addr {page:x} o={order} {old:?} i={i2}");
+            error!("Addr {page:x} o={} {old:?} i={i2}", Self::MAX_ORDER);
             Err(Error::Address)
         } else {
             Ok(())
@@ -535,16 +529,19 @@ where
 
     fn partial_put_huge(&self, old: Entry2, page: usize, order: usize) -> Result<()> {
         warn!("partial free of huge page {page:x} o={order}");
-
         let i2 = Self::MAPPING.idx(2, page);
         let pt2 = self.pt2(page);
         let pt1 = self.pt1(page);
+
+        // Try filling the whole bitfield
         if pt1.fill_cas(true) {
             if pt2.cas(i2, old, Entry2::new()).is_err() {
                 error!("Failed partial clear");
                 return Err(Error::Corruption);
             }
-        } else if !spin_wait(CAS_RETRIES, || !pt2.get(i2).page()) {
+        }
+        // Wait for parallel partial_put_huge to finish
+        else if !spin_wait(CAS_RETRIES, || !pt2.get(i2).page()) {
             error!("Exceeding retries");
             return Err(Error::Corruption);
         }

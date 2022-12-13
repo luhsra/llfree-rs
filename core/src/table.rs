@@ -1,7 +1,7 @@
 use core::fmt;
 use core::mem::{align_of, size_of};
 use core::ops::Range;
-use core::sync::atomic::{self, AtomicU64, Ordering};
+use core::sync::atomic::{self, AtomicU64, Ordering::*};
 
 use log::error;
 
@@ -48,7 +48,7 @@ impl<T: AtomicValue, const LEN: usize> ATable<T, LEN> {
         let mem = unsafe { &mut *(self.entries.as_ptr() as *mut [T; LEN]) };
         mem.fill(e);
         // memory ordering has to be enforced with a memory barrier
-        atomic::fence(Ordering::SeqCst);
+        atomic::fence(SeqCst);
     }
     pub fn get(&self, i: usize) -> T {
         self.entries[i].load()
@@ -100,7 +100,7 @@ impl<const N: usize> fmt::Debug for Bitfield<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Bitfield( ")?;
         for d in &self.data {
-            write!(f, "{:016x} ", d.load(Ordering::Relaxed))?;
+            write!(f, "{:016x} ", d.load(Relaxed))?;
         }
         write!(f, ")")?;
         Ok(())
@@ -126,9 +126,9 @@ impl<const N: usize> Bitfield<N> {
                 let bits = bit_end - bit_start;
                 let byte = (u64::MAX >> (Self::ENTRY_BITS - bits)) << bit_start;
                 if v {
-                    self.data[ei].fetch_or(byte, Ordering::SeqCst);
+                    self.data[ei].fetch_or(byte, SeqCst);
                 } else {
-                    self.data[ei].fetch_and(!byte, Ordering::SeqCst);
+                    self.data[ei].fetch_and(!byte, SeqCst);
                 }
             }
         }
@@ -138,23 +138,26 @@ impl<const N: usize> Bitfield<N> {
     pub fn get(&self, i: usize) -> bool {
         let di = i / Self::ENTRY_BITS;
         let bit = 1 << (i % Self::ENTRY_BITS);
-        self.data[di].load(Ordering::SeqCst) & bit != 0
+        self.data[di].load(SeqCst) & bit != 0
     }
 
     /// Return the  `i`-th entry
     pub fn get_entry(&self, i: usize) -> u64 {
-        self.data[i].load(Ordering::SeqCst)
+        self.data[i].load(SeqCst)
     }
 
     /// Toggle 2^`order` bits at the `i`-th place if they are all zero or one as expected
+    ///
+    /// # Warning
+    /// Orders above 6 need multiple CAS operations, which might lead to race conditions!
     pub fn toggle(&self, i: usize, order: usize, expected: bool) -> Result<(), Error> {
-        let num_pages = 1 << order;
-        debug_assert!(i % num_pages == 0, "not aligned");
-        if num_pages < Self::ENTRY_BITS {
+        let num_bits = 1 << order;
+        debug_assert!(i % num_bits == 0, "not aligned");
+        if num_bits < Self::ENTRY_BITS {
             // Updates within a single entry
-            let mask = (u64::MAX >> (Self::ENTRY_BITS - num_pages)) << (i % Self::ENTRY_BITS);
+            let mask = (u64::MAX >> (Self::ENTRY_BITS - num_bits)) << (i % Self::ENTRY_BITS);
             let di = i / Self::ENTRY_BITS;
-            match self.data[di].fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
+            match self.data[di].fetch_update(SeqCst, SeqCst, |e| {
                 if expected {
                     (e & mask == mask).then_some(e & !mask)
                 } else {
@@ -166,24 +169,16 @@ impl<const N: usize> Bitfield<N> {
             }
         } else {
             // Update multiple entries
-            let num_entries = num_pages / Self::ENTRY_BITS;
+            let num_entries = num_bits / Self::ENTRY_BITS;
             let di = i / Self::ENTRY_BITS;
             for i in di..di + num_entries {
                 let expected = if expected { u64::MAX } else { 0 };
-                if let Err(_) = self.data[i].compare_exchange(
-                    expected,
-                    !expected,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                ) {
+                if let Err(_) = self.data[i].compare_exchange(expected, !expected, SeqCst, SeqCst) {
                     // Undo changes
                     for j in (di..i).rev() {
-                        if let Err(_) = self.data[j].compare_exchange(
-                            !expected,
-                            expected,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        ) {
+                        if let Err(_) =
+                            self.data[j].compare_exchange(!expected, expected, SeqCst, SeqCst)
+                        {
                             error!("Failed undo toggle");
                             return Err(Error::Corruption);
                         }
@@ -196,8 +191,13 @@ impl<const N: usize> Bitfield<N> {
     }
 
     /// Set the first aligned 2^`order` zero bits, returning the bit offset
+    ///
+    /// # Warning
+    /// Orders above 6 need multiple CAS operations, which might lead to race conditions!
     pub fn set_first_zeros(&self, i: usize, order: usize) -> Result<usize, Error> {
-        debug_assert!(order <= 6);
+        if order > Self::ENTRY_BITS.ilog2() as usize {
+            return self.set_first_zero_entries(order);
+        }
 
         for j in 0..self.data.len() {
             let i = (j + i) % self.data.len();
@@ -205,7 +205,7 @@ impl<const N: usize> Bitfield<N> {
             #[cfg(all(test, feature = "stop"))]
             {
                 // Skip full entries for the tests
-                if self.data[i].load(Ordering::SeqCst) == u64::MAX {
+                if self.data[i].load(SeqCst) == u64::MAX {
                     continue;
                 }
                 crate::stop::stop().unwrap();
@@ -213,7 +213,7 @@ impl<const N: usize> Bitfield<N> {
 
             let mut offset = 0;
             if self.data[i]
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |e| {
+                .fetch_update(SeqCst, SeqCst, |e| {
                     if let Some((val, o)) = first_zeros_aligned(e, order) {
                         offset = o;
                         Some(val)
@@ -229,6 +229,36 @@ impl<const N: usize> Bitfield<N> {
         Err(Error::Memory)
     }
 
+    /// Allocate multiple entries with multiple CAS
+    ///
+    /// # Warning
+    /// Using multiple CAS operations might lead to race conditions!
+    fn set_first_zero_entries(&self, order: usize) -> Result<usize, Error> {
+        debug_assert!(order > Self::ENTRY_BITS.ilog2() as usize);
+        debug_assert!(order <= Self::ORDER);
+        let num_entries = 1 << (order - Self::ENTRY_BITS.ilog2() as usize);
+
+        for (i, chunk) in self.data.chunks(num_entries).enumerate() {
+            // Check that these entries are free
+            if chunk.iter().all(|e| e.load(SeqCst) == 0) {
+                for (j, entry) in chunk.iter().enumerate() {
+                    if let Err(_) = entry.compare_exchange(0, u64::MAX, SeqCst, SeqCst) {
+                        // Undo previous updates
+                        for k in (0..j).rev() {
+                            if let Err(_) = chunk[k].compare_exchange(u64::MAX, 0, SeqCst, SeqCst) {
+                                error!("Failed undo search");
+                                return Err(Error::Corruption);
+                            }
+                        }
+                        break;
+                    }
+                }
+                return Ok(i * num_entries * Self::ENTRY_BITS);
+            }
+        }
+        Err(Error::Memory)
+    }
+
     /// Fill this bitset with `v` ignoring any previous data
     pub fn fill(&self, v: bool) {
         let v = if v { u64::MAX } else { 0 };
@@ -237,17 +267,18 @@ impl<const N: usize> Bitfield<N> {
         let mem = unsafe { &mut *(self.data.as_ptr() as *mut [u64; N]) };
         mem.fill(v);
         // memory ordering has to be enforced with a memory barrier
-        atomic::fence(Ordering::SeqCst);
+        atomic::fence(SeqCst);
     }
 
     /// Fills the bitset using atomic compare exchage, returning false on failure
+    ///
+    /// # Warning
+    /// If false is returned, the bitfield might be corrupted!
     pub fn fill_cas(&self, v: bool) -> bool {
         let v = if v { u64::MAX } else { 0 };
 
         for e in &self.data {
-            if e.compare_exchange(!v, v, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-            {
+            if e.compare_exchange(!v, v, SeqCst, SeqCst).is_err() {
                 return false;
             }
         }
@@ -258,7 +289,7 @@ impl<const N: usize> Bitfield<N> {
     pub fn count_zeros(&self) -> usize {
         self.data
             .iter()
-            .map(|v| v.load(Ordering::SeqCst).count_zeros() as usize)
+            .map(|v| v.load(SeqCst).count_zeros() as usize)
             .sum()
     }
 }
@@ -435,6 +466,8 @@ impl<const L: usize> Mapping<L> {
 
 #[cfg(all(test, feature = "std"))]
 mod test {
+    use core::sync::atomic::Ordering::SeqCst;
+
     use crate::table::Mapping;
     use crate::util::Page;
 
@@ -766,5 +799,37 @@ mod test {
             super::first_zeros_aligned(0b0000_0100_1000_0001_0010, 2),
             Some((0b1111_0100_1000_0001_0010, 16))
         );
+    }
+
+    #[test]
+    fn first_zero_entries() {
+        let bitfield = super::Bitfield::<8>::default();
+
+        // 9
+        assert!(bitfield.data.iter().all(|e| e.load(SeqCst) == 0));
+        assert_eq!(0, bitfield.set_first_zeros(0, 9).unwrap());
+        assert!(bitfield.data.iter().all(|e| e.load(SeqCst) == u64::MAX));
+        bitfield.toggle(0, 9, true).unwrap();
+        assert!(bitfield.data.iter().all(|e| e.load(SeqCst) == 0));
+
+        assert_eq!(0, bitfield.set_first_zeros(0, 7).unwrap());
+        assert!(bitfield.data[0..2]
+            .iter()
+            .all(|e| e.load(SeqCst) == u64::MAX));
+
+        assert_eq!(4 * 64, bitfield.set_first_zeros(0, 8).unwrap());
+        assert!(bitfield.data[4..8]
+            .iter()
+            .all(|e| e.load(SeqCst) == u64::MAX));
+
+        assert_eq!(2 * 64, bitfield.set_first_zeros(0, 6).unwrap());
+        assert!(bitfield.get_entry(2) == u64::MAX);
+        assert_eq!(3 * 64, bitfield.set_first_zeros(0, 6).unwrap());
+        assert!(bitfield.get_entry(3) == u64::MAX);
+
+        bitfield.set_first_zeros(0, 9).expect_err("no mem");
+        bitfield.set_first_zeros(0, 8).expect_err("no mem");
+        bitfield.set_first_zeros(0, 7).expect_err("no mem");
+        bitfield.set_first_zeros(0, 6).expect_err("no mem");
     }
 }
