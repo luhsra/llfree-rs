@@ -98,7 +98,6 @@ fn main() {
 
     type A128 = Atom<128>;
     type C32 = Cache<32>;
-    type C64 = Cache<64>;
     let mut allocs: [Box<dyn Alloc>; 10] = [
         Box::<Array<0, A128>>::default(),
         Box::<Array<3, A128>>::default(),
@@ -108,10 +107,6 @@ fn main() {
         Box::<Array<3, C32>>::default(),
         Box::<ArrayList<0, C32>>::default(),
         Box::<ArrayList<3, C32>>::default(),
-        // Box::<Array<0, C64>>::default(),
-        // Box::<Array<3, C64>>::default(),
-        // Box::<ArrayList<0, C64>>::default(),
-        // Box::<ArrayList<3, C64>>::default(),
         Box::<ListLocal>::default(),
         Box::<ListLocked>::default(),
     ];
