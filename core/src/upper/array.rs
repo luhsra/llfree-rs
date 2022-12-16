@@ -609,7 +609,7 @@ impl<const LN: usize> Trees<LN> {
     /// Find and reserve a partially filled tree in the vicinity
     fn reserve_partial(&self, start: usize) -> Result<Entry3> {
         const ENTRIES_PER_CACHELINE: usize = size_of::<CacheLine>() / size_of::<SEntry3>();
-        const VICINITY: usize = ENTRIES_PER_CACHELINE;
+        const VICINITY: usize = ENTRIES_PER_CACHELINE * 2 - 1;
 
         // Positive modulo and cacheline alignment
         let start = align_down(start + self.entries.len(), ENTRIES_PER_CACHELINE) as isize;
@@ -618,16 +618,21 @@ impl<const LN: usize> Trees<LN> {
             // Find the best subtree in the close neighborhood
             let mut best = None;
             let mut best_free: usize = usize::MAX;
-            for i in 1..VICINITY {
-                let i = (start as usize + i) % self.entries.len();
+            for i in 1..VICINITY as isize {
+                let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
+                let i = (start + off) as usize % self.entries.len();
                 let free = self[i].load().free();
-                if free > Self::almost_allocated() && free < best_free {
+                if (Self::almost_allocated()..Self::almost_free()).contains(&free)
+                    && free < best_free
+                {
                     best = Some(i);
                     best_free = free;
                 }
             }
             if let Some(i) = best {
-                if let Ok(entry) = self[i].update(|v| v.reserve(Self::almost_allocated()..)) {
+                if let Ok(entry) =
+                    self[i].update(|v| v.reserve(Self::almost_allocated()..Self::almost_free()))
+                {
                     return Ok(Entry3::from(entry).with_idx(i));
                 }
             }
