@@ -5,10 +5,9 @@ use core::ops::{Range, RangeBounds};
 use bitfield_struct::bitfield;
 use log::error;
 
-use crate::atomic::AtomicValue;
-
+/// Level 3 entry
 #[bitfield(u64)]
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 pub struct Entry3 {
     /// Number of free 4K pages.
     #[bits(20)]
@@ -18,10 +17,6 @@ pub struct Entry3 {
     pub idx: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
-}
-
-impl AtomicValue for Entry3 {
-    type V = u64;
 }
 
 impl Entry3 {
@@ -105,17 +100,13 @@ impl From<SEntry3> for Entry3 {
 }
 
 #[bitfield(u16)]
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 pub struct SEntry3 {
     /// Number of free 4K pages.
     #[bits(15)]
     pub free: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
-}
-
-impl AtomicValue for SEntry3 {
-    type V = u16;
 }
 
 impl SEntry3 {
@@ -180,12 +171,8 @@ impl From<Entry3> for SEntry3 {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Entry2(u16);
-
-impl AtomicValue for Entry2 {
-    type V = u16;
-}
 
 impl Entry2 {
     pub fn new() -> Self {
@@ -261,7 +248,7 @@ impl fmt::Debug for Entry2 {
 }
 
 /// Pair of level 2 entries that can be changed at once.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(align(4))]
 pub struct Entry2Pair(pub Entry2, pub Entry2);
 
@@ -292,16 +279,8 @@ impl From<Entry2Pair> for u32 {
     }
 }
 
-impl AtomicValue for Entry2Pair {
-    type V = u32;
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct SEntry2(u8);
-
-impl AtomicValue for SEntry2 {
-    type V = u8;
-}
 
 impl SEntry2 {
     pub fn new() -> Self {
@@ -375,7 +354,7 @@ impl fmt::Debug for SEntry2 {
     }
 }
 
-pub trait SEntry2Tuple: AtomicValue + fmt::Debug {
+pub trait SEntry2Tuple: fmt::Debug + Copy + Eq + Sized {
     const N: usize;
     fn new(v: SEntry2) -> Self;
     fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self>;
@@ -392,7 +371,7 @@ impl SEntry2Tuple for SEntry2 {
 }
 
 /// Tuple of level 2 entries that can be changed at once.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // #[repr(packed)]
 #[repr(align(8))]
 pub struct SEntry2T8(pub [SEntry2; 8]);
@@ -411,10 +390,6 @@ impl From<SEntry2T8> for u64 {
     }
 }
 
-impl AtomicValue for SEntry2T8 {
-    type V = u64;
-}
-
 impl SEntry2Tuple for SEntry2T8 {
     const N: usize = 8;
     fn new(v: SEntry2) -> Self {
@@ -431,7 +406,7 @@ impl SEntry2Tuple for SEntry2T8 {
 }
 
 /// Tuple of level 2 entries that can be changed at once.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // #[repr(packed)]
 #[repr(align(4))]
 pub struct SEntry2T4(pub [SEntry2; 4]);
@@ -450,10 +425,6 @@ impl From<SEntry2T4> for u32 {
     }
 }
 
-impl AtomicValue for SEntry2T4 {
-    type V = u32;
-}
-
 impl SEntry2Tuple for SEntry2T4 {
     const N: usize = 4;
     fn new(v: SEntry2) -> Self {
@@ -468,7 +439,7 @@ impl SEntry2Tuple for SEntry2T4 {
 }
 
 /// Tuple of level 2 entries that can be changed at once.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // #[repr(packed)]
 #[repr(align(2))]
 pub struct SEntry2T2(pub [SEntry2; 2]);
@@ -487,10 +458,6 @@ impl From<SEntry2T2> for u16 {
     }
 }
 
-impl AtomicValue for SEntry2T2 {
-    type V = u16;
-}
-
 impl SEntry2Tuple for SEntry2T2 {
     const N: usize = 2;
     fn new(v: SEntry2) -> Self {
@@ -506,15 +473,15 @@ impl SEntry2Tuple for SEntry2T2 {
 
 #[cfg(all(test, feature = "std"))]
 mod test {
-    use crate::table::{ATable, PT_LEN};
+    use crossbeam_utils::atomic::AtomicCell;
+
+    use crate::table::PT_LEN;
 
     #[test]
     fn pt() {
-        type Table = ATable<u64, PT_LEN>;
-
-        let pt: Table = Table::empty();
-        pt.cas(0, 0, 42).unwrap();
-        pt.update(0, |v| Some(v + 1)).unwrap();
-        assert_eq!(pt.get(0), 43);
+        let pt: [AtomicCell<u64>; PT_LEN] = unsafe { core::mem::zeroed() };
+        pt[0].compare_exchange(0, 42).unwrap();
+        pt[0].fetch_update(|v| Some(v + 1)).unwrap();
+        assert_eq!(pt[0].load(), 43);
     }
 }

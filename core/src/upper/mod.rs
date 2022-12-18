@@ -2,7 +2,8 @@ use core::any::type_name;
 use core::cell::UnsafeCell;
 use core::fmt;
 
-use crate::atomic::Atomic;
+use crossbeam_utils::atomic::AtomicCell;
+
 use crate::entry::Entry3;
 use crate::table::PT_LEN;
 use crate::util::Page;
@@ -169,9 +170,9 @@ impl PartialEq<AllocName> for &str {
 /// Per core data.
 pub struct Local<const F: usize> {
     /// Page index of the last allocated page -> starting point for the next allocation
-    start: Atomic<usize>,
+    start: AtomicCell<usize>,
     /// Local copy of the reserved level 3 entry
-    entry: Atomic<Entry3>,
+    entry: AtomicCell<Entry3>,
     /// # Safety
     /// This should only be accessed from the corresponding (virtual) CPU core!
     inner: UnsafeCell<RecentFrees<F>>,
@@ -187,8 +188,8 @@ struct RecentFrees<const F: usize> {
 impl<const F: usize> Local<F> {
     fn new() -> Self {
         Self {
-            start: Atomic::new(usize::MAX),
-            entry: Atomic::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
+            start: AtomicCell::new(usize::MAX),
+            entry: AtomicCell::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
             inner: UnsafeCell::new(RecentFrees {
                 frees_i: 0,
                 frees: [usize::MAX; F],

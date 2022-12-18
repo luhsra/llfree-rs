@@ -2,6 +2,7 @@ use core::iter::FromIterator;
 use core::{fmt, slice};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::hint::black_box;
 use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::Barrier;
@@ -14,7 +15,7 @@ use nvalloc::lower::*;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::upper::*;
-use nvalloc::util::{black_box, Page, WyRand};
+use nvalloc::util::{Page, WyRand};
 use nvalloc::{thread, util};
 
 /// Number of allocations per block

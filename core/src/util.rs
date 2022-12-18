@@ -101,20 +101,6 @@ pub fn logging() {
         .try_init();
 }
 
-/// Prevents the compiler from optimizing `dummy` away.
-#[inline(always)]
-pub fn black_box<T>(dummy: T) -> T {
-    unsafe {
-        #[cfg(target_arch = "x86_64")]
-        core::arch::asm!("", in("ax") &dummy, options(nostack));
-        #[cfg(target_arch = "aarch64")]
-        core::arch::asm!("", in("x0") &dummy, options(nostack));
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    compile_error!("Unsupported architecture!");
-    dummy
-}
-
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {
         /// Executes CLWB (cache-line write back) for the given address.

@@ -4,12 +4,13 @@ use core::ops::Index;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
+use crossbeam_utils::atomic::AtomicCell;
 use log::{error, info, warn};
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
 use super::{Alloc, Init, Local, MAGIC, MAX_PAGES};
-use crate::atomic::Atomic;
 use crate::entry::{Entry3, SEntry3};
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
@@ -175,7 +176,7 @@ where
 
         // Try decrement own subtree first
         let num_pages = 1 << order;
-        if let Err(entry) = local.entry.update(|v| v.inc_idx(num_pages, i, max)) {
+        if let Err(entry) = local.entry.fetch_update(|v| v.inc_idx(num_pages, i, max)) {
             if entry.idx() == i {
                 error!("inc failed L{i}: {entry:?} o={order}");
                 return Err(Error::Corruption);
@@ -188,7 +189,7 @@ where
         };
 
         // Subtree not owned by us
-        match self.trees[i].update(|v| v.inc(num_pages, max)) {
+        match self.trees[i].fetch_update(|v| v.inc(num_pages, max)) {
             Ok(entry) => {
                 let new_pages = entry.free() + num_pages;
                 if !entry.reserved() && new_pages > Trees::<{ L::N }>::almost_allocated() {
@@ -309,7 +310,7 @@ where
                 for i in 0..self.pages().div_ceil(L::N) {
                     let page = i * L::N;
                     let pages = self.lower.recover(page, deep)?;
-                    trees.push(Atomic::new(SEntry3::new_table(pages, false)));
+                    trees.push(AtomicCell::new(SEntry3::new_table(pages, false)));
                 }
                 self.trees.entries = trees.into();
 
@@ -352,7 +353,7 @@ where
         let c = core % self.local.len();
         let local = &self.local[c];
 
-        match local.entry.update(|v| v.dec(1 << order)) {
+        match local.entry.fetch_update(|v| v.dec(1 << order)) {
             Ok(old) => {
                 let mut start = local.start.load();
                 if start / L::N != old.idx() {
@@ -370,7 +371,9 @@ where
                         info!("alloc failed o={order} => retry");
                         let max = (self.pages() - align_down(start, L::N)).min(L::N);
                         // Increment global to prevent race condition with concurrent reservation
-                        if let Err(old) = self.trees[old.idx()].update(|v| v.inc(1 << order, max)) {
+                        if let Err(old) =
+                            self.trees[old.idx()].fetch_update(|v| v.inc(1 << order, max))
+                        {
                             error!("Counter reset failed o={order} {old:?}");
                             Err(Error::Corruption)
                         } else {
@@ -397,14 +400,18 @@ where
     ///
     /// If successful returns `Error::CAS` -> retry.
     /// Returns Ok if the global counter was not large enough -> fallback to normal reservation.
-    fn try_sync_with_global(&self, local: &Atomic<Entry3>, old: Entry3) -> Result<()> {
+    fn try_sync_with_global(&self, local: &AtomicCell<Entry3>, old: Entry3) -> Result<()> {
         let i = old.idx();
         if i < self.trees.entries.len()
             && old.free() + self.trees[i].load().free() > Trees::<{ L::N }>::almost_allocated()
         {
-            if let Ok(entry) = self.trees[i].update(|e| e.reserved().then_some(e.with_free(0))) {
+            if let Ok(entry) =
+                self.trees[i].fetch_update(|e| e.reserved().then_some(e.with_free(0)))
+            {
                 if local
-                    .update(|e| (e.idx() == i).then_some(e.with_free(e.free() + entry.free())))
+                    .fetch_update(|e| {
+                        (e.idx() == i).then_some(e.with_free(e.free() + entry.free()))
+                    })
                     .is_ok()
                 {
                     // Sync successfull -> retry allocation
@@ -412,7 +419,7 @@ where
                 } else {
                     // undo global change
                     if self.trees[i]
-                        .update(|e| Some(e.with_free(e.free() + entry.free())))
+                        .fetch_update(|e| Some(e.with_free(e.free() + entry.free())))
                         .is_err()
                     {
                         error!("Failed undo sync");
@@ -430,12 +437,12 @@ where
     fn reserve_or_wait(
         &self,
         core: usize,
-        local: &Atomic<Entry3>,
+        local: &AtomicCell<Entry3>,
         old: Entry3,
         retry: bool,
     ) -> Result<()> {
         // Set the reserved flag, locking the reservation
-        if !old.reserved() && local.update(|v| v.toggle_reserve(true)).is_ok() {
+        if !old.reserved() && local.fetch_update(|v| v.toggle_reserve(true)).is_ok() {
             // Try reserve new subtree
             let start = if old.has_idx() {
                 old.idx()
@@ -447,7 +454,7 @@ where
                 Ok(entry) => entry,
                 Err(e) => {
                     // Clear reserve flag
-                    if local.update(|v| v.toggle_reserve(false)).is_err() {
+                    if local.fetch_update(|v| v.toggle_reserve(false)).is_err() {
                         error!("unexpected reserve state");
                         return Err(Error::Corruption);
                     }
@@ -473,10 +480,10 @@ where
         }
     }
 
-    fn reserve_entry(&self, local: &Atomic<Entry3>, i: usize) -> Result<bool> {
+    fn reserve_entry(&self, local: &AtomicCell<Entry3>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
         if let Ok(entry) =
-            self.trees[i].update(|v| v.reserve(Trees::<{ L::N }>::almost_allocated()..))
+            self.trees[i].fetch_update(|v| v.reserve(Trees::<{ L::N }>::almost_allocated()..))
         {
             let entry = Entry3::from(entry).with_idx(i);
             match self.cas_reserved(local, entry, false) {
@@ -486,7 +493,7 @@ where
                     // Rollback reservation
                     let max = (self.pages() - i * L::N).min(L::N);
                     if self.trees[i]
-                        .update(|v| v.unreserve_add(entry.free(), max))
+                        .fetch_update(|v| v.unreserve_add(entry.free(), max))
                         .is_err()
                     {
                         error!("put - reservation rollback failed");
@@ -507,14 +514,14 @@ where
     /// If `enqueue_back`, the old unreserved entry is added to the back of the partial list.
     fn cas_reserved(
         &self,
-        local: &Atomic<Entry3>,
+        local: &AtomicCell<Entry3>,
         new: Entry3,
         expect_reserved: bool,
     ) -> Result<()> {
         debug_assert!(!new.reserved());
 
         let old = local
-            .update(|v| (v.reserved() == expect_reserved).then_some(new))
+            .fetch_update(|v| (v.reserved() == expect_reserved).then_some(new))
             .map_err(|_| Error::CAS)?;
 
         self.trees.unreserve(old, self.pages())
@@ -524,11 +531,11 @@ where
 #[derive(Default)]
 struct Trees<const LN: usize> {
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
-    entries: Box<[Atomic<SEntry3>]>,
+    entries: Box<[AtomicCell<SEntry3>]>,
 }
 
 impl<const LN: usize> Index<usize> for Trees<LN> {
-    type Output = Atomic<SEntry3>;
+    type Output = AtomicCell<SEntry3>;
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.entries[index]
@@ -558,12 +565,12 @@ impl<const LN: usize> Trees<LN> {
         let len = pages.div_ceil(LN);
         let mut entries = Vec::with_capacity(len);
         if free_all {
-            entries.resize_with(len - 1, || Atomic::new(SEntry3::new_table(LN, false)));
+            entries.resize_with(len - 1, || AtomicCell::new(SEntry3::new_table(LN, false)));
             // The last one might be cut off
             let max = ((pages - 1) % LN) + 1;
-            entries.push(Atomic::new(SEntry3::new_table(max, false)));
+            entries.push(AtomicCell::new(SEntry3::new_table(max, false)));
         } else {
-            entries.resize_with(len, || Atomic::new(SEntry3::new()));
+            entries.resize_with(len, || AtomicCell::new(SEntry3::new()));
         }
         self.entries = entries.into();
     }
@@ -585,7 +592,7 @@ impl<const LN: usize> Trees<LN> {
 
         let i = entry.idx();
         let max = (pages - i * LN).min(LN);
-        if let Ok(_) = self[i].update(|v| v.unreserve_add(entry.free(), max)) {
+        if let Ok(_) = self[i].fetch_update(|v| v.unreserve_add(entry.free(), max)) {
             Ok(())
         } else {
             error!("Unreserve failed i{i}");
@@ -598,7 +605,7 @@ impl<const LN: usize> Trees<LN> {
         // Just search linearly through the array
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
-            if let Ok(entry) = self[i].update(|v| v.reserve(Self::almost_free()..)) {
+            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::almost_free()..)) {
                 return Ok(Entry3::from(entry).with_idx(i));
             }
         }
@@ -630,8 +637,8 @@ impl<const LN: usize> Trees<LN> {
                 }
             }
             if let Some(i) = best {
-                if let Ok(entry) =
-                    self[i].update(|v| v.reserve(Self::almost_allocated()..Self::almost_free()))
+                if let Ok(entry) = self[i]
+                    .fetch_update(|v| v.reserve(Self::almost_allocated()..Self::almost_free()))
                 {
                     return Ok(Entry3::from(entry).with_idx(i));
                 }
@@ -643,7 +650,7 @@ impl<const LN: usize> Trees<LN> {
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
             if let Ok(entry) =
-                self[i].update(|v| v.reserve(Self::almost_allocated()..Self::almost_free()))
+                self[i].fetch_update(|v| v.reserve(Self::almost_allocated()..Self::almost_free()))
             {
                 return Ok(Entry3::from(entry).with_idx(i));
             }

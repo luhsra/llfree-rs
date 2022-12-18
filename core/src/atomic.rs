@@ -1,131 +1,11 @@
 use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 use core::ops::Index;
-use core::sync::atomic::*;
 
+use crossbeam_utils::atomic::AtomicCell;
 use log::error;
 
 use crate::entry::Entry3;
-
-/// Atomic wrapper for the different integer sizes and values that can be converted into them.
-#[repr(transparent)]
-pub struct Atomic<T: AtomicValue>(pub <<T as AtomicValue>::V as AtomicT>::A);
-
-const _: () = assert!(core::mem::size_of::<Atomic<u64>>() == 8);
-
-impl<T: AtomicValue> Atomic<T> {
-    pub fn new(v: T) -> Self {
-        Self(T::V::atomic(v.into()))
-    }
-    pub fn compare_exchange(&self, current: T, new: T) -> Result<T, T> {
-        match T::V::atomic_compare_exchange(&self.0, current.into(), new.into()) {
-            Ok(v) => Ok(v.into()),
-            Err(v) => Err(v.into()),
-        }
-    }
-    pub fn compare_exchange_weak(&self, current: T, new: T) -> Result<T, T> {
-        match T::V::atomic_compare_exchange_weak(&self.0, current.into(), new.into()) {
-            Ok(v) => Ok(v.into()),
-            Err(v) => Err(v.into()),
-        }
-    }
-    pub fn update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
-        match T::V::atomic_update(&self.0, |v| f(v.into()).map(T::into)) {
-            Ok(v) => Ok(v.into()),
-            Err(v) => Err(v.into()),
-        }
-    }
-    pub fn load(&self) -> T {
-        T::V::atomic_load(&self.0).into()
-    }
-    pub fn store(&self, v: T) {
-        T::V::atomic_store(&self.0, v.into());
-    }
-    pub fn swap(&self, v: T) -> T {
-        T::V::atomic_swap(&self.0, v.into()).into()
-    }
-}
-
-/// Value that can be converted into an atomic type.
-pub trait AtomicValue: From<Self::V> + Into<Self::V> + Clone + Copy {
-    type V: AtomicT;
-}
-
-/// An atomic type with atomic functions.
-pub trait AtomicT: Sized + Clone + Copy {
-    type A;
-    /// Specifies the memory ordering used by this type.
-    const ORDER: Ordering = Ordering::SeqCst;
-
-    fn atomic(v: Self) -> Self::A;
-    fn atomic_compare_exchange(atomic: &Self::A, current: Self, new: Self) -> Result<Self, Self>;
-    fn atomic_compare_exchange_weak(
-        atomic: &Self::A,
-        current: Self,
-        new: Self,
-    ) -> Result<Self, Self>;
-    fn atomic_update<F: FnMut(Self) -> Option<Self>>(atomic: &Self::A, f: F) -> Result<Self, Self>;
-    fn atomic_load(atomic: &Self::A) -> Self;
-    fn atomic_store(atomic: &Self::A, v: Self);
-    fn atomic_swap(atomic: &Self::A, v: Self) -> Self;
-}
-
-macro_rules! impl_atomic {
-    ($value:ident, $atomic:ident) => {
-        impl AtomicValue for $value {
-            type V = $value;
-        }
-
-        impl AtomicT for $value {
-            type A = $atomic;
-
-            fn atomic(v: Self) -> Self::A {
-                Self::A::new(v)
-            }
-
-            fn atomic_compare_exchange(
-                atomic: &Self::A,
-                current: Self,
-                new: Self,
-            ) -> Result<Self, Self> {
-                Self::A::compare_exchange(atomic, current, new, Self::ORDER, Self::ORDER)
-            }
-
-            fn atomic_compare_exchange_weak(
-                atomic: &Self::A,
-                current: Self,
-                new: Self,
-            ) -> Result<Self, Self> {
-                Self::A::compare_exchange_weak(atomic, current, new, Self::ORDER, Self::ORDER)
-            }
-
-            fn atomic_update<F: FnMut(Self) -> Option<Self>>(
-                atomic: &Self::A,
-                f: F,
-            ) -> Result<Self, Self> {
-                Self::A::fetch_update(atomic, Self::ORDER, Self::ORDER, f)
-            }
-
-            fn atomic_load(atomic: &Self::A) -> Self {
-                Self::A::load(atomic, Self::ORDER)
-            }
-
-            fn atomic_store(atomic: &Self::A, v: Self) {
-                Self::A::store(atomic, v, Self::ORDER)
-            }
-
-            fn atomic_swap(atomic: &Self::A, v: Self) -> Self {
-                Self::A::swap(atomic, v, Self::ORDER)
-            }
-        }
-    };
-}
-
-impl_atomic!(usize, AtomicUsize);
-impl_atomic!(u64, AtomicU64);
-impl_atomic!(u32, AtomicU32);
-impl_atomic!(u16, AtomicU16);
-impl_atomic!(u8, AtomicU8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Next {
@@ -154,7 +34,7 @@ impl From<Option<usize>> for Next {
 }
 
 /// Node of an atomic stack
-pub trait ANode: AtomicValue + Default {
+pub trait ANode: Eq + Copy + Default {
     fn next(self) -> Next;
     fn with_next(self, next: Next) -> Self;
     fn enqueue(self, next: Next) -> Option<Self> {
@@ -183,19 +63,19 @@ impl ANode for Entry3 {
 /// Simple atomic stack with atomic entries.
 /// It is constructed over an already existing fixed size buffer.
 #[repr(align(64))] // Just to be sure
-pub struct AStack<T: ANode> {
-    start: Atomic<T>,
+pub struct AtomicStack<T: ANode> {
+    start: AtomicCell<T>,
 }
 
-impl<T: ANode> Default for AStack<T> {
+impl<T: ANode> Default for AtomicStack<T> {
     fn default() -> Self {
         Self {
-            start: Atomic::new(T::default().with_next(Next::End)),
+            start: AtomicCell::new(T::default().with_next(Next::End)),
         }
     }
 }
 
-impl<T: ANode> AStack<T> {
+impl<T: ANode> AtomicStack<T> {
     pub fn set(&self, v: T) {
         self.start.store(v)
     }
@@ -203,18 +83,18 @@ impl<T: ANode> AStack<T> {
     /// Pushes the element at `idx` to the front of the stack.
     pub fn push<B>(&self, buf: &B, idx: usize)
     where
-        B: Index<usize, Output = Atomic<T>>,
+        B: Index<usize, Output = AtomicCell<T>>,
     {
         let mut prev = self.start.load();
         let elem = &buf[idx];
         loop {
-            if elem.update(|v| Some(v.with_next(prev.next()))).is_err() {
+            if elem.fetch_update(|v| Some(v.with_next(prev.next()))).is_err() {
                 panic!();
             }
             // CAS weak is important for fetch-update!
             match self
                 .start
-                .compare_exchange_weak(prev, prev.with_next(Next::Some(idx)))
+                .compare_exchange(prev, prev.with_next(Next::Some(idx)))
             {
                 Ok(_) => return,
                 Err(s) => prev = s,
@@ -225,7 +105,7 @@ impl<T: ANode> AStack<T> {
     /// Poping the first element and updating it in place.
     pub fn pop_update<B, F>(&self, buf: &B, mut f: F) -> Option<(usize, Result<T, T>)>
     where
-        B: Index<usize, Output = Atomic<T>>,
+        B: Index<usize, Output = AtomicCell<T>>,
         F: FnMut(T) -> Option<T>,
     {
         let mut prev = self.start.load();
@@ -233,12 +113,12 @@ impl<T: ANode> AStack<T> {
             let idx = prev.next().some()?;
             let next = buf[idx].load().next();
             // CAS weak is important for fetch-update!
-            match self.start.compare_exchange_weak(prev, prev.with_next(next)) {
+            match self.start.compare_exchange(prev, prev.with_next(next)) {
                 Ok(old) => {
                     let i = old.next().some()?;
                     return Some((
                         i,
-                        buf[i].update(|v| f(v).map(|v| v.with_next(Next::Outside))),
+                        buf[i].fetch_update(|v| f(v).map(|v| v.with_next(Next::Outside))),
                     ));
                 }
                 Err(s) => prev = s,
@@ -249,7 +129,7 @@ impl<T: ANode> AStack<T> {
     /// Poping the first element returning its index.
     pub fn pop<B>(&self, buf: &B) -> Option<usize>
     where
-        B: Index<usize, Output = Atomic<T>>,
+        B: Index<usize, Output = AtomicCell<T>>,
     {
         self.pop_update(buf, |v| Some(v)).map(|v| v.0)
     }
@@ -257,15 +137,15 @@ impl<T: ANode> AStack<T> {
 
 /// Debug printer for the [AStack].
 #[allow(dead_code)]
-pub struct AStackDbg<'a, T, B>(pub &'a AStack<T>, pub &'a B)
+pub struct AtomicStackDbg<'a, T, B>(pub &'a AtomicStack<T>, pub &'a B)
 where
     T: ANode,
-    B: Index<usize, Output = Atomic<T>>;
+    B: Index<usize, Output = AtomicCell<T>>;
 
-impl<'a, T, B> fmt::Debug for AStackDbg<'a, T, B>
+impl<'a, T, B> fmt::Debug for AtomicStackDbg<'a, T, B>
 where
     T: ANode,
-    B: Index<usize, Output = Atomic<T>>,
+    B: Index<usize, Output = AtomicCell<T>>,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut dbg = f.debug_list();
@@ -296,13 +176,13 @@ where
 
 /// Simple linked list over a buffer of atomic entries.
 #[derive(Default)]
-pub struct BufList<T: ANode> {
+pub struct BufferList<T: ANode> {
     start: Option<usize>,
     end: Option<usize>,
     _phantom: PhantomData<T>,
 }
 
-impl<T: ANode> fmt::Debug for BufList<T> {
+impl<T: ANode> fmt::Debug for BufferList<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BufList")
             .field("start", &self.start)
@@ -311,7 +191,7 @@ impl<T: ANode> fmt::Debug for BufList<T> {
     }
 }
 
-impl<T: ANode + Debug> BufList<T> {
+impl<T: ANode + Debug> BufferList<T> {
     pub fn clear(&mut self) {
         self.start = None;
         self.end = None;
@@ -319,9 +199,9 @@ impl<T: ANode + Debug> BufList<T> {
 
     pub fn push<B>(&mut self, buf: &B, idx: usize)
     where
-        B: Index<usize, Output = Atomic<T>>,
+        B: Index<usize, Output = AtomicCell<T>>,
     {
-        if buf[idx].update(|v| v.enqueue(self.start.into())).is_err() {
+        if buf[idx].fetch_update(|v| v.enqueue(self.start.into())).is_err() {
             return;
         }
 
@@ -333,15 +213,15 @@ impl<T: ANode + Debug> BufList<T> {
 
     pub fn push_back<B>(&mut self, buf: &B, idx: usize)
     where
-        B: Index<usize, Output = Atomic<T>>,
+        B: Index<usize, Output = AtomicCell<T>>,
     {
-        if buf[idx].update(|v| v.enqueue(Next::End)).is_err() {
+        if buf[idx].fetch_update(|v| v.enqueue(Next::End)).is_err() {
             return;
         }
 
         if let Some(end) = self.end {
             if buf[end]
-                .update(|v| Some(v.with_next(Next::Some(idx))))
+                .fetch_update(|v| Some(v.with_next(Next::Some(idx))))
                 .is_err()
             {
                 unreachable!();
@@ -356,10 +236,10 @@ impl<T: ANode + Debug> BufList<T> {
     /// Poping the first element and updating it in place.
     pub fn pop<B>(&mut self, buf: &B) -> Option<usize>
     where
-        B: Index<usize, Output = Atomic<T>>,
+        B: Index<usize, Output = AtomicCell<T>>,
     {
         let start = self.start?;
-        if let Ok(pte) = buf[start].update(|v| Some(v.with_next(Next::Outside))) {
+        if let Ok(pte) = buf[start].fetch_update(|v| Some(v.with_next(Next::Outside))) {
             self.start = pte.next().some();
             if self.start.is_none() {
                 self.end = None;
@@ -370,26 +250,26 @@ impl<T: ANode + Debug> BufList<T> {
         }
     }
 
-    pub fn iter<'a, B>(&'a self, buf: &'a B) -> BufListIter<'a, T, B>
+    pub fn iter<'a, B>(&'a self, buf: &'a B) -> BufferListIter<'a, T, B>
     where
-        B: Index<usize, Output = Atomic<T>>,
+        B: Index<usize, Output = AtomicCell<T>>,
     {
-        BufListIter {
+        BufferListIter {
             next: self.start,
             buf,
         }
     }
 }
 
-pub struct BufListIter<'a, T: ANode, B: Index<usize, Output = Atomic<T>>> {
+pub struct BufferListIter<'a, T: ANode, B: Index<usize, Output = AtomicCell<T>>> {
     next: Option<usize>,
     buf: &'a B,
 }
 
-impl<'a, T, B> Iterator for BufListIter<'a, T, B>
+impl<'a, T, B> Iterator for BufferListIter<'a, T, B>
 where
     T: ANode,
-    B: Index<usize, Output = Atomic<T>>,
+    B: Index<usize, Output = AtomicCell<T>>,
 {
     type Item = (usize, T);
 
@@ -404,14 +284,14 @@ where
     }
 }
 
-impl<'a, T, B> fmt::Debug for BufListIter<'a, T, B>
+impl<'a, T, B> fmt::Debug for BufferListIter<'a, T, B>
 where
     T: ANode,
-    B: Index<usize, Output = Atomic<T>>,
+    B: Index<usize, Output = AtomicCell<T>>,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut dbg = f.debug_list();
-        let iter = BufListIter {
+        let iter = BufferListIter {
             next: self.next,
             buf: self.buf,
         };
@@ -424,14 +304,15 @@ where
 
 #[cfg(all(test, feature = "std"))]
 mod test {
-    use core::sync::atomic::AtomicU64;
+    use core::hint::black_box;
     use std::sync::Arc;
 
+    use crossbeam_utils::atomic::AtomicCell;
     use spin::Barrier;
 
-    use crate::{atomic::BufList, thread, util::black_box};
+    use crate::{atomic::BufferList, thread};
 
-    use super::{ANode, AStack, AStackDbg, Atomic, Next};
+    use super::{ANode, AtomicStack, AtomicStackDbg, Next};
 
     impl ANode for u64 {
         fn next(self) -> Next {
@@ -453,15 +334,15 @@ mod test {
 
     #[test]
     fn atomic_stack() {
-        const DATA_V: Atomic<u64> = Atomic(AtomicU64::new(0));
+        const DATA_V: AtomicCell<u64> = AtomicCell::new(0);
         const N: usize = 64;
-        let data: [Atomic<u64>; N] = [DATA_V; N];
+        let data: [AtomicCell<u64>; N] = [DATA_V; N];
 
-        let stack = AStack::default();
+        let stack = AtomicStack::default();
         stack.push(&data, 0);
         stack.push(&data, 1);
 
-        println!("{:?}", AStackDbg(&stack, &data));
+        println!("{:?}", AtomicStackDbg(&stack, &data));
 
         assert_eq!(stack.pop(&data), Some(1));
         assert_eq!(stack.pop(&data), Some(0));
@@ -502,11 +383,11 @@ mod test {
 
     #[test]
     fn buf_list() {
-        const DATA_V: Atomic<u64> = Atomic(AtomicU64::new(u64::MAX));
+        const DATA_V: AtomicCell<u64> = AtomicCell::new(u64::MAX);
         const N: usize = 64;
-        let data: [Atomic<u64>; N] = [DATA_V; N];
+        let data: [AtomicCell<u64>; N] = [DATA_V; N];
 
-        let mut list = BufList::default();
+        let mut list = BufferList::default();
         assert_eq!(list.pop(&data), None);
         list.push(&data, 0);
         list.push(&data, 1);

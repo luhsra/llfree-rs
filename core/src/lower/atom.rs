@@ -2,14 +2,15 @@ use core::fmt::{self, Write};
 use core::mem::size_of;
 use core::ops::Range;
 
+use crossbeam_utils::atomic::AtomicCell;
+use log::{error, info, warn};
+
 use alloc::boxed::Box;
 use alloc::slice;
 use alloc::string::String;
-use log::{error, info, warn};
 
-use crate::atomic::Atomic;
 use crate::entry::{SEntry2, SEntry2T2, SEntry2T4, SEntry2T8, SEntry2Tuple};
-use crate::table::{ATable, Bitfield, Mapping};
+use crate::table::{AtomicArray, Bitfield, Mapping};
 use crate::upper::{Init, CAS_RETRIES};
 use crate::util::{align_up, spin_wait, Page};
 use crate::{Error, Result};
@@ -26,16 +27,16 @@ type Table1 = Bitfield<2>;
 /// ## Memory Layout
 /// **persistent:**
 /// ```text
-/// NVRAM: [ Pages | PT1s + padding | PT2s | Meta ]
+/// NVRAM: [ Pages | Entry1s | Entry2s | Meta ]
 /// ```
 /// **volatile:**
 /// ```text
-/// RAM: [ Pages ], PT1s and PT2s are allocated elswhere
+/// RAM: [ Pages ], Entry1s and Entry2s are allocated elswhere
 /// ```
 pub struct Atom<const T2N: usize> {
     area: &'static mut [Page],
     l1: Box<[Table1]>,
-    l2: Box<[ATable<SEntry2, T2N>]>,
+    l2: Box<[[AtomicCell<SEntry2>; T2N]]>,
     persistent: bool,
 }
 
@@ -78,8 +79,8 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
             // Reserve memory within the managed NVM for the l1 and l2 tables
             // These tables are stored at the end of the NVM
             let s1 = n1 * Table1::SIZE;
-            let s1 = align_up(s1, ATable::<SEntry2, T2N>::SIZE); // correct alignment
-            let s2 = n1 * ATable::<SEntry2, T2N>::SIZE;
+            let s1 = align_up(s1, size_of::<[SEntry2; T2N]>()); // correct alignment
+            let s2 = n1 * size_of::<[SEntry2; T2N]>();
             // Num of pages occupied by the tables
             let pages = (s1 + s2).div_ceil(Page::SIZE);
 
@@ -92,7 +93,7 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
             let l1 = unsafe { Box::from_raw(slice::from_raw_parts_mut(tables.cast(), n1)) };
 
             let mut offset = n1 * Table1::SIZE;
-            offset = align_up(offset, ATable::<SEntry2, T2N>::SIZE); // correct alignment
+            offset = align_up(offset, size_of::<[SEntry2; T2N]>()); // correct alignment
 
             // Start of the l2 table array
             let l2 =
@@ -139,18 +140,18 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
         for i in 0..Self::MAPPING.len(2) {
             let start = Self::MAPPING.page(2, start, i);
             if start > self.pages() {
-                pt.set(i, SEntry2::new());
+                pt[i].store(SEntry2::new());
                 continue;
             }
 
-            let pte = pt.get(i);
+            let pte = pt[i].load();
             if deep && pte.free() > 0 {
                 // Deep recovery updates the counter
                 let p = self.pt1(start).count_zeros();
 
                 if pte.free() != p {
                     warn!("Invalid PTE2 start=0x{start:x} i{i}: {} != {p}", pte.free());
-                    pt.set(i, pte.with_free(p));
+                    pt[i].store(pte.with_free(p));
                 }
                 pages += p;
             } else {
@@ -200,7 +201,7 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
         } else {
             let pt2 = self.pt2(page);
             let i2 = Self::MAPPING.idx(2, page);
-            let old = pt2.get(i2);
+            let old = pt2[i2].load();
             if old.page() {
                 self.partial_put_huge(old, page, order)
             } else if old.free() <= Self::MAPPING.span(1) - (1 << order) {
@@ -230,7 +231,7 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
         } else {
             let pt2 = self.pt2(page);
             let i2 = Self::MAPPING.idx(2, page);
-            let pte2 = pt2.get(i2);
+            let pte2 = pt2[i2].load();
             let num_pages = 1 << order;
 
             if pte2.free() < num_pages {
@@ -252,7 +253,7 @@ impl<const T2N: usize> LowerAlloc for Atom<T2N> {
             let pt2 = self.pt2(start);
             for i2 in Self::MAPPING.range(2, start..self.pages()) {
                 let start = Self::MAPPING.page(2, start, i2);
-                let pte2 = pt2.get(i2);
+                let pte2 = pt2[i2].load();
 
                 pages -= if pte2.page() {
                     0
@@ -306,16 +307,16 @@ impl<const T2N: usize> Atom<T2N> {
     /// ```text
     /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
     /// ```
-    fn pt2(&self, page: usize) -> &ATable<SEntry2, T2N> {
+    fn pt2(&self, page: usize) -> &[AtomicCell<SEntry2>; T2N] {
         let i = page / Self::MAPPING.span(2);
         debug_assert!(i < Self::MAPPING.num_pts(2, self.pages()));
         &self.l2[i]
     }
 
     /// Returns the l2 page table with pair entries that can be updated at once.
-    fn pt2_t<T: SEntry2Tuple>(&self, page: usize) -> &[Atomic<T>] {
+    fn pt2_t<T: SEntry2Tuple>(&self, page: usize) -> &[AtomicCell<T>] {
         let pt2 = self.pt2(page);
-        let ptr = pt2.as_ptr() as *const Atomic<T>;
+        let ptr = pt2.as_ptr() as *const AtomicCell<T>;
         unsafe { slice::from_raw_parts(ptr, T2N / T::N) }
     }
 
@@ -324,12 +325,12 @@ impl<const T2N: usize> Atom<T2N> {
         for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
             let pt2 = self.pt2(i * Self::MAPPING.span(2));
             if i + 1 < Self::MAPPING.num_pts(2, self.pages()) {
-                pt2.fill(SEntry2::new().with_free(Self::MAPPING.span(1)));
+                unsafe { pt2.atomic_fill(SEntry2::new().with_free(Self::MAPPING.span(1))) };
             } else {
                 for j in 0..Self::MAPPING.len(2) {
                     let page = i * Self::MAPPING.span(2) + j * Self::MAPPING.span(1);
                     let max = Self::MAPPING.span(1).min(self.pages().saturating_sub(page));
-                    pt2.set(j, SEntry2::new().with_free(max));
+                    pt2[j].store(SEntry2::new().with_free(max));
                 }
             }
         }
@@ -355,16 +356,16 @@ impl<const T2N: usize> Atom<T2N> {
             if self.pages() >= end {
                 // Table is fully included in the memory range
                 // -> Allocated as full pages
-                pt2.fill(SEntry2::new_page());
+                unsafe { pt2.atomic_fill(SEntry2::new_page()) };
             } else {
                 // Table is only partially included in the memory range
                 for j in 0..Self::MAPPING.len(2) {
                     let end = i * Self::MAPPING.span(2) + (j + 1) * Self::MAPPING.span(1);
                     if self.pages() >= end {
-                        pt2.set(j, SEntry2::new_page());
+                        pt2[j].store(SEntry2::new_page());
                     } else {
                         // Remainder is allocated as small pages
-                        pt2.set(j, SEntry2::new_free(0));
+                        pt2[j].store(SEntry2::new_free(0));
                     }
                 }
             }
@@ -388,24 +389,31 @@ impl<const T2N: usize> Atom<T2N> {
         let pt2 = self.pt2(start);
 
         for _ in 0..CAS_RETRIES {
-            for newstart in Self::MAPPING.iterate(2, start) {
-                let i2 = Self::MAPPING.idx(2, newstart);
+            let off = Self::MAPPING.idx(2, start);
+            for j2 in 0..Self::MAPPING.len(2) {
+                let i2 = (j2 + off) % Self::MAPPING.len(2);
+
+                let newstart = if j2 == 0 {
+                    start // Don't round the start pfn
+                } else {
+                    Self::MAPPING.page(2, start, i2)
+                };
 
                 #[cfg(feature = "stop")]
                 {
-                    let pte2 = pt2.get(i2);
+                    let pte2 = pt2[i2].load();
                     if pte2.page() || pte2.free() < (1 << order) {
                         continue;
                     }
                     stop!();
                 }
 
-                if pt2.update(i2, |v| v.dec(1 << order)).is_ok() {
+                if pt2[i2].fetch_update(|v| v.dec(1 << order)).is_ok() {
                     match self.get_table(newstart, order) {
                         // Revert conter
                         Err(Error::Memory) => {
                             if let Err(e) =
-                                pt2.update(i2, |v| v.inc(Self::MAPPING.span(1), 1 << order))
+                                pt2[i2].fetch_update(|v| v.inc(Self::MAPPING.span(1), 1 << order))
                             {
                                 error!("Rollback failed {e:?}");
                                 return Err(Error::Corruption);
@@ -440,10 +448,11 @@ impl<const T2N: usize> Atom<T2N> {
         let order = Table1::ORDER + T::N.ilog2() as usize;
         let pt2 = self.pt2_t::<T>(start);
         for _ in 0..CAS_RETRIES {
-            for page in Self::MAPPING.iterate(2, start).step_by(T::N) {
-                let i2 = Self::MAPPING.idx(2, page) / T::N;
+            let off = Self::MAPPING.idx(2, start);
+            for j2 in (0..Self::MAPPING.len(2)).step_by(T::N) {
+                let i2 = ((j2 + off) % Self::MAPPING.len(2)) / T::N;
                 if pt2[i2]
-                    .update(|v| v.map(|v| v.mark_huge(Self::MAPPING.span(1))))
+                    .fetch_update(|v| v.map(|v| v.mark_huge(Self::MAPPING.span(1))))
                     .is_ok()
                 {
                     return Ok(Self::MAPPING.page(2, start, i2 * T::N));
@@ -468,7 +477,7 @@ impl<const T2N: usize> Atom<T2N> {
 
         let pt2 = self.pt2(page);
         let i2 = Self::MAPPING.idx(2, page);
-        if let Err(pte2) = pt2.update(i2, |v| v.inc(Self::MAPPING.span(1), 1 << order)) {
+        if let Err(pte2) = pt2[i2].fetch_update(|v| v.inc(Self::MAPPING.span(1), 1 << order)) {
             error!("Inc failed i{i1} p={page} {pte2:?}");
             return Err(Error::Corruption);
         }
@@ -500,11 +509,11 @@ impl<const T2N: usize> Atom<T2N> {
         let pt2 = self.pt2(page);
         let pt1 = self.pt1(page);
         if pt1.fill_cas(true) {
-            if pt2.cas(i2, old, SEntry2::new()).is_err() {
+            if pt2[i2].compare_exchange(old, SEntry2::new()).is_err() {
                 error!("Failed partial clear");
                 return Err(Error::Corruption);
             }
-        } else if !spin_wait(CAS_RETRIES, || !pt2.get(i2).page()) {
+        } else if !spin_wait(CAS_RETRIES, || !pt2[i2].load().page()) {
             error!("Exceeding retries");
             return Err(Error::Corruption);
         }
@@ -523,7 +532,7 @@ impl<const T2N: usize> Atom<T2N> {
                 return;
             }
 
-            let pte2 = pt2.get(i2);
+            let pte2 = pt2[i2].load();
             let indent = (Self::MAPPING.levels() - 2) * 4;
             let pt1 = self.pt1(start);
             writeln!(out, "{:indent$}l2 i={i2}: {pte2:?}\t{pt1:?}", "").unwrap();
@@ -600,7 +609,7 @@ mod test {
                 assert!(page != 0);
             });
 
-            assert_eq!(lower.pt2(0).get(0).free(), MAPPING.span(1) - 3);
+            assert_eq!(lower.pt2(0)[0].load().free(), MAPPING.span(1) - 3);
             assert_eq!(count(lower.pt1(0)), MAPPING.span(1) - 3);
         }
     }
@@ -631,7 +640,7 @@ mod test {
                 l.get(0, 0).unwrap();
             });
 
-            let pte2 = lower.pt2(0).get(0);
+            let pte2 = lower.pt2(0)[0].load();
             assert_eq!(pte2.free(), MAPPING.span(1) - 2);
             assert_eq!(count(lower.pt1(0)), MAPPING.span(1) - 2);
         }
@@ -668,8 +677,8 @@ mod test {
             });
 
             let pt2 = lower.pt2(0);
-            assert_eq!(pt2.get(0).free(), 0);
-            assert_eq!(pt2.get(1).free(), MAPPING.span(1) - 1);
+            assert_eq!(pt2[0].load().free(), 0);
+            assert_eq!(pt2[1].load().free(), MAPPING.span(1) - 1);
             assert_eq!(count(lower.pt1(MAPPING.span(1))), MAPPING.span(1) - 1);
         }
     }
@@ -705,7 +714,7 @@ mod test {
                 }
             });
 
-            assert_eq!(lower.pt2(0).get(0).free(), MAPPING.span(1));
+            assert_eq!(lower.pt2(0)[0].load().free(), MAPPING.span(1));
         }
     }
 
@@ -739,7 +748,7 @@ mod test {
             });
 
             let pt2 = lower.pt2(0);
-            assert_eq!(pt2.get(0).free(), 2);
+            assert_eq!(pt2[0].load().free(), 2);
             assert_eq!(count(lower.pt1(0)), 2);
         }
     }
@@ -785,13 +794,13 @@ mod test {
             });
 
             let pt2 = lower.pt2(0);
-            if pt2.get(0).free() == 1 {
+            if pt2[0].load().free() == 1 {
                 assert_eq!(count(lower.pt1(0)), 1);
             } else {
                 // Table entry skipped
-                assert_eq!(pt2.get(0).free(), 2);
+                assert_eq!(pt2[0].load().free(), 2);
                 assert_eq!(count(lower.pt1(0)), 2);
-                assert_eq!(pt2.get(1).free(), MAPPING.span(1) - 1);
+                assert_eq!(pt2[1].load().free(), MAPPING.span(1) - 1);
                 assert_eq!(count(lower.pt1(MAPPING.span(1))), MAPPING.span(1) - 1);
             }
         }
@@ -830,7 +839,7 @@ mod test {
             });
 
             let allocated = 1 + 2 + 4;
-            assert_eq!(lower.pt2(0).get(0).free(), MAPPING.span(1) - allocated);
+            assert_eq!(lower.pt2(0)[0].load().free(), MAPPING.span(1) - allocated);
             assert_eq!(count(lower.pt1(0)), MAPPING.span(1) - allocated);
         }
     }
@@ -855,7 +864,7 @@ mod test {
             pages[0] = lower.get(0, 1).unwrap();
             pages[1] = lower.get(0, 2).unwrap();
 
-            assert_eq!(lower.pt2(0).get(0).free(), MAPPING.span(1) - 2 - 4);
+            assert_eq!(lower.pt2(0)[0].load().free(), MAPPING.span(1) - 2 - 4);
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
@@ -868,7 +877,7 @@ mod test {
                 }
             });
 
-            assert_eq!(lower.pt2(0).get(0).free(), MAPPING.span(1));
+            assert_eq!(lower.pt2(0)[0].load().free(), MAPPING.span(1));
         }
     }
 

@@ -1,79 +1,34 @@
 use core::fmt;
-use core::mem::{align_of, size_of};
+use core::mem::size_of;
 use core::ops::Range;
 use core::sync::atomic::{self, AtomicU64, Ordering::*};
 
+use crossbeam_utils::atomic::AtomicCell;
 use log::error;
 
-use crate::atomic::{Atomic, AtomicValue};
 use crate::util::Page;
-use crate::util::{align_down, align_up, CacheLine};
+use crate::util::{align_down, align_up};
 use crate::Error;
 
 pub const PT_ORDER: usize = 9;
 pub const PT_LEN: usize = 1 << PT_ORDER;
 
-/// Table with atomic entries
-#[repr(align(64))]
-pub struct ATable<T: AtomicValue, const LEN: usize = { PT_LEN }> {
-    entries: [Atomic<T>; LEN],
+pub trait AtomicArray<T: Eq + Copy, const L: usize> {
+    /// Overwrite the content of the whole array non-atomically.
+    ///
+    /// # Safety
+    /// This is faster than atomics but vulnerable to race conditions.
+    unsafe fn atomic_fill(&self, e: T);
 }
 
-// Sanity checks
-const _: () = assert!(size_of::<u64>() == ATable::<u64, PT_LEN>::PTE_SIZE);
-const _: () = assert!(size_of::<ATable<u64, PT_LEN>>() == Page::SIZE);
-const _: () = assert!(align_of::<ATable<u64, PT_LEN>>() == CacheLine::SIZE);
-
-const _: () = assert!(ATable::<u64, PT_LEN>::SIZE == Page::SIZE);
-const _: () = assert!(ATable::<u64, PT_LEN>::LEN == 512);
-const _: () = assert!(ATable::<u64, PT_LEN>::ORDER == 9);
-
-const _: () = assert!(ATable::<u16, 64>::PTE_SIZE == size_of::<u16>());
-const _: () = assert!(ATable::<u16, 64>::SIZE == 128);
-
-impl<T: AtomicValue, const LEN: usize> ATable<T, LEN> {
-    pub const LEN: usize = LEN;
-    pub const ORDER: usize = LEN.ilog2() as _;
-    pub const PTE_SIZE: usize = size_of::<T>();
-    pub const SIZE: usize = LEN * Self::PTE_SIZE;
-
-    pub fn empty() -> Self {
-        Self {
-            entries: unsafe { core::mem::zeroed() },
-        }
-    }
-    pub fn fill(&self, e: T) {
+impl<T: Eq + Copy, const L: usize> AtomicArray<T, L> for [AtomicCell<T>; L] {
+    unsafe fn atomic_fill(&self, e: T) {
         // cast to raw memory to let the compiler use vector instructions
         #[allow(clippy::cast_ref_to_mut)]
-        let mem = unsafe { &mut *(self.entries.as_ptr() as *mut [T; LEN]) };
+        let mem = unsafe { &mut *(self.as_ptr() as *mut [T; L]) };
         mem.fill(e);
         // memory ordering has to be enforced with a memory barrier
         atomic::fence(SeqCst);
-    }
-    pub fn get(&self, i: usize) -> T {
-        self.entries[i].load()
-    }
-    pub fn set(&self, i: usize, e: T) {
-        self.entries[i].store(e);
-    }
-    pub fn cas(&self, i: usize, expected: T, new: T) -> Result<T, T> {
-        self.entries[i].compare_exchange(expected, new)
-    }
-    pub fn update<F: FnMut(T) -> Option<T>>(&self, i: usize, f: F) -> Result<T, T> {
-        self.entries[i].update(f)
-    }
-    pub fn as_ptr(&self) -> *const Atomic<T> {
-        self.entries.as_ptr()
-    }
-}
-
-impl<T: AtomicValue + fmt::Debug, const LEN: usize> fmt::Debug for ATable<T, LEN> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Table {{")?;
-        for (i, entry) in self.entries.iter().enumerate() {
-            writeln!(f, "    {i:>3}; {:?},", entry.load())?;
-        }
-        writeln!(f, "}}")
     }
 }
 
