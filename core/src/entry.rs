@@ -171,7 +171,7 @@ impl From<Entry3> for SEntry3 {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct Entry2(u16);
 
 impl Entry2 {

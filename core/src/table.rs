@@ -240,7 +240,7 @@ impl<const N: usize> Bitfield<N> {
         true
     }
 
-    /// Returns the number of ones in this bitfield
+    /// Returns the number of zeros in this bitfield
     pub fn count_zeros(&self) -> usize {
         self.data
             .iter()

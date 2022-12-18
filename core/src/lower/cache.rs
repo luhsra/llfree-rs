@@ -143,26 +143,41 @@ where
     fn recover(&self, start: usize, deep: bool) -> Result<usize> {
         let mut pages = 0;
 
-        let pt = self.table2(start);
-        for i in 0..Self::MAPPING.len(2) {
+        let table2 = self.table2(start);
+        for (i, entry2) in table2.iter().enumerate() {
             let start = Self::MAPPING.page(2, start, i);
             if start > self.pages() {
-                pt[i].store(Entry2::new());
+                entry2.store(Entry2::new());
                 continue;
             }
 
-            let entry = pt[i].load();
-            if deep && entry.free() > 0 {
+            let entry = entry2.load();
+            let free = entry.free();
+            if deep {
                 // Deep recovery updates the counter
-                let p = self.table1(start).count_zeros();
-
-                if entry.free() != p {
-                    warn!("Invalid L2 start=0x{start:x} i{i}: {} != {p}", entry.free());
-                    pt[i].store(entry.with_free(p));
+                if entry.page() {
+                    // Check that underlying bitfield is empty
+                    let p = self.table1(start).count_zeros();
+                    if p != Self::MAPPING.span(1) {
+                        warn!("Invalid L2 start=0x{start:x} i{i}: h != {p}");
+                        self.table1(start).fill(false);
+                    }
+                } else if free == Self::MAPPING.span(1) {
+                    // Skip entirely free entries
+                    // This is possible because the counter is decremented first
+                    // for allocations and afterwards for frees
+                    pages += Self::MAPPING.span(1);
+                } else {
+                    // Check if partially filled bitfield has the same free count
+                    let p = self.table1(start).count_zeros();
+                    if free != p {
+                        warn!("Invalid L2 start=0x{start:x} i{i}: {free} != {p}");
+                        entry2.store(entry.with_free(p));
+                    }
+                    pages += p;
                 }
-                pages += p;
             } else {
-                pages += entry.free();
+                pages += free;
             }
         }
 
@@ -347,10 +362,10 @@ where
             if i + 1 < Self::MAPPING.num_pts(2, self.pages()) {
                 unsafe { table2.atomic_fill(Entry2::new_free(Self::MAPPING.span(1))) };
             } else {
-                for j in 0..Self::MAPPING.len(2) {
+                for (j, entry2) in table2.iter().enumerate() {
                     let page = i * Self::MAPPING.span(2) + j * Self::MAPPING.span(1);
                     let max = Self::MAPPING.span(1).min(self.pages().saturating_sub(page));
-                    table2[j].store(Entry2::new_free(max));
+                    entry2.store(Entry2::new_free(max));
                 }
             }
         }
@@ -379,13 +394,13 @@ where
                 unsafe { table2.atomic_fill(Entry2::new_page()) };
             } else {
                 // Table is only partially included in the memory range
-                for j in 0..Self::MAPPING.len(2) {
+                for (j, entry2) in table2.iter().enumerate() {
                     let end = i * Self::MAPPING.span(2) + (j + 1) * Self::MAPPING.span(1);
                     if self.pages() >= end {
-                        table2[j].store(Entry2::new_page());
+                        entry2.store(Entry2::new_page());
                     } else {
                         // Remainder is allocated as small pages
-                        table2[j].store(Entry2::new_free(0));
+                        entry2.store(Entry2::new_free(0));
                     }
                 }
             }
@@ -562,13 +577,13 @@ where
         let mut out = String::new();
         writeln!(out, "Dumping pt {}", start / Self::MAPPING.span(2)).unwrap();
         let table2 = self.table2(start);
-        for i2 in 0..Self::MAPPING.len(2) {
+        for (i2, entry2) in table2.iter().enumerate() {
             let start = Self::MAPPING.page(2, start, i2);
             if start > self.pages() {
                 break;
             }
 
-            let entry2 = table2[i2].load();
+            let entry2 = entry2.load();
             let indent = (Self::MAPPING.levels() - 2) * 4;
             let table1 = self.table1(start);
             writeln!(out, "{:indent$}l2 i={i2}: {entry2:?}\t{table1:?}", "").unwrap();
