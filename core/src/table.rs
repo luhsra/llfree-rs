@@ -1,7 +1,7 @@
 use core::fmt;
 use core::mem::size_of;
 use core::ops::Range;
-use core::sync::atomic::{self, AtomicU64, Ordering::*};
+use core::sync::atomic::{self, Ordering::*};
 
 use crossbeam_utils::atomic::AtomicCell;
 use log::error;
@@ -34,7 +34,7 @@ impl<T: Eq + Copy, const L: usize> AtomicArray<T, L> for [AtomicCell<T>; L] {
 
 /// Bitfield replacing the level one table.
 pub struct Bitfield<const N: usize> {
-    data: [AtomicU64; N],
+    data: [AtomicCell<u64>; N],
 }
 
 const _: () = assert!(size_of::<Bitfield<64>>() == Bitfield::<64>::SIZE);
@@ -42,6 +42,7 @@ const _: () = assert!(size_of::<Bitfield<64>>() >= 8);
 const _: () = assert!(Bitfield::<64>::LEN % Bitfield::<64>::ENTRY_BITS == 0);
 const _: () = assert!(1 << Bitfield::<64>::ORDER == Bitfield::<64>::LEN);
 const _: () = assert!(Bitfield::<2>::ORDER == 7);
+const _: () = assert!(AtomicCell::<u64>::is_lock_free());
 
 impl<const N: usize> Default for Bitfield<N> {
     fn default() -> Self {
@@ -55,7 +56,7 @@ impl<const N: usize> fmt::Debug for Bitfield<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Bitfield( ")?;
         for d in &self.data {
-            write!(f, "{:016x} ", d.load(Relaxed))?;
+            write!(f, "{:016x} ", d.load())?;
         }
         write!(f, ")")?;
         Ok(())
@@ -81,9 +82,9 @@ impl<const N: usize> Bitfield<N> {
                 let bits = bit_end - bit_start;
                 let byte = (u64::MAX >> (Self::ENTRY_BITS - bits)) << bit_start;
                 if v {
-                    self.data[ei].fetch_or(byte, SeqCst);
+                    self.data[ei].fetch_or(byte);
                 } else {
-                    self.data[ei].fetch_and(!byte, SeqCst);
+                    self.data[ei].fetch_and(!byte);
                 }
             }
         }
@@ -93,12 +94,12 @@ impl<const N: usize> Bitfield<N> {
     pub fn get(&self, i: usize) -> bool {
         let di = i / Self::ENTRY_BITS;
         let bit = 1 << (i % Self::ENTRY_BITS);
-        self.data[di].load(SeqCst) & bit != 0
+        self.data[di].load() & bit != 0
     }
 
     /// Return the  `i`-th entry
     pub fn get_entry(&self, i: usize) -> u64 {
-        self.data[i].load(SeqCst)
+        self.data[i].load()
     }
 
     /// Toggle 2^`order` bits at the `i`-th place if they are all zero or one as expected
@@ -112,7 +113,7 @@ impl<const N: usize> Bitfield<N> {
             // Updates within a single entry
             let mask = (u64::MAX >> (Self::ENTRY_BITS - num_bits)) << (i % Self::ENTRY_BITS);
             let di = i / Self::ENTRY_BITS;
-            match self.data[di].fetch_update(SeqCst, SeqCst, |e| {
+            match self.data[di].fetch_update(|e| {
                 if expected {
                     (e & mask == mask).then_some(e & !mask)
                 } else {
@@ -128,12 +129,10 @@ impl<const N: usize> Bitfield<N> {
             let di = i / Self::ENTRY_BITS;
             for i in di..di + num_entries {
                 let expected = if expected { u64::MAX } else { 0 };
-                if let Err(_) = self.data[i].compare_exchange(expected, !expected, SeqCst, SeqCst) {
+                if let Err(_) = self.data[i].compare_exchange(expected, !expected) {
                     // Undo changes
                     for j in (di..i).rev() {
-                        if let Err(_) =
-                            self.data[j].compare_exchange(!expected, expected, SeqCst, SeqCst)
-                        {
+                        if let Err(_) = self.data[j].compare_exchange(!expected, expected) {
                             error!("Failed undo toggle");
                             return Err(Error::Corruption);
                         }
@@ -160,7 +159,7 @@ impl<const N: usize> Bitfield<N> {
             #[cfg(all(test, feature = "stop"))]
             {
                 // Skip full entries for the tests
-                if self.data[i].load(SeqCst) == u64::MAX {
+                if self.data[i].load() == u64::MAX {
                     continue;
                 }
                 crate::stop::stop().unwrap();
@@ -168,7 +167,7 @@ impl<const N: usize> Bitfield<N> {
 
             let mut offset = 0;
             if self.data[i]
-                .fetch_update(SeqCst, SeqCst, |e| {
+                .fetch_update(|e| {
                     if let Some((val, o)) = first_zeros_aligned(e, order) {
                         offset = o;
                         Some(val)
@@ -195,12 +194,12 @@ impl<const N: usize> Bitfield<N> {
 
         for (i, chunk) in self.data.chunks(num_entries).enumerate() {
             // Check that these entries are free
-            if chunk.iter().all(|e| e.load(SeqCst) == 0) {
+            if chunk.iter().all(|e| e.load() == 0) {
                 for (j, entry) in chunk.iter().enumerate() {
-                    if let Err(_) = entry.compare_exchange(0, u64::MAX, SeqCst, SeqCst) {
+                    if let Err(_) = entry.compare_exchange(0, u64::MAX) {
                         // Undo previous updates
                         for k in (0..j).rev() {
-                            if let Err(_) = chunk[k].compare_exchange(u64::MAX, 0, SeqCst, SeqCst) {
+                            if let Err(_) = chunk[k].compare_exchange(u64::MAX, 0) {
                                 error!("Failed undo search");
                                 return Err(Error::Corruption);
                             }
@@ -233,7 +232,7 @@ impl<const N: usize> Bitfield<N> {
         let v = if v { u64::MAX } else { 0 };
 
         for e in &self.data {
-            if e.compare_exchange(!v, v, SeqCst, SeqCst).is_err() {
+            if e.compare_exchange(!v, v).is_err() {
                 return false;
             }
         }
@@ -244,7 +243,7 @@ impl<const N: usize> Bitfield<N> {
     pub fn count_zeros(&self) -> usize {
         self.data
             .iter()
-            .map(|v| v.load(SeqCst).count_zeros() as usize)
+            .map(|v| v.load().count_zeros() as usize)
             .sum()
     }
 }
@@ -422,8 +421,6 @@ impl<const L: usize> Mapping<L> {
 
 #[cfg(all(test, feature = "std"))]
 mod test {
-    use core::sync::atomic::Ordering::SeqCst;
-
     use crate::table::Mapping;
     use crate::util::Page;
 
@@ -766,21 +763,17 @@ mod test {
         let bitfield = super::Bitfield::<8>::default();
 
         // 9
-        assert!(bitfield.data.iter().all(|e| e.load(SeqCst) == 0));
+        assert!(bitfield.data.iter().all(|e| e.load() == 0));
         assert_eq!(0, bitfield.set_first_zeros(0, 9).unwrap());
-        assert!(bitfield.data.iter().all(|e| e.load(SeqCst) == u64::MAX));
+        assert!(bitfield.data.iter().all(|e| e.load() == u64::MAX));
         bitfield.toggle(0, 9, true).unwrap();
-        assert!(bitfield.data.iter().all(|e| e.load(SeqCst) == 0));
+        assert!(bitfield.data.iter().all(|e| e.load() == 0));
 
         assert_eq!(0, bitfield.set_first_zeros(0, 7).unwrap());
-        assert!(bitfield.data[0..2]
-            .iter()
-            .all(|e| e.load(SeqCst) == u64::MAX));
+        assert!(bitfield.data[0..2].iter().all(|e| e.load() == u64::MAX));
 
         assert_eq!(4 * 64, bitfield.set_first_zeros(0, 8).unwrap());
-        assert!(bitfield.data[4..8]
-            .iter()
-            .all(|e| e.load(SeqCst) == u64::MAX));
+        assert!(bitfield.data[4..8].iter().all(|e| e.load() == u64::MAX));
 
         assert_eq!(2 * 64, bitfield.set_first_zeros(0, 6).unwrap());
         assert!(bitfield.get_entry(2) == u64::MAX);
