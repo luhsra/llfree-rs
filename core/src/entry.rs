@@ -211,7 +211,7 @@ impl Entry2 {
     }
     /// Decrement the free pages counter.
     pub fn dec(self, num_pages: usize) -> Option<Self> {
-        if self.free() >= num_pages {
+        if !self.page() && self.free() >= num_pages {
             Some(Self::new_free(self.free() - num_pages))
         } else {
             None

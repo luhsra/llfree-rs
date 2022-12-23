@@ -159,7 +159,7 @@ where
         // Retry allocation up to n times if it fails due to a concurrent update
         for _ in 0..CAS_RETRIES {
             match self.get_inner(core, order) {
-                Err(Error::CAS) => continue,
+                Err(Error::Retry) => continue,
                 Ok(addr) => return Ok(addr),
                 Err(e) => return Err(e),
             }
@@ -236,7 +236,7 @@ where
         let c = core % self.local.len();
         let local = &self.local[c];
         match self.cas_reserved(&local.entry, Entry3::new().with_idx(Entry3::IDX_MAX), false) {
-            Err(Error::CAS) => Ok(()), // ignore cas errors
+            Err(Error::Retry) => Ok(()), // ignore cas errors
             r => r,
         }
     }
@@ -395,7 +395,7 @@ where
                             Err(Error::Corruption)
                         } else {
                             self.reserve_or_wait(core, &local.entry, old, true)?;
-                            Err(Error::CAS)
+                            Err(Error::Retry)
                         }
                     }
                     Err(e) => Err(e),
@@ -408,8 +408,14 @@ where
 
                 // The local subtree is full -> reserve a new one
                 self.reserve_or_wait(core, &local.entry, old, false)?;
+
+                // TODO: Steal from other CPUs on Error::Memory
+                // Stealing in general should not only be done after the whole array has been searched,
+                // due to the terrible performance.
+                // We probably need a stealing mode that where a CPU steals the next N pages from another CPU.
+
                 // Reservation successfull -> retry the allocation
-                Err(Error::CAS)
+                Err(Error::Retry)
             }
         }
     }
@@ -433,7 +439,7 @@ where
                     .is_ok()
                 {
                     // Sync successfull -> retry allocation
-                    return Err(Error::CAS);
+                    return Err(Error::Retry);
                 } else {
                     // undo global change
                     if self.trees[i]
@@ -482,7 +488,7 @@ where
             };
             match self.cas_reserved(local, new, true) {
                 Ok(_) => Ok(()),
-                Err(Error::CAS) => {
+                Err(Error::Retry) => {
                     error!("unexpected reserve state");
                     Err(Error::Corruption)
                 }
@@ -507,7 +513,7 @@ where
             let entry = Entry3::from(entry).with_idx(i);
             match self.cas_reserved(local, entry, false) {
                 Ok(_) => Ok(true),
-                Err(Error::CAS) => {
+                Err(Error::Retry) => {
                     warn!("rollback {i}");
                     // Rollback reservation
                     let max = (self.pages() - i * L::N).min(L::N);
@@ -541,7 +547,7 @@ where
 
         let old = local
             .fetch_update(|v| (v.reserved() == expect_reserved).then_some(new))
-            .map_err(|_| Error::CAS)?;
+            .map_err(|_| Error::Retry)?;
 
         self.trees.unreserve(old, self.pages())
     }

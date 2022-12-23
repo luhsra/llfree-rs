@@ -146,7 +146,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
 
         for _ in 0..CAS_RETRIES {
             match self.get_inner(core, order) {
-                Err(Error::CAS) => continue,
+                Err(Error::Retry) => continue,
                 Ok(addr) => return Ok(addr),
                 Err(e) => return Err(e),
             }
@@ -233,7 +233,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
             false,
             false,
         ) {
-            Err(Error::CAS) => Ok(()), // ignore cas errors
+            Err(Error::Retry) => Ok(()), // ignore cas errors
             r => r,
         }
     }
@@ -378,7 +378,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
                         } else {
                             // reserve new, pushing the old entry to the end of the partial list
                             self.reserve_or_wait(&local.entry, entry, true)?;
-                            Err(Error::CAS)
+                            Err(Error::Retry)
                         }
                     }
                     Err(e) => Err(e),
@@ -389,7 +389,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
 
                 // reserve new
                 self.reserve_or_wait(&local.entry, entry, false)?;
-                Err(Error::CAS)
+                Err(Error::Retry)
             }
         }
     }
@@ -419,7 +419,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
             };
             match self.cas_reserved(local, new, true, retry) {
                 Ok(_) => Ok(new),
-                Err(Error::CAS) => {
+                Err(Error::Retry) => {
                     error!("unexpected reserve state");
                     Err(Error::Corruption)
                 }
@@ -444,7 +444,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
         if let Ok(new) = self.trees[i].fetch_update(|v| v.reserve_min(Trees::almost_full())) {
             match self.cas_reserved(local, new.with_idx(i), false, false) {
                 Ok(_) => Ok(true),
-                Err(Error::CAS) => {
+                Err(Error::Retry) => {
                     warn!("rollback {i}");
                     // Rollback reservation
                     let max = (self.pages() - i * L::N).min(L::N);
@@ -479,7 +479,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
 
         let local = local
             .fetch_update(|v| (v.reserved() == expect_reserved).then_some(new))
-            .map_err(|_| Error::CAS)?;
+            .map_err(|_| Error::Retry)?;
         if !local.has_idx() {
             return Ok(());
         }

@@ -121,7 +121,7 @@ impl<const N: usize> Bitfield<N> {
                 }
             }) {
                 Ok(_) => Ok(()),
-                Err(_) => Err(Error::CAS),
+                Err(_) => Err(Error::Retry),
             }
         } else {
             // Update multiple entries
@@ -137,7 +137,7 @@ impl<const N: usize> Bitfield<N> {
                             return Err(Error::Corruption);
                         }
                     }
-                    return Err(Error::CAS);
+                    return Err(Error::Retry);
                 }
             }
             Ok(())

@@ -249,7 +249,7 @@ where
             let i2 = Self::MAPPING.idx(2, page);
             self.table2_pair(page)[i2 / 2]
                 .load()
-                .all(|e| !e.page() && e.free() == Self::MAPPING.span(1))
+                .all(|e| e.free() == Self::MAPPING.span(1))
         } else {
             let table2 = self.table2(page);
             let i2 = Self::MAPPING.idx(2, page);
@@ -264,7 +264,7 @@ where
             }
 
             if num_pages > u64::BITS as usize {
-                // larger than 64 pages (often allocated as huge page)
+                // larger than 64 pages
                 let pt = self.table1(page);
                 let start = page / Table1::ENTRY_BITS;
                 let end = (page + num_pages) / Table1::ENTRY_BITS;
