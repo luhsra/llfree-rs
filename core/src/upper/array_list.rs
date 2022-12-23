@@ -170,8 +170,14 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
 
         // Try decrement own subtree first
         let num_pages = 1 << order;
-        if let Err(entry) = local.entry.fetch_update(|v| v.inc_idx(num_pages, i, max)) {
-            if entry.idx() == i {
+        if let Err(entry) = local.entry.fetch_update(|v| {
+            if v.idx() / L::N == i {
+                v.inc(num_pages, max)
+            } else {
+                None
+            }
+        }) {
+            if entry.idx() / L::N == i {
                 error!("inc failed L{i}: {entry:?} o={order}");
                 return Err(Error::Corruption);
             }
@@ -353,15 +359,13 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
         let local = &self.local[c];
 
         match local.entry.fetch_update(|v| v.dec(1 << order)) {
-            Ok(entry) => {
-                let mut start = local.start.load();
-                if start / L::N != entry.idx() {
-                    start = entry.idx() * L::N
-                }
+            Ok(old) => {
+                let start = old.idx();
                 match self.lower.get(start, order) {
                     Ok(page) => {
                         if order < 64usize.ilog2() as usize {
-                            local.start.store(page);
+                            // Save start index for lower allocations
+                            let _ = local.entry.compare_exchange(old, old.with_idx(page));
                         }
                         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
                     }
@@ -371,13 +375,13 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
                         let max = (self.pages() - align_down(start, L::N)).min(L::N);
                         // Increment global to prevent race condition with concurrent reservation
                         if let Err(old) =
-                            self.trees[entry.idx()].fetch_update(|v| v.inc(1 << order, max))
+                            self.trees[start / L::N].fetch_update(|v| v.inc(1 << order, max))
                         {
                             error!("Counter reset failed o={order} {old:?}");
                             Err(Error::Corruption)
                         } else {
                             // reserve new, pushing the old entry to the end of the partial list
-                            self.reserve_or_wait(&local.entry, entry, true)?;
+                            self.reserve_or_wait(&local.entry, old, true)?;
                             Err(Error::Retry)
                         }
                     }
@@ -442,7 +446,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
     fn reserve_entry(&self, local: &AtomicCell<Entry3>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
         if let Ok(new) = self.trees[i].fetch_update(|v| v.reserve_min(Trees::almost_full())) {
-            match self.cas_reserved(local, new.with_idx(i), false, false) {
+            match self.cas_reserved(local, new.with_idx(i * L::N), false, false) {
                 Ok(_) => Ok(true),
                 Err(Error::Retry) => {
                     warn!("rollback {i}");
@@ -484,7 +488,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
             return Ok(());
         }
 
-        let i = local.idx();
+        let i = local.idx() / L::N;
         let max = (self.pages() - i * L::N).min(L::N);
         if let Ok(global) = self.trees[i].fetch_update(|v| v.unreserve_add(local.free(), max)) {
             // Only if not already in list
@@ -623,7 +627,7 @@ impl Trees {
         } {
             info!("reserve empty {i}");
             if let Ok(entry) = self[i].fetch_update(|v| v.reserve_min(span)) {
-                Ok(entry.with_idx(i))
+                Ok(entry.with_idx(i * span))
             } else {
                 error!("reserve empty failed");
                 Err(Error::Corruption)
@@ -650,7 +654,7 @@ impl Trees {
                         if let Some(empty) = skipped_empty {
                             self.lists.lock().empty.push(self, empty);
                         }
-                        return Ok(entry.with_idx(i));
+                        return Ok(entry.with_idx(i * span));
                     }
                     Err(entry) => {
                         // Skip reserved and empty entries
@@ -665,7 +669,7 @@ impl Trees {
             } else if let Some(i) = skipped_empty {
                 // Reserve the last skipped empty entry instead
                 return if let Ok(entry) = self[i].fetch_update(|v| v.reserve_min(span)) {
-                    Ok(entry.with_idx(i))
+                    Ok(entry.with_idx(i * span))
                 } else {
                     error!("reserve empty failed");
                     Err(Error::Corruption)

@@ -169,8 +169,6 @@ impl PartialEq<AllocName> for &str {
 
 /// Per core data.
 pub struct Local<const F: usize> {
-    /// Page index of the last allocated page -> starting point for the next allocation
-    start: AtomicCell<usize>,
     /// Local copy of the reserved level 3 entry
     entry: AtomicCell<Entry3>,
     /// # Safety
@@ -188,7 +186,6 @@ struct RecentFrees<const F: usize> {
 impl<const F: usize> Local<F> {
     fn new() -> Self {
         Self {
-            start: AtomicCell::new(usize::MAX),
             entry: AtomicCell::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
             inner: UnsafeCell::new(RecentFrees {
                 frees_i: 0,
@@ -227,7 +224,6 @@ impl<const F: usize> Local<F> {
 impl<const F: usize> fmt::Debug for Local<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Local")
-            .field("start", &self.start.load())
             .field("pte", &self.entry.load())
             .field("frees", &self.p().frees)
             .field("frees_i", &self.p().frees_i)
@@ -265,7 +261,7 @@ mod test {
     use crate::Error;
 
     type Lower = Cache<32>;
-    type Allocator = Array<4, Lower>;
+    type Allocator = ArrayList<4, Lower>;
 
     #[test]
     fn names() {

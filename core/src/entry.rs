@@ -20,8 +20,8 @@ pub struct Entry3 {
 }
 
 impl Entry3 {
-    pub const IDX_MAX: usize = (1 << 41) - 1;
-    pub const IDX_END: usize = (1 << 41) - 2;
+    pub const IDX_MAX: usize = (1 << Self::IDX_BITS) - 1;
+    pub const IDX_END: usize = (1 << Self::IDX_BITS) - 2;
 
     pub fn empty(span: usize) -> Self {
         Self::new().with_free(span)
@@ -47,14 +47,6 @@ impl Entry3 {
         let pages = self.free() + num_pages;
         if pages <= max {
             Some(self.with_free(pages))
-        } else {
-            None
-        }
-    }
-    /// Increments the free pages counter and checks for `idx` to match.
-    pub fn inc_idx(self, num_pages: usize, idx: usize, max: usize) -> Option<Self> {
-        if self.idx() == idx {
-            self.inc(num_pages, max)
         } else {
             None
         }
