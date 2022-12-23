@@ -148,7 +148,10 @@ impl<const N: usize> Bitfield<N> {
     ///
     /// # Warning
     /// Orders above 6 need multiple CAS operations, which might lead to race conditions!
-    pub fn set_first_zeros(&self, i: usize, order: usize) -> Result<usize, Error> {
+    pub fn set_first_zeros(&self, start_i: usize, order: usize) -> Result<usize, Error> {
+        let i = start_i / Self::ENTRY_BITS;
+        debug_assert!(i < Self::ENTRIES);
+
         if order > Self::ENTRY_BITS.ilog2() as usize {
             return self.set_first_zero_entries(order);
         }
