@@ -1,6 +1,8 @@
+#![allow(deprecated)]
+
 use core::ops::Index;
 use core::ptr::null_mut;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
 use core::{fmt, hint};
 
 use crossbeam_utils::atomic::AtomicCell;
@@ -19,17 +21,21 @@ use crate::util::{align_down, Page};
 use crate::{Error, Result};
 
 /// Non-Volatile global metadata
+#[repr(align(0x1000))]
 struct Meta {
+    /// A magic number used to check if the persistent memory contains the allocator state
     magic: AtomicUsize,
+    /// Number of pages managed by the persistent allocator
     pages: AtomicUsize,
-    active: AtomicUsize,
+    /// Flag that stores if the system has crashed or was shutdown correctly
+    crashed: AtomicBool,
 }
 const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
 /// This allocator splits its memory range into chunks.
-/// Giant pages are directly allocated in it.
-/// For smaller pages, however, the chunk is handed over to the
-/// lower allocator, managing these smaller allocations.
+/// These chunks are reserved by CPUs to reduce sharing.
+/// Allocations/frees within the chunk are handed over to the
+/// lower allocator.
 /// These chunks are, due to the inner workins of the lower allocator,
 /// called *subtrees*.
 ///
@@ -43,6 +49,7 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
 #[repr(align(64))]
+#[deprecated = "Replaced by the improved Array allocator."]
 pub struct ArrayList<const PR: usize, L: LowerAlloc> {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
     meta: *mut Meta,
@@ -132,7 +139,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
         if let Some(meta) = unsafe { self.meta.as_ref() } {
             meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
-            meta.active.store(1, Ordering::SeqCst);
+            meta.crashed.store(true, Ordering::SeqCst);
         }
 
         Ok(())
@@ -278,7 +285,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
 impl<const PR: usize, L: LowerAlloc> Drop for ArrayList<PR, L> {
     fn drop(&mut self) {
         if let Some(meta) = unsafe { self.meta.as_mut() } {
-            meta.active.store(0, Ordering::SeqCst);
+            meta.crashed.store(false, Ordering::SeqCst);
         }
     }
 }
@@ -302,7 +309,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
                 && meta.magic.load(Ordering::SeqCst) == MAGIC
             {
                 info!("recover p={}", self.pages());
-                let deep = meta.active.load(Ordering::SeqCst) != 0;
+                let deep = meta.crashed.load(Ordering::SeqCst);
                 if deep {
                     warn!("Try recover crashed allocator!");
                 }
@@ -321,7 +328,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
                     self.trees.push(i, pages, L::N);
                 }
 
-                meta.active.store(1, Ordering::SeqCst);
+                meta.crashed.store(true, Ordering::SeqCst);
                 Ok(())
             } else {
                 Err(Error::Initialization)

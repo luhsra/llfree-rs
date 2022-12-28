@@ -30,16 +30,16 @@ struct Meta {
 const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 
 /// This allocator splits its memory range into chunks.
-/// Giant pages are directly allocated in it.
-/// For smaller pages, however, the chunk is handed over to the
-/// lower allocator, managing these smaller allocations.
+/// These chunks are reserved by CPUs to reduce sharing.
+/// Allocations/frees within the chunk are handed over to the
+/// lower allocator.
 /// These chunks are, due to the inner workins of the lower allocator,
 /// called *subtrees*.
 ///
 /// This allocator stores the level three entries (subtree roots) in a
 /// packed array.
 /// For the reservation, the allocator simply scans the array for free entries,
-/// while prioritizing partially empty chunks.
+/// while prioritizing partially empty chunks to avoid fragmentation.
 ///
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
@@ -397,7 +397,7 @@ where
                             error!("Counter reset failed o={order} {old:?}");
                             Err(Error::Corruption)
                         } else {
-                            self.reserve_or_wait(core, &local.entry, old, true)?;
+                            self.reserve_or_wait(core, order, &local.entry, old, true)?;
                             Err(Error::Retry)
                         }
                     }
@@ -410,12 +410,12 @@ where
                 self.try_sync_with_global(&local.entry, old)?;
 
                 // The local subtree is full -> reserve a new one
-                self.reserve_or_wait(core, &local.entry, old, false)?;
+                self.reserve_or_wait(core, order, &local.entry, old, false)?;
 
                 // TODO: Steal from other CPUs on Error::Memory
                 // Stealing in general should not only be done after the whole array has been searched,
                 // due to the terrible performance.
-                // We probably need a stealing mode that where a CPU steals the next N pages from another CPU.
+                // We probably need a stealing mode where a CPU steals the next N pages from another CPU.
 
                 // Reservation successfull -> retry the allocation
                 Err(Error::Retry)
@@ -464,6 +464,7 @@ where
     fn reserve_or_wait(
         &self,
         core: usize,
+        order: usize,
         local: &AtomicCell<Entry3>,
         old: Entry3,
         retry: bool,
@@ -478,7 +479,7 @@ where
                 self.trees.entries.len() / self.local.len() * core
                 // TODO: Reset start periodically to space CPUs more evenly over the memory zone
             };
-            let new = match self.trees.reserve(self.local.len(), start, retry) {
+            let new = match self.trees.reserve(order, self.local.len(), start, retry) {
                 Ok(entry) => entry,
                 Err(e) => {
                     // Clear reserve flag
@@ -573,17 +574,17 @@ impl<const LN: usize> Index<usize> for Trees<LN> {
 impl<const LN: usize> fmt::Debug for Trees<LN> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let max = self.entries.len();
-        let mut empty = 0;
+        let mut free = 0;
         let mut partial = 0;
         for e in &*self.entries {
-            let free = e.load().free();
-            if free == LN {
-                empty += 1;
-            } else if free > Self::almost_allocated() {
+            let f = e.load().free();
+            if f == LN {
+                free += 1;
+            } else if f > Self::almost_allocated() {
                 partial += 1;
             }
         }
-        write!(f, "(total: {max}, empty: {empty}, partial: {partial})")?;
+        write!(f, "(total: {max}, free: {free}, partial: {partial})")?;
         Ok(())
     }
 }
@@ -630,21 +631,21 @@ impl<const LN: usize> Trees<LN> {
         }
     }
 
-    /// Find and reserve an empty tree
-    fn reserve_empty(&self, start: usize) -> Result<Entry3> {
+    /// Find and reserve a free tree
+    fn reserve_free(&self, start: usize) -> Option<Entry3> {
         // Just search linearly through the array
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
             if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::almost_free()..)) {
-                return Ok(Entry3::from(entry).with_idx(i * LN));
+                return Some(Entry3::from(entry).with_idx(i * LN));
             }
         }
-        warn!("no empty tree {self:?}");
-        Err(Error::Memory)
+        warn!("no full tree");
+        None
     }
 
-    /// Find and reserve a partially filled tree in the vicinity
-    fn reserve_partial(&self, cores: usize, start: usize) -> Result<Entry3> {
+    /// Find and reserve a partial tree in the vicinity
+    fn reserve_partial(&self, cores: usize, start: usize) -> Option<Entry3> {
         const ENTRIES_PER_CACHELINE: usize = size_of::<CacheLine>() / size_of::<SEntry3>();
         // One quater of the per-CPU memory
         let vicinity = ((self.entries.len() / cores) / 4).max(1) as isize;
@@ -659,7 +660,7 @@ impl<const LN: usize> Trees<LN> {
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
             if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::almost_allocated()..)) {
-                return Ok(Entry3::from(entry).with_idx(i * LN));
+                return Some(Entry3::from(entry).with_idx(i * LN));
             }
         }
 
@@ -671,25 +672,45 @@ impl<const LN: usize> Trees<LN> {
             if let Ok(entry) =
                 self[i].fetch_update(|v| v.reserve(Self::almost_allocated()..Self::almost_free()))
             {
-                return Ok(Entry3::from(entry).with_idx(i * LN));
+                return Some(Entry3::from(entry).with_idx(i * LN));
             }
         }
-        Err(Error::Memory)
+        None
+    }
+
+    /// Fallback to search for any suitable subtree
+    fn reserve_any(&self, start: usize, order: usize) -> Option<Entry3> {
+        // Just search linearly through the array
+        let num_pages = 1 << order;
+        for i in 0..self.entries.len() {
+            let i = (i + start) % self.entries.len();
+            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(num_pages..)) {
+                return Some(Entry3::from(entry).with_idx(i * LN));
+            }
+        }
+        warn!("no pages left");
+        None
     }
 
     /// Reserves a new subtree, prioritizing partially filled subtrees.
-    fn reserve(&self, cores: usize, start: usize, prioritize_empty: bool) -> Result<Entry3> {
-        info!("reserve prio={prioritize_empty}");
-        if prioritize_empty {
-            match self.reserve_empty(start) {
-                Err(Error::Memory) => self.reserve_partial(cores, start),
-                r => r,
-            }
+    fn reserve(
+        &self,
+        order: usize,
+        cores: usize,
+        start: usize,
+        prioritize_free: bool,
+    ) -> Result<Entry3> {
+        if prioritize_free {
+            // try free subtrees first
+            self.reserve_free(start)
+                .or_else(|| self.reserve_partial(cores, start))
+                .or_else(|| self.reserve_any(start, order))
+                .ok_or(Error::Memory)
         } else {
-            match self.reserve_partial(cores, start) {
-                Err(Error::Memory) => self.reserve_empty(start),
-                r => r,
-            }
+            self.reserve_partial(cores, start)
+                .or_else(|| self.reserve_free(start))
+                .or_else(|| self.reserve_any(start, order))
+                .ok_or(Error::Memory)
         }
     }
 }

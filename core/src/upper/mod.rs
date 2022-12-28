@@ -12,6 +12,7 @@ use crate::Result;
 mod array;
 pub use array::Array;
 mod array_list;
+#[allow(deprecated)]
 pub use array_list::ArrayList;
 mod list_local;
 pub use list_local::ListLocal;
@@ -261,7 +262,7 @@ mod test {
     use crate::Error;
 
     type Lower = Cache<32>;
-    type Allocator = ArrayList<4, Lower>;
+    type Allocator = Array<4, Lower>;
 
     #[test]
     fn names() {
