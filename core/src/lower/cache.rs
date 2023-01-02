@@ -339,16 +339,24 @@ where
         }
 
         // Init bitfields
-        let (last, bitfields) = self.bitfields.split_last().unwrap();
+        let last_i = self.pages() / Bitfield::LEN;
+        let (included, mut remainder) = self.bitfields.split_at(last_i);
         // Bitfield is fully included in the memory range
-        for bitfield in bitfields {
+        for bitfield in included {
             bitfield.fill(false);
         }
-        // Bitfield is fully included in the memory range
-        let end = self.pages() - bitfields.len() * Bitfield::LEN;
-        debug_assert!(end <= Bitfield::LEN);
-        last.set(0..end, false);
-        last.set(end..Bitfield::LEN, true);
+        // Bitfield might be only partially included in the memory range
+        if let Some((last, excluded)) = remainder.split_first() {
+            let end = self.pages() - included.len() * Bitfield::LEN;
+            debug_assert!(end <= Bitfield::LEN);
+            last.set(0..end, false);
+            last.set(end..Bitfield::LEN, true);
+            remainder = excluded;
+        }
+        // Not part of the final memory range
+        for bitfield in remainder {
+            bitfield.fill(true);
+        }
     }
 
     fn reserve_all(&self) {
@@ -370,13 +378,16 @@ where
         }
 
         // Init bitfields
-        let (last, bitfields) = self.bitfields.split_last().unwrap();
+        let last_i = self.pages() / Bitfield::LEN;
+        let (included, remainder) = self.bitfields.split_at(last_i);
         // Bitfield is fully included in the memory range
-        for bitfield in bitfields {
+        for bitfield in included {
             bitfield.fill(false);
         }
         // Bitfield might be only partially included in the memory range
-        last.fill(self.pages() % Bitfield::LEN != 0);
+        for bitfield in remainder {
+            bitfield.fill(true);
+        }
     }
 
     /// Allocate pages up to order 8
