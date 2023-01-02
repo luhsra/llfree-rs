@@ -2,7 +2,7 @@
 
 use core::ops::Index;
 use core::ptr::null_mut;
-use core::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::{fmt, hint};
 
 use crossbeam_utils::atomic::AtomicCell;
@@ -84,7 +84,7 @@ impl<const PR: usize, L: LowerAlloc> fmt::Debug for ArrayList<PR, L> {
         )?;
 
         for (t, local) in self.local.iter().enumerate() {
-            writeln!(f, "    L{t:>2}: {:?}", local.reserved_tree.load())?;
+            writeln!(f, "    L{t:>2}: {:?}", local.reserved.load())?;
         }
 
         write!(f, "}}")?;
@@ -177,7 +177,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
 
         // Try decrement own subtree first
         let num_pages = 1 << order;
-        if let Err(entry) = local.reserved_tree.fetch_update(|v| {
+        if let Err(entry) = local.reserved.fetch_update(|v| {
             if v.idx() / L::N == i {
                 v.inc(num_pages, max)
             } else {
@@ -201,7 +201,10 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
                 let new_pages = entry.free() + num_pages;
                 if !entry.reserved() && new_pages > Trees::almost_full() {
                     // Try to reserve the subtree that was targeted by the recent frees
-                    if core == c && local.frees_eq_to(i) && self.reserve_entry(&local.reserved_tree, i)? {
+                    if core == c
+                        && local.frees_eq_to(i)
+                        && self.reserve_entry(&local.reserved, i)?
+                    {
                         return Ok(());
                     }
 
@@ -240,7 +243,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
         let c = core % self.local.len();
         let local = &self.local[c];
         match self.cas_reserved(
-            &local.reserved_tree,
+            &local.reserved,
             Entry3::new().with_idx(Entry3::IDX_MAX),
             false,
             false,
@@ -259,7 +262,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
         }
         // Pages allocated in reserved subtrees
         for local in self.local.iter() {
-            pages += local.reserved_tree.load().free();
+            pages += local.reserved.load().free();
         }
         pages
     }
@@ -364,14 +367,14 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
         let c = core % self.local.len();
         let local = &self.local[c];
 
-        match local.reserved_tree.fetch_update(|v| v.dec(1 << order)) {
+        match local.reserved.fetch_update(|v| v.dec(1 << order)) {
             Ok(old) => {
                 let start = old.idx();
                 match self.lower.get(start, order) {
                     Ok(page) => {
                         if order < 64usize.ilog2() as usize {
                             // Save start index for lower allocations
-                            let _ = local.reserved_tree.compare_exchange(old, old.with_idx(page));
+                            let _ = local.reserved.compare_exchange(old, old.with_idx(page));
                         }
                         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
                     }
@@ -387,7 +390,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
                             Err(Error::Corruption)
                         } else {
                             // reserve new, pushing the old entry to the end of the partial list
-                            self.reserve_or_wait(&local.reserved_tree, old, true)?;
+                            self.reserve_or_wait(&local.reserved, old, true)?;
                             Err(Error::Retry)
                         }
                     }
@@ -398,7 +401,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
                 // TODO: try sync with global
 
                 // reserve new
-                self.reserve_or_wait(&local.reserved_tree, entry, false)?;
+                self.reserve_or_wait(&local.reserved, entry, false)?;
                 Err(Error::Retry)
             }
         }

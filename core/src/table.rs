@@ -149,15 +149,15 @@ impl<const N: usize> Bitfield<N> {
     /// # Warning
     /// Orders above 6 need multiple CAS operations, which might lead to race conditions!
     pub fn set_first_zeros(&self, start_i: usize, order: usize) -> Result<usize, Error> {
-        let i = start_i / Self::ENTRY_BITS;
-        debug_assert!(i < Self::ENTRIES);
+        let offset = start_i / Self::ENTRY_BITS;
+        debug_assert!(offset < Self::ENTRIES);
 
         if order > Self::ENTRY_BITS.ilog2() as usize {
             return self.set_first_zero_entries(order);
         }
 
-        for j in 0..self.data.len() {
-            let i = (j + i) % self.data.len();
+        for i in 0..self.data.len() {
+            let i = (i + offset) % self.data.len();
 
             #[cfg(all(test, feature = "stop"))]
             {

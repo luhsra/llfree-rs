@@ -172,7 +172,7 @@ impl PartialEq<AllocName> for &str {
 /// Per core data.
 pub struct Local<const F: usize> {
     /// Local copy of the reserved level 3 entry
-    reserved_tree: AtomicCell<Entry3>,
+    reserved: AtomicCell<Entry3>,
     /// # Safety
     /// This should only be accessed from the corresponding (virtual) CPU core!
     last_frees: UnsafeCell<RingBuffer<usize, F>>,
@@ -181,7 +181,7 @@ pub struct Local<const F: usize> {
 impl<const F: usize> Local<F> {
     fn new() -> Self {
         Self {
-            reserved_tree: AtomicCell::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
+            reserved: AtomicCell::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
             last_frees: UnsafeCell::new(RingBuffer::default()),
         }
     }
@@ -209,7 +209,7 @@ impl<const F: usize> Local<F> {
 impl<const F: usize> fmt::Debug for Local<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Local")
-            .field("pte", &self.reserved_tree.load())
+            .field("pte", &self.reserved.load())
             .field("frees", &self.p())
             .finish()
     }
@@ -319,7 +319,7 @@ mod test {
     fn simple() {
         logging();
         // 8GiB
-        const MEM_SIZE: usize = 8 << 30;
+        const MEM_SIZE: usize = 1 << 30;
         let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
         let range = mapping.as_ptr_range();
         let range = range.start as u64..range.end as u64;

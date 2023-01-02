@@ -85,7 +85,7 @@ where
         )?;
 
         for (t, local) in self.local.iter().enumerate() {
-            writeln!(f, "    L{t:>2}: {:?}", local.reserved_tree.load())?;
+            writeln!(f, "    L{t:>2}: {:?}", local.reserved.load())?;
         }
 
         write!(f, "}}")?;
@@ -187,7 +187,7 @@ where
 
         // Try update own subtree first
         let num_pages = 1 << order;
-        if let Err(entry) = local.reserved_tree.fetch_update(|v| {
+        if let Err(entry) = local.reserved.fetch_update(|v| {
             if v.idx() / L::N == i {
                 v.inc(num_pages, max)
             } else {
@@ -213,7 +213,10 @@ where
                 if !entry.reserved() && new_pages > Trees::<{ L::N }>::almost_allocated() {
                     // put-reserve optimization:
                     // Try to reserve the subtree that was targeted by the recent frees
-                    if core == c && local.frees_eq_to(i) && self.reserve_entry(&local.reserved_tree, i)? {
+                    if core == c
+                        && local.frees_eq_to(i)
+                        && self.reserve_entry(&local.reserved, i)?
+                    {
                         return Ok(());
                     }
                 }
@@ -245,7 +248,11 @@ where
     fn drain(&self, core: usize) -> Result<()> {
         let c = core % self.local.len();
         let local = &self.local[c];
-        match self.cas_reserved(&local.reserved_tree, Entry3::new().with_idx(Entry3::IDX_MAX), false) {
+        match self.cas_reserved(
+            &local.reserved,
+            Entry3::new().with_idx(Entry3::IDX_MAX),
+            false,
+        ) {
             Err(Error::Retry) => Ok(()), // ignore cas errors
             r => r,
         }
@@ -260,7 +267,7 @@ where
         }
         // Pages allocated in reserved subtrees
         for local in self.local.iter() {
-            pages += local.reserved_tree.load().free();
+            pages += local.reserved.load().free();
         }
         pages
     }
@@ -375,7 +382,7 @@ where
         let c = core % self.local.len();
         let local = &self.local[c];
         // Update the upper counters first
-        match local.reserved_tree.fetch_update(|v| v.dec(1 << order)) {
+        match local.reserved.fetch_update(|v| v.dec(1 << order)) {
             Ok(old) => {
                 // The start point for the search
                 let start = old.idx();
@@ -383,9 +390,13 @@ where
                 match self.lower.get(start, order) {
                     Ok(page) => {
                         // Success
-                        if order < 64usize.ilog2() as usize {
+                        if order < 64usize.ilog2() as usize
+                            && align_down(start, 64) != align_down(page, 64)
+                        {
                             // Save start index for lower allocations
-                            let _ = local.reserved_tree.compare_exchange(old, old.with_idx(page));
+                            let new = old.dec(1 << order).unwrap();
+                            let ret = local.reserved.compare_exchange(new, new.with_idx(page));
+                            debug_assert!(ret.is_ok());
                         }
                         Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
                     }
@@ -401,7 +412,7 @@ where
                             error!("Counter reset failed o={order} {old:?}");
                             Err(Error::Corruption)
                         } else {
-                            self.reserve_or_wait(core, order, &local.reserved_tree, old, true)?;
+                            self.reserve_or_wait(core, order, &local.reserved, old, true)?;
                             Err(Error::Retry)
                         }
                     }
@@ -411,10 +422,10 @@ where
             Err(old) => {
                 // If the local counter is large enough we do not have to reserve a new subtree
                 // Just update the local counter and reuse the current subtree
-                self.try_sync_with_global(&local.reserved_tree, old)?;
+                self.try_sync_with_global(&local.reserved, old)?;
 
                 // The local subtree is full -> reserve a new one
-                self.reserve_or_wait(core, order, &local.reserved_tree, old, false)?;
+                self.reserve_or_wait(core, order, &local.reserved, old, false)?;
 
                 // TODO: Steal from other CPUs on Error::Memory
                 // Stealing in general should not only be done after the whole array has been searched,
