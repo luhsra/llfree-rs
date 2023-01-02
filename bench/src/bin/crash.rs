@@ -122,9 +122,9 @@ fn execute(
         barrier.wait();
         warn!("alloc {allocs}");
 
-        for i in 0..allocs {
+        for (i, page) in data.iter_mut().enumerate() {
             *idx = i as _;
-            data[i] = alloc.get(t, order).unwrap();
+            *page = alloc.get(t, order).unwrap();
         }
 
         warn!("repeat");

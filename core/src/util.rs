@@ -1,7 +1,7 @@
-use core::fmt;
 use core::mem::transmute;
 use core::mem::{align_of, size_of};
 use core::ops::{Add, Deref, DerefMut, Div, Range};
+use core::{fmt, mem};
 
 /// Correctly sized and aligned page.
 #[derive(Clone)]
@@ -101,6 +101,51 @@ impl<T: fmt::Debug> fmt::Debug for CacheAlign<T> {
 impl<T> From<T> for CacheAlign<T> {
     fn from(t: T) -> Self {
         CacheAlign(t)
+    }
+}
+
+/// Simple ring buffer implementation
+#[derive(Debug)]
+#[repr(align(64))]
+pub struct RingBuffer<T, const N: usize> {
+    buf: [T; N],
+    idx: usize,
+}
+impl<T: Copy, const N: usize> RingBuffer<T, N> {
+    pub const fn new(value: T) -> Self {
+        debug_assert!(N > 0);
+        Self {
+            buf: [value; N],
+            idx: 0,
+        }
+    }
+    pub const fn len() -> usize {
+        N
+    }
+    pub fn push(&mut self, value: T) {
+        if N == 1 {
+            self.buf[0] = value;
+        } else {
+            self.buf[self.idx] = value;
+            self.idx = (self.idx + 1) % N;
+        }
+    }
+}
+impl<T: Copy + Default, const N: usize> RingBuffer<T, N> {
+    pub fn pop(&mut self) -> T {
+        let value = mem::take(&mut self.buf[self.idx]);
+        self.idx = (N + self.idx - 1) % N;
+        value
+    }
+}
+impl<T: Copy + Default, const N: usize> Default for RingBuffer<T, N> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+impl<T: Copy + PartialEq, const N: usize> RingBuffer<T, N> {
+    pub fn all_eq(&self, value: T) -> bool {
+        self.buf.iter().all(|v| *v == value)
     }
 }
 

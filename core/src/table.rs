@@ -425,11 +425,8 @@ impl<const L: usize> Mapping<L> {
         let span = self.span(level);
         let rounded = self.round(level, start);
         let offset = self.round(level - 1, start - rounded);
-        core::iter::once(start).chain(
-            (1..self.len(level))
-                .into_iter()
-                .map(move |v| rounded + (v * span_m1 + offset) % span),
-        )
+        core::iter::once(start)
+            .chain((1..self.len(level)).map(move |v| rounded + (v * span_m1 + offset) % span))
     }
 }
 

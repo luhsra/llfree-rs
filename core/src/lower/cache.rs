@@ -19,30 +19,31 @@ use super::LowerAlloc;
 
 type Bitfield = crate::table::Bitfield<8>;
 
-/// Subtree allocator which is able to allocate order 0..11 pages.
+/// Tree allocator which is able to allocate order 0..11 pages.
 ///
-/// Here the bitfields are 512bit large -> strong focus on huge pages.
+/// Here the bitfields are 512 bit large -> strong focus on huge pages.
+/// Upon that is a table for each tree, with an entry per bitfield.
 ///
-/// The generic parameter `T2N` configures the level 2 table size.
+/// The parameter `HP` configures the number of table entries (huge pages per tree).
 /// It has to be a multiple of 2!
 ///
 /// ## Memory Layout
 /// **persistent:**
 /// ```text
-/// NVRAM: [ Pages | Entry1s | Entry2s | Meta ]
+/// NVRAM: [ Pages | Bitfields | Tables | Zone ]
 /// ```
 /// **volatile:**
 /// ```text
-/// RAM: [ Pages ], Entry1s and Entry2s are allocated elswhere
+/// RAM: [ Pages ], Bitfields and Tables are allocated elswhere
 /// ```
-pub struct Cache<const T2N: usize> {
+pub struct Cache<const HP: usize> {
     area: &'static mut [Page],
     bitfields: Box<[Bitfield]>,
-    tables: Box<[[AtomicCell<Entry2>; T2N]]>,
+    tables: Box<[[AtomicCell<Entry2>; HP]]>,
     persistent: bool,
 }
 
-impl<const T2N: usize> Default for Cache<T2N> {
+impl<const HP: usize> Default for Cache<HP> {
     fn default() -> Self {
         Self {
             area: &mut [],
@@ -53,7 +54,7 @@ impl<const T2N: usize> Default for Cache<T2N> {
     }
 }
 
-impl<const T2N: usize> fmt::Debug for Cache<T2N> {
+impl<const HP: usize> fmt::Debug for Cache<HP> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cache")
             .field("area", &self.area.as_ptr_range())
@@ -64,19 +65,19 @@ impl<const T2N: usize> fmt::Debug for Cache<T2N> {
     }
 }
 
-unsafe impl<const T2N: usize> Send for Cache<T2N> {}
-unsafe impl<const T2N: usize> Sync for Cache<T2N> {}
+unsafe impl<const HP: usize> Send for Cache<HP> {}
+unsafe impl<const HP: usize> Sync for Cache<HP> {}
 
-impl<const T2N: usize> LowerAlloc for Cache<T2N>
+impl<const HP: usize> LowerAlloc for Cache<HP>
 where
-    [(); T2N / 2]:,
+    [(); HP / 2]:,
 {
-    const N: usize = T2N * Bitfield::LEN;
+    const N: usize = HP * Bitfield::LEN;
     const HUGE_ORDER: usize = Bitfield::ORDER;
     const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
 
     fn new(_cores: usize, area: &mut [Page], init: Init, free_all: bool) -> Self {
-        assert!(T2N < (1 << (u16::BITS as usize - Self::HUGE_ORDER)));
+        debug_assert!(HP < (1 << (u16::BITS as usize - Self::HUGE_ORDER)));
 
         // FIXME: Lifetime hack!
         let area = unsafe { slice::from_raw_parts_mut(area.as_mut_ptr(), area.len()) };
@@ -86,12 +87,12 @@ where
             // Reserve memory within the managed NVM for the l1 and l2 tables
             // These tables are stored at the end of the NVM
             let size_bitfields = num_bitfields * size_of::<Bitfield>();
-            let size_bitfields = align_up(size_bitfields, size_of::<[Entry2; T2N]>()); // correct alignment
-            let size_tables = num_bitfields * size_of::<[Entry2; T2N]>();
+            let size_bitfields = align_up(size_bitfields, size_of::<[Entry2; HP]>()); // correct alignment
+            let size_tables = num_bitfields * size_of::<[Entry2; HP]>();
             // Num of pages occupied by the tables
             let metadata_pages = (size_bitfields + size_tables).div_ceil(Page::SIZE);
 
-            assert!(metadata_pages < area.len());
+            debug_assert!(metadata_pages < area.len());
             let (area, tables) = area.split_at_mut(area.len() - metadata_pages);
 
             let tables: *mut u8 = tables.as_mut_ptr().cast();
@@ -101,7 +102,7 @@ where
                 unsafe { Box::from_raw(slice::from_raw_parts_mut(tables.cast(), num_bitfields)) };
 
             let mut offset = num_bitfields * size_of::<Bitfield>();
-            offset = align_up(offset, size_of::<[Entry2; T2N]>()); // correct alignment
+            offset = align_up(offset, size_of::<[Entry2; HP]>()); // correct alignment
 
             // Start of the l2 table array
             let tables = unsafe {
@@ -215,7 +216,7 @@ where
         if order == Self::MAX_ORDER {
             self.put_max(page)
         } else if order == Self::HUGE_ORDER {
-            let i = (page / Bitfield::LEN) % T2N;
+            let i = (page / Bitfield::LEN) % HP;
             let table = &self.tables[page / Self::N];
 
             if let Err(old) =
@@ -227,7 +228,7 @@ where
                 Ok(())
             }
         } else if order < Self::HUGE_ORDER {
-            let i = (page / Bitfield::LEN) % T2N;
+            let i = (page / Bitfield::LEN) % HP;
             let table = &self.tables[page / Self::N];
 
             let old = table[i].load();
@@ -253,13 +254,13 @@ where
 
         if order > Bitfield::ORDER {
             // multiple hugepages
-            let i = (page / Bitfield::LEN) % T2N;
+            let i = (page / Bitfield::LEN) % HP;
             self.table_pair(page)[i / 2]
                 .load()
                 .all(|e| e.free() == Bitfield::LEN)
         } else {
             let table = &self.tables[page / Self::N];
-            let i = (page / Bitfield::LEN) % T2N;
+            let i = (page / Bitfield::LEN) % HP;
             let entry = table[i].load();
             let num_pages = 1 << order;
 
@@ -289,12 +290,9 @@ where
 
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages();
-        for i in 0..self.pages().div_ceil(Self::N) {
-            let start = i * Self::N;
-            let table = &self.tables[start / Self::N];
-            for i in 0..T2N {
-                let entry = table[i].load();
-                pages -= entry.free();
+        for table in &*self.tables {
+            for entry in table {
+                pages -= entry.load().free();
             }
         }
         pages
@@ -310,84 +308,75 @@ where
 
     fn size_per_gib() -> usize {
         let pages = 1usize << (30 - Page::SIZE_BITS);
-        let s1 = pages.div_ceil(8); // 1 bit per page
-        let s2 = size_of::<Entry2>() * pages.div_ceil(Bitfield::LEN);
-        s1 + s2
+        let size_bitfields = pages.div_ceil(8); // 1 bit per page
+        let size_tables = size_of::<Entry2>() * pages.div_ceil(Bitfield::LEN);
+        size_bitfields + size_tables
     }
 }
 
-impl<const T2N: usize> Cache<T2N>
+impl<const HP: usize> Cache<HP>
 where
-    [(); T2N / 2]:,
+    [(); HP / 2]:,
 {
     /// Returns the table with pair entries that can be updated at once.
-    fn table_pair(&self, page: usize) -> &[AtomicCell<Entry2Pair>; T2N / 2] {
+    fn table_pair(&self, page: usize) -> &[AtomicCell<Entry2Pair>; HP / 2] {
         let table = &self.tables[page / Self::N];
         unsafe { &*table.as_ptr().cast() }
     }
 
     fn free_all(&self) {
-        // Init table
-        for i in 0..self.pages().div_ceil(Self::N) {
-            let table = &self.tables[i];
-            if i + 1 < self.pages().div_ceil(Self::N) {
-                unsafe { table.atomic_fill(Entry2::new_free(Bitfield::LEN)) };
-            } else {
-                for (j, entry) in table.iter().enumerate() {
-                    let page = i * Self::N + j * Bitfield::LEN;
-                    let max = Bitfield::LEN.min(self.pages().saturating_sub(page));
-                    entry.store(Entry2::new_free(max));
-                }
-            }
+        // Init tables
+        let (last, tables) = self.tables.split_last().unwrap();
+        // Table is fully included in the memory range
+        for table in tables {
+            unsafe { table.atomic_fill(Entry2::new_free(Bitfield::LEN)) };
         }
-        // Init table1
-        for i in 0..self.pages().div_ceil(Bitfield::LEN) {
-            let bitfield = &self.bitfields[i];
+        // Table is only partially included in the memory range
+        for (i, entry) in last.iter().enumerate() {
+            let page = tables.len() * Self::N + i * Bitfield::LEN;
+            let free = self.pages().saturating_sub(page).min(Bitfield::LEN);
+            entry.store(Entry2::new_free(free));
+        }
 
-            if i + 1 < self.pages().div_ceil(Bitfield::LEN) {
-                bitfield.fill(false);
-            } else {
-                let end = self.pages() - i * Bitfield::LEN;
-                bitfield.set(0..end, false);
-                bitfield.set(end..Bitfield::LEN, true);
-            }
+        // Init bitfields
+        let (last, bitfields) = self.bitfields.split_last().unwrap();
+        // Bitfield is fully included in the memory range
+        for bitfield in bitfields {
+            bitfield.fill(false);
         }
+        // Bitfield is fully included in the memory range
+        let end = self.pages() - bitfields.len() * Bitfield::LEN;
+        debug_assert!(end <= Bitfield::LEN);
+        last.set(0..end, false);
+        last.set(end..Bitfield::LEN, true);
     }
 
     fn reserve_all(&self) {
         // Init table
-        for i in 0..self.pages().div_ceil(Self::N) {
-            let table = &self.tables[i];
-            let end = (i + 1) * Self::N;
-            if self.pages() >= end {
-                // Table is fully included in the memory range
-                // -> Allocated as full pages
-                unsafe { table.atomic_fill(Entry2::new_page()) };
-            } else {
-                // Table is only partially included in the memory range
-                for (j, entry) in table.iter().enumerate() {
-                    let end = i * Self::N + (j + 1) * Bitfield::LEN;
-                    if end <= self.pages() {
-                        entry.store(Entry2::new_page());
-                    } else {
-                        // Remainder is allocated as small pages
-                        entry.store(Entry2::new_free(0));
-                    }
-                }
-            }
+        let (last, tables) = self.tables.split_last().unwrap();
+        // Table is fully included in the memory range
+        for table in tables {
+            unsafe { table.atomic_fill(Entry2::new_page()) };
         }
-        // Init table1
-        for i in 0..self.pages().div_ceil(Bitfield::LEN) {
-            let bitfield = &self.bitfields[i];
-            let end = (i + 1) * Bitfield::LEN;
-            if end <= self.pages() {
-                // Table is fully included in the memory range
-                bitfield.fill(false);
-            } else {
-                // Table is only partially included in the memory range
-                bitfield.fill(true);
-            }
+        // Table is only partially included in the memory range
+        let last_i = (self.pages() / Bitfield::LEN) - tables.len() * HP;
+        let (included, remainder) = last.split_at(last_i);
+        for entry in included {
+            entry.store(Entry2::new_page());
         }
+        // Remainder is allocated as small pages
+        for entry in remainder {
+            entry.store(Entry2::new_free(0));
+        }
+
+        // Init bitfields
+        let (last, bitfields) = self.bitfields.split_last().unwrap();
+        // Bitfield is fully included in the memory range
+        for bitfield in bitfields {
+            bitfield.fill(false);
+        }
+        // Bitfield might be only partially included in the memory range
+        last.fill(self.pages() % Bitfield::LEN != 0);
     }
 
     /// Allocate pages up to order 8
@@ -398,9 +387,9 @@ where
 
         for _ in 0..CAS_RETRIES {
             // Begin iteration by start idx
-            let off = (start / Bitfield::LEN) % T2N;
-            for j in 0..T2N {
-                let i = (j + off) % T2N;
+            let off = (start / Bitfield::LEN) % HP;
+            for j in 0..HP {
+                let i = (j + off) % HP;
 
                 let newstart = if j == 0 {
                     start // Don't round the start pfn
@@ -441,10 +430,10 @@ where
     /// Allocate huge page
     fn get_huge(&self, start: usize) -> Result<usize> {
         let table = &self.tables[start / Self::N];
-        let offset = (start / Bitfield::LEN) % T2N;
+        let offset = (start / Bitfield::LEN) % HP;
         for _ in 0..CAS_RETRIES {
-            for i in 0..T2N {
-                let i = (offset + i) % T2N;
+            for i in 0..HP {
+                let i = (offset + i) % HP;
                 if table[i]
                     .fetch_update(|v| v.mark_page(Bitfield::LEN))
                     .is_ok()
@@ -461,10 +450,10 @@ where
     /// Allocate multiple huge pages
     fn get_max(&self, start: usize) -> Result<usize> {
         let table_pair = self.table_pair(start);
-        let offset = ((start / Bitfield::LEN) % T2N) / 2;
+        let offset = ((start / Bitfield::LEN) % HP) / 2;
         for _ in 0..CAS_RETRIES {
-            for i in 0..T2N / 2 {
-                let i = (offset + i) % (T2N / 2);
+            for i in 0..HP / 2 {
+                let i = (offset + i) % (HP / 2);
                 if table_pair[i]
                     .fetch_update(|v| v.map(|v| v.mark_page(Bitfield::LEN)))
                     .is_ok()
@@ -493,9 +482,9 @@ where
         stop!();
 
         let table = &self.tables[page / Self::N];
-        let i = (page / Bitfield::LEN) % T2N;
-        if let Err(entry2) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order)) {
-            error!("Inc failed i{i} p={page} {entry2:?}");
+        let i = (page / Bitfield::LEN) % HP;
+        if let Err(entry) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order)) {
+            error!("Inc failed i{i} p={page} {entry:?}");
             return Err(Error::Corruption);
         }
 
@@ -504,7 +493,7 @@ where
 
     pub fn put_max(&self, page: usize) -> Result<()> {
         let table_pair = self.table_pair(page);
-        let i = ((page / Bitfield::LEN) % T2N) / 2;
+        let i = ((page / Bitfield::LEN) % HP) / 2;
 
         if let Err(old) = table_pair[i].compare_exchange(
             Entry2Pair(Entry2::new_page(), Entry2::new_page()),
@@ -522,7 +511,7 @@ where
 
     fn partial_put_huge(&self, old: Entry2, page: usize, order: usize) -> Result<()> {
         warn!("partial free of huge page {page:x} o={order}");
-        let i = (page / Bitfield::LEN) % T2N;
+        let i = (page / Bitfield::LEN) % HP;
         let table = &self.tables[page / Self::N];
         let bitfield = &self.bitfields[page / Bitfield::LEN];
 
@@ -562,7 +551,7 @@ where
     }
 }
 
-impl<const T2N: usize> Drop for Cache<T2N> {
+impl<const HP: usize> Drop for Cache<HP> {
     fn drop(&mut self) {
         if self.persistent {
             // The chunks are part of the allocators managed memory

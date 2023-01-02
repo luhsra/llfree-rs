@@ -6,7 +6,7 @@ use crossbeam_utils::atomic::AtomicCell;
 
 use crate::entry::Entry3;
 use crate::table::PT_LEN;
-use crate::util::Page;
+use crate::util::{Page, RingBuffer};
 use crate::Result;
 
 mod array;
@@ -101,8 +101,9 @@ pub trait AllocExt: Sized + Alloc + Default {
 impl<A: Sized + Alloc + Default> AllocExt for A {}
 
 /// The short name of an allocator.
-/// E.g.: `ArrayAtomic4C32` for
-/// `nvalloc::upper::array_atomic::ArrayAtomic<4, nvalloc::lower::cache::Cache<32>>`
+///
+/// E.g.: `Array4C32` for
+/// `nvalloc::upper::array::Array<4, nvalloc::lower::cache::Cache<32>>`
 #[derive(PartialEq, Eq, Hash, Debug)]
 pub struct AllocName([&'static str; 4]);
 
@@ -171,63 +172,45 @@ impl PartialEq<AllocName> for &str {
 /// Per core data.
 pub struct Local<const F: usize> {
     /// Local copy of the reserved level 3 entry
-    entry: AtomicCell<Entry3>,
+    reserved_tree: AtomicCell<Entry3>,
     /// # Safety
     /// This should only be accessed from the corresponding (virtual) CPU core!
-    inner: UnsafeCell<RecentFrees<F>>,
-}
-
-/// Ringbuffer storing the locations of recent frees for the free-reserve heuristic.
-#[repr(align(64))]
-struct RecentFrees<const F: usize> {
-    frees: [usize; F],
-    frees_i: usize,
+    last_frees: UnsafeCell<RingBuffer<usize, F>>,
 }
 
 impl<const F: usize> Local<F> {
     fn new() -> Self {
         Self {
-            entry: AtomicCell::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
-            inner: UnsafeCell::new(RecentFrees {
-                frees_i: 0,
-                frees: [usize::MAX; F],
-            }),
+            reserved_tree: AtomicCell::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
+            last_frees: UnsafeCell::new(RingBuffer::default()),
         }
     }
     #[allow(clippy::mut_from_ref)]
-    fn p(&self) -> &mut RecentFrees<F> {
-        unsafe { &mut *self.inner.get() }
+    fn p(&self) -> &mut RingBuffer<usize, F> {
+        unsafe { &mut *self.last_frees.get() }
     }
     /// Add a chunk (subtree) id to the history of chunks.
     pub fn frees_push(&self, chunk: usize) {
-        if F > 1 {
-            let inner = self.p();
-            inner.frees_i = (inner.frees_i + 1) % inner.frees.len();
-            inner.frees[inner.frees_i] = chunk;
-        } else if F == 1 {
-            // We don't have to update the index if there is only one element
-            let inner = self.p();
-            inner.frees[0] = 0;
-        }
+        self.p().push(chunk + 1);
     }
     /// Calls frees_push on exiting scope.
-    /// NOTE: Bind the return value to a variable!
+    /// # Note
+    /// Bind the return value to a **named** variable!
     #[must_use]
     pub fn defer_frees_push(&self, chunk: usize) -> LocalFreePush<'_, F> {
         LocalFreePush(self, chunk)
     }
     /// Checks if the previous frees were in the given chunk.
-    pub fn frees_related(&self, chunk: usize) -> bool {
-        F > 0 && self.p().frees.iter().all(|p| *p == chunk)
+    pub fn frees_eq_to(&self, chunk: usize) -> bool {
+        F > 0 && self.p().all_eq(chunk + 1)
     }
 }
 
 impl<const F: usize> fmt::Debug for Local<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Local")
-            .field("pte", &self.entry.load())
-            .field("frees", &self.p().frees)
-            .field("frees_i", &self.p().frees_i)
+            .field("pte", &self.reserved_tree.load())
+            .field("frees", &self.p())
             .finish()
     }
 }
@@ -304,32 +287,32 @@ mod test {
 
     /// Testing the related pages heuristic for frees
     #[test]
-    fn related_pages() {
+    fn last_frees() {
         let local = Local::<4>::new();
         let page1 = 43;
         let i1 = page1 / (512 * 512);
-        assert!(!local.frees_related(i1));
+        assert!(!local.frees_eq_to(i1));
         local.frees_push(i1);
         local.frees_push(i1);
         local.frees_push(i1);
-        assert!(!local.frees_related(i1));
+        assert!(!local.frees_eq_to(i1));
         local.frees_push(i1);
-        assert!(local.frees_related(i1));
+        assert!(local.frees_eq_to(i1));
         let page2 = 512 * 512 + 43;
         let i2 = page2 / (512 * 512);
         assert_ne!(i1, i2);
         local.frees_push(i2);
-        assert!(!local.frees_related(i1));
-        assert!(!local.frees_related(i2));
+        assert!(!local.frees_eq_to(i1));
+        assert!(!local.frees_eq_to(i2));
 
         {
             let _push1 = local.defer_frees_push(i1);
             local.frees_push(i1);
             local.frees_push(i1);
             let _push2 = local.defer_frees_push(i1);
-            assert!(!local.frees_related(i1));
+            assert!(!local.frees_eq_to(i1));
         };
-        assert!(local.frees_related(i1));
+        assert!(local.frees_eq_to(i1));
     }
 
     #[test]
