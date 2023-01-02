@@ -103,7 +103,7 @@ impl<A: Sized + Alloc + Default> AllocExt for A {}
 /// The short name of an allocator.
 /// E.g.: `ArrayAtomic4C32` for
 /// `nvalloc::upper::array_atomic::ArrayAtomic<4, nvalloc::lower::cache::Cache<32>>`
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, Debug)]
 pub struct AllocName([&'static str; 4]);
 
 impl fmt::Display for AllocName {
@@ -271,11 +271,13 @@ mod test {
             type_name::<Array<4, Lower>>(),
             AllocName::new::<Array<4, Lower>>()
         );
+        assert_eq!("Array4C32", AllocName::new::<Array<4, Lower>>());
         println!(
             "{}\n -> {}",
             type_name::<ListLocal>(),
             AllocName::new::<ListLocal>()
         );
+        assert_eq!("ListLocal", AllocName::new::<ListLocal>());
         println!(
             "{}\n -> {}",
             type_name::<ArrayList<4, Lower>>(),

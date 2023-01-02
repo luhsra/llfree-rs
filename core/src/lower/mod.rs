@@ -23,7 +23,7 @@ pub use cache::Cache;
 
 /// Level 2 page allocator.
 pub trait LowerAlloc: Default + fmt::Debug {
-    /// Pages per subtree
+    /// Pages per tree
     const N: usize;
     /// The maximal allowed order of this allocator
     const MAX_ORDER: usize;

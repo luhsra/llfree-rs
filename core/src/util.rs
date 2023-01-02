@@ -1,6 +1,7 @@
+use core::fmt;
 use core::mem::transmute;
 use core::mem::{align_of, size_of};
-use core::ops::{Add, Div, Range};
+use core::ops::{Add, Deref, DerefMut, Div, Range};
 
 /// Correctly sized and aligned page.
 #[derive(Clone)]
@@ -36,6 +37,7 @@ pub struct CacheLine {
 }
 const _: () = assert!(size_of::<CacheLine>() == CacheLine::SIZE);
 const _: () = assert!(align_of::<CacheLine>() == CacheLine::SIZE);
+
 impl CacheLine {
     pub const SIZE: usize = 64;
     pub const SIZE_BITS: usize = Self::SIZE.ilog2() as _;
@@ -54,14 +56,52 @@ impl CacheLine {
     }
 }
 
+#[inline(always)]
 pub const fn align_up(v: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     (v + align - 1) & !(align - 1)
 }
 
+#[inline(always)]
 pub const fn align_down(v: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     v & !(align - 1)
+}
+
+/// Cache alignment for T
+#[derive(Clone, Default, Hash, PartialEq, Eq)]
+#[repr(align(64))]
+pub struct CacheAlign<T>(pub T);
+
+const _: () = assert!(align_of::<CacheAlign<usize>>() == CacheLine::SIZE);
+
+unsafe impl<T: Send> Send for CacheAlign<T> {}
+unsafe impl<T: Sync> Sync for CacheAlign<T> {}
+
+impl<T> Deref for CacheAlign<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for CacheAlign<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for CacheAlign<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl<T> From<T> for CacheAlign<T> {
+    fn from(t: T) -> Self {
+        CacheAlign(t)
+    }
 }
 
 #[cfg(feature = "std")]
@@ -227,7 +267,7 @@ where
 
 #[cfg(all(test, feature = "std"))]
 mod test {
-    use super::{Cycles, WyRand};
+    use super::{align_down, align_up, Cycles, WyRand};
 
     #[cfg(target_arch = "x86_64")]
     #[test]
@@ -269,5 +309,20 @@ mod test {
         std /= buckets.len() as f64;
         std = (std - (avg * avg)).sqrt();
         println!("avg={avg:.2}, std={std:.2}, min={min}, max={max}");
+    }
+
+    #[test]
+    fn align() {
+        assert_eq!(align_down(0, 64), 0);
+        assert_eq!(align_down(1, 64), 0);
+        assert_eq!(align_down(63, 64), 0);
+        assert_eq!(align_down(64, 64), 64);
+        assert_eq!(align_down(65, 64), 64);
+
+        assert_eq!(align_up(0, 64), 0);
+        assert_eq!(align_up(1, 64), 64);
+        assert_eq!(align_up(63, 64), 64);
+        assert_eq!(align_up(64, 64), 64);
+        assert_eq!(align_up(65, 64), 128);
     }
 }

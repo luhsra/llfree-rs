@@ -10,14 +10,14 @@ use alloc::slice;
 use alloc::string::String;
 
 use crate::entry::{Entry2, Entry2Pair};
-use crate::table::{AtomicArray, Bitfield, Mapping};
+use crate::table::AtomicArray;
 use crate::upper::{Init, CAS_RETRIES};
-use crate::util::{align_up, spin_wait, Page};
+use crate::util::{align_down, align_up, spin_wait, Page};
 use crate::{Error, Result};
 
 use super::LowerAlloc;
 
-type Table1 = Bitfield<8>;
+type Bitfield = crate::table::Bitfield<8>;
 
 /// Subtree allocator which is able to allocate order 0..11 pages.
 ///
@@ -37,8 +37,8 @@ type Table1 = Bitfield<8>;
 /// ```
 pub struct Cache<const T2N: usize> {
     area: &'static mut [Page],
-    l1: Box<[Table1]>,
-    l2: Box<[[AtomicCell<Entry2>; T2N]]>,
+    bitfields: Box<[Bitfield]>,
+    tables: Box<[[AtomicCell<Entry2>; T2N]]>,
     persistent: bool,
 }
 
@@ -46,8 +46,8 @@ impl<const T2N: usize> Default for Cache<T2N> {
     fn default() -> Self {
         Self {
             area: &mut [],
-            l1: Default::default(),
-            l2: Default::default(),
+            bitfields: Default::default(),
+            tables: Default::default(),
             persistent: Default::default(),
         }
     }
@@ -57,8 +57,8 @@ impl<const T2N: usize> fmt::Debug for Cache<T2N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cache")
             .field("area", &self.area.as_ptr_range())
-            .field("l1", &self.l1)
-            .field("l2", &self.l2)
+            .field("bitfields", &self.bitfields)
+            .field("tables", &self.tables)
             .field("persistent", &self.persistent)
             .finish()
     }
@@ -71,53 +71,58 @@ impl<const T2N: usize> LowerAlloc for Cache<T2N>
 where
     [(); T2N / 2]:,
 {
-    const N: usize = Self::MAPPING.span(2);
-    const MAX_ORDER: usize = Self::MAPPING.order(1) + 1;
-    const HUGE_ORDER: usize = Self::MAPPING.order(1);
+    const N: usize = T2N * Bitfield::LEN;
+    const HUGE_ORDER: usize = Bitfield::ORDER;
+    const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
 
     fn new(_cores: usize, area: &mut [Page], init: Init, free_all: bool) -> Self {
-        assert!(T2N < (1 << (u16::BITS as usize - Self::MAPPING.order(1))));
+        assert!(T2N < (1 << (u16::BITS as usize - Self::HUGE_ORDER)));
 
         // FIXME: Lifetime hack!
         let area = unsafe { slice::from_raw_parts_mut(area.as_mut_ptr(), area.len()) };
-        let n1 = Self::MAPPING.num_pts(1, area.len());
-        let n2 = Self::MAPPING.num_pts(2, area.len());
+        let num_bitfields = area.len().div_ceil(Bitfield::LEN);
+        let num_tables = area.len().div_ceil(Self::N);
         let alloc = if init != Init::Volatile {
             // Reserve memory within the managed NVM for the l1 and l2 tables
             // These tables are stored at the end of the NVM
-            let s1 = n1 * size_of::<Table1>();
-            let s1 = align_up(s1, size_of::<[Entry2; T2N]>()); // correct alignment
-            let s2 = n1 * size_of::<[Entry2; T2N]>();
+            let size_bitfields = num_bitfields * size_of::<Bitfield>();
+            let size_bitfields = align_up(size_bitfields, size_of::<[Entry2; T2N]>()); // correct alignment
+            let size_tables = num_bitfields * size_of::<[Entry2; T2N]>();
             // Num of pages occupied by the tables
-            let pages = (s1 + s2).div_ceil(Page::SIZE);
+            let metadata_pages = (size_bitfields + size_tables).div_ceil(Page::SIZE);
 
-            assert!(pages < area.len());
-            let (area, tables) = area.split_at_mut(area.len() - pages);
+            assert!(metadata_pages < area.len());
+            let (area, tables) = area.split_at_mut(area.len() - metadata_pages);
 
             let tables: *mut u8 = tables.as_mut_ptr().cast();
 
             // Start of the l1 table array
-            let l1 = unsafe { Box::from_raw(slice::from_raw_parts_mut(tables.cast(), n1)) };
+            let bitfields =
+                unsafe { Box::from_raw(slice::from_raw_parts_mut(tables.cast(), num_bitfields)) };
 
-            let mut offset = n1 * size_of::<Table1>();
+            let mut offset = num_bitfields * size_of::<Bitfield>();
             offset = align_up(offset, size_of::<[Entry2; T2N]>()); // correct alignment
 
             // Start of the l2 table array
-            let l2 =
-                unsafe { Box::from_raw(slice::from_raw_parts_mut(tables.add(offset).cast(), n2)) };
+            let tables = unsafe {
+                Box::from_raw(slice::from_raw_parts_mut(
+                    tables.add(offset).cast(),
+                    num_tables,
+                ))
+            };
 
             Self {
                 area,
-                l1,
-                l2,
+                bitfields,
+                tables,
                 persistent: init != Init::Volatile,
             }
         } else {
             // Allocate l1 and l2 tables in volatile memory
             Self {
                 area,
-                l1: unsafe { Box::new_uninit_slice(n1).assume_init() },
-                l2: unsafe { Box::new_uninit_slice(n2).assume_init() },
+                bitfields: unsafe { Box::new_uninit_slice(num_bitfields).assume_init() },
+                tables: unsafe { Box::new_uninit_slice(num_tables).assume_init() },
                 persistent: init != Init::Volatile,
             }
         };
@@ -143,36 +148,38 @@ where
     fn recover(&self, start: usize, deep: bool) -> Result<usize> {
         let mut pages = 0;
 
-        let table2 = self.table2(start);
-        for (i, entry2) in table2.iter().enumerate() {
-            let start = Self::MAPPING.page(2, start, i);
+        let table = &self.tables[start / Self::N];
+        for (i, a_entry) in table.iter().enumerate() {
+            let start = align_down(start, Self::N) + i * Bitfield::LEN;
+            let i = start / Bitfield::LEN;
+
             if start > self.pages() {
-                entry2.store(Entry2::new());
+                a_entry.store(Entry2::new());
                 continue;
             }
 
-            let entry = entry2.load();
+            let entry = a_entry.load();
             let free = entry.free();
             if deep {
                 // Deep recovery updates the counter
                 if entry.page() {
                     // Check that underlying bitfield is empty
-                    let p = self.table1(start).count_zeros();
-                    if p != Self::MAPPING.span(1) {
+                    let p = self.bitfields[i].count_zeros();
+                    if p != Bitfield::LEN {
                         warn!("Invalid L2 start=0x{start:x} i{i}: h != {p}");
-                        self.table1(start).fill(false);
+                        self.bitfields[i].fill(false);
                     }
-                } else if free == Self::MAPPING.span(1) {
+                } else if free == Bitfield::LEN {
                     // Skip entirely free entries
                     // This is possible because the counter is decremented first
                     // for allocations and afterwards for frees
-                    pages += Self::MAPPING.span(1);
+                    pages += Bitfield::LEN;
                 } else {
                     // Check if partially filled bitfield has the same free count
-                    let p = self.table1(start).count_zeros();
+                    let p = self.bitfields[i].count_zeros();
                     if free != p {
                         warn!("Invalid L2 start=0x{start:x} i{i}: {free} != {p}");
-                        entry2.store(entry.with_free(p));
+                        a_entry.store(entry.with_free(p));
                     }
                     pages += p;
                 }
@@ -208,11 +215,11 @@ where
         if order == Self::MAX_ORDER {
             self.put_max(page)
         } else if order == Self::HUGE_ORDER {
-            let i2 = Self::MAPPING.idx(2, page);
-            let table2 = self.table2(page);
+            let i = (page / Bitfield::LEN) % T2N;
+            let table = &self.tables[page / Self::N];
 
-            if let Err(old) = table2[i2]
-                .compare_exchange(Entry2::new_page(), Entry2::new_free(Self::MAPPING.span(1)))
+            if let Err(old) =
+                table[i].compare_exchange(Entry2::new_page(), Entry2::new_free(Bitfield::LEN))
             {
                 error!("Addr p={page:x} o={order} {old:?}");
                 Err(Error::Address)
@@ -220,13 +227,13 @@ where
                 Ok(())
             }
         } else if order < Self::HUGE_ORDER {
-            let i2 = Self::MAPPING.idx(2, page);
-            let table2 = self.table2(page);
+            let i = (page / Bitfield::LEN) % T2N;
+            let table = &self.tables[page / Self::N];
 
-            let old = table2[i2].load();
+            let old = table[i].load();
             if old.page() {
                 self.partial_put_huge(old, page, order)
-            } else if old.free() <= Self::MAPPING.span(1) - (1 << order) {
+            } else if old.free() <= Bitfield::LEN - (1 << order) {
                 self.put_small(page, order)
             } else {
                 error!("Addr p={page:x} o={order} {old:?}");
@@ -244,37 +251,37 @@ where
             return false;
         }
 
-        if order > Self::MAPPING.order(1) {
+        if order > Bitfield::ORDER {
             // multiple hugepages
-            let i2 = Self::MAPPING.idx(2, page);
-            self.table2_pair(page)[i2 / 2]
+            let i = (page / Bitfield::LEN) % T2N;
+            self.table_pair(page)[i / 2]
                 .load()
-                .all(|e| e.free() == Self::MAPPING.span(1))
+                .all(|e| e.free() == Bitfield::LEN)
         } else {
-            let table2 = self.table2(page);
-            let i2 = Self::MAPPING.idx(2, page);
-            let entry2 = table2[i2].load();
+            let table = &self.tables[page / Self::N];
+            let i = (page / Bitfield::LEN) % T2N;
+            let entry = table[i].load();
             let num_pages = 1 << order;
 
-            if entry2.free() < num_pages {
+            if entry.free() < num_pages {
                 return false;
             }
-            if entry2.free() == Self::MAPPING.span(1) {
+            if entry.free() == Bitfield::LEN {
                 return true;
             }
 
             if num_pages > u64::BITS as usize {
                 // larger than 64 pages
-                let pt = self.table1(page);
-                let start = page / Table1::ENTRY_BITS;
-                let end = (page + num_pages) / Table1::ENTRY_BITS;
-                (start..end).all(|i| pt.get_entry(i) == 0)
+                let bitfield = &self.bitfields[page / Bitfield::LEN];
+                let start = page / Bitfield::ENTRY_BITS;
+                let end = (page + num_pages) / Bitfield::ENTRY_BITS;
+                (start..end).all(|i| bitfield.get_entry(i) == 0)
             } else {
                 // small allocations
-                let pt = self.table1(page);
-                let entry = pt.get_entry(page / Table1::ENTRY_BITS);
+                let bitfield = &self.bitfields[page / Bitfield::LEN];
+                let entry = bitfield.get_entry(page / Bitfield::ENTRY_BITS);
                 let mask =
-                    (u64::MAX >> (u64::BITS as usize - num_pages)) << (page % Table1::ENTRY_BITS);
+                    (u64::MAX >> (u64::BITS as usize - num_pages)) << (page % Bitfield::ENTRY_BITS);
                 (entry & mask) == 0
             }
         }
@@ -282,35 +289,21 @@ where
 
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages();
-        for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
-            let start = i * Self::MAPPING.span(2);
-            let table2 = self.table2(start);
-            for i2 in Self::MAPPING.range(2, start..self.pages()) {
-                let start = Self::MAPPING.page(2, start, i2);
-                let entry2 = table2[i2].load();
-
-                pages -= if entry2.page() {
-                    0
-                } else {
-                    let table1 = self.table1(start);
-                    let mut free = 0;
-                    for i1 in Self::MAPPING.range(1, start..self.pages()) {
-                        free += !table1.get(i1) as usize;
-                    }
-                    assert_eq!(free, entry2.free(), "{entry2:?}: {table1:?}");
-                    free
-                }
+        for i in 0..self.pages().div_ceil(Self::N) {
+            let start = i * Self::N;
+            let table = &self.tables[start / Self::N];
+            for i in 0..T2N {
+                let entry = table[i].load();
+                pages -= entry.free();
             }
         }
         pages
     }
 
     fn dbg_for_each_huge_page<F: FnMut(usize)>(&self, mut f: F) {
-        for i3 in 0..(self.pages() / Self::MAPPING.span(2)) {
-            let start = i3 * Self::MAPPING.span(2);
-            let table2 = self.table2(start);
-            for i2 in Self::MAPPING.range(2, start..self.pages()) {
-                f(table2[i2].load().free());
+        for table in &*self.tables {
+            for entry in table {
+                f(entry.load().free())
             }
         }
     }
@@ -318,7 +311,7 @@ where
     fn size_per_gib() -> usize {
         let pages = 1usize << (30 - Page::SIZE_BITS);
         let s1 = pages.div_ceil(8); // 1 bit per page
-        let s2 = size_of::<Entry2>() * pages.div_ceil(Table1::LEN);
+        let s2 = size_of::<Entry2>() * pages.div_ceil(Bitfield::LEN);
         s1 + s2
     }
 }
@@ -327,135 +320,112 @@ impl<const T2N: usize> Cache<T2N>
 where
     [(); T2N / 2]:,
 {
-    const MAPPING: Mapping<2> = Mapping([Table1::ORDER, T2N.ilog2() as _]);
-
-    /// Returns the l1 page table that contains the `page`.
-    /// ```text
-    /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
-    /// ```
-    fn table1(&self, page: usize) -> &Table1 {
-        let i = page / Self::MAPPING.span(1);
-        debug_assert!(i < Self::MAPPING.num_pts(1, self.pages()));
-        &self.l1[i]
-    }
-
-    /// Returns the l2 page table that contains the `page`.
-    /// ```text
-    /// NVRAM: [ Pages | padding | PT1s | PT2s | Meta ]
-    /// ```
-    fn table2(&self, page: usize) -> &[AtomicCell<Entry2>; T2N] {
-        let i = page / Self::MAPPING.span(2);
-        debug_assert!(i < Self::MAPPING.num_pts(2, self.pages()));
-        &self.l2[i]
-    }
-
-    /// Returns the l2 page table with pair entries that can be updated at once.
-    fn table2_pair(&self, page: usize) -> &[AtomicCell<Entry2Pair>; T2N / 2] {
-        let table2 = self.table2(page);
-        unsafe { &*(table2.as_ptr().cast()) }
+    /// Returns the table with pair entries that can be updated at once.
+    fn table_pair(&self, page: usize) -> &[AtomicCell<Entry2Pair>; T2N / 2] {
+        let table = &self.tables[page / Self::N];
+        unsafe { &*table.as_ptr().cast() }
     }
 
     fn free_all(&self) {
-        // Init table2
-        for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
-            let table2 = self.table2(i * Self::MAPPING.span(2));
-            if i + 1 < Self::MAPPING.num_pts(2, self.pages()) {
-                unsafe { table2.atomic_fill(Entry2::new_free(Self::MAPPING.span(1))) };
+        // Init table
+        for i in 0..self.pages().div_ceil(Self::N) {
+            let table = &self.tables[i];
+            if i + 1 < self.pages().div_ceil(Self::N) {
+                unsafe { table.atomic_fill(Entry2::new_free(Bitfield::LEN)) };
             } else {
-                for (j, entry2) in table2.iter().enumerate() {
-                    let page = i * Self::MAPPING.span(2) + j * Self::MAPPING.span(1);
-                    let max = Self::MAPPING.span(1).min(self.pages().saturating_sub(page));
-                    entry2.store(Entry2::new_free(max));
+                for (j, entry) in table.iter().enumerate() {
+                    let page = i * Self::N + j * Bitfield::LEN;
+                    let max = Bitfield::LEN.min(self.pages().saturating_sub(page));
+                    entry.store(Entry2::new_free(max));
                 }
             }
         }
         // Init table1
-        for i in 0..Self::MAPPING.num_pts(1, self.pages()) {
-            let table1 = self.table1(i * Self::MAPPING.span(1));
+        for i in 0..self.pages().div_ceil(Bitfield::LEN) {
+            let bitfield = &self.bitfields[i];
 
-            if i + 1 < Self::MAPPING.num_pts(1, self.pages()) {
-                table1.fill(false);
+            if i + 1 < self.pages().div_ceil(Bitfield::LEN) {
+                bitfield.fill(false);
             } else {
-                let end = self.pages() - i * Self::MAPPING.span(1);
-                table1.set(0..end, false);
-                table1.set(end..Self::MAPPING.len(1), true);
+                let end = self.pages() - i * Bitfield::LEN;
+                bitfield.set(0..end, false);
+                bitfield.set(end..Bitfield::LEN, true);
             }
         }
     }
 
     fn reserve_all(&self) {
-        // Init table2
-        for i in 0..Self::MAPPING.num_pts(2, self.pages()) {
-            let table2 = self.table2(i * Self::MAPPING.span(2));
-            let end = (i + 1) * Self::MAPPING.span(2);
+        // Init table
+        for i in 0..self.pages().div_ceil(Self::N) {
+            let table = &self.tables[i];
+            let end = (i + 1) * Self::N;
             if self.pages() >= end {
                 // Table is fully included in the memory range
                 // -> Allocated as full pages
-                unsafe { table2.atomic_fill(Entry2::new_page()) };
+                unsafe { table.atomic_fill(Entry2::new_page()) };
             } else {
                 // Table is only partially included in the memory range
-                for (j, entry2) in table2.iter().enumerate() {
-                    let end = i * Self::MAPPING.span(2) + (j + 1) * Self::MAPPING.span(1);
-                    if self.pages() >= end {
-                        entry2.store(Entry2::new_page());
+                for (j, entry) in table.iter().enumerate() {
+                    let end = i * Self::N + (j + 1) * Bitfield::LEN;
+                    if end <= self.pages() {
+                        entry.store(Entry2::new_page());
                     } else {
                         // Remainder is allocated as small pages
-                        entry2.store(Entry2::new_free(0));
+                        entry.store(Entry2::new_free(0));
                     }
                 }
             }
         }
         // Init table1
-        for i in 0..Self::MAPPING.num_pts(1, self.pages()) {
-            let table1 = self.table1(i * Self::MAPPING.span(1));
-            let end = (i + 1) * Self::MAPPING.span(1);
-            if self.pages() >= end {
+        for i in 0..self.pages().div_ceil(Bitfield::LEN) {
+            let bitfield = &self.bitfields[i];
+            let end = (i + 1) * Bitfield::LEN;
+            if end <= self.pages() {
                 // Table is fully included in the memory range
-                table1.fill(false);
+                bitfield.fill(false);
             } else {
                 // Table is only partially included in the memory range
-                table1.fill(true);
+                bitfield.fill(true);
             }
         }
     }
 
     /// Allocate pages up to order 8
     fn get_small(&self, start: usize, order: usize) -> Result<usize> {
-        debug_assert!(order < Self::MAPPING.order(1));
+        debug_assert!(order < Bitfield::ORDER);
 
-        let table2 = self.table2(start);
+        let table = &self.tables[start / Self::N];
 
         for _ in 0..CAS_RETRIES {
             // Begin iteration by start idx
-            let off = Self::MAPPING.idx(2, start);
-            for j2 in 0..Self::MAPPING.len(2) {
-                let i2 = (j2 + off) % Self::MAPPING.len(2);
+            let off = (start / Bitfield::LEN) % T2N;
+            for j in 0..T2N {
+                let i = (j + off) % T2N;
 
-                let newstart = if j2 == 0 {
+                let newstart = if j == 0 {
                     start // Don't round the start pfn
                 } else {
-                    Self::MAPPING.page(2, start, i2)
+                    align_down(start, Self::N) + i * Bitfield::LEN
                 };
 
                 #[cfg(feature = "stop")]
                 {
-                    let entry2 = table2[i2].load();
-                    if entry2.page() || entry2.free() < (1 << order) {
+                    let entry = table[i].load();
+                    if entry.page() || entry.free() < (1 << order) {
                         continue;
                     }
                     stop!();
                 }
 
-                if table2[i2].fetch_update(|v| v.dec(1 << order)).is_ok() {
-                    let i1 = Self::MAPPING.idx(1, newstart);
-                    let table1 = self.table1(newstart);
+                if table[i].fetch_update(|v| v.dec(1 << order)).is_ok() {
+                    let bi = newstart % Bitfield::LEN;
+                    let bitfield = &self.bitfields[newstart / Bitfield::LEN];
 
-                    if let Ok(offset) = table1.set_first_zeros(i1, order) {
-                        return Ok(Self::MAPPING.page(1, newstart, offset));
+                    if let Ok(offset) = bitfield.set_first_zeros(bi, order) {
+                        return Ok(align_down(newstart, Bitfield::LEN) + offset);
                     } else {
                         // Revert conter
-                        if let Err(_) =
-                            table2[i2].fetch_update(|v| v.inc(Self::MAPPING.span(1), 1 << order))
+                        if let Err(_) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order))
                         {
                             error!("Undo failed");
                             return Err(Error::Corruption);
@@ -470,16 +440,16 @@ where
 
     /// Allocate huge page
     fn get_huge(&self, start: usize) -> Result<usize> {
-        let table2 = self.table2(start);
-        let start_i = Self::MAPPING.idx(2, start);
+        let table = &self.tables[start / Self::N];
+        let offset = (start / Bitfield::LEN) % T2N;
         for _ in 0..CAS_RETRIES {
-            for i2 in 0..Self::MAPPING.len(2) {
-                let i2 = (start_i + i2) % Self::MAPPING.len(2);
-                if table2[i2]
-                    .fetch_update(|v| v.mark_huge(Self::MAPPING.span(1)))
+            for i in 0..T2N {
+                let i = (offset + i) % T2N;
+                if table[i]
+                    .fetch_update(|v| v.mark_page(Bitfield::LEN))
                     .is_ok()
                 {
-                    return Ok(Self::MAPPING.page(2, start, i2));
+                    return Ok(align_down(start, Self::N) + i * Bitfield::LEN);
                 }
             }
             core::hint::spin_loop();
@@ -490,16 +460,16 @@ where
 
     /// Allocate multiple huge pages
     fn get_max(&self, start: usize) -> Result<usize> {
-        let table2_pair = self.table2_pair(start);
-        let start_i = Self::MAPPING.idx(2, start) / 2;
+        let table_pair = self.table_pair(start);
+        let offset = ((start / Bitfield::LEN) % T2N) / 2;
         for _ in 0..CAS_RETRIES {
-            for i2 in 0..Self::MAPPING.len(2) / 2 {
-                let i2 = (start_i + i2) % (Self::MAPPING.len(2) / 2);
-                if table2_pair[i2]
-                    .fetch_update(|v| v.map(|v| v.mark_huge(Self::MAPPING.span(1))))
+            for i in 0..T2N / 2 {
+                let i = (offset + i) % (T2N / 2);
+                if table_pair[i]
+                    .fetch_update(|v| v.map(|v| v.mark_page(Bitfield::LEN)))
                     .is_ok()
                 {
-                    return Ok(Self::MAPPING.page(2, start, i2 * 2));
+                    return Ok(align_down(start, Self::N) + 2 * i * Bitfield::LEN);
                 }
             }
             core::hint::spin_loop();
@@ -513,19 +483,19 @@ where
 
         stop!();
 
-        let table1 = self.table1(page);
-        let i1 = Self::MAPPING.idx(1, page);
-        if table1.toggle(i1, order, true).is_err() {
-            error!("L1 put failed i{i1} p={page}");
+        let bitfield = &self.bitfields[page / Bitfield::LEN];
+        let i = page % Bitfield::LEN;
+        if bitfield.toggle(i, order, true).is_err() {
+            error!("L1 put failed i{i} p={page}");
             return Err(Error::Address);
         }
 
         stop!();
 
-        let table2 = self.table2(page);
-        let i2 = Self::MAPPING.idx(2, page);
-        if let Err(entry2) = table2[i2].fetch_update(|v| v.inc(Self::MAPPING.span(1), 1 << order)) {
-            error!("Inc failed i{i1} p={page} {entry2:?}");
+        let table = &self.tables[page / Self::N];
+        let i = (page / Bitfield::LEN) % T2N;
+        if let Err(entry2) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order)) {
+            error!("Inc failed i{i} p={page} {entry2:?}");
             return Err(Error::Corruption);
         }
 
@@ -533,17 +503,17 @@ where
     }
 
     pub fn put_max(&self, page: usize) -> Result<()> {
-        let table2_pair = self.table2_pair(page);
-        let i2 = Self::MAPPING.idx(2, page) / 2;
+        let table_pair = self.table_pair(page);
+        let i = ((page / Bitfield::LEN) % T2N) / 2;
 
-        if let Err(old) = table2_pair[i2].compare_exchange(
+        if let Err(old) = table_pair[i].compare_exchange(
             Entry2Pair(Entry2::new_page(), Entry2::new_page()),
             Entry2Pair(
-                Entry2::new_free(Self::MAPPING.span(1)),
-                Entry2::new_free(Self::MAPPING.span(1)),
+                Entry2::new_free(Bitfield::LEN),
+                Entry2::new_free(Bitfield::LEN),
             ),
         ) {
-            error!("Addr {page:x} o={} {old:?} i={i2}", Self::MAX_ORDER);
+            error!("Addr {page:x} o={} {old:?} i={i}", Self::MAX_ORDER);
             Err(Error::Address)
         } else {
             Ok(())
@@ -552,19 +522,19 @@ where
 
     fn partial_put_huge(&self, old: Entry2, page: usize, order: usize) -> Result<()> {
         warn!("partial free of huge page {page:x} o={order}");
-        let i2 = Self::MAPPING.idx(2, page);
-        let table2 = self.table2(page);
-        let table1 = self.table1(page);
+        let i = (page / Bitfield::LEN) % T2N;
+        let table = &self.tables[page / Self::N];
+        let bitfield = &self.bitfields[page / Bitfield::LEN];
 
         // Try filling the whole bitfield
-        if table1.fill_cas(true) {
-            if table2[i2].compare_exchange(old, Entry2::new()).is_err() {
+        if bitfield.fill_cas(true) {
+            if table[i].compare_exchange(old, Entry2::new()).is_err() {
                 error!("Failed partial clear");
                 return Err(Error::Corruption);
             }
         }
         // Wait for parallel partial_put_huge to finish
-        else if !spin_wait(CAS_RETRIES, || !table2[i2].load().page()) {
+        else if !spin_wait(CAS_RETRIES, || !table[i].load().page()) {
             error!("Exceeding retries");
             return Err(Error::Corruption);
         }
@@ -575,18 +545,18 @@ where
     #[allow(dead_code)]
     pub fn dump(&self, start: usize) {
         let mut out = String::new();
-        writeln!(out, "Dumping pt {}", start / Self::MAPPING.span(2)).unwrap();
-        let table2 = self.table2(start);
-        for (i2, entry2) in table2.iter().enumerate() {
-            let start = Self::MAPPING.page(2, start, i2);
+        writeln!(out, "Dumping pt {}", start / Self::N).unwrap();
+        let table = &self.tables[start / Self::N];
+        for (i, entry) in table.iter().enumerate() {
+            let start = align_down(start, Self::N) + i * Bitfield::LEN;
             if start > self.pages() {
                 break;
             }
 
-            let entry2 = entry2.load();
-            let indent = (Self::MAPPING.levels() - 2) * 4;
-            let table1 = self.table1(start);
-            writeln!(out, "{:indent$}l2 i={i2}: {entry2:?}\t{table1:?}", "").unwrap();
+            let entry = entry.load();
+            let indent = 4;
+            let bitfield = &self.bitfields[start / Bitfield::LEN];
+            writeln!(out, "{:indent$}l2 i={i}: {entry:?}\t{bitfield:?}", "").unwrap();
         }
         warn!("{out}");
     }
@@ -596,8 +566,8 @@ impl<const T2N: usize> Drop for Cache<T2N> {
     fn drop(&mut self) {
         if self.persistent {
             // The chunks are part of the allocators managed memory
-            Box::leak(core::mem::take(&mut self.l1));
-            Box::leak(core::mem::take(&mut self.l2));
+            Box::leak(core::mem::take(&mut self.bitfields));
+            Box::leak(core::mem::take(&mut self.tables));
         }
     }
 }
@@ -610,20 +580,18 @@ mod test {
     use alloc::vec::Vec;
     use log::warn;
 
-    use super::{Cache, Table1};
+    use super::{Bitfield, Cache};
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
-    use crate::table::Mapping;
     use crate::thread;
     use crate::upper::Init;
     use crate::util::{logging, Page, WyRand};
 
     type Allocator = Cache<64>;
-    const MAPPING: Mapping<2> = Allocator::MAPPING;
 
-    fn count(pt: &Table1) -> usize {
+    fn count(pt: &Bitfield) -> usize {
         let mut pages = 0;
-        for i in 0..Table1::LEN {
+        for i in 0..Bitfield::LEN {
             pages += !pt.get(i) as usize;
         }
         pages
@@ -641,7 +609,7 @@ mod test {
             vec![1, 1, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
+        let mut buffer = vec![Page::new(); 4 * Allocator::N];
 
         for order in orders {
             warn!("order: {order:?}");
@@ -660,8 +628,8 @@ mod test {
                 assert!(page != 0);
             });
 
-            assert_eq!(lower.table2(0)[0].load().free(), MAPPING.span(1) - 3);
-            assert_eq!(count(lower.table1(0)), MAPPING.span(1) - 3);
+            assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN - 3);
+            assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 3);
         }
     }
 
@@ -676,7 +644,7 @@ mod test {
             vec![1, 1, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
+        let mut buffer = vec![Page::new(); 4 * Allocator::N];
 
         for order in orders {
             warn!("order: {order:?}");
@@ -691,9 +659,9 @@ mod test {
                 l.get(0, 0).unwrap();
             });
 
-            let entry2 = lower.table2(0)[0].load();
-            assert_eq!(entry2.free(), MAPPING.span(1) - 2);
-            assert_eq!(count(lower.table1(0)), MAPPING.span(1) - 2);
+            let entry2 = lower.tables[0][0].load();
+            assert_eq!(entry2.free(), Bitfield::LEN - 2);
+            assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 2);
         }
     }
 
@@ -708,13 +676,13 @@ mod test {
             vec![1, 1, 0, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
+        let mut buffer = vec![Page::new(); 4 * Allocator::N];
 
         for order in orders {
             warn!("order: {order:?}");
             let lower = Arc::new(Allocator::new(2, &mut buffer, Init::Overwrite, true));
 
-            for _ in 0..MAPPING.span(1) - 1 {
+            for _ in 0..Bitfield::LEN - 1 {
                 lower.get(0, 0).unwrap();
             }
 
@@ -727,10 +695,10 @@ mod test {
                 l.get(0, 0).unwrap();
             });
 
-            let table2 = lower.table2(0);
-            assert_eq!(table2[0].load().free(), 0);
-            assert_eq!(table2[1].load().free(), MAPPING.span(1) - 1);
-            assert_eq!(count(lower.table1(MAPPING.span(1))), MAPPING.span(1) - 1);
+            let table = &lower.tables[0];
+            assert_eq!(table[0].load().free(), 0);
+            assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
+            assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
         }
     }
 
@@ -745,7 +713,7 @@ mod test {
         ];
 
         let mut pages = [0; 2];
-        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
+        let mut buffer = vec![Page::new(); 4 * Allocator::N];
 
         for order in orders {
             warn!("order: {order:?}");
@@ -765,7 +733,7 @@ mod test {
                 }
             });
 
-            assert_eq!(lower.table2(0)[0].load().free(), MAPPING.span(1));
+            assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN);
         }
     }
 
@@ -779,8 +747,8 @@ mod test {
             vec![0, 1, 1, 0, 0, 1, 1, 0],
         ];
 
-        let mut pages = [0; MAPPING.span(1)];
-        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
+        let mut pages = [0; Bitfield::LEN];
+        let mut buffer = vec![Page::new(); 4 * Allocator::N];
 
         for order in orders {
             warn!("order: {order:?}");
@@ -798,9 +766,9 @@ mod test {
                 l.put(pages[t as usize], 0).unwrap();
             });
 
-            let table2 = lower.table2(0);
-            assert_eq!(table2[0].load().free(), 2);
-            assert_eq!(count(lower.table1(0)), 2);
+            let table = &lower.tables[0];
+            assert_eq!(table[0].load().free(), 2);
+            assert_eq!(count(&lower.bitfields[0]), 2);
         }
     }
 
@@ -819,14 +787,14 @@ mod test {
             vec![1, 0, 0, 0, 1],
         ];
 
-        let mut pages = [0; MAPPING.span(1)];
-        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
+        let mut pages = [0; Bitfield::LEN];
+        let mut buffer = vec![Page::new(); 4 * Allocator::N];
 
         for order in orders {
             warn!("order: {order:?}");
             let lower = Arc::new(Allocator::new(2, &mut buffer, Init::Overwrite, true));
 
-            for page in &mut pages[..MAPPING.span(1) - 1] {
+            for page in &mut pages[..Bitfield::LEN - 1] {
                 *page = lower.get(0, 0).unwrap();
             }
             let stop = StopVec::new(2, order);
@@ -844,15 +812,15 @@ mod test {
                 lower.put(pages[0], 0).unwrap();
             });
 
-            let table2 = lower.table2(0);
-            if table2[0].load().free() == 1 {
-                assert_eq!(count(lower.table1(0)), 1);
+            let table = &lower.tables[0];
+            if table[0].load().free() == 1 {
+                assert_eq!(count(&lower.bitfields[0]), 1);
             } else {
                 // Table entry skipped
-                assert_eq!(table2[0].load().free(), 2);
-                assert_eq!(count(lower.table1(0)), 2);
-                assert_eq!(table2[1].load().free(), MAPPING.span(1) - 1);
-                assert_eq!(count(lower.table1(MAPPING.span(1))), MAPPING.span(1) - 1);
+                assert_eq!(table[0].load().free(), 2);
+                assert_eq!(count(&lower.bitfields[0]), 2);
+                assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
+                assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
             }
         }
     }
@@ -869,7 +837,7 @@ mod test {
             vec![1, 1, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
+        let mut buffer = vec![Page::new(); 4 * Allocator::N];
 
         for order in orders {
             warn!("order: {order:?}");
@@ -890,11 +858,8 @@ mod test {
             });
 
             let allocated = 1 + 2 + 4;
-            assert_eq!(
-                lower.table2(0)[0].load().free(),
-                MAPPING.span(1) - allocated
-            );
-            assert_eq!(count(lower.table1(0)), MAPPING.span(1) - allocated);
+            assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN - allocated);
+            assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - allocated);
         }
     }
 
@@ -909,7 +874,7 @@ mod test {
         ];
 
         let mut pages = [0; 2];
-        let mut buffer = vec![Page::new(); 4 * MAPPING.span(2)];
+        let mut buffer = vec![Page::new(); 4 * Allocator::N];
 
         for order in orders {
             warn!("order: {order:?}");
@@ -918,7 +883,7 @@ mod test {
             pages[0] = lower.get(0, 1).unwrap();
             pages[1] = lower.get(0, 2).unwrap();
 
-            assert_eq!(lower.table2(0)[0].load().free(), MAPPING.span(1) - 2 - 4);
+            assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN - 2 - 4);
 
             let stop = StopVec::new(2, order);
             let l = lower.clone();
@@ -931,7 +896,7 @@ mod test {
                 }
             });
 
-            assert_eq!(lower.table2(0)[0].load().free(), MAPPING.span(1));
+            assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN);
         }
     }
 
@@ -940,7 +905,7 @@ mod test {
         logging();
 
         const MAX_ORDER: usize = Allocator::MAX_ORDER;
-        let mut buffer = vec![Page::new(); MAPPING.span(2)];
+        let mut buffer = vec![Page::new(); Allocator::N];
 
         thread::pin(0);
         let lower = Arc::new(Allocator::new(1, &mut buffer, Init::Overwrite, true));
@@ -980,12 +945,12 @@ mod test {
 
         const MAX_ORDER: usize = Allocator::MAX_ORDER;
 
-        let mut buffer = vec![Page::new(); MAPPING.span(2) - 1];
+        let mut buffer = vec![Page::new(); Allocator::N - 1];
         let num_max_pages = buffer.len() / (1 << MAX_ORDER);
 
         let lower = Arc::new(Allocator::new(1, &mut buffer, Init::Volatile, false));
 
-        assert_eq!(lower.dbg_allocated_pages(), MAPPING.span(2) - 1);
+        assert_eq!(lower.dbg_allocated_pages(), Allocator::N - 1);
 
         for i in 0..num_max_pages {
             lower.put(i * (1 << MAX_ORDER), MAX_ORDER).unwrap();
@@ -998,15 +963,15 @@ mod test {
     fn partial_put_huge() {
         logging();
 
-        let mut buffer = vec![Page::new(); MAPPING.span(2) - 1];
+        let mut buffer = vec![Page::new(); Allocator::N - 1];
 
         let lower = Arc::new(Allocator::new(1, &mut buffer, Init::Volatile, false));
 
-        assert_eq!(lower.dbg_allocated_pages(), MAPPING.span(2) - 1);
+        assert_eq!(lower.dbg_allocated_pages(), Allocator::N - 1);
 
         lower.put(0, 0).unwrap();
 
-        assert_eq!(lower.dbg_allocated_pages(), MAPPING.span(2) - 2);
+        assert_eq!(lower.dbg_allocated_pages(), Allocator::N - 2);
 
         lower.dump(0);
     }

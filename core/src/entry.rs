@@ -102,9 +102,6 @@ pub struct SEntry3 {
 }
 
 impl SEntry3 {
-    pub const IDX_MAX: usize = (1 << 41) - 1;
-    pub const IDX_END: usize = (1 << 41) - 2;
-
     pub fn empty(span: usize) -> Self {
         debug_assert!(span < (1 << 15));
         Self::new().with_free(span)
@@ -163,38 +160,24 @@ impl From<Entry3> for SEntry3 {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub struct Entry2(u16);
+#[bitfield(u16)]
+#[derive(Default, PartialEq, Eq)]
+pub struct Entry2 {
+    /// Number of free 4K pages.
+    #[bits(15)]
+    pub free: usize,
+    /// If this entry is reserved by a CPU.
+    pub page: bool,
+}
 
 impl Entry2 {
-    pub fn new() -> Self {
-        Self(0)
-    }
     pub fn new_page() -> Self {
-        Self(u16::MAX)
+        Self::new().with_page(true)
     }
     pub fn new_free(free: usize) -> Self {
-        Self(free as u16)
+        Self::new().with_free(free)
     }
-
-    pub fn page(self) -> bool {
-        self.0 == u16::MAX
-    }
-    pub fn with_page(self, page: bool) -> Self {
-        Self(if page { u16::MAX } else { 0 })
-    }
-    pub fn free(self) -> usize {
-        if self.0 < u16::MAX {
-            self.0 as _
-        } else {
-            0
-        }
-    }
-    pub fn with_free(self, free: usize) -> Self {
-        Self(free as _)
-    }
-
-    pub fn mark_huge(self, span: usize) -> Option<Self> {
+    pub fn mark_page(self, span: usize) -> Option<Self> {
         if self.free() == span {
             Some(Self::new_page())
         } else {
@@ -216,26 +199,6 @@ impl Entry2 {
         } else {
             None
         }
-    }
-}
-
-impl From<u16> for Entry2 {
-    fn from(value: u16) -> Self {
-        Self(value)
-    }
-}
-impl From<Entry2> for u16 {
-    fn from(value: Entry2) -> Self {
-        value.0
-    }
-}
-
-impl fmt::Debug for Entry2 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Entry2")
-            .field("free", &self.free())
-            .field("page", &self.page())
-            .finish()
     }
 }
 

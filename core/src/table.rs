@@ -6,8 +6,8 @@ use core::sync::atomic::{self, Ordering::*};
 use crossbeam_utils::atomic::AtomicCell;
 use log::error;
 
+use crate::util::align_down;
 use crate::util::Page;
-use crate::util::{align_down, align_up};
 use crate::Error;
 
 pub const PT_ORDER: usize = 9;
@@ -312,10 +312,12 @@ pub struct Mapping<const L: usize>(pub [usize; L]);
 impl<const L: usize> Mapping<L> {
     pub const LEVELS: usize = L;
 
+    #[inline(always)]
     pub const fn levels(&self) -> usize {
         L
     }
 
+    #[inline(always)]
     pub const fn len(&self, level: usize) -> usize {
         if level == 0 {
             1
@@ -326,12 +328,14 @@ impl<const L: usize> Mapping<L> {
 
     /// Memory bytes that the `level` covers.
     /// 0 is always 1 page.
+    #[inline(always)]
     pub const fn m_span(&self, level: usize) -> usize {
         self.span(level) << Page::SIZE_BITS
     }
 
     /// Number of pages that the `level` covers.
     /// 0 is always 1 page.
+    #[inline(always)]
     pub const fn span(&self, level: usize) -> usize {
         debug_assert!(level <= Self::LEVELS);
 
@@ -339,6 +343,7 @@ impl<const L: usize> Mapping<L> {
     }
 
     /// Log2 of the number of pages that the `level` covers.
+    #[inline(always)]
     pub const fn order(&self, level: usize) -> usize {
         debug_assert!(level <= Self::LEVELS);
 
@@ -351,11 +356,13 @@ impl<const L: usize> Mapping<L> {
         res
     }
 
+    #[inline(always)]
     pub const fn max_order(&self) -> usize {
         self.order(Self::LEVELS)
     }
 
     /// Returns pt index that contains the `page`
+    #[inline(always)]
     pub const fn idx(&self, level: usize, page: usize) -> usize {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
@@ -363,11 +370,13 @@ impl<const L: usize> Mapping<L> {
     }
 
     /// Returns the starting page of the corresponding page table
+    #[inline(always)]
     pub const fn round(&self, level: usize, page: usize) -> usize {
         align_down(page, self.span(level))
     }
 
     /// Returns the page at the given index `i`
+    #[inline(always)]
     pub const fn page(&self, level: usize, start: usize, i: usize) -> usize {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
@@ -375,6 +384,7 @@ impl<const L: usize> Mapping<L> {
     }
 
     /// Returns the number of page tables needed to manage the number of `pages`
+    #[inline(always)]
     pub const fn num_pts(&self, level: usize, pages: usize) -> usize {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
@@ -382,13 +392,14 @@ impl<const L: usize> Mapping<L> {
     }
 
     /// Computes the index range for the given page range
+    #[inline(always)]
     pub const fn range(&self, level: usize, pages: Range<usize>) -> Range<usize> {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
         if pages.start < pages.end {
             let span_m1 = self.span(level - 1);
             let start_d = pages.start / span_m1;
-            let end_d = align_up(pages.end, span_m1) / span_m1;
+            let end_d = pages.end.div_ceil(span_m1);
 
             let entries = self.len(level);
             let max = align_down(start_d, entries) + entries;
