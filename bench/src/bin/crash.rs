@@ -42,11 +42,8 @@ fn main() {
     let pages = memory * PT_LEN * PT_LEN;
     assert!(pages >= MIN_PAGES * threads);
 
-    type A = Atom<128>;
     type C = Cache<32>;
-    let allocs: [Box<dyn Alloc>; 4] = [
-        Box::<Array<4, A>>::default(),
-        Box::<ArrayList<4, A>>::default(),
+    let allocs: [Box<dyn Alloc>; 2] = [
         Box::<Array<4, C>>::default(),
         Box::<ArrayList<4, C>>::default(),
     ];

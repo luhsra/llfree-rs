@@ -16,8 +16,6 @@ macro_rules! stop {
     () => {};
 }
 
-mod atom;
-pub use atom::Atom;
 mod cache;
 pub use cache::Cache;
 
@@ -68,7 +66,7 @@ mod test {
     use crate::upper::Init;
     use crate::util::{logging, Page};
 
-    type Lower = super::atom::Atom<512>;
+    type Lower = super::cache::Cache<512>;
 
     #[test]
     #[ignore]

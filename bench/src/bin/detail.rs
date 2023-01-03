@@ -8,14 +8,14 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::lower::Atom;
+use nvalloc::lower::Cache;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::upper::{Alloc, Array, Init};
 use nvalloc::util::{logging, Page};
 
-type Allocator = Array<3, Atom<128>>;
+type Allocator = Array<3, Cache<128>>;
 
 /// Benchmarking an allocator in more detail.
 /// This benchmark measures the time per allocation and the standard deviation.

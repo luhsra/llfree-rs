@@ -97,13 +97,8 @@ fn main() {
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
 
-    type A128 = Atom<128>;
     type C32 = Cache<32>;
-    let mut allocs: [Box<dyn Alloc>; 10] = [
-        Box::<Array<0, A128>>::default(),
-        Box::<Array<3, A128>>::default(),
-        Box::<ArrayList<0, A128>>::default(),
-        Box::<ArrayList<3, A128>>::default(),
+    let mut allocs: [Box<dyn Alloc>; 6] = [
         Box::<Array<0, C32>>::default(),
         Box::<Array<3, C32>>::default(),
         Box::<ArrayList<0, C32>>::default(),

@@ -1,10 +1,9 @@
 use core::fmt;
-use core::ops::Range;
-use core::ptr::{null, null_mut};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use crossbeam_utils::atomic::AtomicCell;
 use log::{error, info};
 use spin::Mutex;
 
@@ -19,12 +18,13 @@ use crate::{Error, Result};
 /// As expected the contention on the ticket lock is very high.
 #[repr(align(64))]
 pub struct ListLocked {
-    memory: Range<*const Page>,
-    struct_pages: Box<[StructPage]>,
+    offset: u64,
+    len: usize,
+    frames: Box<[PageFrame]>,
     /// CPU local metadata
     local: Box<[LocalCounter]>,
     /// Per page metadata
-    next: Mutex<Node<StructPage>>,
+    next: Mutex<Node>,
 }
 
 #[repr(align(64))]
@@ -50,10 +50,11 @@ impl fmt::Debug for ListLocked {
 impl Default for ListLocked {
     fn default() -> Self {
         Self {
-            memory: null()..null(),
-            next: Mutex::new(Node::new(null_mut())),
+            len: 0,
+            offset: 0,
+            next: Mutex::new(Node::new(None)),
             local: Box::new([]),
-            struct_pages: Box::new([]),
+            frames: Box::new([]),
         }
     }
 }
@@ -78,7 +79,8 @@ impl Alloc for ListLocked {
             return Err(Error::Memory);
         }
 
-        self.memory = memory.as_ptr_range();
+        self.offset = memory.as_ptr() as u64 / Page::SIZE as u64;
+        self.len = memory.len();
 
         let mut local = Vec::with_capacity(cores);
         local.resize_with(cores, || LocalCounter {
@@ -87,8 +89,8 @@ impl Alloc for ListLocked {
         self.local = local.into();
 
         let mut struct_pages = Vec::with_capacity(memory.len());
-        struct_pages.resize_with(memory.len(), || StructPage { next: null_mut() });
-        self.struct_pages = struct_pages.into();
+        struct_pages.resize_with(memory.len(), || PageFrame::new());
+        self.frames = struct_pages.into();
 
         if free_all {
             self.free_all()?;
@@ -105,11 +107,9 @@ impl Alloc for ListLocked {
             return Err(Error::Memory);
         }
 
-        if let Some(node) = self.next.lock().pop() {
+        if let Some(pfn) = self.next.lock().pop(|i| self.frames[i].get_next()) {
             self.local[core].counter.fetch_add(1, Ordering::Relaxed);
-            let addr = self.from_struct_page(node as *mut _) as u64;
-            debug_assert!(addr % Page::SIZE as u64 == 0 && self.memory.contains(&(addr as _)),);
-            Ok(addr)
+            Ok(self.from_pfn(pfn))
         } else {
             error!("No memory");
             Err(Error::Memory)
@@ -117,13 +117,15 @@ impl Alloc for ListLocked {
     }
 
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
-        if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) || order != 0 {
-            error!("invalid addr");
-            return Err(Error::Address);
+        if order != 0 {
+            error!("order {order:?} not supported");
+            return Err(Error::Memory);
         }
+        let pfn = self.to_pfn(addr)?;
 
-        let struct_page = self.to_struct_page(addr as *mut Page);
-        self.next.lock().push(unsafe { &mut *struct_page });
+        self.next
+            .lock()
+            .push(pfn, |i, n| self.frames[i].set_next(n));
         self.local[core].counter.fetch_sub(1, Ordering::Relaxed);
         Ok(())
     }
@@ -133,7 +135,7 @@ impl Alloc for ListLocked {
     }
 
     fn pages(&self) -> usize {
-        unsafe { self.memory.end.offset_from(self.memory.start) as usize }
+        self.len
     }
 
     #[cold]
@@ -159,22 +161,13 @@ impl ListLocked {
 
         let mut next = self.next.lock(); // lock here to prevent races
 
-        let begin = self.struct_pages.as_ptr();
-
-        // Safety: The next pointer is locked
-        let struct_pages = unsafe {
-            core::slice::from_raw_parts_mut(
-                self.struct_pages.as_ptr().cast_mut(),
-                self.struct_pages.len(),
-            )
-        };
         // build free lists
         for i in 1..self.pages() {
-            struct_pages[i - 1].next = unsafe { begin.add(i) as _ };
+            self.frames[i - 1].set_next(Some(i));
         }
-        struct_pages[self.pages() - 1].next = null_mut();
+        self.frames[self.pages() - 1].set_next(None);
 
-        *next = Node::new(begin as _);
+        next.set(Some(0));
         Ok(())
     }
 
@@ -184,56 +177,82 @@ impl ListLocked {
                 .counter
                 .store(self.pages() / self.local.len(), Ordering::Relaxed);
         }
-        *self.next.lock() = Node::new(null_mut());
+        self.next.lock().set(None);
         Ok(())
     }
 
     #[inline]
-    fn to_struct_page(&self, v: *mut Page) -> *mut StructPage {
-        debug_assert!(self.memory.contains(&(v as *const _)));
-        let idx = unsafe { v.offset_from(self.memory.start) };
-        unsafe { self.struct_pages.as_ptr().add(idx as _) as _ }
+    fn to_pfn(&self, addr: u64) -> Result<usize> {
+        if addr % Page::SIZE as u64 != 0 {
+            return Err(Error::Address);
+        }
+        let off = addr / (Page::SIZE as u64);
+        if let Some(pfn) = off.checked_sub(self.offset) {
+            if (pfn as usize) < self.len {
+                Ok(pfn as _)
+            } else {
+                Err(Error::Address)
+            }
+        } else {
+            Err(Error::Address)
+        }
     }
     #[inline]
-    fn from_struct_page(&self, v: *mut StructPage) -> *mut Page {
-        debug_assert!(self.struct_pages.as_ptr_range().contains(&(v as *const _)));
-        let idx = unsafe { v.offset_from(self.struct_pages.as_ptr()) };
-        unsafe { self.memory.start.add(idx as _) as _ }
+    fn from_pfn(&self, pfn: usize) -> u64 {
+        debug_assert!(pfn < self.len);
+        (self.offset + pfn as u64) * Page::SIZE as u64
     }
 }
 
 /// Representing Linux `struct page`
 #[repr(align(64))]
-struct StructPage {
+struct PageFrame {
     /// Next pointers are a bit ugly, but they are used heavily in linux
-    next: *mut StructPage,
+    next: AtomicCell<usize>,
 }
-const _: () = assert!(core::mem::align_of::<StructPage>() == 64);
+const _: () = assert!(core::mem::align_of::<PageFrame>() == 64);
+const _: () = assert!(AtomicCell::<usize>::is_lock_free());
 
-impl HasNext for StructPage {
-    fn next(&mut self) -> &mut *mut Self {
-        &mut self.next
+impl PageFrame {
+    fn new() -> Self {
+        Self {
+            next: AtomicCell::new(usize::MAX),
+        }
+    }
+    fn get_next(&self) -> Option<usize> {
+        let val = self.next.load();
+        (val < usize::MAX).then_some(val)
+    }
+    fn set_next(&self, next: Option<usize>) {
+        self.next.store(next.unwrap_or(usize::MAX));
     }
 }
 
-trait HasNext {
-    fn next(&mut self) -> &mut *mut Self;
+struct Node {
+    start: Option<usize>,
 }
 
-struct Node<T: HasNext>(*mut T);
-
-impl<T: HasNext> Node<T> {
-    fn new(v: *mut T) -> Self {
-        Self(v)
+impl Node {
+    fn new(start: Option<usize>) -> Self {
+        Self { start }
     }
-    fn push(&mut self, v: &mut T) {
-        *v.next() = self.0;
-        self.0 = v;
+    fn set(&mut self, start: Option<usize>) {
+        self.start = start;
     }
-    fn pop(&mut self) -> Option<&mut T> {
-        if let Some(curr) = unsafe { self.0.as_mut() } {
-            self.0 = *curr.next();
-            Some(curr)
+    fn push<F>(&mut self, next: usize, set_next: F)
+    where
+        F: FnOnce(usize, Option<usize>),
+    {
+        set_next(next, self.start);
+        self.start = Some(next);
+    }
+    fn pop<F>(&mut self, get_next: F) -> Option<usize>
+    where
+        F: FnOnce(usize) -> Option<usize>,
+    {
+        if let Some(idx) = self.start {
+            self.start = get_next(idx);
+            Some(idx)
         } else {
             None
         }
@@ -267,8 +286,7 @@ mod test {
 
         let alloc = Arc::new({
             let mut a = Allocator::default();
-            a.init(1, &mut mapping, Init::Volatile, true)
-                .unwrap();
+            a.init(1, &mut mapping, Init::Volatile, true).unwrap();
             a
         });
 

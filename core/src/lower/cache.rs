@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use alloc::slice;
 use alloc::string::String;
 
-use crate::entry::{Entry2, Entry2Pair};
+use crate::entry::{Child, ChildPair};
 use crate::table::AtomicArray;
 use crate::upper::{Init, CAS_RETRIES};
 use crate::util::{align_down, align_up, spin_wait, Page};
@@ -39,7 +39,7 @@ type Bitfield = crate::table::Bitfield<8>;
 pub struct Cache<const HP: usize> {
     area: &'static mut [Page],
     bitfields: Box<[Bitfield]>,
-    tables: Box<[[AtomicCell<Entry2>; HP]]>,
+    tables: Box<[[AtomicCell<Child>; HP]]>,
     persistent: bool,
 }
 
@@ -87,8 +87,8 @@ where
             // Reserve memory within the managed NVM for the l1 and l2 tables
             // These tables are stored at the end of the NVM
             let size_bitfields = num_bitfields * size_of::<Bitfield>();
-            let size_bitfields = align_up(size_bitfields, size_of::<[Entry2; HP]>()); // correct alignment
-            let size_tables = num_bitfields * size_of::<[Entry2; HP]>();
+            let size_bitfields = align_up(size_bitfields, size_of::<[Child; HP]>()); // correct alignment
+            let size_tables = num_bitfields * size_of::<[Child; HP]>();
             // Num of pages occupied by the tables
             let metadata_pages = (size_bitfields + size_tables).div_ceil(Page::SIZE);
 
@@ -102,7 +102,7 @@ where
                 unsafe { Box::from_raw(slice::from_raw_parts_mut(tables.cast(), num_bitfields)) };
 
             let mut offset = num_bitfields * size_of::<Bitfield>();
-            offset = align_up(offset, size_of::<[Entry2; HP]>()); // correct alignment
+            offset = align_up(offset, size_of::<[Child; HP]>()); // correct alignment
 
             // Start of the l2 table array
             let tables = unsafe {
@@ -155,7 +155,7 @@ where
             let i = start / Bitfield::LEN;
 
             if start > self.pages() {
-                a_entry.store(Entry2::new());
+                a_entry.store(Child::new());
                 continue;
             }
 
@@ -220,7 +220,7 @@ where
             let table = &self.tables[page / Self::N];
 
             if let Err(old) =
-                table[i].compare_exchange(Entry2::new_page(), Entry2::new_free(Bitfield::LEN))
+                table[i].compare_exchange(Child::new_page(), Child::new_free(Bitfield::LEN))
             {
                 error!("Addr p={page:x} o={order} {old:?}");
                 Err(Error::Address)
@@ -309,7 +309,7 @@ where
     fn size_per_gib() -> usize {
         let pages = 1usize << (30 - Page::SIZE_BITS);
         let size_bitfields = pages.div_ceil(8); // 1 bit per page
-        let size_tables = size_of::<Entry2>() * pages.div_ceil(Bitfield::LEN);
+        let size_tables = size_of::<Child>() * pages.div_ceil(Bitfield::LEN);
         size_bitfields + size_tables
     }
 }
@@ -319,7 +319,7 @@ where
     [(); HP / 2]:,
 {
     /// Returns the table with pair entries that can be updated at once.
-    fn table_pair(&self, page: usize) -> &[AtomicCell<Entry2Pair>; HP / 2] {
+    fn table_pair(&self, page: usize) -> &[AtomicCell<ChildPair>; HP / 2] {
         let table = &self.tables[page / Self::N];
         unsafe { &*table.as_ptr().cast() }
     }
@@ -329,13 +329,13 @@ where
         let (last, tables) = self.tables.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
-            unsafe { table.atomic_fill(Entry2::new_free(Bitfield::LEN)) };
+            unsafe { table.atomic_fill(Child::new_free(Bitfield::LEN)) };
         }
         // Table is only partially included in the memory range
         for (i, entry) in last.iter().enumerate() {
             let page = tables.len() * Self::N + i * Bitfield::LEN;
             let free = self.pages().saturating_sub(page).min(Bitfield::LEN);
-            entry.store(Entry2::new_free(free));
+            entry.store(Child::new_free(free));
         }
 
         // Init bitfields
@@ -364,17 +364,17 @@ where
         let (last, tables) = self.tables.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
-            unsafe { table.atomic_fill(Entry2::new_page()) };
+            unsafe { table.atomic_fill(Child::new_page()) };
         }
         // Table is only partially included in the memory range
         let last_i = (self.pages() / Bitfield::LEN) - tables.len() * HP;
         let (included, remainder) = last.split_at(last_i);
         for entry in included {
-            entry.store(Entry2::new_page());
+            entry.store(Child::new_page());
         }
         // Remainder is allocated as small pages
         for entry in remainder {
-            entry.store(Entry2::new_free(0));
+            entry.store(Child::new_free(0));
         }
 
         // Init bitfields
@@ -507,10 +507,10 @@ where
         let i = ((page / Bitfield::LEN) % HP) / 2;
 
         if let Err(old) = table_pair[i].compare_exchange(
-            Entry2Pair(Entry2::new_page(), Entry2::new_page()),
-            Entry2Pair(
-                Entry2::new_free(Bitfield::LEN),
-                Entry2::new_free(Bitfield::LEN),
+            ChildPair(Child::new_page(), Child::new_page()),
+            ChildPair(
+                Child::new_free(Bitfield::LEN),
+                Child::new_free(Bitfield::LEN),
             ),
         ) {
             error!("Addr {page:x} o={} {old:?} i={i}", Self::MAX_ORDER);
@@ -520,7 +520,7 @@ where
         }
     }
 
-    fn partial_put_huge(&self, old: Entry2, page: usize, order: usize) -> Result<()> {
+    fn partial_put_huge(&self, old: Child, page: usize, order: usize) -> Result<()> {
         warn!("partial free of huge page {page:x} o={order}");
         let i = (page / Bitfield::LEN) % HP;
         let table = &self.tables[page / Self::N];
@@ -528,7 +528,7 @@ where
 
         // Try filling the whole bitfield
         if bitfield.fill_cas(true) {
-            if table[i].compare_exchange(old, Entry2::new()).is_err() {
+            if table[i].compare_exchange(old, Child::new()).is_err() {
                 error!("Failed partial clear");
                 return Err(Error::Corruption);
             }

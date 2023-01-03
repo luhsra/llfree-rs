@@ -5,7 +5,7 @@ use core::ops::Index;
 use crossbeam_utils::atomic::AtomicCell;
 use log::error;
 
-use crate::entry::Entry3;
+use crate::entry::TreeNode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Next {
@@ -42,11 +42,11 @@ pub trait ANode: Eq + Copy + Default {
     }
 }
 
-impl ANode for Entry3 {
+impl ANode for TreeNode {
     fn next(self) -> Next {
         match self.idx() {
-            Entry3::IDX_MAX => Next::Outside,
-            Entry3::IDX_END => Next::End,
+            TreeNode::IDX_MAX => Next::Outside,
+            TreeNode::IDX_END => Next::End,
             i => Next::Some(i),
         }
     }
@@ -54,8 +54,8 @@ impl ANode for Entry3 {
     fn with_next(self, next: Next) -> Self {
         self.with_idx(match next {
             Next::Some(i) => i,
-            Next::End => Entry3::IDX_END,
-            Next::Outside => Entry3::IDX_MAX,
+            Next::End => TreeNode::IDX_END,
+            Next::Outside => TreeNode::IDX_MAX,
         })
     }
 }

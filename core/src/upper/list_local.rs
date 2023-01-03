@@ -1,11 +1,9 @@
 use core::cell::UnsafeCell;
 use core::fmt;
-use core::ops::Range;
-use core::ptr::{null, null_mut};
 
 use alloc::boxed::Box;
-use alloc::slice;
 use alloc::vec::Vec;
+use crossbeam_utils::atomic::AtomicCell;
 use log::{error, info};
 
 use super::{Alloc, Init, MIN_PAGES};
@@ -22,11 +20,11 @@ use crate::{Error, Result};
 /// the allocation fails.
 #[repr(align(64))]
 pub struct ListLocal {
-    memory: Range<*const Page>,
-    struct_pages: Box<[StructPage]>,
+    frames: Box<[PageFrame]>,
     /// CPU local metadata
     local: Box<[UnsafeCell<Local>]>,
-    pages: usize,
+    offset: u64,
+    len: usize,
 }
 
 unsafe impl Send for ListLocal {}
@@ -47,10 +45,10 @@ impl fmt::Debug for ListLocal {
 impl Default for ListLocal {
     fn default() -> Self {
         Self {
-            memory: null()..null(),
-            struct_pages: Box::new([]),
+            frames: Box::new([]),
             local: Box::new([]),
-            pages: 0,
+            offset: 0,
+            len: 0,
         }
     }
 }
@@ -79,11 +77,11 @@ impl Alloc for ListLocal {
         local.resize_with(cores, || UnsafeCell::new(Local::default()));
 
         let mut struct_pages = Vec::with_capacity(memory.len());
-        struct_pages.resize_with(memory.len(), || StructPage { next: null_mut() });
-        self.struct_pages = struct_pages.into();
+        struct_pages.resize_with(memory.len(), || PageFrame::new());
+        self.frames = struct_pages.into();
 
-        self.pages = (memory.len() / cores) * cores;
-        self.memory = memory[..self.pages].as_ptr_range();
+        self.len = (memory.len() / cores) * cores;
+        self.offset = memory.as_ptr() as u64 / Page::SIZE as u64;
         self.local = local.into();
 
         if free_all {
@@ -101,12 +99,10 @@ impl Alloc for ListLocal {
             return Err(Error::Memory);
         }
 
-        let local = unsafe { &mut *self.local[core].get() };
-        if let Some(node) = local.next.pop() {
+        let local = self.local(core);
+        if let Some(index) = local.next.pop(|i| self.frames[i].get_next()) {
             local.counter += 1;
-            let addr = self.from_struct_page(node as *mut _) as u64;
-            debug_assert!(addr % Page::SIZE as u64 == 0 && self.memory.contains(&(addr as _)));
-            Ok(addr)
+            Ok(self.from_pfn(index) as u64)
         } else {
             error!("No memory");
             Err(Error::Memory)
@@ -114,14 +110,14 @@ impl Alloc for ListLocal {
     }
 
     fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
-        if addr % Page::SIZE as u64 != 0 || !self.memory.contains(&(addr as _)) || order != 0 {
-            error!("invalid addr");
+        if order != 0 {
+            error!("order {order:?} not supported");
             return Err(Error::Address);
         }
 
-        let local = unsafe { &mut *self.local[core].get() };
-        let struct_page = self.to_struct_page(addr as *mut Page);
-        local.next.push(unsafe { &mut *struct_page });
+        let pfn = self.to_pfn(addr)?;
+        let local = self.local(core);
+        local.next.push(pfn, |i, n| self.frames[i].set_next(n));
         local.counter -= 1;
         Ok(())
     }
@@ -131,7 +127,7 @@ impl Alloc for ListLocal {
     }
 
     fn pages(&self) -> usize {
-        self.pages
+        self.len
     }
 
     #[cold]
@@ -139,7 +135,7 @@ impl Alloc for ListLocal {
 
     #[cold]
     fn dbg_free_pages(&self) -> usize {
-        let mut pages = self.pages;
+        let mut pages = self.len;
         for local in self.local.iter() {
             let local = unsafe { &*local.get() };
             pages -= local.counter;
@@ -149,24 +145,24 @@ impl Alloc for ListLocal {
 }
 
 impl ListLocal {
+    #[allow(clippy::mut_from_ref)]
+    fn local(&self, core: usize) -> &mut Local {
+        unsafe { &mut *self.local[core].get() }
+    }
+
     #[cold]
     fn free_all(&self) -> Result<()> {
         let cores = self.local.len();
-        let struct_pages = unsafe {
-            slice::from_raw_parts_mut(self.struct_pages.as_ptr() as *mut StructPage, self.pages)
-        };
-
-        let begin = self.struct_pages.as_ptr();
         // build core local free lists
-        let p_core = self.pages / cores;
+        let p_core = self.len / cores;
         for core in 0..cores {
-            let l = unsafe { &mut *self.local[core].get() };
+            let l = self.local(core);
             // build linked list
-            for i in core * p_core + 1..(core + 1) * p_core {
-                struct_pages[i - 1].next = unsafe { begin.add(i).cast_mut() };
+            for pfn in core * p_core + 1..(core + 1) * p_core {
+                self.frames[pfn - 1].set_next(Some(pfn));
             }
-            struct_pages[(core + 1) * p_core - 1].next = null_mut();
-            l.next.set(unsafe { begin.add(core * p_core).cast_mut() });
+            self.frames[(core + 1) * p_core - 1].set_next(None);
+            l.next.set(Some(core * p_core));
             l.counter = 0;
         }
         Ok(())
@@ -177,37 +173,46 @@ impl ListLocal {
         let cores = self.local.len();
 
         for core in 0..cores {
-            let l = unsafe { &mut *self.local[core].get() };
-            l.next.set(null_mut());
+            let l = self.local(core);
+            l.next.set(None);
             l.counter = self.pages() / cores;
         }
         Ok(())
     }
 
     #[inline]
-    fn to_struct_page(&self, v: *mut Page) -> *mut StructPage {
-        debug_assert!(self.memory.contains(&(v as *const _)));
-        let idx = unsafe { v.offset_from(self.memory.start) };
-        unsafe { self.struct_pages.as_ptr().add(idx as _) as _ }
+    fn to_pfn(&self, addr: u64) -> Result<usize> {
+        if addr % Page::SIZE as u64 != 0 {
+            return Err(Error::Address);
+        }
+        let off = addr / (Page::SIZE as u64);
+        if let Some(pfn) = off.checked_sub(self.offset) {
+            if (pfn as usize) < self.len {
+                Ok(pfn as _)
+            } else {
+                Err(Error::Address)
+            }
+        } else {
+            Err(Error::Address)
+        }
     }
     #[inline]
-    fn from_struct_page(&self, v: *mut StructPage) -> *mut Page {
-        debug_assert!(self.struct_pages.as_ptr_range().contains(&(v as *const _)));
-        let idx = unsafe { v.offset_from(self.struct_pages.as_ptr()) };
-        unsafe { self.memory.start.add(idx as _) as _ }
+    fn from_pfn(&self, pfn: usize) -> u64 {
+        debug_assert!(pfn < self.len);
+        (self.offset + pfn as u64) * Page::SIZE as u64
     }
 }
 
 #[repr(align(64))]
 struct Local {
-    next: Node<StructPage>,
+    next: Node,
     counter: usize,
 }
 
 impl Default for Local {
     fn default() -> Self {
         Self {
-            next: Node::new(null_mut()),
+            next: Node::new(None),
             counter: 0,
         }
     }
@@ -215,39 +220,53 @@ impl Default for Local {
 
 /// Representing Linux `struct page`
 #[repr(align(64))]
-struct StructPage {
+struct PageFrame {
     /// Next pointers are a bit ugly, but they are used heavily in linux
-    next: *mut StructPage,
+    next: AtomicCell<usize>,
 }
-const _: () = assert!(core::mem::align_of::<StructPage>() == 64);
+const _: () = assert!(core::mem::align_of::<PageFrame>() == 64);
+const _: () = assert!(AtomicCell::<usize>::is_lock_free());
 
-impl HasNext for StructPage {
-    fn next(&mut self) -> &mut *mut Self {
-        &mut self.next
+impl PageFrame {
+    fn new() -> Self {
+        Self {
+            next: AtomicCell::new(usize::MAX),
+        }
+    }
+    fn get_next(&self) -> Option<usize> {
+        let val = self.next.load();
+        (val < usize::MAX).then_some(val)
+    }
+    fn set_next(&self, next: Option<usize>) {
+        self.next.store(next.unwrap_or(usize::MAX));
     }
 }
 
-trait HasNext {
-    fn next(&mut self) -> &mut *mut Self;
+struct Node {
+    start: Option<usize>,
 }
 
-struct Node<T: HasNext>(*mut T);
-
-impl<T: HasNext> Node<T> {
-    fn new(v: *mut T) -> Self {
-        Self(v)
+impl Node {
+    fn new(start: Option<usize>) -> Self {
+        Self { start }
     }
-    fn set(&mut self, v: *mut T) {
-        self.0 = v;
+    fn set(&mut self, start: Option<usize>) {
+        self.start = start;
     }
-    fn push(&mut self, v: &mut T) {
-        *v.next() = self.0;
-        self.0 = v;
+    fn push<F>(&mut self, next: usize, set_next: F)
+    where
+        F: FnOnce(usize, Option<usize>),
+    {
+        set_next(next, self.start);
+        self.start = Some(next);
     }
-    fn pop(&mut self) -> Option<&mut T> {
-        if let Some(curr) = unsafe { self.0.as_mut() } {
-            self.0 = *curr.next();
-            Some(curr)
+    fn pop<F>(&mut self, get_next: F) -> Option<usize>
+    where
+        F: FnOnce(usize) -> Option<usize>,
+    {
+        if let Some(idx) = self.start {
+            self.start = get_next(idx);
+            Some(idx)
         } else {
             None
         }
@@ -256,13 +275,12 @@ impl<T: HasNext> Node<T> {
 
 #[cfg(test)]
 mod test {
-    use alloc::sync::Arc;
     use alloc::vec::Vec;
     use log::{info, warn};
 
     use crate::mmap::test_mapping;
     use crate::table::PT_LEN;
-    use crate::upper::{Alloc, Init};
+    use crate::upper::{Alloc, AllocExt, Init};
     use crate::util::{logging, Page};
     use crate::Error;
 
@@ -279,12 +297,7 @@ mod test {
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(1, &mut mapping, Init::Volatile, true)
-                .unwrap();
-            a
-        });
+        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
 
         assert_eq!(alloc.dbg_free_pages(), alloc.pages());
 

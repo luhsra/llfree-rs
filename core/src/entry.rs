@@ -3,23 +3,25 @@ use core::mem::{align_of, size_of};
 use core::ops::{Range, RangeBounds};
 
 use bitfield_struct::bitfield;
+use crossbeam_utils::atomic::AtomicCell;
 use log::error;
 
 /// Level 3 entry
 #[bitfield(u64)]
 #[derive(Default, PartialEq, Eq)]
-pub struct Entry3 {
+pub struct TreeNode {
     /// Number of free 4K pages.
     #[bits(20)]
     pub free: usize,
-    /// Metadata for the higher level allocators.
+    /// Index of the next tree node (linked list).
     #[bits(43)]
     pub idx: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
 }
+const _: () = assert!(AtomicCell::<TreeNode>::is_lock_free());
 
-impl Entry3 {
+impl TreeNode {
     pub const IDX_MAX: usize = (1 << Self::IDX_BITS) - 1;
     pub const IDX_END: usize = (1 << Self::IDX_BITS) - 2;
 
@@ -27,20 +29,8 @@ impl Entry3 {
         Self::new().with_free(span)
     }
     /// Creates a new entry referring to a level 2 page table.
-    pub fn new_table(pages: usize, reserved: bool) -> Self {
-        Self::new().with_free(pages).with_reserved(reserved)
-    }
-    /// If this entry has a valid idx.
-    pub fn has_idx(self) -> bool {
-        self.idx() < Self::IDX_END
-    }
-    /// Decrements the free pages counter.
-    pub fn dec(self, num_pages: usize) -> Option<Self> {
-        if self.idx() <= Self::IDX_END && self.free() >= num_pages {
-            Some(self.with_free(self.free() - num_pages))
-        } else {
-            None
-        }
+    pub fn new_with(free: usize, idx: usize) -> Self {
+        Self::new().with_free(free).with_idx(idx)
     }
     /// Increments the free pages counter.
     pub fn inc(self, num_pages: usize, max: usize) -> Option<Self> {
@@ -67,11 +57,6 @@ impl Entry3 {
             None
         }
     }
-    /// Updates the reserve flag to `new` if `old != new`.
-    pub fn toggle_reserve(self, new: bool) -> Option<Self> {
-        (self.reserved() != new).then_some(self.with_reserved(new))
-    }
-
     /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
     pub fn unreserve_add(self, add: usize, max: usize) -> Option<Self> {
@@ -85,39 +70,115 @@ impl Entry3 {
     }
 }
 
-impl From<SEntry3> for Entry3 {
-    fn from(value: SEntry3) -> Self {
-        Self::new_table(value.free(), value.reserved())
+/// Level 3 entry
+#[bitfield(u64, debug = false)]
+#[derive(PartialEq, Eq)]
+pub struct ReservedTree {
+    /// Number of free 4K pages.
+    #[bits(16)]
+    pub free: usize,
+    /// If this subtree is locked by a CPU.
+    pub locked: bool,
+    /// Start pfn / 64 within this reserved tree.
+    #[bits(47)]
+    start_raw: usize,
+}
+const _: () = assert!(AtomicCell::<ReservedTree>::is_lock_free());
+
+impl Default for ReservedTree {
+    fn default() -> Self {
+        Self::new().with_start_raw(Self::START_RAW_MAX)
+    }
+}
+
+impl ReservedTree {
+    const START_RAW_MAX: usize = (1 << Self::START_RAW_BITS) - 1;
+
+    /// Creates a new entry referring to a level 2 page table.
+    pub fn new_with(free: usize, start: usize) -> Self {
+        Self::new().with_free(free).with_start(start)
+    }
+    /// If this entry has a valid start pfn.
+    pub fn has_start(self) -> bool {
+        self.start_raw() < Self::START_RAW_MAX
+    }
+    /// Start page frame number.
+    #[inline(always)]
+    pub fn start(self) -> usize {
+        self.start_raw() * 64
+    }
+    #[inline(always)]
+    pub fn with_start(self, start: usize) -> Self {
+        let raw = start / 64;
+        debug_assert!(raw < (1 << Self::START_RAW_BITS));
+        self.with_start_raw(raw)
+    }
+    #[inline(always)]
+    pub fn set_start(&mut self, start: usize) {
+        *self = self.with_start(start);
+    }
+
+    /// Decrements the free pages counter.
+    pub fn dec(self, num_pages: usize) -> Option<Self> {
+        if self.has_start() && self.free() >= num_pages {
+            Some(self.with_free(self.free() - num_pages))
+        } else {
+            None
+        }
+    }
+    /// Increments the free pages counter.
+    pub fn inc<F: FnOnce(usize) -> bool>(
+        self,
+        num_pages: usize,
+        max: usize,
+        check_start: F,
+    ) -> Option<Self> {
+        if !check_start(self.start()) {
+            return None;
+        }
+        let pages = self.free() + num_pages;
+        if pages <= max {
+            Some(self.with_free(pages))
+        } else {
+            None
+        }
+    }
+    /// Updates the reserve flag to `new` if `old != new`.
+    pub fn toggle_locked(self, new: bool) -> Option<Self> {
+        (self.locked() != new).then_some(self.with_locked(new))
+    }
+}
+
+impl fmt::Debug for ReservedTree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReservedTree")
+            .field("free", &self.free())
+            .field("locked", &self.locked())
+            .field("start", &self.start())
+            .finish()
     }
 }
 
 #[bitfield(u16)]
 #[derive(Default, PartialEq, Eq)]
-pub struct SEntry3 {
+pub struct Tree {
     /// Number of free 4K pages.
     #[bits(15)]
     pub free: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
 }
+const _: () = assert!(AtomicCell::<Tree>::is_lock_free());
 
-impl SEntry3 {
+impl Tree {
     pub fn empty(span: usize) -> Self {
         debug_assert!(span < (1 << 15));
         Self::new().with_free(span)
     }
     /// Creates a new entry referring to a level 2 page table.
-    pub fn new_table(pages: usize, reserved: bool) -> Self {
+    pub fn new_with(pages: usize, reserved: bool) -> Self {
         debug_assert!(pages < (1 << 15));
         Self::new().with_free(pages).with_reserved(reserved)
-    }
-    /// Decrements the free pages counter.
-    pub fn dec(self, num_pages: usize) -> Option<Self> {
-        if self.free() >= num_pages {
-            Some(self.with_free(self.free() - num_pages))
-        } else {
-            None
-        }
     }
     /// Increments the free pages counter.
     pub fn inc(self, num_pages: usize, max: usize) -> Option<Self> {
@@ -136,11 +197,6 @@ impl SEntry3 {
             None
         }
     }
-    /// Updates the reserve flag to `new` if `old != new`.
-    pub fn toggle_reserve(self, new: bool) -> Option<Self> {
-        (self.reserved() != new).then_some(self.with_reserved(new))
-    }
-
     /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
     pub fn unreserve_add(self, add: usize, max: usize) -> Option<Self> {
@@ -154,23 +210,18 @@ impl SEntry3 {
     }
 }
 
-impl From<Entry3> for SEntry3 {
-    fn from(value: Entry3) -> Self {
-        Self::new_table(value.free(), value.reserved())
-    }
-}
-
 #[bitfield(u16)]
 #[derive(Default, PartialEq, Eq)]
-pub struct Entry2 {
+pub struct Child {
     /// Number of free 4K pages.
     #[bits(15)]
     pub free: usize,
     /// If this entry is reserved by a CPU.
     pub page: bool,
 }
+const _: () = assert!(AtomicCell::<Child>::is_lock_free());
 
-impl Entry2 {
+impl Child {
     pub fn new_page() -> Self {
         Self::new().with_page(true)
     }
@@ -205,224 +256,21 @@ impl Entry2 {
 /// Pair of level 2 entries that can be changed at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(align(4))]
-pub struct Entry2Pair(pub Entry2, pub Entry2);
+pub struct ChildPair(pub Child, pub Child);
 
-const _: () = assert!(size_of::<Entry2Pair>() == 2 * size_of::<Entry2>());
-const _: () = assert!(align_of::<Entry2Pair>() == size_of::<Entry2Pair>());
+const _: () = assert!(AtomicCell::<ChildPair>::is_lock_free());
+const _: () = assert!(size_of::<ChildPair>() == 2 * size_of::<Child>());
+const _: () = assert!(align_of::<ChildPair>() == size_of::<ChildPair>());
 
-impl Entry2Pair {
-    pub fn map<F: Fn(Entry2) -> Option<Entry2>>(self, f: F) -> Option<Entry2Pair> {
+impl ChildPair {
+    pub fn map<F: Fn(Child) -> Option<Child>>(self, f: F) -> Option<ChildPair> {
         match (f(self.0), f(self.1)) {
-            (Some(a), Some(b)) => Some(Entry2Pair(a, b)),
+            (Some(a), Some(b)) => Some(ChildPair(a, b)),
             _ => None,
         }
     }
-    pub fn all<F: Fn(Entry2) -> bool>(self, f: F) -> bool {
+    pub fn all<F: Fn(Child) -> bool>(self, f: F) -> bool {
         f(self.0) && f(self.1)
-    }
-}
-
-impl From<u32> for Entry2Pair {
-    fn from(v: u32) -> Self {
-        Entry2Pair((v as u16).into(), ((v >> 16) as u16).into())
-    }
-}
-
-impl From<Entry2Pair> for u32 {
-    fn from(v: Entry2Pair) -> Self {
-        u16::from(v.0) as u32 | ((u16::from(v.1) as u32) << 16)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub struct SEntry2(u8);
-
-impl SEntry2 {
-    pub fn new() -> Self {
-        Self(0)
-    }
-    pub fn new_page() -> Self {
-        Self::new().with_page(true)
-    }
-    pub fn new_free(free: usize) -> Self {
-        Self::new().with_free(free)
-    }
-
-    pub fn page(self) -> bool {
-        self.0 == u8::MAX
-    }
-    pub fn with_page(self, page: bool) -> Self {
-        Self(if page { u8::MAX } else { 0 })
-    }
-    pub fn free(self) -> usize {
-        if self.0 < u8::MAX {
-            self.0 as _
-        } else {
-            0
-        }
-    }
-    pub fn with_free(self, free: usize) -> Self {
-        Self(free as _)
-    }
-    pub fn mark_huge(self, span: usize) -> Option<Self> {
-        if !self.page() && self.free() == span {
-            Some(Self::new_page())
-        } else {
-            None
-        }
-    }
-    /// Decrement the free pages counter.
-    pub fn dec(self, num_pages: usize) -> Option<Self> {
-        if !self.page() && self.free() >= num_pages {
-            Some(Self::new_free(self.free() - num_pages))
-        } else {
-            None
-        }
-    }
-    /// Increments the free pages counter.
-    pub fn inc(self, span: usize, num_pages: usize) -> Option<Self> {
-        if !self.page() && self.free() <= span - num_pages {
-            Some(Self::new_free(self.free() + num_pages))
-        } else {
-            None
-        }
-    }
-}
-
-impl From<u8> for SEntry2 {
-    fn from(v: u8) -> Self {
-        Self(v)
-    }
-}
-impl From<SEntry2> for u8 {
-    fn from(v: SEntry2) -> Self {
-        v.0
-    }
-}
-
-impl fmt::Debug for SEntry2 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SEntry2")
-            .field("free", &self.free())
-            .field("page", &self.page())
-            .finish()
-    }
-}
-
-pub trait SEntry2Tuple: fmt::Debug + Copy + Eq + Sized {
-    const N: usize;
-    fn new(v: SEntry2) -> Self;
-    fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self>;
-}
-
-impl SEntry2Tuple for SEntry2 {
-    const N: usize = 1;
-    fn new(v: SEntry2) -> Self {
-        v
-    }
-    fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
-        f(self)
-    }
-}
-
-/// Tuple of level 2 entries that can be changed at once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// #[repr(packed)]
-#[repr(align(8))]
-pub struct SEntry2T8(pub [SEntry2; 8]);
-const _: () = assert!(size_of::<SEntry2T8>() == 8 * size_of::<SEntry2>());
-const _: () = assert!(align_of::<SEntry2T8>() == size_of::<SEntry2T8>());
-
-impl From<u64> for SEntry2T8 {
-    fn from(v: u64) -> Self {
-        SEntry2T8(v.to_le_bytes().map(SEntry2::from))
-    }
-}
-
-impl From<SEntry2T8> for u64 {
-    fn from(v: SEntry2T8) -> Self {
-        u64::from_le_bytes(v.0.map(u8::from))
-    }
-}
-
-impl SEntry2Tuple for SEntry2T8 {
-    const N: usize = 8;
-    fn new(v: SEntry2) -> Self {
-        Self([v; 8])
-    }
-    fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
-        match self.0.map(f) {
-            [Some(r0), Some(r1), Some(r2), Some(r3), Some(r4), Some(r5), Some(r6), Some(r7)] => {
-                Some(Self([r0, r1, r2, r3, r4, r5, r6, r7]))
-            }
-            _ => None,
-        }
-    }
-}
-
-/// Tuple of level 2 entries that can be changed at once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// #[repr(packed)]
-#[repr(align(4))]
-pub struct SEntry2T4(pub [SEntry2; 4]);
-const _: () = assert!(size_of::<SEntry2T4>() == 4 * size_of::<SEntry2>());
-const _: () = assert!(align_of::<SEntry2T4>() == size_of::<SEntry2T4>());
-
-impl From<u32> for SEntry2T4 {
-    fn from(v: u32) -> Self {
-        SEntry2T4(v.to_le_bytes().map(SEntry2::from))
-    }
-}
-
-impl From<SEntry2T4> for u32 {
-    fn from(v: SEntry2T4) -> Self {
-        u32::from_le_bytes(v.0.map(u8::from))
-    }
-}
-
-impl SEntry2Tuple for SEntry2T4 {
-    const N: usize = 4;
-    fn new(v: SEntry2) -> Self {
-        Self([v; 4])
-    }
-    fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
-        match self.0.map(f) {
-            [Some(r0), Some(r1), Some(r2), Some(r3)] => Some(Self([r0, r1, r2, r3])),
-            _ => None,
-        }
-    }
-}
-
-/// Tuple of level 2 entries that can be changed at once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// #[repr(packed)]
-#[repr(align(2))]
-pub struct SEntry2T2(pub [SEntry2; 2]);
-const _: () = assert!(size_of::<SEntry2T2>() == 2 * size_of::<SEntry2>());
-const _: () = assert!(align_of::<SEntry2T2>() == size_of::<SEntry2T2>());
-
-impl From<u16> for SEntry2T2 {
-    fn from(v: u16) -> Self {
-        SEntry2T2(v.to_le_bytes().map(SEntry2::from))
-    }
-}
-
-impl From<SEntry2T2> for u16 {
-    fn from(v: SEntry2T2) -> Self {
-        u16::from_le_bytes(v.0.map(u8::from))
-    }
-}
-
-impl SEntry2Tuple for SEntry2T2 {
-    const N: usize = 2;
-    fn new(v: SEntry2) -> Self {
-        Self([v; 2])
-    }
-    fn map<F: Fn(SEntry2) -> Option<SEntry2>>(self, f: F) -> Option<Self> {
-        match self.0.map(f) {
-            [Some(r0), Some(r1)] => Some(Self([r0, r1])),
-            _ => None,
-        }
     }
 }
 

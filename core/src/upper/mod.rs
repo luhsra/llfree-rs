@@ -4,7 +4,7 @@ use core::fmt;
 
 use crossbeam_utils::atomic::AtomicCell;
 
-use crate::entry::Entry3;
+use crate::entry::ReservedTree;
 use crate::table::PT_LEN;
 use crate::util::{Page, RingBuffer};
 use crate::Result;
@@ -172,7 +172,7 @@ impl PartialEq<AllocName> for &str {
 /// Per core data.
 pub struct Local<const F: usize> {
     /// Local copy of the reserved level 3 entry
-    reserved: AtomicCell<Entry3>,
+    reserved: AtomicCell<ReservedTree>,
     /// # Safety
     /// This should only be accessed from the corresponding (virtual) CPU core!
     last_frees: UnsafeCell<RingBuffer<usize, F>>,
@@ -181,7 +181,7 @@ pub struct Local<const F: usize> {
 impl<const F: usize> Local<F> {
     fn new() -> Self {
         Self {
-            reserved: AtomicCell::new(Entry3::new().with_idx(Entry3::IDX_MAX)),
+            reserved: AtomicCell::new(ReservedTree::default()),
             last_frees: UnsafeCell::new(RingBuffer::default()),
         }
     }
@@ -276,13 +276,6 @@ mod test {
         println!("  Static size {}B", size_of::<A4C32>());
         println!("  Size per CPU: {}B", size_of::<Local<4>>());
         println!("  Size per GiB: {}B", C32::size_per_gib());
-
-        type A128 = Atom<128>;
-        type A4A128 = Array<4, A128>;
-        println!("{}:", AllocName::new::<A4A128>());
-        println!("  Static size {}B", size_of::<A4A128>());
-        println!("  Size per CPU: {}B", size_of::<Local<4>>());
-        println!("  Size per GiB: {}B", A128::size_per_gib());
     }
 
     /// Testing the related pages heuristic for frees
