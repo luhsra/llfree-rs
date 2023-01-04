@@ -75,9 +75,6 @@ pub struct CacheAlign<T>(pub T);
 
 const _: () = assert!(align_of::<CacheAlign<usize>>() == CacheLine::SIZE);
 
-unsafe impl<T: Send> Send for CacheAlign<T> {}
-unsafe impl<T: Sync> Sync for CacheAlign<T> {}
-
 impl<T> Deref for CacheAlign<T> {
     type Target = T;
 
@@ -186,61 +183,6 @@ pub fn logging() {
         .try_init();
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(target_arch = "x86_64")] {
-        /// Executes CLWB (cache-line write back) for the given address.
-        ///
-        /// # Safety
-        /// Directly executes an asm instruction.
-        #[inline(always)]
-        pub unsafe fn _mm_clwb<T>(addr: *const T) {
-            use core::arch::asm;
-            asm!("clwb [rax]", in("rax") addr);
-        }
-
-        /// Executes RDTSC (read time-stamp counter) and returns the current cycle count.
-        ///
-        /// # Safety
-        /// Directly executes an asm instruction.
-        #[inline(always)]
-        unsafe fn time_stamp_counter() -> u64 {
-            use core::arch::asm;
-
-            let mut lo: u32;
-            let mut hi: u32;
-            asm!("rdtsc", out("eax") lo, out("edx") hi);
-            lo as u64 | (hi as u64) << 32
-        }
-
-        /// x86 cycle timer.
-        #[derive(Debug, Clone, Copy)]
-        #[repr(transparent)]
-        pub struct Cycles(u64);
-
-        impl Cycles {
-            pub fn now() -> Self {
-                Self(unsafe { time_stamp_counter() })
-            }
-            pub fn elapsed(self) -> u64 {
-                unsafe { time_stamp_counter() }.wrapping_sub(self.0)
-            }
-        }
-    } else if #[cfg(feature = "std")] {
-        /// Fallback to default ns timer.
-        #[derive(Debug, Clone, Copy)]
-        pub struct Cycles(std::time::Instant);
-
-        impl Cycles {
-            pub fn now() -> Self {
-                Self(std::time::Instant::now())
-            }
-            pub fn elapsed(self) -> u64 {
-                self.0.elapsed().as_nanos() as _
-            }
-        }
-    }
-}
-
 /// Simple bare bones random number generator based on wyhash.
 ///
 /// @see https://github.com/wangyi-fudan/wyhash
@@ -312,26 +254,7 @@ where
 
 #[cfg(all(test, feature = "std"))]
 mod test {
-    use super::{align_down, align_up, Cycles, WyRand};
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    #[ignore]
-    fn clwb() {
-        use alloc::boxed::Box;
-
-        let mut data = Box::new(43_u64);
-        *data = 44;
-        unsafe { super::_mm_clwb(data.as_ref() as *const _ as _) };
-        assert!(*data == 44);
-    }
-
-    #[test]
-    fn cycles() {
-        let cycles = Cycles::now();
-        println!("waiting...");
-        println!("cycles {}", cycles.elapsed());
-    }
+    use super::{align_down, align_up, WyRand};
 
     #[test]
     fn wy_rand() {

@@ -1,7 +1,6 @@
 use core::fmt;
 use core::mem::size_of;
 use core::ops::Index;
-use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crossbeam_utils::atomic::AtomicCell;
@@ -49,7 +48,7 @@ where
     [(); L::N]:,
 {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
-    meta: *mut Meta,
+    meta: Option<&'static Meta>,
     /// CPU local data (only shared between CPUs if the memory area is too small)
     local: Box<[Local<F>]>,
     /// Metadata of the lower alloc
@@ -122,8 +121,7 @@ where
         if init != Init::Volatile {
             // Last frame is reserved for metadata
             let (m, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
-            let meta = rem[0].cast_mut::<Meta>();
-            self.meta = meta;
+            self.meta = Some(unsafe { &*rem.as_ptr().cast::<Meta>() });
             memory = m;
         }
 
@@ -145,7 +143,7 @@ where
 
         self.trees.init(self.pages(), free_all);
 
-        if let Some(meta) = unsafe { self.meta.as_ref() } {
+        if let Some(meta) = self.meta {
             meta.pages.store(self.pages(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
             meta.crashed.store(true, Ordering::SeqCst);
@@ -287,7 +285,7 @@ where
     [(); L::N]:,
 {
     fn drop(&mut self) {
-        if let Some(meta) = unsafe { self.meta.as_mut() } {
+        if let Some(meta) = self.meta {
             meta.crashed.store(false, Ordering::SeqCst);
         }
     }
@@ -298,7 +296,7 @@ where
 {
     fn default() -> Self {
         Self {
-            meta: null_mut(),
+            meta: None,
             trees: Default::default(),
             local: Default::default(),
             lower: Default::default(),
@@ -313,7 +311,7 @@ where
     /// Recover the allocator from NVM after reboot.
     /// If crashed then the level 1 page tables are traversed and diverging counters are corrected.
     fn recover(&mut self) -> Result<()> {
-        if let Some(meta) = unsafe { self.meta.as_ref() } {
+        if let Some(meta) = self.meta {
             if meta.pages.load(Ordering::SeqCst) == self.pages()
                 && meta.magic.load(Ordering::SeqCst) == MAGIC
             {

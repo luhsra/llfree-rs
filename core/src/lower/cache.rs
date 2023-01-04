@@ -329,7 +329,7 @@ where
         let (last, tables) = self.tables.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
-            unsafe { table.atomic_fill(Child::new_free(Bitfield::LEN)) };
+            table.atomic_fill(Child::new_free(Bitfield::LEN));
         }
         // Table is only partially included in the memory range
         for (i, entry) in last.iter().enumerate() {
@@ -364,7 +364,7 @@ where
         let (last, tables) = self.tables.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
-            unsafe { table.atomic_fill(Child::new_page()) };
+            table.atomic_fill(Child::new_page());
         }
         // Table is only partially included in the memory range
         let last_i = (self.pages() / Bitfield::LEN) - tables.len() * HP;
@@ -575,8 +575,6 @@ impl<const HP: usize> Drop for Cache<HP> {
 #[cfg(feature = "stop")]
 #[cfg(all(test, feature = "std"))]
 mod test {
-    use std::sync::Arc;
-
     use alloc::vec::Vec;
     use log::warn;
 
@@ -613,17 +611,16 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(Allocator::new(2, &mut buffer, Init::Overwrite, true));
+            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
             lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
 
-            let l = lower.clone();
-            thread::parallel(0..2, move |t| {
+            thread::parallel(0..2, |t| {
                 thread::pin(t);
                 let key = Stopper::init(stop, t as _);
 
-                let page = l.get(0, 0).unwrap();
+                let page = lower.get(0, 0).unwrap();
                 drop(key);
                 assert!(page != 0);
             });
@@ -648,15 +645,14 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(Allocator::new(2, &mut buffer, Init::Overwrite, true));
+            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
 
             let stop = StopVec::new(2, order);
-            let l = lower.clone();
-            thread::parallel(0..2, move |t| {
+            thread::parallel(0..2, |t| {
                 thread::pin(t);
                 let _stopper = Stopper::init(stop, t as _);
 
-                l.get(0, 0).unwrap();
+                lower.get(0, 0).unwrap();
             });
 
             let entry2 = lower.tables[0][0].load();
@@ -680,19 +676,18 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(Allocator::new(2, &mut buffer, Init::Overwrite, true));
+            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
 
             for _ in 0..Bitfield::LEN - 1 {
                 lower.get(0, 0).unwrap();
             }
 
             let stop = StopVec::new(2, order);
-            let l = lower.clone();
-            thread::parallel(0..2, move |t| {
+            thread::parallel(0..2, |t| {
                 thread::pin(t);
                 let _stopper = Stopper::init(stop, t as _);
 
-                l.get(0, 0).unwrap();
+                lower.get(0, 0).unwrap();
             });
 
             let table = &lower.tables[0];
@@ -717,20 +712,16 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(Allocator::new(2, &mut buffer, Init::Overwrite, true));
+            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
 
             pages[0] = lower.get(0, 0).unwrap();
             pages[1] = lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
-            let l = lower.clone();
-            thread::parallel(0..2, {
-                let pages = pages.clone();
-                move |t| {
-                    let _stopper = Stopper::init(stop, t as _);
+            thread::parallel(0..2, |t| {
+                let _stopper = Stopper::init(stop, t as _);
 
-                    l.put(pages[t as usize], 0).unwrap();
-                }
+                lower.put(pages[t as usize], 0).unwrap();
             });
 
             assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN);
@@ -752,18 +743,17 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(Allocator::new(2, &mut buffer, Init::Overwrite, true));
+            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
 
             for page in &mut pages {
                 *page = lower.get(0, 0).unwrap();
             }
 
             let stop = StopVec::new(2, order);
-            let l = lower.clone();
-            thread::parallel(0..2, move |t| {
+            thread::parallel(0..2, |t| {
                 let _stopper = Stopper::init(stop, t as _);
 
-                l.put(pages[t as usize], 0).unwrap();
+                lower.put(pages[t as usize], 0).unwrap();
             });
 
             let table = &lower.tables[0];
@@ -792,7 +782,7 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(Allocator::new(2, &mut buffer, Init::Overwrite, true));
+            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
 
             for page in &mut pages[..Bitfield::LEN - 1] {
                 *page = lower.get(0, 0).unwrap();
@@ -841,18 +831,17 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(Allocator::new(2, &mut buffer, Init::Overwrite, true));
+            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
             lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
 
-            let l = lower.clone();
-            thread::parallel(0..2, move |t| {
+            thread::parallel(0..2, |t| {
                 thread::pin(t);
                 let key = Stopper::init(stop, t as _);
 
                 let order = t + 1; // order 1 and 2
-                let page = l.get(0, order).unwrap();
+                let page = lower.get(0, order).unwrap();
                 drop(key);
                 assert!(page != 0);
             });
@@ -878,7 +867,7 @@ mod test {
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Arc::new(Allocator::new(2, &mut buffer, Init::Overwrite, true));
+            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
 
             pages[0] = lower.get(0, 1).unwrap();
             pages[1] = lower.get(0, 2).unwrap();
@@ -886,14 +875,10 @@ mod test {
             assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN - 2 - 4);
 
             let stop = StopVec::new(2, order);
-            let l = lower.clone();
-            thread::parallel(0..2, {
-                let pages = pages.clone();
-                move |t| {
-                    let _stopper = Stopper::init(stop, t as _);
+            thread::parallel(0..2, |t| {
+                let _stopper = Stopper::init(stop, t as _);
 
-                    l.put(pages[t as usize], t + 1).unwrap();
-                }
+                lower.put(pages[t as usize], t + 1).unwrap();
             });
 
             assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN);
@@ -908,7 +893,7 @@ mod test {
         let mut buffer = vec![Page::new(); Allocator::N];
 
         thread::pin(0);
-        let lower = Arc::new(Allocator::new(1, &mut buffer, Init::Overwrite, true));
+        let lower = Allocator::new(1, &mut buffer, Init::Overwrite, true);
 
         assert_eq!(lower.dbg_allocated_pages(), 0);
 
@@ -948,7 +933,7 @@ mod test {
         let mut buffer = vec![Page::new(); Allocator::N - 1];
         let num_max_pages = buffer.len() / (1 << MAX_ORDER);
 
-        let lower = Arc::new(Allocator::new(1, &mut buffer, Init::Volatile, false));
+        let lower = Allocator::new(1, &mut buffer, Init::Volatile, false);
 
         assert_eq!(lower.dbg_allocated_pages(), Allocator::N - 1);
 
@@ -965,7 +950,7 @@ mod test {
 
         let mut buffer = vec![Page::new(); Allocator::N - 1];
 
-        let lower = Arc::new(Allocator::new(1, &mut buffer, Init::Volatile, false));
+        let lower = Allocator::new(1, &mut buffer, Init::Volatile, false);
 
         assert_eq!(lower.dbg_allocated_pages(), Allocator::N - 1);
 

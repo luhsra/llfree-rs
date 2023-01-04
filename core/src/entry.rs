@@ -282,7 +282,8 @@ mod test {
 
     #[test]
     fn pt() {
-        let pt: [AtomicCell<u64>; PT_LEN] = unsafe { core::mem::zeroed() };
+        const A: AtomicCell<u64> = AtomicCell::new(0);
+        let pt: [AtomicCell<u64>; PT_LEN] = [A; PT_LEN];
         pt[0].compare_exchange(0, 42).unwrap();
         pt[0].fetch_update(|v| Some(v + 1)).unwrap();
         assert_eq!(pt[0].load(), 43);

@@ -276,7 +276,6 @@ mod test {
     #[test]
     #[ignore]
     fn dax() {
-        use crate::util::_mm_clwb;
         use core::arch::x86_64::_mm_sfence;
 
         logging();
@@ -296,7 +295,6 @@ mod test {
         info!("previously {}", mapping[0]);
 
         mapping[0] = 42;
-        unsafe { _mm_clwb(mapping.as_ptr() as _) };
         unsafe { _mm_sfence() };
 
         assert_eq!(mapping[0], 42);

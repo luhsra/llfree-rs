@@ -16,13 +16,12 @@ pub const PT_LEN: usize = 1 << PT_ORDER;
 pub trait AtomicArray<T: Eq + Copy, const L: usize> {
     /// Overwrite the content of the whole array non-atomically.
     ///
-    /// # Safety
-    /// This is faster than atomics but vulnerable to race conditions.
-    unsafe fn atomic_fill(&self, e: T);
+    /// This is faster than atomics but does not handle race conditions.
+    fn atomic_fill(&self, e: T);
 }
 
 impl<T: Eq + Copy, const L: usize> AtomicArray<T, L> for [AtomicCell<T>; L] {
-    unsafe fn atomic_fill(&self, e: T) {
+    fn atomic_fill(&self, e: T) {
         // cast to raw memory to let the compiler use vector instructions
         #[allow(clippy::cast_ref_to_mut)]
         let mem = unsafe { &mut *(self.as_ptr() as *mut [T; L]) };
@@ -46,9 +45,8 @@ const _: () = assert!(AtomicCell::<u64>::is_lock_free());
 
 impl<const N: usize> Default for Bitfield<N> {
     fn default() -> Self {
-        Self {
-            data: unsafe { core::mem::zeroed() },
-        }
+        const A: AtomicCell<u64> = AtomicCell::new(0);
+        Self { data: [A; N] }
     }
 }
 
@@ -216,7 +214,9 @@ impl<const N: usize> Bitfield<N> {
         Err(Error::Memory)
     }
 
-    /// Fill this bitset with `v` ignoring any previous data
+    /// Fill this bitset with `v` ignoring any previous data.
+    ///
+    /// This is faster than atomics but does not handle race conditions.
     pub fn fill(&self, v: bool) {
         let v = if v { u64::MAX } else { 0 };
         // cast to raw memory to let the compiler use vector instructions
