@@ -1,12 +1,13 @@
 use core::any::type_name;
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use bitfield_struct::bitfield;
 use crossbeam_utils::atomic::AtomicCell;
 
 use crate::entry::ReservedTree;
 use crate::table::PT_LEN;
-use crate::util::Page;
+use crate::util::{CacheAlign, Page};
 use crate::Result;
 
 mod array;
@@ -183,7 +184,7 @@ pub struct Local<const F: usize> {
     /// Local copy of the reserved level 3 entry
     reserved: AtomicCell<ReservedTree>,
     /// Last frees
-    last_frees: AtomicCell<LastFrees>,
+    last_frees: CacheAlign<AtomicU64>,
 }
 
 const _: () = assert!(AtomicCell::<LastFrees>::is_lock_free());
@@ -192,23 +193,31 @@ impl<const F: usize> Local<F> {
     fn new() -> Self {
         Self {
             reserved: AtomicCell::new(ReservedTree::default()),
-            last_frees: AtomicCell::new(LastFrees::default()),
+            last_frees: CacheAlign(AtomicU64::new(LastFrees::default().into())),
         }
     }
     /// Add a tree index to the history.
     pub fn frees_push(&self, tree_index: usize) {
         // If the update of this heuristic fails, ignore it
-        let _ = self.last_frees.fetch_update(|v| {
-            if v.tree_index() == tree_index {
-                if v.count() < F {
-                    Some(v.with_count(v.count() + 1))
+        let _ = self
+            .last_frees
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                let v = LastFrees::from(v);
+                if v.tree_index() == tree_index {
+                    if v.count() < F {
+                        Some(v.with_count(v.count() + 1).into())
+                    } else {
+                        None
+                    }
                 } else {
-                    None
+                    Some(
+                        LastFrees::new()
+                            .with_tree_index(tree_index)
+                            .with_count(1)
+                            .into(),
+                    )
                 }
-            } else {
-                Some(LastFrees::new().with_tree_index(tree_index).with_count(1))
-            }
-        });
+            });
     }
     /// Calls frees_push on scope exit.
     /// # Note
@@ -219,7 +228,7 @@ impl<const F: usize> Local<F> {
     }
     /// Checks if the previous `count` frees had the same tree index.
     pub fn frees_in_tree(&self, tree_index: usize) -> bool {
-        let lf = self.last_frees.load();
+        let lf = LastFrees::from(self.last_frees.load(Ordering::Relaxed));
         lf.tree_index() == tree_index && lf.count() >= F
     }
 }
@@ -228,7 +237,10 @@ impl<const F: usize> fmt::Debug for Local<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Local")
             .field("reserved", &self.reserved.load())
-            .field("frees", &self.last_frees.load())
+            .field(
+                "frees",
+                &LastFrees::from(self.last_frees.load(Ordering::Relaxed)),
+            )
             .finish()
     }
 }

@@ -110,8 +110,8 @@ fn main() {
     // Additional constraints (perf)
     let mut conditions = HashMap::<AllocName, &'static dyn Fn(usize, usize) -> bool>::new();
     conditions.insert(AllocName::new::<ListLocal>(), &|_, order| order == 0);
-    conditions.insert(AllocName::new::<ListLocked>(), &|cores, order| {
-        order == 0 && (cores <= 16 || cores == 32)
+    conditions.insert(AllocName::new::<ListLocked>(), &|_, order| {
+        order == 0 //&& (cores <= 16 || cores == 32)
     });
 
     for x in x {

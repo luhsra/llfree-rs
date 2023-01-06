@@ -207,7 +207,7 @@ impl ListLocked {
 /// Representing Linux `struct page`
 #[repr(align(64))]
 struct PageFrame {
-    /// Next pointers are a bit ugly, but they are used heavily in linux
+    /// Next page frame number
     next: AtomicCell<usize>,
 }
 const _: () = assert!(core::mem::align_of::<PageFrame>() == 64);
