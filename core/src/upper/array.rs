@@ -179,49 +179,41 @@ where
 
         // Then update local / global counters
         let i = page / L::N;
-        let c = core % self.local.len();
-        let local = &self.local[c];
+        let local = &self.local[core % self.local.len()];
         let max = (self.pages() - i * L::N).min(L::N);
 
-        // Try update own subtree first
+        // Try update own tree first
         let num_pages = 1 << order;
-        if let Err(entry) = local
+        if let Err(tree) = local
             .reserved
             .fetch_update(|v| v.inc(num_pages, max, |s| s / L::N == i))
         {
-            if entry.start() / L::N == i {
-                error!("inc failed L{i}: {entry:?} o={order}");
+            if tree.start() / L::N == i {
+                error!("inc failed L{i}: {tree:?} o={order}");
                 return Err(Error::Corruption);
             }
         } else {
-            // Save the modified subtree id for the push-reserve heuristic
-            if c == core {
-                local.frees_push(i);
-            }
+            // Save the modified tree id for the push-reserve heuristic
+            local.frees_push(i);
             return Ok(());
         };
 
-        // Subtree not owned by us -> update global
+        // Tree not owned by us -> update global
         match self.trees[i].fetch_update(|v| v.inc(num_pages, max)) {
-            Ok(entry) => {
-                let new_pages = entry.free() + num_pages;
-                if !entry.reserved() && new_pages > Trees::<{ L::N }>::almost_allocated() {
+            Ok(tree) => {
+                let new_pages = tree.free() + num_pages;
+                if !tree.reserved() && new_pages > Trees::<{ L::N }>::almost_allocated() {
                     // put-reserve optimization:
-                    // Try to reserve the subtree that was targeted by the recent frees
-                    if core == c
-                        && local.frees_eq_to(i)
-                        && self.reserve_entry(&local.reserved, i)?
-                    {
+                    // Try to reserve the tree that was targeted by the recent frees
+                    if local.frees_in_tree(i) && self.reserve_entry(&local.reserved, i)? {
                         return Ok(());
                     }
                 }
-                if c == core {
-                    local.frees_push(i);
-                }
+                local.frees_push(i);
                 Ok(())
             }
-            Err(entry) => {
-                error!("inc failed i{i}: {entry:?} o={order}");
+            Err(tree) => {
+                error!("inc failed i{i}: {tree:?} o={order}");
                 Err(Error::Corruption)
             }
         }
@@ -241,8 +233,7 @@ where
 
     #[cold]
     fn drain(&self, core: usize) -> Result<()> {
-        let c = core % self.local.len();
-        let local = &self.local[c];
+        let local = &self.local[core % self.local.len()];
         match self.cas_reserved(&local.reserved, ReservedTree::default(), false) {
             Err(Error::Retry) => Ok(()), // ignore cas errors
             r => r,

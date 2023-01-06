@@ -199,7 +199,7 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
                 if !entry.reserved() && new_pages > Trees::almost_full() {
                     // Try to reserve the subtree that was targeted by the recent frees
                     if core == c
-                        && local.frees_eq_to(i)
+                        && local.frees_in_tree(i)
                         && self.reserve_entry(&local.reserved, i)?
                     {
                         return Ok(());
