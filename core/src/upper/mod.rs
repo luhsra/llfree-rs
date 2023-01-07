@@ -7,7 +7,7 @@ use crossbeam_utils::atomic::AtomicCell;
 
 use crate::entry::ReservedTree;
 use crate::table::PT_LEN;
-use crate::util::{CacheAlign, Page};
+use crate::util::{CacheLine, Page};
 use crate::Result;
 
 mod array;
@@ -47,20 +47,16 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     fn pages(&self) -> usize;
 
     /// Unreserve cpu-local pages
-    #[cold]
     fn drain(&self, _core: usize) -> Result<()> {
         Ok(())
     }
 
     /// Return the number of allocated pages.
-    #[cold]
     fn dbg_allocated_pages(&self) -> usize {
         self.pages() - self.dbg_free_pages()
     }
-    #[cold]
     /// Return the number of free pages.
     fn dbg_free_pages(&self) -> usize;
-    #[cold]
     /// Return the number of free huge pages or 0 if the allocator cannot allocate huge pages.
     fn dbg_free_huge_pages(&self) -> usize {
         0
@@ -68,7 +64,7 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     /// Execute f for each huge page with the number of free pages
     /// in this huge page as parameter.
     #[cold]
-    fn dbg_for_each_huge_page(&self, f: fn(usize));
+    fn dbg_for_each_huge_page(&self, _f: fn(usize)) {}
     /// Return the name of the allocator.
     #[cold]
     fn name(&self) -> AllocName {
@@ -182,9 +178,9 @@ pub struct LastFrees {
 /// Per core data.
 pub struct Local<const F: usize> {
     /// Local copy of the reserved level 3 entry
-    reserved: AtomicCell<ReservedTree>,
+    reserved: CacheLine<AtomicCell<ReservedTree>>,
     /// Last frees
-    last_frees: CacheAlign<AtomicU64>,
+    last_frees: CacheLine<AtomicU64>,
 }
 
 const _: () = assert!(AtomicCell::<LastFrees>::is_lock_free());
@@ -192,8 +188,8 @@ const _: () = assert!(AtomicCell::<LastFrees>::is_lock_free());
 impl<const F: usize> Local<F> {
     fn new() -> Self {
         Self {
-            reserved: AtomicCell::new(ReservedTree::default()),
-            last_frees: CacheAlign(AtomicU64::new(LastFrees::default().into())),
+            reserved: CacheLine(AtomicCell::new(ReservedTree::default())),
+            last_frees: CacheLine(AtomicU64::new(LastFrees::default().into())),
         }
     }
     /// Add a tree index to the history.
@@ -291,11 +287,6 @@ mod test {
             AllocName::new::<ListLocal>()
         );
         assert_eq!("ListLocal", AllocName::new::<ListLocal>());
-        println!(
-            "{}\n -> {}",
-            type_name::<ArrayList<4, Lower>>(),
-            AllocName::new::<ArrayList<4, Lower>>()
-        );
     }
 
     #[test]

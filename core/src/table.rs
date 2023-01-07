@@ -1,14 +1,14 @@
-use core::fmt;
 use core::mem::size_of;
-use core::ops::Range;
+use core::ops::{Not, Range};
 use core::sync::atomic::{self, Ordering::*};
+use core::{fmt, mem};
 
 use crossbeam_utils::atomic::AtomicCell;
 use log::error;
 
 use crate::util::align_down;
 use crate::util::Page;
-use crate::Error;
+use crate::{Error, Result};
 
 pub const PT_ORDER: usize = 9;
 pub const PT_LEN: usize = 1 << PT_ORDER;
@@ -61,7 +61,12 @@ impl<const N: usize> fmt::Debug for Bitfield<N> {
     }
 }
 
-impl<const N: usize> Bitfield<N> {
+impl<const N: usize> Bitfield<N>
+where
+    [(); N * 2]:, // Validate generic const expressions
+    [(); N * 4]:,
+    [(); N * 8]:,
+{
     pub const ENTRY_BITS: usize = 64;
     pub const ENTRIES: usize = N;
     pub const LEN: usize = N * Self::ENTRY_BITS;
@@ -104,41 +109,68 @@ impl<const N: usize> Bitfield<N> {
     ///
     /// # Warning
     /// Orders above 6 need multiple CAS operations, which might lead to race conditions!
-    pub fn toggle(&self, i: usize, order: usize, expected: bool) -> Result<(), Error> {
+    pub fn toggle(&self, i: usize, order: usize, expected: bool) -> Result<()> {
         let num_bits = 1 << order;
         debug_assert!(i % num_bits == 0, "not aligned");
-        if num_bits < Self::ENTRY_BITS {
-            // Updates within a single entry
-            let mask = (u64::MAX >> (Self::ENTRY_BITS - num_bits)) << (i % Self::ENTRY_BITS);
-            let di = i / Self::ENTRY_BITS;
-            match self.data[di].fetch_update(|e| {
-                if expected {
-                    (e & mask == mask).then_some(e & !mask)
-                } else {
-                    (e & mask == 0).then_some(e | mask)
-                }
-            }) {
-                Ok(_) => Ok(()),
-                Err(_) => Err(Error::Retry),
-            }
-        } else {
-            // Update multiple entries
-            let num_entries = num_bits / Self::ENTRY_BITS;
-            let di = i / Self::ENTRY_BITS;
-            for i in di..di + num_entries {
-                let expected = if expected { u64::MAX } else { 0 };
-                if let Err(_) = self.data[i].compare_exchange(expected, !expected) {
-                    // Undo changes
-                    for j in (di..i).rev() {
-                        if let Err(_) = self.data[j].compare_exchange(!expected, expected) {
-                            error!("Failed undo toggle");
-                            return Err(Error::Corruption);
-                        }
+        match order {
+            0..=2 => {
+                // Updates within a single entry
+                let mask = (u64::MAX >> (Self::ENTRY_BITS - num_bits)) << (i % Self::ENTRY_BITS);
+                let di = i / Self::ENTRY_BITS;
+                match self.data[di].fetch_update(|e| {
+                    if expected {
+                        (e & mask == mask).then_some(e & !mask)
+                    } else {
+                        (e & mask == 0).then_some(e | mask)
                     }
-                    return Err(Error::Retry);
+                }) {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(Error::Retry),
                 }
             }
-            Ok(())
+            3 => self.toggle_int::<u8>(i, expected),
+            4 => self.toggle_int::<u16>(i, expected),
+            5 => self.toggle_int::<u32>(i, expected),
+            _ => {
+                // Update multiple entries
+                let num_entries = num_bits / Self::ENTRY_BITS;
+                let di = i / Self::ENTRY_BITS;
+                for i in di..di + num_entries {
+                    let expected = if expected { !0 } else { 0 };
+                    if let Err(_) = self.data[i].compare_exchange(expected, !expected) {
+                        // Undo changes
+                        for j in (di..i).rev() {
+                            if let Err(_) = self.data[j].compare_exchange(!expected, expected) {
+                                error!("Failed undo toggle");
+                                return Err(Error::Corruption);
+                            }
+                        }
+                        return Err(Error::Retry);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Toggle multiple bits with a single correctly sized compare exchange operation
+    ///
+    /// Note: This only seems to make a difference between a 64 bit fetch_update on Intel Optane
+    fn toggle_int<I: AtomicInt>(&self, i: usize, expected: bool) -> Result<()>
+    where
+        [(); N * I::M]:,
+    {
+        let i = i / (u64::BITS as usize / I::M);
+        let expected = if expected {
+            !I::default()
+        } else {
+            I::default()
+        };
+        // Cast to int type, keeping the same byte size
+        let data: &[AtomicCell<I>; N * I::M] = unsafe { mem::transmute(&self.data) };
+        match data[i].compare_exchange(expected, !expected) {
+            Ok(_) => Ok(()),
+            Err(_) => Err(Error::Retry),
         }
     }
 
@@ -146,7 +178,7 @@ impl<const N: usize> Bitfield<N> {
     ///
     /// # Warning
     /// Orders above 6 need multiple CAS operations, which might lead to race conditions!
-    pub fn set_first_zeros(&self, start_i: usize, order: usize) -> Result<usize, Error> {
+    pub fn set_first_zeros(&self, start_i: usize, order: usize) -> Result<usize> {
         let offset = start_i / Self::ENTRY_BITS;
         debug_assert!(offset < Self::ENTRIES);
 
@@ -188,7 +220,7 @@ impl<const N: usize> Bitfield<N> {
     ///
     /// # Warning
     /// Using multiple CAS operations might lead to race conditions!
-    fn set_first_zero_entries(&self, order: usize) -> Result<usize, Error> {
+    fn set_first_zero_entries(&self, order: usize) -> Result<usize> {
         debug_assert!(order > Self::ENTRY_BITS.ilog2() as usize);
         debug_assert!(order <= Self::ORDER);
         let num_entries = 1 << (order - Self::ENTRY_BITS.ilog2() as usize);
@@ -249,6 +281,20 @@ impl<const N: usize> Bitfield<N> {
             .map(|v| v.load().count_zeros() as usize)
             .sum()
     }
+}
+
+trait AtomicInt: Sized + Default + Copy + Eq + Not<Output = Self> {
+    /// How this type fits in 64 bit
+    const M: usize;
+}
+impl AtomicInt for u8 {
+    const M: usize = 8;
+}
+impl AtomicInt for u16 {
+    const M: usize = 4;
+}
+impl AtomicInt for u32 {
+    const M: usize = 2;
 }
 
 /// Set the first aligned 2^`order` zero bits, returning the bit offset

@@ -1,5 +1,5 @@
 use core::fmt;
-use core::mem::size_of;
+use core::mem::{size_of, align_of};
 use core::ops::Index;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -231,7 +231,6 @@ where
         self.lower.pages()
     }
 
-    #[cold]
     fn drain(&self, core: usize) -> Result<()> {
         let local = &self.local[core % self.local.len()];
         match self.cas_reserved(&local.reserved, ReservedTree::default(), false) {
@@ -240,12 +239,11 @@ where
         }
     }
 
-    #[cold]
     fn dbg_free_pages(&self) -> usize {
         let mut pages = 0;
         // Global array
-        for i in 0..self.pages().div_ceil(L::N) {
-            pages += self.trees[i].load().free();
+        for tree in self.trees.entries.iter() {
+            pages += tree.load().free();
         }
         // Pages allocated in reserved subtrees
         for local in self.local.iter() {
@@ -254,7 +252,6 @@ where
         pages
     }
 
-    #[cold]
     fn dbg_free_huge_pages(&self) -> usize {
         let mut counter = 0;
         self.lower.dbg_for_each_huge_page(|c| {
@@ -647,7 +644,7 @@ impl<const LN: usize> Trees<LN> {
 
     /// Find and reserve a partial tree in the vicinity
     fn reserve_partial(&self, cores: usize, start: usize) -> Option<ReservedTree> {
-        const ENTRIES_PER_CACHELINE: usize = size_of::<CacheLine>() / size_of::<Tree>();
+        const ENTRIES_PER_CACHELINE: usize = align_of::<CacheLine>() / size_of::<Tree>();
         // One quater of the per-CPU memory
         let vicinity = ((self.entries.len() / cores) / 4).max(1) as isize;
 

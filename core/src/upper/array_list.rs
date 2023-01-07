@@ -235,7 +235,6 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
         self.lower.pages()
     }
 
-    #[cold]
     fn drain(&self, core: usize) -> Result<()> {
         let c = core % self.local.len();
         let local = &self.local[c];
@@ -245,7 +244,6 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
         }
     }
 
-    #[cold]
     fn dbg_free_pages(&self) -> usize {
         let mut pages = 0;
         for i in 0..self.pages().div_ceil(L::N) {
@@ -259,7 +257,6 @@ impl<const PR: usize, L: LowerAlloc> Alloc for ArrayList<PR, L> {
         pages
     }
 
-    #[cold]
     fn dbg_free_huge_pages(&self) -> usize {
         let mut counter = 0;
         self.lower.dbg_for_each_huge_page(|c| {

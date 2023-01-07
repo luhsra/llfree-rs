@@ -130,10 +130,6 @@ impl Alloc for ListLocal {
         self.len
     }
 
-    #[cold]
-    fn dbg_for_each_huge_page(&self, _f: fn(usize)) {}
-
-    #[cold]
     fn dbg_free_pages(&self) -> usize {
         let mut pages = self.len;
         for local in self.local.iter() {

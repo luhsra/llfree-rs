@@ -3,6 +3,20 @@ use core::mem::transmute;
 use core::mem::{align_of, size_of};
 use core::ops::{Add, Deref, DerefMut, Div, Range};
 
+/// Align v up to next `align` (power of two!)
+#[inline(always)]
+pub const fn align_up(v: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two());
+    (v + align - 1) & !(align - 1)
+}
+
+/// Align v up to previous `align` (power of two!)
+#[inline(always)]
+pub const fn align_down(v: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two());
+    v & !(align - 1)
+}
+
 /// Correctly sized and aligned page.
 #[derive(Clone)]
 #[repr(align(0x1000))]
@@ -29,75 +43,33 @@ impl Page {
     }
 }
 
-/// Correctly sized and aligned cache line
-#[derive(Clone)]
-#[repr(align(64))]
-pub struct CacheLine {
-    _data: [u8; Self::SIZE],
-}
-const _: () = assert!(size_of::<CacheLine>() == CacheLine::SIZE);
-const _: () = assert!(align_of::<CacheLine>() == CacheLine::SIZE);
-
-impl CacheLine {
-    pub const SIZE: usize = 64;
-    pub const SIZE_BITS: usize = Self::SIZE.ilog2() as _;
-    pub const fn new() -> Self {
-        Self {
-            _data: [0; Self::SIZE],
-        }
-    }
-    pub fn cast<T>(&self) -> &T {
-        debug_assert!(size_of::<T>() <= size_of::<Self>());
-        unsafe { transmute(self) }
-    }
-    pub fn cast_mut<T>(&mut self) -> &mut T {
-        debug_assert!(size_of::<T>() <= size_of::<Self>());
-        unsafe { transmute(self) }
-    }
-}
-
-#[inline(always)]
-pub const fn align_up(v: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    (v + align - 1) & !(align - 1)
-}
-
-#[inline(always)]
-pub const fn align_down(v: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    v & !(align - 1)
-}
-
 /// Cache alignment for T
 #[derive(Clone, Default, Hash, PartialEq, Eq)]
 #[repr(align(64))]
-pub struct CacheAlign<T>(pub T);
+pub struct CacheLine<T = ()>(pub T);
 
-const _: () = assert!(align_of::<CacheAlign<usize>>() == CacheLine::SIZE);
+const _: () = assert!(align_of::<CacheLine>() == 64);
+const _: () = assert!(align_of::<CacheLine<usize>>() == 64);
 
-impl<T> Deref for CacheAlign<T> {
+impl<T> Deref for CacheLine<T> {
     type Target = T;
-
     fn deref(&self) -> &T {
         &self.0
     }
 }
-
-impl<T> DerefMut for CacheAlign<T> {
+impl<T> DerefMut for CacheLine<T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.0
     }
 }
-
-impl<T: fmt::Debug> fmt::Debug for CacheAlign<T> {
+impl<T: fmt::Debug> fmt::Debug for CacheLine<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.0, f)
     }
 }
-
-impl<T> From<T> for CacheAlign<T> {
+impl<T> From<T> for CacheLine<T> {
     fn from(t: T) -> Self {
-        CacheAlign(t)
+        CacheLine(t)
     }
 }
 

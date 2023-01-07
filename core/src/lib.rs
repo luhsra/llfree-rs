@@ -29,7 +29,7 @@ pub mod table;
 pub mod upper;
 pub mod util;
 
-#[cfg(feature = "stop")]
+#[cfg(all(test, feature = "stop"))]
 mod stop;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

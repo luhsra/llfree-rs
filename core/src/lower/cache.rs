@@ -12,7 +12,7 @@ use alloc::string::String;
 use crate::entry::{Child, ChildPair};
 use crate::table::AtomicArray;
 use crate::upper::{Init, CAS_RETRIES};
-use crate::util::{align_down, align_up, spin_wait, Page};
+use crate::util::{align_down, align_up, spin_wait, CacheLine, Page};
 use crate::{Error, Result};
 
 use super::LowerAlloc;
@@ -38,8 +38,8 @@ type Bitfield = crate::table::Bitfield<8>;
 /// ```
 pub struct Cache<const HP: usize> {
     area: &'static mut [Page],
-    bitfields: Box<[Bitfield]>,
-    tables: Box<[[AtomicCell<Child>; HP]]>,
+    bitfields: Box<[CacheLine<Bitfield>]>,
+    tables: Box<[CacheLine<[AtomicCell<Child>; HP]>]>,
     persistent: bool,
 }
 
@@ -291,7 +291,7 @@ where
     fn dbg_allocated_pages(&self) -> usize {
         let mut pages = self.pages();
         for table in &*self.tables {
-            for entry in table {
+            for entry in table.iter() {
                 pages -= entry.load().free();
             }
         }
@@ -300,7 +300,7 @@ where
 
     fn dbg_for_each_huge_page<F: FnMut(usize)>(&self, mut f: F) {
         for table in &*self.tables {
-            for entry in table {
+            for entry in table.iter() {
                 f(entry.load().free())
             }
         }
