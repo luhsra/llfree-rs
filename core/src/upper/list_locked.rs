@@ -89,7 +89,7 @@ impl Alloc for ListLocked {
         self.local = local.into();
 
         let mut struct_pages = Vec::with_capacity(memory.len());
-        struct_pages.resize_with(memory.len(), || PageFrame::new());
+        struct_pages.resize_with(memory.len(), PageFrame::new);
         self.frames = struct_pages.into();
 
         if free_all {

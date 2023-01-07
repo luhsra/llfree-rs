@@ -77,7 +77,7 @@ impl Alloc for ListLocal {
         local.resize_with(cores, || UnsafeCell::new(Local::default()));
 
         let mut struct_pages = Vec::with_capacity(memory.len());
-        struct_pages.resize_with(memory.len(), || PageFrame::new());
+        struct_pages.resize_with(memory.len(), PageFrame::new);
         self.frames = struct_pages.into();
 
         self.len = (memory.len() / cores) * cores;
@@ -102,7 +102,7 @@ impl Alloc for ListLocal {
         let local = self.local(core);
         if let Some(index) = local.next.pop(|i| self.frames[i].get_next()) {
             local.counter += 1;
-            Ok(self.from_pfn(index) as u64)
+            Ok(self.from_pfn(index))
         } else {
             error!("No memory");
             Err(Error::Memory)
