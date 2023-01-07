@@ -471,9 +471,18 @@ fn filling(
         // Operate on filling level.
         let t1 = Instant::now();
         for _ in 0..allocs {
-            pages.push(alloc.get(t, order).unwrap());
+            let Ok(page) = alloc.get(t, order) else {
+                break;
+            };
+            pages.push(page);
         }
-        let get = t1.elapsed().as_nanos() / allocs as u128;
+        let num_alloc = pages.len();
+        let get = t1.elapsed().as_nanos() / num_alloc as u128;
+
+        if num_alloc < allocs {
+            warn!("Allocator completely full {num_alloc}");
+        }
+
         pages.reverse();
         let pages = black_box(pages);
 
@@ -482,7 +491,7 @@ fn filling(
         for page in pages {
             alloc.put(t, page, order).unwrap();
         }
-        let put = t2.elapsed().as_nanos() / allocs as u128;
+        let put = t2.elapsed().as_nanos() / num_alloc as u128;
 
         Perf {
             get_min: get,
@@ -545,6 +554,7 @@ impl Perf {
             res.put_max = res.put_max.max(p.put_max);
             res.init += p.init;
             res.total += p.total;
+            res.allocs += p.allocs;
             counter += 1;
         }
         assert!(counter > 0);

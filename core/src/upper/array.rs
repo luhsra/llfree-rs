@@ -1,5 +1,5 @@
 use core::fmt;
-use core::mem::{size_of, align_of};
+use core::mem::{align_of, size_of};
 use core::ops::Index;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -479,6 +479,23 @@ where
             };
             let new = match self.trees.reserve(order, self.local.len(), start, retry) {
                 Ok(entry) => entry,
+                Err(Error::Memory) => {
+                    // Drain all
+                    for core in 0..self.local.len() {
+                        self.drain(core)?;
+                    }
+                    // Steal drained trees
+                    if let Some(entry) = self.trees.reserve_any(start, order) {
+                        entry
+                    } else {
+                        // Clear reserve flag
+                        if local.fetch_update(|v| v.toggle_locked(false)).is_err() {
+                            error!("unexpected reserve state");
+                            return Err(Error::Corruption);
+                        }
+                        return Err(Error::Memory);
+                    }
+                }
                 Err(e) => {
                     // Clear reserve flag
                     if local.fetch_update(|v| v.toggle_locked(false)).is_err() {
@@ -638,7 +655,6 @@ impl<const LN: usize> Trees<LN> {
                 return Some(ReservedTree::new_with(entry.free(), i * LN));
             }
         }
-        warn!("no full tree");
         None
     }
 
