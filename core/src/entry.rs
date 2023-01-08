@@ -1,77 +1,12 @@
 use core::fmt;
 use core::mem::{align_of, size_of};
-use core::ops::{Range, RangeBounds};
+use core::ops::RangeBounds;
 use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64};
 
 use bitfield_struct::bitfield;
 use log::error;
 
 use crate::atomic::Atomic;
-
-/// Level 3 entry
-#[bitfield(u64)]
-#[derive(Default, PartialEq, Eq)]
-pub struct TreeNode {
-    /// Number of free 4K pages.
-    #[bits(20)]
-    pub free: usize,
-    /// Index of the next tree node (linked list).
-    #[bits(43)]
-    pub idx: usize,
-    /// If this subtree is reserved by a CPU.
-    pub reserved: bool,
-}
-impl Atomic for TreeNode {
-    type I = AtomicU64;
-}
-impl TreeNode {
-    pub const IDX_MAX: usize = (1 << Self::IDX_BITS) - 1;
-    pub const IDX_END: usize = (1 << Self::IDX_BITS) - 2;
-
-    pub fn empty(span: usize) -> Self {
-        Self::new().with_free(span)
-    }
-    /// Creates a new entry referring to a level 2 page table.
-    pub fn new_with(free: usize, idx: usize) -> Self {
-        Self::new().with_free(free).with_idx(idx)
-    }
-    /// Increments the free pages counter.
-    pub fn inc(self, num_pages: usize, max: usize) -> Option<Self> {
-        let pages = self.free() + num_pages;
-        if pages <= max {
-            Some(self.with_free(pages))
-        } else {
-            None
-        }
-    }
-    /// Reserves this entry if it has at least `min` pages.
-    pub fn reserve_min(self, min: usize) -> Option<Self> {
-        if !self.reserved() && self.free() >= min {
-            Some(self.with_reserved(true).with_free(0))
-        } else {
-            None
-        }
-    }
-    /// Reserves this entry if its page count is in `range`.
-    pub fn reserve_partial(self, range: Range<usize>) -> Option<Self> {
-        if !self.reserved() && range.contains(&self.free()) {
-            Some(self.with_reserved(true).with_free(0))
-        } else {
-            None
-        }
-    }
-    /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
-    /// `self` is the entry in the global array / table.
-    pub fn unreserve_add(self, add: usize, max: usize) -> Option<Self> {
-        let pages = self.free() + add;
-        if self.reserved() && pages <= max {
-            Some(self.with_free(pages).with_reserved(false))
-        } else {
-            error!("{self:?} + {add}, {pages} <= {max}");
-            None
-        }
-    }
-}
 
 /// Level 3 entry
 #[bitfield(u64, debug = false)]

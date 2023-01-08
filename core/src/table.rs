@@ -36,7 +36,6 @@ pub struct Bitfield<const N: usize> {
     data: [Atom<u64>; N],
 }
 
-const _: () = assert!(size_of::<Bitfield<64>>() == Bitfield::<64>::SIZE);
 const _: () = assert!(size_of::<Bitfield<64>>() >= 8);
 const _: () = assert!(Bitfield::<64>::LEN % Bitfield::<64>::ENTRY_BITS == 0);
 const _: () = assert!(1 << Bitfield::<64>::ORDER == Bitfield::<64>::LEN);
@@ -70,7 +69,6 @@ where
     pub const ENTRIES: usize = N;
     pub const LEN: usize = N * Self::ENTRY_BITS;
     pub const ORDER: usize = Self::LEN.ilog2() as _;
-    pub const SIZE: usize = Self::LEN / 8;
 
     /// Overwrite the `range` of bits with `v`
     pub fn set(&self, range: Range<usize>, v: bool) {
