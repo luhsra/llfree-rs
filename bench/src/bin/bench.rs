@@ -4,8 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
-use std::sync::atomic::Ordering;
-use std::sync::Barrier;
+use std::sync::{atomic::Ordering, Barrier};
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
@@ -79,8 +78,7 @@ fn main() {
         thread::STRIDE.store(stride, Ordering::Relaxed);
     }
 
-    let ppt = (memory * PT_LEN * PT_LEN) / threads;
-    assert!(ppt >= MIN_PAGES, "{ppt} > {MIN_PAGES}");
+    assert!(memory >= 1);
 
     let mut out = File::create(outfile).unwrap();
     writeln!(out, "alloc,x,iteration,memory,{}", Perf::header()).unwrap();
@@ -90,9 +88,11 @@ fn main() {
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
 
     if warmup {
-        for page in &mut mapping[..] {
-            *page.cast_mut::<usize>() = 1;
-        }
+        thread::parallel(mapping.chunks_mut(threads), |chunk| {
+            for page in chunk {
+                *page.cast_mut::<usize>() = 1;
+            }
+        });
     }
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
@@ -444,8 +444,6 @@ fn filling(
     threads: usize,
     x: usize,
 ) -> Perf {
-    assert!(x <= 90);
-
     let timer = Instant::now();
     alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
     let init = timer.elapsed().as_millis();
@@ -454,7 +452,7 @@ fn filling(
 
     // Allocate to filling level
     let fill = (allocs * x) / 100;
-    let allocs = allocs / 10;
+    let allocs = allocs / 100; // allocate 1%
     warn!("fill={fill} allocs={allocs}");
 
     assert!((fill + allocs) * threads < alloc.pages());
@@ -468,30 +466,35 @@ fn filling(
         barrier.wait();
 
         let mut pages = Vec::with_capacity(allocs);
-        // Operate on filling level.
-        let t1 = Instant::now();
-        for _ in 0..allocs {
-            let Ok(page) = alloc.get(t, order) else {
-                break;
-            };
-            pages.push(page);
-        }
-        let num_alloc = pages.len();
-        let get = t1.elapsed().as_nanos() / num_alloc as u128;
-
-        if num_alloc < allocs {
-            warn!("Allocator completely full {num_alloc}");
-        }
-
-        pages.reverse();
-        let pages = black_box(pages);
-
         barrier.wait();
-        let t2 = Instant::now();
-        for page in pages {
-            alloc.put(t, page, order).unwrap();
+
+        let mut get = 0;
+        let mut put = 0;
+        const N: usize = 100;
+        for _ in 0..N {
+            // Operate on filling level.
+            let timer = Instant::now();
+            for _ in 0..allocs {
+                let Ok(page) = alloc.get(t, order) else {
+                    break;
+                };
+                pages.push(page);
+            }
+            let num_alloc = pages.len();
+            get += timer.elapsed().as_nanos() / num_alloc as u128;
+
+            if num_alloc < allocs {
+                warn!("Allocator completely full {num_alloc}");
+            }
+
+            let timer = Instant::now();
+            while let Some(page) = pages.pop() {
+                alloc.put(t, page, order).unwrap();
+            }
+            put += timer.elapsed().as_nanos() / num_alloc as u128;
         }
-        let put = t2.elapsed().as_nanos() / num_alloc as u128;
+        get /= N as u128;
+        put /= N as u128;
 
         Perf {
             get_min: get,
@@ -501,7 +504,7 @@ fn filling(
             put_avg: put,
             put_max: put,
             init: 0,
-            total: t1.elapsed().as_millis(),
+            total: 0,
             allocs,
         }
     }));

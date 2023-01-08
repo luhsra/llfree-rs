@@ -69,7 +69,7 @@ impl<T: Atomic<I: AtomicImpl<V = T>>> Atom<T> {
 
 /// Types that can be converted from/into atomics
 pub trait Atomic:
-    Sized + Eq + Copy + Into<<Self::I as AtomicImpl>::V> + From<<Self::I as AtomicImpl>::V>
+    Sized + Copy + Into<<Self::I as AtomicImpl>::V> + From<<Self::I as AtomicImpl>::V>
 {
     type I: AtomicImpl;
 }

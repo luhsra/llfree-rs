@@ -33,9 +33,9 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
 /// Allocations/frees within the chunk are handed over to the
 /// lower allocator.
 /// These chunks are, due to the inner workins of the lower allocator,
-/// called *subtrees*.
+/// called *trees*.
 ///
-/// This allocator stores the level three entries (subtree roots) in a
+/// This allocator stores the level three entries (tree roots) in a
 /// packed array.
 /// For the reservation, the allocator simply scans the array for free entries,
 /// while prioritizing partially empty chunks to avoid fragmentation.
@@ -53,7 +53,7 @@ where
     local: Box<[Local<F>]>,
     /// Metadata of the lower alloc
     lower: L,
-    /// Manages the allocators subtrees
+    /// Manages the allocators trees
     trees: Trees<{ L::N }>,
 }
 
@@ -74,7 +74,7 @@ where
             self.lower.pages()
         )?;
 
-        writeln!(f, "    subtrees: {:?} ({} pages)", self.trees, L::N)?;
+        writeln!(f, "    trees: {:?} ({} pages)", self.trees, L::N)?;
         let free_pages = self.dbg_free_pages();
         let free_huge_pages = self.dbg_free_huge_pages();
         writeln!(
@@ -245,7 +245,7 @@ where
         for tree in self.trees.entries.iter() {
             pages += tree.load().free();
         }
-        // Pages allocated in reserved subtrees
+        // Pages allocated in reserved trees
         for local in self.local.iter() {
             pages += local.reserved.load().free();
         }
@@ -313,7 +313,7 @@ where
                 }
 
                 let mut trees = Vec::with_capacity(self.pages().div_ceil(L::N));
-                // Recover each subtree one-by-one
+                // Recover each tree one-by-one
                 for i in 0..self.pages().div_ceil(L::N) {
                     let page = i * L::N;
                     let pages = self.lower.recover(page, deep)?;
@@ -399,11 +399,11 @@ where
                 }
             }
             Err(old) => {
-                // If the local counter is large enough we do not have to reserve a new subtree
-                // Just update the local counter and reuse the current subtree
+                // If the local counter is large enough we do not have to reserve a new tree
+                // Just update the local counter and reuse the current tree
                 self.try_sync_with_global(&local.reserved, old)?;
 
-                // The local subtree is full -> reserve a new one
+                // The local tree is full -> reserve a new one
                 self.reserve_or_wait(core, order, &local.reserved, old, false)?;
 
                 // TODO: Steal from other CPUs on Error::Memory
@@ -456,9 +456,9 @@ where
         Ok(())
     }
 
-    /// Try to reserve a new subtree or wait for concurrent reservations to finish.
+    /// Try to reserve a new tree or wait for concurrent reservations to finish.
     ///
-    /// If `retry`, tries to reserve a less fragmented subtree
+    /// If `retry`, tries to reserve a less fragmented tree
     fn reserve_or_wait(
         &self,
         core: usize,
@@ -469,7 +469,7 @@ where
     ) -> Result<()> {
         // Set the reserved flag, locking the reservation
         if !old.locked() && local.fetch_update(|v| v.toggle_locked(true)).is_ok() {
-            // Try reserve new subtree
+            // Try reserve new tree
             let start = if old.has_start() {
                 old.start() / L::N
             } else {
@@ -552,20 +552,18 @@ where
         }
     }
 
-    /// Swap the current reserved subtree out replacing it with a new one.
-    /// The old subtree is unreserved and added back to the lists.
-    ///
-    /// If `enqueue_back`, the old unreserved entry is added to the back of the partial list.
+    /// Swap the current reserved tree out replacing it with a new one.
+    /// The old tree is unreserved.
     fn cas_reserved(
         &self,
         local: &Atom<ReservedTree>,
         new: ReservedTree,
-        expect_reserved: bool,
+        expect_locked: bool,
     ) -> Result<()> {
         debug_assert!(!new.locked());
 
         let old = local
-            .fetch_update(|v| (v.locked() == expect_reserved).then_some(new))
+            .fetch_update(|v| (v.locked() == expect_locked).then_some(new))
             .map_err(|_| Error::Retry)?;
 
         self.trees.unreserve(old, self.pages())
@@ -574,7 +572,7 @@ where
 
 #[derive(Default)]
 struct Trees<const LN: usize> {
-    /// Array of level 3 entries, which are the roots of the subtrees
+    /// Array of level 3 entries, which are the roots of the trees
     entries: Box<[Atom<Tree>]>,
 }
 
@@ -605,7 +603,7 @@ impl<const LN: usize> fmt::Debug for Trees<LN> {
 }
 
 impl<const LN: usize> Trees<LN> {
-    /// Initialize the subtree array
+    /// Initialize the tree array
     fn init(&mut self, pages: usize, free_all: bool) {
         let len = pages.div_ceil(LN);
         let mut entries = Vec::with_capacity(len);
@@ -667,8 +665,8 @@ impl<const LN: usize> Trees<LN> {
         // Positive modulo and cacheline alignment
         let start = align_down(start + self.entries.len(), ENTRIES_PER_CACHELINE) as isize;
 
-        // Search the the array for a partially or entirely free subtree
-        // This speeds up the search drastically if many subtrees are free
+        // Search the the array for a partially or entirely free tree
+        // This speeds up the search drastically if many trees are free
         for i in 1..vicinity {
             // Alternating between before and after this entry
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
@@ -678,7 +676,7 @@ impl<const LN: usize> Trees<LN> {
             }
         }
 
-        // Search the rest of the array for a partially but not entirely free subtree
+        // Search the rest of the array for a partially but not entirely free tree
         for i in vicinity..=self.entries.len() as isize {
             // Alternating between before and after this entry
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
@@ -692,7 +690,7 @@ impl<const LN: usize> Trees<LN> {
         None
     }
 
-    /// Fallback to search for any suitable subtree
+    /// Fallback to search for any suitable tree
     fn reserve_any(&self, start: usize, order: usize) -> Option<ReservedTree> {
         // Just search linearly through the array
         let num_pages = 1 << order;
@@ -706,7 +704,7 @@ impl<const LN: usize> Trees<LN> {
         None
     }
 
-    /// Reserves a new subtree, prioritizing partially filled subtrees.
+    /// Reserves a new tree, prioritizing partially filled trees.
     fn reserve(
         &self,
         order: usize,
@@ -715,7 +713,7 @@ impl<const LN: usize> Trees<LN> {
         prioritize_free: bool,
     ) -> Result<ReservedTree> {
         if prioritize_free {
-            // try free subtrees first
+            // try free trees first
             self.reserve_free(start)
                 .or_else(|| self.reserve_partial(cores, start))
                 .or_else(|| self.reserve_any(start, order))

@@ -13,7 +13,7 @@ use crate::{Error, Result};
 pub const PT_ORDER: usize = 9;
 pub const PT_LEN: usize = 1 << PT_ORDER;
 
-pub trait AtomicArray<T: Eq + Copy, const L: usize> {
+pub trait AtomicArray<T: Copy, const L: usize> {
     /// Overwrite the content of the whole array non-atomically.
     ///
     /// This is faster than atomics but does not handle race conditions.
