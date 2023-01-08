@@ -12,9 +12,6 @@ use crate::Result;
 
 mod array;
 pub use array::Array;
-mod array_list;
-#[allow(deprecated)]
-pub use array_list::ArrayList;
 mod list_local;
 pub use list_local::ListLocal;
 mod list_locked;

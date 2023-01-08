@@ -43,10 +43,7 @@ fn main() {
     assert!(pages >= MIN_PAGES * threads);
 
     type C = Cache<32>;
-    let allocs: [Box<dyn Alloc>; 2] = [
-        Box::<Array<4, C>>::default(),
-        Box::<ArrayList<4, C>>::default(),
-    ];
+    let allocs: [Box<dyn Alloc>; 1] = [Box::<Array<4, C>>::default()];
     for a in allocs {
         if format!("{}", a.name()) == alloc {
             let allocs = pages / threads / 2 / (1 << order);
@@ -71,15 +68,7 @@ fn main() {
             } else if pid == 0 {
                 execute(a, allocs, threads, order, mapping, out_mapping);
             } else {
-                monitor(
-                    a,
-                    allocs,
-                    threads,
-                    order,
-                    pid,
-                    mapping,
-                    out_mapping,
-                );
+                monitor(a, allocs, threads, order, pid, mapping, out_mapping);
             }
             return;
         }
@@ -104,7 +93,9 @@ fn execute(
         *page.cast_mut::<usize>() = 1;
     }
 
-    alloc.init(threads, &mut mapping, Init::Overwrite, true).unwrap();
+    alloc
+        .init(threads, &mut mapping, Init::Overwrite, true)
+        .unwrap();
     warn!("initialized");
 
     let barrier = Barrier::new(threads);
@@ -191,7 +182,9 @@ fn monitor(
     warn!("check");
 
     // Recover allocator
-    alloc.init(threads, &mut mapping, Init::Recover, true).unwrap();
+    alloc
+        .init(threads, &mut mapping, Init::Recover, true)
+        .unwrap();
 
     let expected = allocs * threads - threads;
     let actual = alloc.dbg_allocated_pages();
