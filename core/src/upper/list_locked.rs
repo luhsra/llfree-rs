@@ -3,11 +3,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use crossbeam_utils::atomic::AtomicCell;
 use log::{error, info};
-use spin::Mutex;
 
 use super::{Alloc, Init, MIN_PAGES};
+use crate::atomic::{Atom, Spin};
 use crate::util::Page;
 use crate::{Error, Result};
 
@@ -24,7 +23,7 @@ pub struct ListLocked {
     /// CPU local metadata
     local: Box<[LocalCounter]>,
     /// Per page metadata
-    next: Mutex<Node>,
+    next: Spin<Node>,
 }
 
 #[repr(align(64))]
@@ -52,7 +51,7 @@ impl Default for ListLocked {
         Self {
             len: 0,
             offset: 0,
-            next: Mutex::new(Node::new(None)),
+            next: Spin::new(Node::new(None)),
             local: Box::new([]),
             frames: Box::new([]),
         }
@@ -204,15 +203,14 @@ impl ListLocked {
 #[repr(align(64))]
 struct PageFrame {
     /// Next page frame number
-    next: AtomicCell<usize>,
+    next: Atom<usize>,
 }
 const _: () = assert!(core::mem::align_of::<PageFrame>() == 64);
-const _: () = assert!(AtomicCell::<usize>::is_lock_free());
 
 impl PageFrame {
     fn new() -> Self {
         Self {
-            next: AtomicCell::new(usize::MAX),
+            next: Atom::new(usize::MAX),
         }
     }
     fn get_next(&self) -> Option<usize> {

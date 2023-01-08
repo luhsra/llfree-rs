@@ -2,13 +2,13 @@ use core::fmt::{self, Write};
 use core::mem::size_of;
 use core::ops::Range;
 
-use crossbeam_utils::atomic::AtomicCell;
 use log::{error, info, warn};
 
 use alloc::boxed::Box;
 use alloc::slice;
 use alloc::string::String;
 
+use crate::atomic::Atom;
 use crate::entry::{Child, ChildPair};
 use crate::table::AtomicArray;
 use crate::upper::{Init, CAS_RETRIES};
@@ -39,7 +39,7 @@ type Bitfield = crate::table::Bitfield<8>;
 pub struct Cache<const HP: usize> {
     area: &'static mut [Page],
     bitfields: Box<[CacheLine<Bitfield>]>,
-    tables: Box<[CacheLine<[AtomicCell<Child>; HP]>]>,
+    tables: Box<[CacheLine<[Atom<Child>; HP]>]>,
     persistent: bool,
 }
 
@@ -319,7 +319,7 @@ where
     [(); HP / 2]:,
 {
     /// Returns the table with pair entries that can be updated at once.
-    fn table_pair(&self, page: usize) -> &[AtomicCell<ChildPair>; HP / 2] {
+    fn table_pair(&self, page: usize) -> &[Atom<ChildPair>; HP / 2] {
         let table = &self.tables[page / Self::N];
         unsafe { &*table.as_ptr().cast() }
     }

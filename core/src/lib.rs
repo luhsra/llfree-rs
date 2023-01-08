@@ -6,7 +6,8 @@
 #![feature(int_roundings)]
 #![feature(array_windows)]
 #![feature(generic_const_exprs)]
-
+#![feature(associated_type_bounds)]
+// Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 
 #[cfg(feature = "std")]

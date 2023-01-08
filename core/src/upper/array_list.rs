@@ -5,15 +5,13 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::{fmt, hint};
 
-use crossbeam_utils::atomic::AtomicCell;
 use log::{error, info, warn};
-use spin::Mutex;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::{Alloc, Init, Local, MAGIC, MAX_PAGES};
-use crate::atomic::{ANode, BufferList, Next};
+use crate::atomic::{ANode, BufferList, Next, Atom, Spin};
 use crate::entry::{TreeNode, ReservedTree};
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
@@ -306,7 +304,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
                 }
                 let mut trees = Vec::with_capacity(self.pages().div_ceil(L::N));
                 trees.resize_with(self.pages().div_ceil(L::N), || {
-                    AtomicCell::new(TreeNode::new())
+                    Atom::new(TreeNode::new())
                 });
                 self.trees.entries = trees.into();
 
@@ -401,7 +399,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
     /// If `retry`, tries to reserve a less fragmented subtree
     fn reserve_or_wait(
         &self,
-        local: &AtomicCell<ReservedTree>,
+        local: &Atom<ReservedTree>,
         old: ReservedTree,
         retry: bool,
     ) -> Result<ReservedTree> {
@@ -441,7 +439,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
         }
     }
 
-    fn reserve_entry(&self, local: &AtomicCell<ReservedTree>, i: usize) -> Result<bool> {
+    fn reserve_entry(&self, local: &Atom<ReservedTree>, i: usize) -> Result<bool> {
         // Try to reserve it for bulk frees
         if let Ok(new) = self.trees[i].fetch_update(|v| v.reserve_min(Trees::almost_full())) {
             match self.cas_reserved(
@@ -477,7 +475,7 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
     /// If `enqueue_back`, the old unreserved entry is added to the back of the partial list.
     fn cas_reserved(
         &self,
-        local: &AtomicCell<ReservedTree>,
+        local: &Atom<ReservedTree>,
         new: ReservedTree,
         expect_reserved: bool,
         enqueue_back: bool,
@@ -513,9 +511,9 @@ impl<const PR: usize, L: LowerAlloc> ArrayList<PR, L> {
 #[derive(Default)]
 struct Trees {
     /// Array of level 3 entries, the roots of the 1G subtrees, the lower alloc manages
-    entries: Box<[AtomicCell<TreeNode>]>,
+    entries: Box<[Atom<TreeNode>]>,
     /// List of idx to subtrees
-    lists: Mutex<Lists>,
+    lists: Spin<Lists>,
 }
 
 #[derive(Default)]
@@ -528,7 +526,7 @@ struct Lists {
 }
 
 impl Index<usize> for Trees {
-    type Output = AtomicCell<TreeNode>;
+    type Output = Atom<TreeNode>;
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.entries[index]
@@ -571,12 +569,12 @@ impl Trees {
         if free_all {
             let len = pages.div_ceil(span);
             entries.resize_with(len - 1, || {
-                AtomicCell::new(TreeNode::empty(span).with_next(Next::Outside))
+                Atom::new(TreeNode::empty(span).with_next(Next::Outside))
             });
 
             // The last one might be cut off
             let max = ((pages - 1) % span) + 1;
-            entries.push(AtomicCell::new(
+            entries.push(Atom::new(
                 TreeNode::new().with_free(max).with_next(Next::Outside),
             ));
 
@@ -586,7 +584,7 @@ impl Trees {
             self.push(len - 1, max, span);
         } else {
             entries.resize_with(len, || {
-                AtomicCell::new(TreeNode::new().with_next(Next::Outside))
+                Atom::new(TreeNode::new().with_next(Next::Outside))
             });
             self.lists = Default::default();
             self.entries = entries.into();

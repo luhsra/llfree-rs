@@ -1,10 +1,12 @@
 use core::fmt;
 use core::mem::{align_of, size_of};
 use core::ops::{Range, RangeBounds};
+use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64};
 
 use bitfield_struct::bitfield;
-use crossbeam_utils::atomic::AtomicCell;
 use log::error;
+
+use crate::atomic::Atomic;
 
 /// Level 3 entry
 #[bitfield(u64)]
@@ -19,8 +21,9 @@ pub struct TreeNode {
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
 }
-const _: () = assert!(AtomicCell::<TreeNode>::is_lock_free());
-
+impl Atomic for TreeNode {
+    type I = AtomicU64;
+}
 impl TreeNode {
     pub const IDX_MAX: usize = (1 << Self::IDX_BITS) - 1;
     pub const IDX_END: usize = (1 << Self::IDX_BITS) - 2;
@@ -83,14 +86,14 @@ pub struct ReservedTree {
     #[bits(47)]
     start_raw: usize,
 }
-const _: () = assert!(AtomicCell::<ReservedTree>::is_lock_free());
-
+impl Atomic for ReservedTree {
+    type I = AtomicU64;
+}
 impl Default for ReservedTree {
     fn default() -> Self {
         Self::new().with_start_raw(Self::START_RAW_MAX)
     }
 }
-
 impl ReservedTree {
     const START_RAW_MAX: usize = (1 << Self::START_RAW_BITS) - 1;
 
@@ -168,8 +171,9 @@ pub struct Tree {
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
 }
-const _: () = assert!(AtomicCell::<Tree>::is_lock_free());
-
+impl Atomic for Tree {
+    type I = AtomicU16;
+}
 impl Tree {
     pub fn empty(span: usize) -> Self {
         debug_assert!(span < (1 << 15));
@@ -219,8 +223,9 @@ pub struct Child {
     /// If this entry is reserved by a CPU.
     pub page: bool,
 }
-const _: () = assert!(AtomicCell::<Child>::is_lock_free());
-
+impl Atomic for Child {
+    type I = AtomicU16;
+}
 impl Child {
     pub fn new_page() -> Self {
         Self::new().with_page(true)
@@ -257,8 +262,10 @@ impl Child {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(align(4))]
 pub struct ChildPair(pub Child, pub Child);
+impl Atomic for ChildPair {
+    type I = AtomicU32;
+}
 
-const _: () = assert!(AtomicCell::<ChildPair>::is_lock_free());
 const _: () = assert!(size_of::<ChildPair>() == 2 * size_of::<Child>());
 const _: () = assert!(align_of::<ChildPair>() == size_of::<ChildPair>());
 
@@ -273,17 +280,28 @@ impl ChildPair {
         f(self.0) && f(self.1)
     }
 }
+impl From<u32> for ChildPair {
+    fn from(value: u32) -> Self {
+        unsafe { core::mem::transmute(value) }
+    }
+}
+impl From<ChildPair> for u32 {
+    fn from(value: ChildPair) -> Self {
+        unsafe { core::mem::transmute(value) }
+    }
+}
 
 #[cfg(all(test, feature = "std"))]
 mod test {
-    use crossbeam_utils::atomic::AtomicCell;
+    use core::sync::atomic::AtomicU64;
 
+    use crate::atomic::Atom;
     use crate::table::PT_LEN;
 
     #[test]
     fn pt() {
-        const A: AtomicCell<u64> = AtomicCell::new(0);
-        let pt: [AtomicCell<u64>; PT_LEN] = [A; PT_LEN];
+        const A: Atom<u64> = Atom::raw(AtomicU64::new(0));
+        let pt: [Atom<u64>; PT_LEN] = [A; PT_LEN];
         pt[0].compare_exchange(0, 42).unwrap();
         pt[0].fetch_update(|v| Some(v + 1)).unwrap();
         assert_eq!(pt[0].load(), 43);

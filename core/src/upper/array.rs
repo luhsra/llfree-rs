@@ -3,13 +3,13 @@ use core::mem::{align_of, size_of};
 use core::ops::Index;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crossbeam_utils::atomic::AtomicCell;
 use log::{error, info, warn};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::{Alloc, Init, Local, MAGIC, MAX_PAGES};
+use crate::atomic::Atom;
 use crate::entry::{ReservedTree, Tree};
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
@@ -317,7 +317,7 @@ where
                 for i in 0..self.pages().div_ceil(L::N) {
                     let page = i * L::N;
                     let pages = self.lower.recover(page, deep)?;
-                    trees.push(AtomicCell::new(Tree::new_with(pages, false)));
+                    trees.push(Atom::new(Tree::new_with(pages, false)));
                 }
                 self.trees.entries = trees.into();
 
@@ -423,7 +423,7 @@ where
     /// Returns Ok if the global counter was not large enough -> fallback to normal reservation.
     fn try_sync_with_global(
         &self,
-        local: &AtomicCell<ReservedTree>,
+        local: &Atom<ReservedTree>,
         old: ReservedTree,
     ) -> Result<()> {
         let i = old.start() / L::N;
@@ -463,7 +463,7 @@ where
         &self,
         core: usize,
         order: usize,
-        local: &AtomicCell<ReservedTree>,
+        local: &Atom<ReservedTree>,
         old: ReservedTree,
         retry: bool,
     ) -> Result<()> {
@@ -525,7 +525,7 @@ where
     }
 
     // Reserve an entry for bulk frees
-    fn reserve_entry(&self, local: &AtomicCell<ReservedTree>, i: usize) -> Result<bool> {
+    fn reserve_entry(&self, local: &Atom<ReservedTree>, i: usize) -> Result<bool> {
         if let Ok(entry) =
             self.trees[i].fetch_update(|v| v.reserve(Trees::<{ L::N }>::almost_allocated()..))
         {
@@ -558,7 +558,7 @@ where
     /// If `enqueue_back`, the old unreserved entry is added to the back of the partial list.
     fn cas_reserved(
         &self,
-        local: &AtomicCell<ReservedTree>,
+        local: &Atom<ReservedTree>,
         new: ReservedTree,
         expect_reserved: bool,
     ) -> Result<()> {
@@ -575,11 +575,11 @@ where
 #[derive(Default)]
 struct Trees<const LN: usize> {
     /// Array of level 3 entries, which are the roots of the subtrees
-    entries: Box<[AtomicCell<Tree>]>,
+    entries: Box<[Atom<Tree>]>,
 }
 
 impl<const LN: usize> Index<usize> for Trees<LN> {
-    type Output = AtomicCell<Tree>;
+    type Output = Atom<Tree>;
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.entries[index]
@@ -610,12 +610,12 @@ impl<const LN: usize> Trees<LN> {
         let len = pages.div_ceil(LN);
         let mut entries = Vec::with_capacity(len);
         if free_all {
-            entries.resize_with(len - 1, || AtomicCell::new(Tree::new_with(LN, false)));
+            entries.resize_with(len - 1, || Atom::new(Tree::new_with(LN, false)));
             // The last one might be cut off
             let max = ((pages - 1) % LN) + 1;
-            entries.push(AtomicCell::new(Tree::new_with(max, false)));
+            entries.push(Atom::new(Tree::new_with(max, false)));
         } else {
-            entries.resize_with(len, || AtomicCell::new(Tree::new()));
+            entries.resize_with(len, || Atom::new(Tree::new()));
         }
         self.entries = entries.into();
     }

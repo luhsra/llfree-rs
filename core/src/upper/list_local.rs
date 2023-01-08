@@ -3,10 +3,10 @@ use core::fmt;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use crossbeam_utils::atomic::AtomicCell;
 use log::{error, info};
 
 use super::{Alloc, Init, MIN_PAGES};
+use crate::atomic::Atom;
 use crate::util::Page;
 use crate::{Error, Result};
 
@@ -218,15 +218,14 @@ impl Default for Local {
 #[repr(align(64))]
 struct PageFrame {
     /// Next pointers are a bit ugly, but they are used heavily in linux
-    next: AtomicCell<usize>,
+    next: Atom<usize>,
 }
 const _: () = assert!(core::mem::align_of::<PageFrame>() == 64);
-const _: () = assert!(AtomicCell::<usize>::is_lock_free());
 
 impl PageFrame {
     fn new() -> Self {
         Self {
-            next: AtomicCell::new(usize::MAX),
+            next: Atom::new(usize::MAX),
         }
     }
     fn get_next(&self) -> Option<usize> {

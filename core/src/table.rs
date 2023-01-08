@@ -1,11 +1,11 @@
 use core::mem::size_of;
 use core::ops::{Not, Range};
-use core::sync::atomic::{self, Ordering::*};
+use core::sync::atomic::{self, AtomicU64, Ordering::*};
 use core::{fmt, mem};
 
-use crossbeam_utils::atomic::AtomicCell;
 use log::error;
 
+use crate::atomic::{Atom, Atomic};
 use crate::util::align_down;
 use crate::util::Page;
 use crate::{Error, Result};
@@ -20,20 +20,20 @@ pub trait AtomicArray<T: Eq + Copy, const L: usize> {
     fn atomic_fill(&self, e: T);
 }
 
-impl<T: Eq + Copy, const L: usize> AtomicArray<T, L> for [AtomicCell<T>; L] {
+impl<T: Atomic, const L: usize> AtomicArray<T, L> for [Atom<T>; L] {
     fn atomic_fill(&self, e: T) {
         // cast to raw memory to let the compiler use vector instructions
         #[allow(clippy::cast_ref_to_mut)]
         let mem = unsafe { &mut *(self.as_ptr() as *mut [T; L]) };
         mem.fill(e);
         // memory ordering has to be enforced with a memory barrier
-        atomic::fence(SeqCst);
+        atomic::fence(Release);
     }
 }
 
 /// Bitfield replacing the level one table.
 pub struct Bitfield<const N: usize> {
-    data: [AtomicCell<u64>; N],
+    data: [Atom<u64>; N],
 }
 
 const _: () = assert!(size_of::<Bitfield<64>>() == Bitfield::<64>::SIZE);
@@ -41,11 +41,10 @@ const _: () = assert!(size_of::<Bitfield<64>>() >= 8);
 const _: () = assert!(Bitfield::<64>::LEN % Bitfield::<64>::ENTRY_BITS == 0);
 const _: () = assert!(1 << Bitfield::<64>::ORDER == Bitfield::<64>::LEN);
 const _: () = assert!(Bitfield::<2>::ORDER == 7);
-const _: () = assert!(AtomicCell::<u64>::is_lock_free());
 
 impl<const N: usize> Default for Bitfield<N> {
     fn default() -> Self {
-        const A: AtomicCell<u64> = AtomicCell::new(0);
+        const A: Atom<u64> = Atom::raw(AtomicU64::new(0));
         Self { data: [A; N] }
     }
 }
@@ -63,9 +62,9 @@ impl<const N: usize> fmt::Debug for Bitfield<N> {
 
 impl<const N: usize> Bitfield<N>
 where
-    [(); N * 2]:, // Validate generic const expressions
-    [(); N * 4]:,
-    [(); N * 8]:,
+    [(); N * size_of::<u64>() / size_of::<u8>()]:, // Validate generic const expressions
+    [(); N * size_of::<u64>() / size_of::<u16>()]:,
+    [(); N * size_of::<u64>() / size_of::<u32>()]:,
 {
     pub const ENTRY_BITS: usize = 64;
     pub const ENTRIES: usize = N;
@@ -156,19 +155,16 @@ where
     /// Toggle multiple bits with a single correctly sized compare exchange operation
     ///
     /// Note: This only seems to make a difference between a 64 bit fetch_update on Intel Optane
-    fn toggle_int<I: AtomicInt>(&self, i: usize, expected: bool) -> Result<()>
+    fn toggle_int<I: Atomic + Default + Not<Output = I>>(&self, i: usize, e: bool) -> Result<()>
     where
-        [(); N * I::M]:,
+        [(); N * size_of::<u64>() / size_of::<I>()]:,
     {
-        let i = i / (u64::BITS as usize / I::M);
-        let expected = if expected {
-            !I::default()
-        } else {
-            I::default()
-        };
+        let idx = i / (8 * size_of::<I>());
+        let val = if e { !I::default() } else { I::default() };
         // Cast to int type, keeping the same byte size
-        let data: &[AtomicCell<I>; N * I::M] = unsafe { mem::transmute(&self.data) };
-        match data[i].compare_exchange(expected, !expected) {
+        let data: &[Atom<I>; N * size_of::<u64>() / size_of::<I>()] =
+            unsafe { mem::transmute(&self.data) };
+        match data[idx].compare_exchange(val, !val) {
             Ok(_) => Ok(()),
             Err(_) => Err(Error::Retry),
         }
@@ -281,20 +277,6 @@ where
             .map(|v| v.load().count_zeros() as usize)
             .sum()
     }
-}
-
-trait AtomicInt: Sized + Default + Copy + Eq + Not<Output = Self> {
-    /// How this type fits in 64 bit
-    const M: usize;
-}
-impl AtomicInt for u8 {
-    const M: usize = 8;
-}
-impl AtomicInt for u16 {
-    const M: usize = 4;
-}
-impl AtomicInt for u32 {
-    const M: usize = 2;
 }
 
 /// Set the first aligned 2^`order` zero bits, returning the bit offset

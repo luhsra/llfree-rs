@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use alloc::vec::Vec;
-use spin::Barrier;
+use std::sync::Barrier;
 
 use crate::util::WyRand;
 use log::{error, trace};
