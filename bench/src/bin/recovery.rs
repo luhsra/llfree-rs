@@ -33,6 +33,7 @@ struct Args {
     /// Where to store the benchmark results in csv format.
     #[arg(short, long, default_value = "bench/out/bench.csv")]
     outfile: String,
+
 }
 
 type Allocator = Array<3, Cache<32>>;
@@ -56,7 +57,9 @@ fn main() {
 
     warn!("Prepare alloc");
     thread::parallel(
-        mapping.chunks(mapping.len().div_ceil(threads)).enumerate(),
+        mapping[..alloc.pages()]
+            .chunks(alloc.pages().div_ceil(threads))
+            .enumerate(),
         |(t, chunk)| {
             let mut rng = WyRand::new(t as u64);
             let mut pages = chunk
@@ -76,35 +79,33 @@ fn main() {
     assert!(0 < num_allocated && num_allocated < alloc.pages());
 
     if crash {
-        // Invalidate counters
-        for local in alloc.local.iter() {
-            let tree = local.reserved.load();
-            assert!(tree.has_start(), "No preferred tree!");
+        // Invalidate some counters
+        for t in 0..threads {
+            let start = alloc.pages() / threads * t;
 
-            let children = tree.start() / Cache::<32>::N;
-            let bitfield = (tree.start() / PT_LEN) % 32;
+            let children = start / Cache::<32>::N;
+            let bitfield = (start / PT_LEN) % 32;
             alloc.lower.tables[children][bitfield]
                 .fetch_update(|v| v.dec(1))
                 .unwrap();
         }
 
         std::mem::forget(alloc); // Don't clear active flag!
+    } else {
+        drop(alloc); // Normal shutdown
     }
 
-    // Close mapping and reopen it
-    drop(mapping);
-
     warn!("Recover alloc");
-    let mut mapping = map(0x1000_0000_0000, memory * PT_LEN * PT_LEN, &dax).unwrap();
 
     let timer = Instant::now();
     let alloc = Allocator::new(threads, &mut mapping, Init::Recover, false).unwrap();
-    let time = timer.elapsed().as_millis();
+    let time = timer.elapsed().as_nanos();
 
-    warn!("Recovered {num_allocated} allocations in {time} ms");
+    warn!("Recovered {num_allocated} allocations in {time} ns");
     assert!(alloc.dbg_allocated_pages() == num_allocated);
 
     drop(alloc);
+    drop(mapping);
 
     let mut out = File::create(outfile).unwrap();
     writeln!(out, "recovery\n{time}").unwrap();

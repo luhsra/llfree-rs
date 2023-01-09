@@ -521,7 +521,7 @@ where
     }
 
     fn partial_put_huge(&self, old: Child, page: usize, order: usize) -> Result<()> {
-        warn!("partial free of huge page {page:x} o={order}");
+        info!("partial free of huge page {page:x} o={order}");
         let i = (page / Bitfield::LEN) % HP;
         let table = &self.tables[page / Self::N];
         let bitfield = &self.bitfields[page / Bitfield::LEN];
