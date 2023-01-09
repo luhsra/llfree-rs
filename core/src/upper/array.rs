@@ -18,7 +18,7 @@ use crate::{Error, Result};
 
 /// Non-Volatile global metadata
 #[repr(align(0x1000))]
-struct Meta {
+pub struct Meta {
     /// A magic number used to check if the persistent memory contains the allocator state
     magic: AtomicUsize,
     /// Number of pages managed by the persistent allocator
@@ -48,13 +48,13 @@ where
     [(); L::N]:,
 {
     /// Pointer to the metadata page at the end of the allocators persistent memory range
-    meta: Option<&'static Meta>,
+    pub meta: Option<&'static Meta>,
     /// CPU local data (only shared between CPUs if the memory area is too small)
-    local: Box<[Local<F>]>,
+    pub local: Box<[Local<F>]>,
     /// Metadata of the lower alloc
-    lower: L,
+    pub lower: L,
     /// Manages the allocators trees
-    trees: Trees<{ L::N }>,
+    pub trees: Trees<{ L::N }>,
 }
 
 unsafe impl<const F: usize, L: LowerAlloc> Send for Array<F, L> where [(); L::N]: {}
@@ -571,7 +571,7 @@ where
 }
 
 #[derive(Default)]
-struct Trees<const LN: usize> {
+pub struct Trees<const LN: usize> {
     /// Array of level 3 entries, which are the roots of the trees
     entries: Box<[Atom<Tree>]>,
 }

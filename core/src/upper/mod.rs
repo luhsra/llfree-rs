@@ -175,9 +175,9 @@ pub struct LastFrees {
 /// Per core data.
 pub struct Local<const F: usize> {
     /// Local copy of the reserved level 3 entry
-    reserved: CacheLine<Atom<ReservedTree>>,
+    pub reserved: CacheLine<Atom<ReservedTree>>,
     /// Last frees
-    last_frees: CacheLine<AtomicU64>,
+    pub last_frees: CacheLine<AtomicU64>,
 }
 
 impl<const F: usize> Local<F> {

@@ -37,10 +37,10 @@ type Bitfield = crate::table::Bitfield<8>;
 /// RAM: [ Pages ], Bitfields and Tables are allocated elswhere
 /// ```
 pub struct Cache<const HP: usize> {
-    area: &'static mut [Page],
-    bitfields: Box<[CacheLine<Bitfield>]>,
-    tables: Box<[CacheLine<[Atom<Child>; HP]>]>,
-    persistent: bool,
+    pub area: &'static mut [Page],
+    pub bitfields: Box<[CacheLine<Bitfield>]>,
+    pub tables: Box<[CacheLine<[Atom<Child>; HP]>]>,
+    pub persistent: bool,
 }
 
 impl<const HP: usize> Default for Cache<HP> {
