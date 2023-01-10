@@ -180,7 +180,7 @@ where
                     let p = self.bitfields[i].count_zeros();
                     if free != p {
                         warn!("Invalid L2 start=0x{start:x} i{i}: {free} != {p}");
-                        a_entry.store(entry.with_free(p));
+                        a_entry.store(Child::new_free(p));
                     }
                     pages += p;
                 }

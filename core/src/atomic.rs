@@ -29,6 +29,12 @@ impl<T: Atomic> Atom<T> {
             Err(v) => Err(v.into()),
         }
     }
+    pub fn compare_exchange_weak(&self, current: T, new: T) -> Result<T, T> {
+        match self.0.compare_exchange_weak(current.into(), new.into()) {
+            Ok(v) => Ok(v.into()),
+            Err(v) => Err(v.into()),
+        }
+    }
     pub fn fetch_update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
         match self.0.fetch_update(|v| f(v.into()).map(|v| v.into())) {
             Ok(v) => Ok(v.into()),
@@ -81,6 +87,7 @@ pub trait AtomicImpl: Sized {
     fn store(&self, v: Self::V);
     fn swap(&self, v: Self::V) -> Self::V;
     fn compare_exchange(&self, current: Self::V, new: Self::V) -> Result<Self::V, Self::V>;
+    fn compare_exchange_weak(&self, current: Self::V, new: Self::V) -> Result<Self::V, Self::V>;
     fn fetch_update<F: FnMut(Self::V) -> Option<Self::V>>(&self, f: F) -> Result<Self::V, Self::V>;
 
     fn fetch_min(&self, v: Self::V) -> Self::V;
@@ -121,6 +128,9 @@ macro_rules! atomic_impl {
             }
             fn compare_exchange(&self, current: Self::V, new: Self::V) -> Result<Self::V, Self::V> {
                 self.compare_exchange(current, new, AcqRel, Acquire)
+            }
+            fn compare_exchange_weak(&self, current: Self::V, new: Self::V) -> Result<Self::V, Self::V> {
+                self.compare_exchange_weak(current, new, AcqRel, Acquire)
             }
             fn fetch_update<F: FnMut(Self::V) -> Option<Self::V>>(
                 &self,

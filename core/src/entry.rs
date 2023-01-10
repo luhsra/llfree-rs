@@ -152,21 +152,28 @@ impl Tree {
 #[bitfield(u16)]
 #[derive(Default, PartialEq, Eq)]
 pub struct Child {
-    /// Number of free 4K pages.
-    #[bits(15)]
-    pub free: usize,
-    /// If this entry is reserved by a CPU.
-    pub page: bool,
+    /// Number of free 4K pages or u16::MAX for a huge page.
+    count: u16,
 }
 impl Atomic for Child {
     type I = AtomicU16;
 }
 impl Child {
     pub fn new_page() -> Self {
-        Self::new().with_page(true)
+        Self::new().with_count(u16::MAX)
     }
     pub fn new_free(free: usize) -> Self {
-        Self::new().with_free(free)
+        Self::new().with_count(free as _)
+    }
+    pub fn page(self) -> bool {
+        self.count() == u16::MAX
+    }
+    pub fn free(self) -> usize {
+        if !self.page() {
+            self.count() as _
+        } else {
+            0
+        }
     }
     pub fn mark_page(self, span: usize) -> Option<Self> {
         if self.free() == span {

@@ -252,7 +252,7 @@ impl AtomicStack {
             }
 
             // CAS weak is important for fetch-update!
-            match self.start.compare_exchange(prev, Next::Some(idx)) {
+            match self.start.compare_exchange_weak(prev, Next::Some(idx)) {
                 Ok(_) => return,
                 Err(s) => {
                     prev_elem = prev;
@@ -272,7 +272,7 @@ impl AtomicStack {
             let idx = prev.some()?;
             let next = buf[idx].load();
             // CAS weak is important for fetch-update!
-            match self.start.compare_exchange(prev, next) {
+            match self.start.compare_exchange_weak(prev, next) {
                 Ok(old) => {
                     let i = old.some()?;
                     if buf[i].compare_exchange(next, Next::Outside).is_err() {
