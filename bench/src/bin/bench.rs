@@ -217,23 +217,32 @@ fn bulk(
 
     let barrier = Barrier::new(threads);
     let mut perf = Perf::avg(thread::parallel(0..threads, |t| {
-        thread::pin(t);
-        barrier.wait();
-        let mut pages = Vec::with_capacity(allocs);
-        let t1 = Instant::now();
-        for _ in 0..allocs {
-            pages.push(alloc.get(t, order).unwrap());
-        }
-        let get = t1.elapsed().as_nanos() / allocs as u128;
-        pages.reverse();
-        let pages = black_box(pages);
+        let mut get = 0;
+        let mut put = 0;
 
-        barrier.wait();
-        let t2 = Instant::now();
-        for page in pages {
-            alloc.put(t, page, order).unwrap();
+        let total = Instant::now();
+
+        let mut pages = Vec::with_capacity(allocs);
+
+        for _ in 0..(1 << order) {
+            thread::pin(t);
+
+            barrier.wait();
+            let timer = Instant::now();
+            for _ in 0..allocs {
+                pages.push(alloc.get(t, order).unwrap());
+            }
+            get += timer.elapsed().as_nanos() / allocs as u128;
+
+            barrier.wait();
+            let timer = Instant::now();
+            while let Some(page) = pages.pop() {
+                alloc.put(t, page, order).unwrap();
+            }
+            put += timer.elapsed().as_nanos() / allocs as u128;
         }
-        let put = t2.elapsed().as_nanos() / allocs as u128;
+        get /= 1 << order;
+        put /= 1 << order;
 
         Perf {
             get_min: get,
@@ -243,8 +252,8 @@ fn bulk(
             put_avg: put,
             put_max: put,
             init: 0,
-            total: t1.elapsed().as_millis(),
-            allocs,
+            total: total.elapsed().as_millis(),
+            allocs: allocs * (1 << order),
         }
     }));
     assert_eq!(alloc.dbg_allocated_pages(), 0, "{alloc:?}");
@@ -275,13 +284,15 @@ fn repeat(
 
         barrier.wait();
         let timer = Instant::now();
-        for _ in 0..allocs {
-            let page = alloc.get(t, order).unwrap();
-            let page = black_box(page);
-            alloc.put(t, page, order).unwrap();
+        for _ in 0..(1 << order) {
+            for _ in 0..allocs {
+                let page = alloc.get(t, order).unwrap();
+                let page = black_box(page);
+                alloc.put(t, page, order).unwrap();
+            }
         }
 
-        let realloc = timer.elapsed().as_nanos() / allocs as u128;
+        let realloc = timer.elapsed().as_nanos() / (allocs * (1 << order)) as u128;
         Perf {
             get_min: realloc,
             get_avg: realloc,
@@ -321,30 +332,38 @@ fn rand(
     let chunks = all_pages.chunks_mut(allocs).enumerate();
     let mut perf = Perf::avg(thread::parallel(chunks, |(t, pages)| {
         thread::pin(t);
-        barrier.wait();
 
         let timer = Instant::now();
-        for page in pages.iter_mut() {
-            *page = alloc.get(t, order).unwrap();
-        }
-        let get = timer.elapsed().as_nanos() / allocs as u128;
+        let mut get = 0;
+        let mut put = 0;
+        for _ in 0..(1 << order) {
+            barrier.wait();
+            let timer = Instant::now();
+            for page in pages.iter_mut() {
+                *page = alloc.get(t, order).unwrap();
+            }
+            get += timer.elapsed().as_nanos() / allocs as u128;
 
-        barrier.wait();
-        if t == 0 {
-            assert_eq!(pages.len(), allocs);
-            assert_eq!(alloc.dbg_allocated_pages(), allocs * threads * (1 << order));
-            // Shuffle between all cores
-            let pages =
-                unsafe { slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads) };
-            WyRand::new(42).shuffle(pages);
-        }
-        barrier.wait();
+            barrier.wait();
+            if t == 0 {
+                assert_eq!(pages.len(), allocs);
+                assert_eq!(alloc.dbg_allocated_pages(), allocs * threads * (1 << order));
+                // Shuffle between all cores
+                let pages = unsafe {
+                    slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads)
+                };
+                WyRand::new(42).shuffle(pages);
+            }
+            barrier.wait();
 
-        let timer = Instant::now();
-        for page in pages {
-            alloc.put(t, *page, order).unwrap();
+            let timer = Instant::now();
+            for page in pages.iter() {
+                alloc.put(t, *page, order).unwrap();
+            }
+            put += timer.elapsed().as_nanos() / allocs as u128;
         }
-        let put = timer.elapsed().as_nanos() / allocs as u128;
+        get /= 1 << order;
+        put /= 1 << order;
 
         Perf {
             get_min: get,
