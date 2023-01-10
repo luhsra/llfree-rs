@@ -1,13 +1,14 @@
 use core::fmt;
 use core::ops::Index;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering, AtomicU64};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use bitfield_struct::bitfield;
 use log::{error, info};
 
 use super::{Alloc, Init, MIN_PAGES};
-use crate::atomic::Atom;
+use crate::atomic::{Atom, Atomic};
 use crate::entry::Next;
 use crate::util::Page;
 use crate::{Error, Result};
@@ -160,7 +161,7 @@ impl ListCAS {
         }
         self.frames[self.pages() - 1].next.store(Next::End);
 
-        self.list.start.store(Next::Some(0));
+        self.list.start.store(ANext::with(Next::Some(0), 0));
         Ok(())
     }
 
@@ -170,7 +171,7 @@ impl ListCAS {
                 .counter
                 .store(self.pages() / self.local.len(), Ordering::Relaxed);
         }
-        self.list.start.store(Next::End);
+        self.list.start.store(ANext::with(Next::End, 0));
         Ok(())
     }
 
@@ -221,17 +222,49 @@ impl PageFrame {
     }
 }
 
+#[bitfield(u64)]
+struct ANext {
+    index: u32,
+    /// Counts the number of successful writes to prevent ABA
+    #[bits(32)]
+    tag: usize,
+}
+
+impl ANext {
+    const OUTSIDE: u32 = ((1u64 << Self::INDEX_BITS) - 1) as _;
+    const END: u32 = ((1u64 << Self::INDEX_BITS) - 2) as _;
+    fn with(n: Next, tag: usize) -> Self {
+        Self::new()
+            .with_index(match n {
+                Next::Outside => Self::OUTSIDE,
+                Next::End => Self::END,
+                Next::Some(i) => i as _,
+            })
+            .with_tag(tag)
+    }
+    fn next(self) -> Next {
+        match self.index() {
+            Self::OUTSIDE => Next::Outside,
+            Self::END => Next::End,
+            i => Next::Some(i as _)
+        }
+    }
+}
+impl Atomic for ANext {
+    type I = AtomicU64;
+}
+
 /// Simple atomic stack with atomic entries.
 /// It is constructed over an already existing fixed size buffer.
 #[repr(align(64))] // Just to be sure
 pub struct AtomicStack {
-    start: Atom<Next>,
+    start: Atom<ANext>,
 }
 
 impl Default for AtomicStack {
     fn default() -> Self {
         Self {
-            start: Atom::new(Next::End),
+            start: Atom::new(ANext::with(Next::End, 0)),
         }
     }
 }
@@ -242,21 +275,20 @@ impl AtomicStack {
     where
         B: Index<usize, Output = Atom<Next>>,
     {
-        let mut prev_elem = Next::Outside;
-        let mut prev = self.start.load();
+        let mut prev = Next::Outside;
+        let mut top = self.start.load();
         let elem = &buf[idx];
         loop {
-            if elem.compare_exchange(prev_elem, prev).is_err() {
+            if elem.compare_exchange(prev, top.next()).is_err() {
                 error!("invalid list element");
                 panic!()
             }
 
-            // CAS weak is important for fetch-update!
-            match self.start.compare_exchange_weak(prev, Next::Some(idx)) {
+            match self.start.compare_exchange(top, ANext::with(Next::Some(idx), top.tag().wrapping_add(1))) {
                 Ok(_) => return,
-                Err(s) => {
-                    prev_elem = prev;
-                    prev = s;
+                Err(new_top) => {
+                    prev = top.next();
+                    top = new_top;
                 }
             }
         }
@@ -267,21 +299,19 @@ impl AtomicStack {
     where
         B: Index<usize, Output = Atom<Next>>,
     {
-        let mut prev = self.start.load();
+        let mut top = self.start.load();
         loop {
-            let idx = prev.some()?;
-            let next = buf[idx].load();
-            // CAS weak is important for fetch-update!
-            match self.start.compare_exchange_weak(prev, next) {
-                Ok(old) => {
-                    let i = old.some()?;
-                    if buf[i].compare_exchange(next, Next::Outside).is_err() {
+            let top_idx = top.next().some()?;
+            let next = buf[top_idx].load();
+            match self.start.compare_exchange(top, ANext::with(next.into(), top.tag().wrapping_add(1))) {
+                Ok(_) => {
+                    if buf[top_idx].compare_exchange(next, Next::Outside).is_err() {
                         error!("invalid list element");
                         panic!();
                     }
-                    return Some(i);
+                    return Some(top_idx);
                 }
-                Err(s) => prev = s,
+                Err(new_top) => top = new_top,
             }
         }
     }
@@ -300,7 +330,7 @@ where
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut dbg = f.debug_list();
 
-        if let Next::Some(mut i) = self.0.start.load() {
+        if let Next::Some(mut i) = self.0.start.load().next() {
             let mut ended = false;
             for _ in 0..1000 {
                 dbg.entry(&i);
@@ -468,6 +498,32 @@ mod test {
                 for i in &mut idx {
                     *i = stack.pop(&data).unwrap();
                 }
+            }
+        });
+        assert_eq!(stack.pop(&data), None);
+    }
+
+    #[test]
+    fn atomic_stack_repeat() {
+        util::logging();
+        const THREADS: usize = 6;
+        const DATA_V: Atom<Next> = Atom::raw(AtomicU64::new(u64::MAX));
+        let data: [Atom<Next>; THREADS] = [DATA_V; THREADS];
+
+        let stack = AtomicStack::default();
+        // Stress test
+        warn!("parallel:");
+
+        let barrier = Barrier::new(THREADS);
+        thread::parallel(0..THREADS, |t| {
+            thread::pin(t);
+            let mut idx = t;
+
+            barrier.wait();
+
+            for _ in 0..1000 {
+                stack.push(&data, idx);
+                idx = stack.pop(&data).unwrap();
             }
         });
         assert_eq!(stack.pop(&data), None);
