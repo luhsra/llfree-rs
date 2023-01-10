@@ -98,10 +98,11 @@ fn main() {
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
 
     type C32 = Cache<32>;
-    let mut allocs: [Box<dyn Alloc>; 4] = [
+    let mut allocs: [Box<dyn Alloc>; 5] = [
         Box::<Array<0, C32>>::default(),
         Box::<Array<3, C32>>::default(),
         Box::<ListLocal>::default(),
+        Box::<ListCAS>::default(),
         Box::<ListLocked>::default(),
     ];
 

@@ -16,6 +16,8 @@ mod list_local;
 pub use list_local::ListLocal;
 mod list_locked;
 pub use list_locked::ListLocked;
+mod list_cas;
+pub use list_cas::ListCAS;
 
 /// Number of retries if an atomic operation fails.
 pub const CAS_RETRIES: usize = 16;
