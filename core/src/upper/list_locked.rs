@@ -1,4 +1,5 @@
 use core::fmt;
+use core::ops::Index;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
@@ -7,6 +8,7 @@ use log::{error, info};
 
 use super::{Alloc, Init, MIN_PAGES};
 use crate::atomic::{Atom, Spin};
+use crate::entry::Next;
 use crate::util::Page;
 use crate::{Error, Result};
 
@@ -51,7 +53,7 @@ impl Default for ListLocked {
         Self {
             len: 0,
             offset: 0,
-            next: Spin::new(Node::new(None)),
+            next: Spin::new(Node::new(Next::End)),
             local: Box::new([]),
             frames: Box::new([]),
         }
@@ -106,7 +108,7 @@ impl Alloc for ListLocked {
             return Err(Error::Memory);
         }
 
-        if let Some(pfn) = self.next.lock().pop(|i| self.frames[i].get_next()) {
+        if let Some(pfn) = self.next.lock().pop(self) {
             self.local[core].counter.fetch_add(1, Ordering::Relaxed);
             Ok(self.from_pfn(pfn))
         } else {
@@ -122,9 +124,7 @@ impl Alloc for ListLocked {
         }
         let pfn = self.to_pfn(addr)?;
 
-        self.next
-            .lock()
-            .push(pfn, |i, n| self.frames[i].set_next(n));
+        self.next.lock().push(self, pfn);
         self.local[core].counter.fetch_sub(1, Ordering::Relaxed);
         Ok(())
     }
@@ -158,11 +158,11 @@ impl ListLocked {
 
         // build free lists
         for i in 1..self.pages() {
-            self.frames[i - 1].set_next(Some(i));
+            self.frames[i - 1].next.store(Next::Some(i));
         }
-        self.frames[self.pages() - 1].set_next(None);
+        self.frames[self.pages() - 1].next.store(Next::End);
 
-        next.set(Some(0));
+        next.set(Next::Some(0));
         Ok(())
     }
 
@@ -172,7 +172,7 @@ impl ListLocked {
                 .counter
                 .store(self.pages() / self.local.len(), Ordering::Relaxed);
         }
-        self.next.lock().set(None);
+        self.next.lock().set(Next::End);
         Ok(())
     }
 
@@ -199,53 +199,54 @@ impl ListLocked {
     }
 }
 
+impl Index<usize> for ListLocked {
+    type Output = Atom<Next>;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.frames[index].next
+    }
+}
+
 /// Representing Linux `struct page`
 #[repr(align(64))]
 struct PageFrame {
-    /// Next page frame number
-    next: Atom<usize>,
+    /// Next pointers are a bit ugly, but they are used heavily in linux
+    next: Atom<Next>,
 }
 const _: () = assert!(core::mem::align_of::<PageFrame>() == 64);
 
 impl PageFrame {
     fn new() -> Self {
         Self {
-            next: Atom::new(usize::MAX),
+            next: Atom::new(Next::Outside),
         }
-    }
-    fn get_next(&self) -> Option<usize> {
-        let val = self.next.load();
-        (val < usize::MAX).then_some(val)
-    }
-    fn set_next(&self, next: Option<usize>) {
-        self.next.store(next.unwrap_or(usize::MAX));
     }
 }
 
 struct Node {
-    start: Option<usize>,
+    start: Next,
 }
 
 impl Node {
-    fn new(start: Option<usize>) -> Self {
+    fn new(start: Next) -> Self {
         Self { start }
     }
-    fn set(&mut self, start: Option<usize>) {
+    fn set(&mut self, start: Next) {
         self.start = start;
     }
-    fn push<F>(&mut self, next: usize, set_next: F)
+    fn push<B>(&mut self, buf: &B, next: usize)
     where
-        F: FnOnce(usize, Option<usize>),
+        B: Index<usize, Output = Atom<Next>>,
     {
-        set_next(next, self.start);
-        self.start = Some(next);
+        buf[next].store(self.start);
+        self.start = Next::Some(next);
     }
-    fn pop<F>(&mut self, get_next: F) -> Option<usize>
+    fn pop<B>(&mut self, buf: &B) -> Option<usize>
     where
-        F: FnOnce(usize) -> Option<usize>,
+        B: Index<usize, Output = Atom<Next>>,
     {
-        if let Some(idx) = self.start {
-            self.start = get_next(idx);
+        if let Some(idx) = self.start.some() {
+            self.start = buf[idx].swap(Next::Outside);
             Some(idx)
         } else {
             None
@@ -255,13 +256,12 @@ impl Node {
 
 #[cfg(test)]
 mod test {
-    use alloc::sync::Arc;
     use alloc::vec::Vec;
     use log::{info, warn};
 
     use crate::mmap::test_mapping;
     use crate::table::PT_LEN;
-    use crate::upper::{Alloc, Init};
+    use crate::upper::{Alloc, AllocExt, Init};
     use crate::util::{logging, Page};
     use crate::Error;
 
@@ -278,11 +278,7 @@ mod test {
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
-        let alloc = Arc::new({
-            let mut a = Allocator::default();
-            a.init(1, &mut mapping, Init::Volatile, true).unwrap();
-            a
-        });
+        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
 
         assert_eq!(alloc.dbg_free_pages(), alloc.pages());
 

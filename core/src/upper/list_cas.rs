@@ -1,13 +1,14 @@
 use core::fmt;
 use core::ops::Index;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use log::{error, info};
 
 use super::{Alloc, Init, MIN_PAGES};
-use crate::atomic::{Atom, Atomic};
+use crate::atomic::Atom;
+use crate::entry::Next;
 use crate::util::Page;
 use crate::{Error, Result};
 
@@ -218,54 +219,6 @@ impl PageFrame {
             next: Atom::new(Next::Outside),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Next {
-    #[default]
-    Outside,
-    End,
-    Some(usize),
-}
-
-impl Next {
-    fn some(self) -> Option<usize> {
-        match self {
-            Next::Some(i) => Some(i),
-            Next::End => None,
-            Next::Outside => panic!("invalid list element"),
-        }
-    }
-}
-impl From<Option<usize>> for Next {
-    fn from(v: Option<usize>) -> Self {
-        match v {
-            Some(i) => Self::Some(i),
-            None => Self::End,
-        }
-    }
-}
-impl From<u64> for Next {
-    fn from(value: u64) -> Self {
-        const MAX_SUB: u64 = u64::MAX - 1;
-        match value {
-            u64::MAX => Next::Outside,
-            MAX_SUB => Next::End,
-            _ => Next::Some(value as _),
-        }
-    }
-}
-impl From<Next> for u64 {
-    fn from(value: Next) -> Self {
-        match value {
-            Next::Outside => u64::MAX,
-            Next::End => u64::MAX - 1,
-            Next::Some(v) => v as _,
-        }
-    }
-}
-impl Atomic for Next {
-    type I = AtomicU64;
 }
 
 /// Simple atomic stack with atomic entries.

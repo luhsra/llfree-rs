@@ -242,3 +242,52 @@ mod test {
         assert_eq!(pt[0].load(), 43);
     }
 }
+
+/// Next element of a list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Next {
+    #[default]
+    Outside,
+    End,
+    Some(usize),
+}
+
+impl Next {
+    pub fn some(self) -> Option<usize> {
+        match self {
+            Next::Some(i) => Some(i),
+            Next::End => None,
+            Next::Outside => panic!("invalid list element"),
+        }
+    }
+}
+impl From<Option<usize>> for Next {
+    fn from(v: Option<usize>) -> Self {
+        match v {
+            Some(i) => Self::Some(i),
+            None => Self::End,
+        }
+    }
+}
+impl From<u64> for Next {
+    fn from(value: u64) -> Self {
+        const MAX_SUB: u64 = u64::MAX - 1;
+        match value {
+            u64::MAX => Next::Outside,
+            MAX_SUB => Next::End,
+            _ => Next::Some(value as _),
+        }
+    }
+}
+impl From<Next> for u64 {
+    fn from(value: Next) -> Self {
+        match value {
+            Next::Outside => u64::MAX,
+            Next::End => u64::MAX - 1,
+            Next::Some(v) => v as _,
+        }
+    }
+}
+impl Atomic for Next {
+    type I = AtomicU64;
+}

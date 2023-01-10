@@ -1,5 +1,6 @@
 use core::cell::UnsafeCell;
 use core::fmt;
+use core::ops::Index;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -7,6 +8,7 @@ use log::{error, info};
 
 use super::{Alloc, Init, MIN_PAGES};
 use crate::atomic::Atom;
+use crate::entry::Next;
 use crate::util::Page;
 use crate::{Error, Result};
 
@@ -100,7 +102,7 @@ impl Alloc for ListLocal {
         }
 
         let local = self.local(core);
-        if let Some(index) = local.next.pop(|i| self.frames[i].get_next()) {
+        if let Some(index) = local.next.pop(self) {
             local.counter += 1;
             Ok(self.from_pfn(index))
         } else {
@@ -117,7 +119,7 @@ impl Alloc for ListLocal {
 
         let pfn = self.to_pfn(addr)?;
         let local = self.local(core);
-        local.next.push(pfn, |i, n| self.frames[i].set_next(n));
+        local.next.push(self, pfn);
         local.counter -= 1;
         Ok(())
     }
@@ -155,10 +157,10 @@ impl ListLocal {
             let l = self.local(core);
             // build linked list
             for pfn in core * p_core + 1..(core + 1) * p_core {
-                self.frames[pfn - 1].set_next(Some(pfn));
+                self.frames[pfn - 1].next.store(Next::Some(pfn));
             }
-            self.frames[(core + 1) * p_core - 1].set_next(None);
-            l.next.set(Some(core * p_core));
+            self.frames[(core + 1) * p_core - 1].next.store(Next::End);
+            l.next.set(Next::Some(core * p_core));
             l.counter = 0;
         }
         Ok(())
@@ -170,7 +172,7 @@ impl ListLocal {
 
         for core in 0..cores {
             let l = self.local(core);
-            l.next.set(None);
+            l.next.set(Next::Outside);
             l.counter = self.pages() / cores;
         }
         Ok(())
@@ -199,6 +201,14 @@ impl ListLocal {
     }
 }
 
+impl Index<usize> for ListLocal {
+    type Output = Atom<Next>;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.frames[index].next
+    }
+}
+
 #[repr(align(64))]
 struct Local {
     next: Node,
@@ -208,7 +218,7 @@ struct Local {
 impl Default for Local {
     fn default() -> Self {
         Self {
-            next: Node::new(None),
+            next: Node::new(Next::End),
             counter: 0,
         }
     }
@@ -218,49 +228,42 @@ impl Default for Local {
 #[repr(align(64))]
 struct PageFrame {
     /// Next pointers are a bit ugly, but they are used heavily in linux
-    next: Atom<usize>,
+    next: Atom<Next>,
 }
 const _: () = assert!(core::mem::align_of::<PageFrame>() == 64);
 
 impl PageFrame {
     fn new() -> Self {
         Self {
-            next: Atom::new(usize::MAX),
+            next: Atom::new(Next::Outside),
         }
-    }
-    fn get_next(&self) -> Option<usize> {
-        let val = self.next.load();
-        (val < usize::MAX).then_some(val)
-    }
-    fn set_next(&self, next: Option<usize>) {
-        self.next.store(next.unwrap_or(usize::MAX));
     }
 }
 
 struct Node {
-    start: Option<usize>,
+    start: Next,
 }
 
 impl Node {
-    fn new(start: Option<usize>) -> Self {
+    fn new(start: Next) -> Self {
         Self { start }
     }
-    fn set(&mut self, start: Option<usize>) {
+    fn set(&mut self, start: Next) {
         self.start = start;
     }
-    fn push<F>(&mut self, next: usize, set_next: F)
+    fn push<B>(&mut self, buf: &B, next: usize)
     where
-        F: FnOnce(usize, Option<usize>),
+        B: Index<usize, Output = Atom<Next>>,
     {
-        set_next(next, self.start);
-        self.start = Some(next);
+        buf[next].store(self.start);
+        self.start = Next::Some(next);
     }
-    fn pop<F>(&mut self, get_next: F) -> Option<usize>
+    fn pop<B>(&mut self, buf: &B) -> Option<usize>
     where
-        F: FnOnce(usize) -> Option<usize>,
+        B: Index<usize, Output = Atom<Next>>,
     {
-        if let Some(idx) = self.start {
-            self.start = get_next(idx);
+        if let Some(idx) = self.start.some() {
+            self.start = buf[idx].swap(Next::Outside);
             Some(idx)
         } else {
             None
