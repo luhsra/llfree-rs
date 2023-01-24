@@ -1,6 +1,5 @@
-use core::fmt::{self, Write};
+use core::fmt::Write;
 use core::mem::size_of;
-use core::ops::Range;
 
 use log::{error, info, warn};
 
@@ -12,57 +11,37 @@ use crate::atomic::Atom;
 use crate::entry::{Child, ChildPair};
 use crate::table::AtomicArray;
 use crate::upper::{Init, CAS_RETRIES};
-use crate::util::{align_down, align_up, spin_wait, CacheLine, Page};
-use crate::{Error, Result};
+use crate::util::{align_down, align_up, spin_wait, CacheLine};
+use crate::{Error, Page, Result, PFN};
 
 use super::LowerAlloc;
 
 type Bitfield = crate::table::Bitfield<8>;
 
-/// Tree allocator which is able to allocate order 0..11 pages.
+/// Tree allocator which is able to allocate order 0..11 frames.
 ///
-/// Here the bitfields are 512 bit large -> strong focus on huge pages.
+/// Here the bitfields are 512 bit large -> strong focus on huge frames.
 /// Upon that is a table for each tree, with an entry per bitfield.
 ///
-/// The parameter `HP` configures the number of table entries (huge pages per tree).
+/// The parameter `HP` configures the number of table entries (huge frames per tree).
 /// It has to be a multiple of 2!
 ///
 /// ## Memory Layout
 /// **persistent:**
 /// ```text
-/// NVRAM: [ Pages | Bitfields | Tables | Zone ]
+/// NVRAM: [ Frames | Bitfields | Tables | Zone ]
 /// ```
 /// **volatile:**
 /// ```text
-/// RAM: [ Pages ], Bitfields and Tables are allocated elswhere
+/// RAM: [ Frames ], Bitfields and Tables are allocated elswhere
 /// ```
+#[derive(Default, Debug)]
 pub struct Cache<const HP: usize> {
-    pub area: &'static mut [Page],
+    pub begin: PFN,
+    pub len: usize,
     pub bitfields: Box<[CacheLine<Bitfield>]>,
-    pub tables: Box<[CacheLine<[Atom<Child>; HP]>]>,
+    pub children: Box<[CacheLine<[Atom<Child>; HP]>]>,
     pub persistent: bool,
-}
-
-impl<const HP: usize> Default for Cache<HP> {
-    fn default() -> Self {
-        Self {
-            area: &mut [],
-            bitfields: Default::default(),
-            tables: Default::default(),
-            persistent: Default::default(),
-        }
-    }
-}
-
-impl<const HP: usize> fmt::Debug for Cache<HP> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Cache")
-            .field("area", &self.area.as_ptr_range())
-            .field("bitfields", &self.bitfields)
-            .field("tables", &self.tables)
-            .field("persistent", &self.persistent)
-            .finish()
-    }
 }
 
 unsafe impl<const HP: usize> Send for Cache<HP> {}
@@ -76,54 +55,58 @@ where
     const HUGE_ORDER: usize = Bitfield::ORDER;
     const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
 
-    fn new(_cores: usize, area: &mut [Page], init: Init, free_all: bool) -> Self {
+    fn new(_cores: usize, begin: PFN, len: usize, init: Init, free_all: bool) -> Self {
         debug_assert!(HP < (1 << (u16::BITS as usize - Self::HUGE_ORDER)));
 
         // FIXME: Lifetime hack!
-        let area = unsafe { slice::from_raw_parts_mut(area.as_mut_ptr(), area.len()) };
-        let num_bitfields = area.len().div_ceil(Bitfield::LEN);
-        let num_tables = area.len().div_ceil(Self::N);
+        let memory = unsafe { slice::from_raw_parts_mut(begin.as_ptr_mut(), len) };
+
+        let num_bitfields = len.div_ceil(Bitfield::LEN);
+        let num_tables = len.div_ceil(Self::N);
         let alloc = if init != Init::Volatile {
             // Reserve memory within the managed NVM for the l1 and l2 tables
             // These tables are stored at the end of the NVM
             let size_bitfields = num_bitfields * size_of::<Bitfield>();
             let size_bitfields = align_up(size_bitfields, size_of::<[Child; HP]>()); // correct alignment
             let size_tables = num_bitfields * size_of::<[Child; HP]>();
-            // Num of pages occupied by the tables
-            let metadata_pages = (size_bitfields + size_tables).div_ceil(Page::SIZE);
+            // Num of frames occupied by the tables
+            let metadata_frames = (size_bitfields + size_tables).div_ceil(Page::SIZE);
 
-            debug_assert!(metadata_pages < area.len());
-            let (area, tables) = area.split_at_mut(area.len() - metadata_pages);
+            debug_assert!(metadata_frames < len);
+            let len = len - metadata_frames;
+            let (_, metadata) = memory.split_at_mut(len);
 
-            let tables: *mut u8 = tables.as_mut_ptr().cast();
+            let metadata: *mut u8 = metadata.as_mut_ptr().cast();
 
             // Start of the l1 table array
             let bitfields =
-                unsafe { Box::from_raw(slice::from_raw_parts_mut(tables.cast(), num_bitfields)) };
+                unsafe { Box::from_raw(slice::from_raw_parts_mut(metadata.cast(), num_bitfields)) };
 
             let mut offset = num_bitfields * size_of::<Bitfield>();
             offset = align_up(offset, size_of::<[Child; HP]>()); // correct alignment
 
             // Start of the l2 table array
-            let tables = unsafe {
+            let children = unsafe {
                 Box::from_raw(slice::from_raw_parts_mut(
-                    tables.add(offset).cast(),
+                    metadata.add(offset).cast(),
                     num_tables,
                 ))
             };
 
             Self {
-                area,
+                begin,
+                len,
                 bitfields,
-                tables,
+                children,
                 persistent: init != Init::Volatile,
             }
         } else {
             // Allocate l1 and l2 tables in volatile memory
             Self {
-                area,
+                begin,
+                len,
                 bitfields: unsafe { Box::new_uninit_slice(num_bitfields).assume_init() },
-                tables: unsafe { Box::new_uninit_slice(num_tables).assume_init() },
+                children: unsafe { Box::new_uninit_slice(num_tables).assume_init() },
                 persistent: init != Init::Volatile,
             }
         };
@@ -138,23 +121,23 @@ where
         alloc
     }
 
-    fn pages(&self) -> usize {
-        self.area.len()
+    fn frames(&self) -> usize {
+        self.len
     }
 
-    fn memory(&self) -> Range<*const Page> {
-        self.area.as_ptr_range()
+    fn begin(&self) -> PFN {
+        self.begin
     }
 
     fn recover(&self, start: usize, deep: bool) -> Result<usize> {
-        let mut pages = 0;
+        let mut frames = 0;
 
-        let table = &self.tables[start / Self::N];
+        let table = &self.children[start / Self::N];
         for (i, a_entry) in table.iter().enumerate() {
             let start = align_down(start, Self::N) + i * Bitfield::LEN;
             let i = start / Bitfield::LEN;
 
-            if start > self.pages() {
+            if start > self.frames() {
                 a_entry.store(Child::new());
                 continue;
             }
@@ -163,7 +146,7 @@ where
             let free = entry.free();
             if deep {
                 // Deep recovery updates the counter
-                if entry.page() {
+                if entry.allocated() {
                     // Check that underlying bitfield is empty
                     let p = self.bitfields[i].count_zeros();
                     if p != Bitfield::LEN {
@@ -174,7 +157,7 @@ where
                     // Skip entirely free entries
                     // This is possible because the counter is decremented first
                     // for allocations and afterwards for frees
-                    pages += Bitfield::LEN;
+                    frames += Bitfield::LEN;
                 } else {
                     // Check if partially filled bitfield has the same free count
                     let p = self.bitfields[i].count_zeros();
@@ -182,14 +165,14 @@ where
                         warn!("Invalid L2 start=0x{start:x} i{i}: {free} != {p}");
                         a_entry.store(Child::new_free(p));
                     }
-                    pages += p;
+                    frames += p;
                 }
             } else {
-                pages += free;
+                frames += free;
             }
         }
 
-        Ok(pages)
+        Ok(frames)
     }
 
     fn get(&self, start: usize, order: usize) -> Result<usize> {
@@ -207,37 +190,37 @@ where
         }
     }
 
-    /// Free single page and returns if the page was huge
-    fn put(&self, page: usize, order: usize) -> Result<()> {
+    /// Free single frame and returns if the frame was huge
+    fn put(&self, frame: usize, order: usize) -> Result<()> {
         debug_assert!(order <= Self::MAX_ORDER);
-        debug_assert!(page < self.pages());
+        debug_assert!(frame < self.frames());
         stop!();
 
         if order == Self::MAX_ORDER {
-            self.put_max(page)
+            self.put_max(frame)
         } else if order == Self::HUGE_ORDER {
-            let i = (page / Bitfield::LEN) % HP;
-            let table = &self.tables[page / Self::N];
+            let i = (frame / Bitfield::LEN) % HP;
+            let table = &self.children[frame / Self::N];
 
             if let Err(old) =
-                table[i].compare_exchange(Child::new_page(), Child::new_free(Bitfield::LEN))
+                table[i].compare_exchange(Child::new_frame(), Child::new_free(Bitfield::LEN))
             {
-                error!("Addr p={page:x} o={order} {old:?}");
+                error!("Addr p={frame:x} o={order} {old:?}");
                 Err(Error::Address)
             } else {
                 Ok(())
             }
         } else if order < Self::HUGE_ORDER {
-            let i = (page / Bitfield::LEN) % HP;
-            let table = &self.tables[page / Self::N];
+            let i = (frame / Bitfield::LEN) % HP;
+            let table = &self.children[frame / Self::N];
 
             let old = table[i].load();
-            if old.page() {
-                self.partial_put_huge(old, page, order)
+            if old.allocated() {
+                self.partial_put_huge(old, frame, order)
             } else if old.free() <= Bitfield::LEN - (1 << order) {
-                self.put_small(page, order)
+                self.put_small(frame, order)
             } else {
-                error!("Addr p={page:x} o={order} {old:?}");
+                error!("Addr p={frame:x} o={order} {old:?}");
                 Err(Error::Address)
             }
         } else {
@@ -246,70 +229,70 @@ where
         }
     }
 
-    fn is_free(&self, page: usize, order: usize) -> bool {
-        debug_assert!(page % (1 << order) == 0);
-        if order > Self::MAX_ORDER || page + (1 << order) > self.pages() {
+    fn is_free(&self, frame: usize, order: usize) -> bool {
+        debug_assert!(frame % (1 << order) == 0);
+        if order > Self::MAX_ORDER || frame + (1 << order) > self.frames() {
             return false;
         }
 
         if order > Bitfield::ORDER {
-            // multiple hugepages
-            let i = (page / Bitfield::LEN) % HP;
-            self.table_pair(page)[i / 2]
+            // multiple huge frames
+            let i = (frame / Bitfield::LEN) % HP;
+            self.table_pair(frame)[i / 2]
                 .load()
                 .all(|e| e.free() == Bitfield::LEN)
         } else {
-            let table = &self.tables[page / Self::N];
-            let i = (page / Bitfield::LEN) % HP;
+            let table = &self.children[frame / Self::N];
+            let i = (frame / Bitfield::LEN) % HP;
             let entry = table[i].load();
-            let num_pages = 1 << order;
+            let num_frames = 1 << order;
 
-            if entry.free() < num_pages {
+            if entry.free() < num_frames {
                 return false;
             }
             if entry.free() == Bitfield::LEN {
                 return true;
             }
 
-            if num_pages > u64::BITS as usize {
-                // larger than 64 pages
-                let bitfield = &self.bitfields[page / Bitfield::LEN];
-                let start = page / Bitfield::ENTRY_BITS;
-                let end = (page + num_pages) / Bitfield::ENTRY_BITS;
+            if num_frames > u64::BITS as usize {
+                // larger than 64 frames
+                let bitfield = &self.bitfields[frame / Bitfield::LEN];
+                let start = frame / Bitfield::ENTRY_BITS;
+                let end = (frame + num_frames) / Bitfield::ENTRY_BITS;
                 (start..end).all(|i| bitfield.get_entry(i) == 0)
             } else {
                 // small allocations
-                let bitfield = &self.bitfields[page / Bitfield::LEN];
-                let entry = bitfield.get_entry(page / Bitfield::ENTRY_BITS);
-                let mask =
-                    (u64::MAX >> (u64::BITS as usize - num_pages)) << (page % Bitfield::ENTRY_BITS);
+                let bitfield = &self.bitfields[frame / Bitfield::LEN];
+                let entry = bitfield.get_entry(frame / Bitfield::ENTRY_BITS);
+                let mask = (u64::MAX >> (u64::BITS as usize - num_frames))
+                    << (frame % Bitfield::ENTRY_BITS);
                 (entry & mask) == 0
             }
         }
     }
 
-    fn dbg_allocated_pages(&self) -> usize {
-        let mut pages = self.pages();
-        for table in &*self.tables {
+    fn allocated_frames(&self) -> usize {
+        let mut frames = self.frames();
+        for table in &*self.children {
             for entry in table.iter() {
-                pages -= entry.load().free();
+                frames -= entry.load().free();
             }
         }
-        pages
+        frames
     }
 
-    fn dbg_for_each_huge_page<F: FnMut(usize)>(&self, mut f: F) {
-        for table in &*self.tables {
-            for entry in table.iter() {
-                f(entry.load().free())
+    fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, mut f: F) {
+        for (ti, table) in self.children.iter().enumerate() {
+            for (ci, child) in table.iter().enumerate() {
+                f(ti * HP + ci, child.load().free())
             }
         }
     }
 
     fn size_per_gib() -> usize {
-        let pages = 1usize << (30 - Page::SIZE_BITS);
-        let size_bitfields = pages.div_ceil(8); // 1 bit per page
-        let size_tables = size_of::<Child>() * pages.div_ceil(Bitfield::LEN);
+        let frames = 1usize << (30 - Page::SIZE_BITS);
+        let size_bitfields = frames.div_ceil(8); // 1 bit per frame
+        let size_tables = size_of::<Child>() * frames.div_ceil(Bitfield::LEN);
         size_bitfields + size_tables
     }
 }
@@ -319,27 +302,27 @@ where
     [(); HP / 2]:,
 {
     /// Returns the table with pair entries that can be updated at once.
-    fn table_pair(&self, page: usize) -> &[Atom<ChildPair>; HP / 2] {
-        let table = &self.tables[page / Self::N];
+    fn table_pair(&self, frame: usize) -> &[Atom<ChildPair>; HP / 2] {
+        let table = &self.children[frame / Self::N];
         unsafe { &*table.as_ptr().cast() }
     }
 
     fn free_all(&self) {
         // Init tables
-        let (last, tables) = self.tables.split_last().unwrap();
+        let (last, tables) = self.children.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
             table.atomic_fill(Child::new_free(Bitfield::LEN));
         }
         // Table is only partially included in the memory range
         for (i, entry) in last.iter().enumerate() {
-            let page = tables.len() * Self::N + i * Bitfield::LEN;
-            let free = self.pages().saturating_sub(page).min(Bitfield::LEN);
+            let frame = tables.len() * Self::N + i * Bitfield::LEN;
+            let free = self.frames().saturating_sub(frame).min(Bitfield::LEN);
             entry.store(Child::new_free(free));
         }
 
         // Init bitfields
-        let last_i = self.pages() / Bitfield::LEN;
+        let last_i = self.frames() / Bitfield::LEN;
         let (included, mut remainder) = self.bitfields.split_at(last_i);
         // Bitfield is fully included in the memory range
         for bitfield in included {
@@ -347,7 +330,7 @@ where
         }
         // Bitfield might be only partially included in the memory range
         if let Some((last, excluded)) = remainder.split_first() {
-            let end = self.pages() - included.len() * Bitfield::LEN;
+            let end = self.frames() - included.len() * Bitfield::LEN;
             debug_assert!(end <= Bitfield::LEN);
             last.set(0..end, false);
             last.set(end..Bitfield::LEN, true);
@@ -361,24 +344,24 @@ where
 
     fn reserve_all(&self) {
         // Init table
-        let (last, tables) = self.tables.split_last().unwrap();
+        let (last, tables) = self.children.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
-            table.atomic_fill(Child::new_page());
+            table.atomic_fill(Child::new_frame());
         }
         // Table is only partially included in the memory range
-        let last_i = (self.pages() / Bitfield::LEN) - tables.len() * HP;
+        let last_i = (self.frames() / Bitfield::LEN) - tables.len() * HP;
         let (included, remainder) = last.split_at(last_i);
         for entry in included {
-            entry.store(Child::new_page());
+            entry.store(Child::new_frame());
         }
-        // Remainder is allocated as small pages
+        // Remainder is allocated as small frames
         for entry in remainder {
             entry.store(Child::new_free(0));
         }
 
         // Init bitfields
-        let last_i = self.pages() / Bitfield::LEN;
+        let last_i = self.frames() / Bitfield::LEN;
         let (included, remainder) = self.bitfields.split_at(last_i);
         // Bitfield is fully included in the memory range
         for bitfield in included {
@@ -390,11 +373,11 @@ where
         }
     }
 
-    /// Allocate pages up to order 8
+    /// Allocate frames up to order 8
     fn get_small(&self, start: usize, order: usize) -> Result<usize> {
         debug_assert!(order < Bitfield::ORDER);
 
-        let table = &self.tables[start / Self::N];
+        let table = &self.children[start / Self::N];
 
         for _ in 0..CAS_RETRIES {
             // Begin iteration by start idx
@@ -411,7 +394,7 @@ where
                 #[cfg(feature = "stop")]
                 {
                     let entry = table[i].load();
-                    if entry.page() || entry.free() < (1 << order) {
+                    if entry.allocated() || entry.free() < (1 << order) {
                         continue;
                     }
                     stop!();
@@ -438,15 +421,15 @@ where
         Err(Error::Memory)
     }
 
-    /// Allocate huge page
+    /// Allocate huge frame
     fn get_huge(&self, start: usize) -> Result<usize> {
-        let table = &self.tables[start / Self::N];
+        let table = &self.children[start / Self::N];
         let offset = (start / Bitfield::LEN) % HP;
         for _ in 0..CAS_RETRIES {
             for i in 0..HP {
                 let i = (offset + i) % HP;
                 if table[i]
-                    .fetch_update(|v| v.mark_page(Bitfield::LEN))
+                    .fetch_update(|v| v.mark_allocated(Bitfield::LEN))
                     .is_ok()
                 {
                     return Ok(align_down(start, Self::N) + i * Bitfield::LEN);
@@ -458,7 +441,7 @@ where
         Err(Error::Memory)
     }
 
-    /// Allocate multiple huge pages
+    /// Allocate multiple huge frames
     fn get_max(&self, start: usize) -> Result<usize> {
         let table_pair = self.table_pair(start);
         let offset = ((start / Bitfield::LEN) % HP) / 2;
@@ -466,7 +449,7 @@ where
             for i in 0..HP / 2 {
                 let i = (offset + i) % (HP / 2);
                 if table_pair[i]
-                    .fetch_update(|v| v.map(|v| v.mark_page(Bitfield::LEN)))
+                    .fetch_update(|v| v.map(|v| v.mark_allocated(Bitfield::LEN)))
                     .is_ok()
                 {
                     return Ok(align_down(start, Self::N) + 2 * i * Bitfield::LEN);
@@ -478,53 +461,53 @@ where
         Err(Error::Memory)
     }
 
-    fn put_small(&self, page: usize, order: usize) -> Result<()> {
+    fn put_small(&self, frame: usize, order: usize) -> Result<()> {
         debug_assert!(order < Self::HUGE_ORDER);
 
         stop!();
 
-        let bitfield = &self.bitfields[page / Bitfield::LEN];
-        let i = page % Bitfield::LEN;
+        let bitfield = &self.bitfields[frame / Bitfield::LEN];
+        let i = frame % Bitfield::LEN;
         if bitfield.toggle(i, order, true).is_err() {
-            error!("L1 put failed i{i} p={page}");
+            error!("L1 put failed i{i} p={frame}");
             return Err(Error::Address);
         }
 
         stop!();
 
-        let table = &self.tables[page / Self::N];
-        let i = (page / Bitfield::LEN) % HP;
+        let table = &self.children[frame / Self::N];
+        let i = (frame / Bitfield::LEN) % HP;
         if let Err(entry) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order)) {
-            error!("Inc failed i{i} p={page} {entry:?}");
+            error!("Inc failed i{i} p={frame} {entry:?}");
             return Err(Error::Corruption);
         }
 
         Ok(())
     }
 
-    pub fn put_max(&self, page: usize) -> Result<()> {
-        let table_pair = self.table_pair(page);
-        let i = ((page / Bitfield::LEN) % HP) / 2;
+    pub fn put_max(&self, frame: usize) -> Result<()> {
+        let table_pair = self.table_pair(frame);
+        let i = ((frame / Bitfield::LEN) % HP) / 2;
 
         if let Err(old) = table_pair[i].compare_exchange(
-            ChildPair(Child::new_page(), Child::new_page()),
+            ChildPair(Child::new_frame(), Child::new_frame()),
             ChildPair(
                 Child::new_free(Bitfield::LEN),
                 Child::new_free(Bitfield::LEN),
             ),
         ) {
-            error!("Addr {page:x} o={} {old:?} i={i}", Self::MAX_ORDER);
+            error!("Addr {frame} o={} {old:?} i={i}", Self::MAX_ORDER);
             Err(Error::Address)
         } else {
             Ok(())
         }
     }
 
-    fn partial_put_huge(&self, old: Child, page: usize, order: usize) -> Result<()> {
-        info!("partial free of huge page {page:x} o={order}");
-        let i = (page / Bitfield::LEN) % HP;
-        let table = &self.tables[page / Self::N];
-        let bitfield = &self.bitfields[page / Bitfield::LEN];
+    fn partial_put_huge(&self, old: Child, frame: usize, order: usize) -> Result<()> {
+        info!("partial free of huge frame {frame:x} o={order}");
+        let i = (frame / Bitfield::LEN) % HP;
+        let table = &self.children[frame / Self::N];
+        let bitfield = &self.bitfields[frame / Bitfield::LEN];
 
         // Try filling the whole bitfield
         if bitfield.fill_cas(true) {
@@ -534,22 +517,22 @@ where
             }
         }
         // Wait for parallel partial_put_huge to finish
-        else if !spin_wait(CAS_RETRIES, || !table[i].load().page()) {
+        else if !spin_wait(CAS_RETRIES, || !table[i].load().allocated()) {
             error!("Exceeding retries");
             return Err(Error::Corruption);
         }
 
-        self.put_small(page, order)
+        self.put_small(frame, order)
     }
 
     #[allow(dead_code)]
     pub fn dump(&self, start: usize) {
         let mut out = String::new();
         writeln!(out, "Dumping pt {}", start / Self::N).unwrap();
-        let table = &self.tables[start / Self::N];
+        let table = &self.children[start / Self::N];
         for (i, entry) in table.iter().enumerate() {
             let start = align_down(start, Self::N) + i * Bitfield::LEN;
-            if start > self.pages() {
+            if start > self.frames() {
                 break;
             }
 
@@ -567,7 +550,7 @@ impl<const HP: usize> Drop for Cache<HP> {
         if self.persistent {
             // The chunks are part of the allocators managed memory
             Box::leak(core::mem::take(&mut self.bitfields));
-            Box::leak(core::mem::take(&mut self.tables));
+            Box::leak(core::mem::take(&mut self.children));
         }
     }
 }
@@ -581,18 +564,18 @@ mod test {
     use super::{Bitfield, Cache};
     use crate::lower::LowerAlloc;
     use crate::stop::{StopVec, Stopper};
-    use crate::thread;
     use crate::upper::Init;
-    use crate::util::{logging, Page, WyRand};
+    use crate::util::{logging, WyRand};
+    use crate::{thread, PFN};
 
     type Allocator = Cache<64>;
 
     fn count(pt: &Bitfield) -> usize {
-        let mut pages = 0;
+        let mut frames = 0;
         for i in 0..Bitfield::LEN {
-            pages += !pt.get(i) as usize;
+            frames += !pt.get(i) as usize;
         }
-        pages
+        frames
     }
 
     #[test]
@@ -607,11 +590,10 @@ mod test {
             vec![1, 1, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * Allocator::N];
-
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
+            const FRAMES: usize = 4 * Allocator::N;
+            let lower = Allocator::new(2, PFN(0), FRAMES, Init::Volatile, true);
             lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
@@ -620,12 +602,12 @@ mod test {
                 thread::pin(t);
                 let key = Stopper::init(stop, t as _);
 
-                let page = lower.get(0, 0).unwrap();
+                let frame = lower.get(0, 0).unwrap();
                 drop(key);
-                assert!(page != 0);
+                assert!(frame < FRAMES);
             });
 
-            assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN - 3);
+            assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 3);
             assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 3);
         }
     }
@@ -641,11 +623,9 @@ mod test {
             vec![1, 1, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * Allocator::N];
-
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
+            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
             let stop = StopVec::new(2, order);
             thread::parallel(0..2, |t| {
@@ -655,7 +635,7 @@ mod test {
                 lower.get(0, 0).unwrap();
             });
 
-            let entry2 = lower.tables[0][0].load();
+            let entry2 = lower.children[0][0].load();
             assert_eq!(entry2.free(), Bitfield::LEN - 2);
             assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 2);
         }
@@ -672,11 +652,9 @@ mod test {
             vec![1, 1, 0, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * Allocator::N];
-
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
+            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
             for _ in 0..Bitfield::LEN - 1 {
                 lower.get(0, 0).unwrap();
@@ -690,7 +668,7 @@ mod test {
                 lower.get(0, 0).unwrap();
             });
 
-            let table = &lower.tables[0];
+            let table = &lower.children[0];
             assert_eq!(table[0].load().free(), 0);
             assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
             assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
@@ -707,24 +685,23 @@ mod test {
             vec![0, 0, 1, 1, 1, 0, 0],
         ];
 
-        let mut pages = [0; 2];
-        let mut buffer = vec![Page::new(); 4 * Allocator::N];
+        let mut frames = [0; 2];
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
+            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-            pages[0] = lower.get(0, 0).unwrap();
-            pages[1] = lower.get(0, 0).unwrap();
+            frames[0] = lower.get(0, 0).unwrap();
+            frames[1] = lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
             thread::parallel(0..2, |t| {
                 let _stopper = Stopper::init(stop, t as _);
 
-                lower.put(pages[t as usize], 0).unwrap();
+                lower.put(frames[t as usize], 0).unwrap();
             });
 
-            assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN);
+            assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
         }
     }
 
@@ -738,25 +715,24 @@ mod test {
             vec![0, 1, 1, 0, 0, 1, 1, 0],
         ];
 
-        let mut pages = [0; Bitfield::LEN];
-        let mut buffer = vec![Page::new(); 4 * Allocator::N];
+        let mut frames = [0; Bitfield::LEN];
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
+            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-            for page in &mut pages {
-                *page = lower.get(0, 0).unwrap();
+            for frame in &mut frames {
+                *frame = lower.get(0, 0).unwrap();
             }
 
             let stop = StopVec::new(2, order);
             thread::parallel(0..2, |t| {
                 let _stopper = Stopper::init(stop, t as _);
 
-                lower.put(pages[t as usize], 0).unwrap();
+                lower.put(frames[t as usize], 0).unwrap();
             });
 
-            let table = &lower.tables[0];
+            let table = &lower.children[0];
             assert_eq!(table[0].load().free(), 2);
             assert_eq!(count(&lower.bitfields[0]), 2);
         }
@@ -777,15 +753,14 @@ mod test {
             vec![1, 0, 0, 0, 1],
         ];
 
-        let mut pages = [0; Bitfield::LEN];
-        let mut buffer = vec![Page::new(); 4 * Allocator::N];
+        let mut frames = [0; Bitfield::LEN];
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
+            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-            for page in &mut pages[..Bitfield::LEN - 1] {
-                *page = lower.get(0, 0).unwrap();
+            for frame in &mut frames[..Bitfield::LEN - 1] {
+                *frame = lower.get(0, 0).unwrap();
             }
             let stop = StopVec::new(2, order);
 
@@ -799,10 +774,10 @@ mod test {
 
                 let _stopper = Stopper::init(stop, 0);
 
-                lower.put(pages[0], 0).unwrap();
+                lower.put(frames[0], 0).unwrap();
             });
 
-            let table = &lower.tables[0];
+            let table = &lower.children[0];
             if table[0].load().free() == 1 {
                 assert_eq!(count(&lower.bitfields[0]), 1);
             } else {
@@ -827,11 +802,10 @@ mod test {
             vec![1, 1, 0, 0],
         ];
 
-        let mut buffer = vec![Page::new(); 4 * Allocator::N];
-
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
+            const FRAMES: usize = 4 * Allocator::N;
+            let lower = Allocator::new(2, PFN(0), FRAMES, Init::Volatile, true);
             lower.get(0, 0).unwrap();
 
             let stop = StopVec::new(2, order);
@@ -841,13 +815,16 @@ mod test {
                 let key = Stopper::init(stop, t as _);
 
                 let order = t + 1; // order 1 and 2
-                let page = lower.get(0, order).unwrap();
+                let frame = lower.get(0, order).unwrap();
                 drop(key);
-                assert!(page != 0);
+                assert!(frame < FRAMES);
             });
 
             let allocated = 1 + 2 + 4;
-            assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN - allocated);
+            assert_eq!(
+                lower.children[0][0].load().free(),
+                Bitfield::LEN - allocated
+            );
             assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - allocated);
         }
     }
@@ -862,26 +839,25 @@ mod test {
             vec![0, 0, 1, 1, 1, 0, 0],
         ];
 
-        let mut pages = [0; 2];
-        let mut buffer = vec![Page::new(); 4 * Allocator::N];
+        let mut frames = [0; 2];
 
         for order in orders {
             warn!("order: {order:?}");
-            let lower = Allocator::new(2, &mut buffer, Init::Overwrite, true);
+            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-            pages[0] = lower.get(0, 1).unwrap();
-            pages[1] = lower.get(0, 2).unwrap();
+            frames[0] = lower.get(0, 1).unwrap();
+            frames[1] = lower.get(0, 2).unwrap();
 
-            assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN - 2 - 4);
+            assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 2 - 4);
 
             let stop = StopVec::new(2, order);
             thread::parallel(0..2, |t| {
                 let _stopper = Stopper::init(stop, t as _);
 
-                lower.put(pages[t as usize], t + 1).unwrap();
+                lower.put(frames[t as usize], t + 1).unwrap();
             });
 
-            assert_eq!(lower.tables[0][0].load().free(), Bitfield::LEN);
+            assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
         }
     }
 
@@ -890,38 +866,37 @@ mod test {
         logging();
 
         const MAX_ORDER: usize = Allocator::MAX_ORDER;
-        let mut buffer = vec![Page::new(); Allocator::N];
 
         thread::pin(0);
-        let lower = Allocator::new(1, &mut buffer, Init::Overwrite, true);
+        let lower = Allocator::new(1, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-        assert_eq!(lower.dbg_allocated_pages(), 0);
+        assert_eq!(lower.allocated_frames(), 0);
 
         let mut rng = WyRand::new(42);
 
-        let mut num_pages = 0;
-        let mut pages = Vec::new();
+        let mut num_frames = 0;
+        let mut frames = Vec::new();
         for order in 0..=MAX_ORDER {
             for _ in 0..1usize << (MAX_ORDER - order) {
-                pages.push((order, 0));
-                num_pages += 1 << order;
+                frames.push((order, 0));
+                num_frames += 1 << order;
             }
         }
-        rng.shuffle(&mut pages);
-        warn!("allocate {num_pages} pages up to order {MAX_ORDER}");
+        rng.shuffle(&mut frames);
+        warn!("allocate {num_frames} frames up to order {MAX_ORDER}");
 
-        for (order, page) in &mut pages {
-            *page = lower.get(0, *order).unwrap();
+        for (order, frame) in &mut frames {
+            *frame = lower.get(0, *order).unwrap();
         }
 
         lower.dump(0);
-        assert_eq!(lower.dbg_allocated_pages(), num_pages);
+        assert_eq!(lower.allocated_frames(), num_frames);
 
-        for (order, page) in &pages {
-            lower.put(*page, *order).unwrap();
+        for (order, frame) in &frames {
+            lower.put(*frame, *order).unwrap();
         }
 
-        assert_eq!(lower.dbg_allocated_pages(), 0);
+        assert_eq!(lower.allocated_frames(), 0);
     }
 
     #[test]
@@ -930,33 +905,30 @@ mod test {
 
         const MAX_ORDER: usize = Allocator::MAX_ORDER;
 
-        let mut buffer = vec![Page::new(); Allocator::N - 1];
-        let num_max_pages = buffer.len() / (1 << MAX_ORDER);
+        let num_max_frames = (Allocator::N - 1) / (1 << MAX_ORDER);
 
-        let lower = Allocator::new(1, &mut buffer, Init::Volatile, false);
+        let lower = Allocator::new(1, PFN(0), Allocator::N - 1, Init::Volatile, false);
 
-        assert_eq!(lower.dbg_allocated_pages(), Allocator::N - 1);
+        assert_eq!(lower.allocated_frames(), Allocator::N - 1);
 
-        for i in 0..num_max_pages {
+        for i in 0..num_max_frames {
             lower.put(i * (1 << MAX_ORDER), MAX_ORDER).unwrap();
         }
 
-        assert_eq!(lower.dbg_allocated_pages(), (1 << MAX_ORDER) - 1);
+        assert_eq!(lower.allocated_frames(), (1 << MAX_ORDER) - 1);
     }
 
     #[test]
     fn partial_put_huge() {
         logging();
 
-        let mut buffer = vec![Page::new(); Allocator::N - 1];
+        let lower = Allocator::new(1, PFN(0), Allocator::N - 1, Init::Volatile, false);
 
-        let lower = Allocator::new(1, &mut buffer, Init::Volatile, false);
-
-        assert_eq!(lower.dbg_allocated_pages(), Allocator::N - 1);
+        assert_eq!(lower.allocated_frames(), Allocator::N - 1);
 
         lower.put(0, 0).unwrap();
 
-        assert_eq!(lower.dbg_allocated_pages(), Allocator::N - 2);
+        assert_eq!(lower.allocated_frames(), Allocator::N - 2);
 
         lower.dump(0);
     }

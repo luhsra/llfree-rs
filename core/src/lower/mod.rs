@@ -2,8 +2,7 @@ use core::fmt;
 use core::ops::Range;
 
 use crate::upper::Init;
-use crate::util::Page;
-use crate::Result;
+use crate::{Result, PFN};
 
 #[cfg(all(test, feature = "stop"))]
 macro_rules! stop {
@@ -28,10 +27,14 @@ pub trait LowerAlloc: Default + fmt::Debug {
     const HUGE_ORDER: usize;
 
     /// Create a new lower allocator.
-    fn new(cores: usize, area: &mut [Page], init: Init, free_all: bool) -> Self;
+    fn new(cores: usize, begin: PFN, len: usize, init: Init, free_all: bool) -> Self;
 
-    fn pages(&self) -> usize;
-    fn memory(&self) -> Range<*const Page>;
+    fn frames(&self) -> usize;
+    fn begin(&self) -> PFN;
+
+    fn memory(&self) -> Range<PFN> {
+        self.begin()..PFN(self.begin().0 + self.frames())
+    }
 
     /// Recover the level 2 page table at `start`.
     /// If deep, the level 1 pts are also traversed and false counters are corrected.
@@ -46,9 +49,9 @@ pub trait LowerAlloc: Default + fmt::Debug {
     fn is_free(&self, page: usize, order: usize) -> bool;
 
     /// Debug function, returning the number of allocated pages and performing internal checks.
-    fn dbg_allocated_pages(&self) -> usize;
+    fn allocated_frames(&self) -> usize;
     /// Debug function returning number of free pages in each order 9 chunk
-    fn dbg_for_each_huge_page<F: FnMut(usize)>(&self, f: F);
+    fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, f: F);
 
     fn size_per_gib() -> usize;
 }
@@ -64,7 +67,8 @@ mod test {
     use crate::table::PT_LEN;
     use crate::thread;
     use crate::upper::Init;
-    use crate::util::{logging, Page};
+    use crate::util::logging;
+    use crate::Page;
 
     type Lower = super::cache::Cache<512>;
 
@@ -74,7 +78,7 @@ mod test {
         logging();
 
         const THREADS: usize = 6;
-        let mut buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
+        let buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
         for _ in 0..8 {
             let seed = unsafe { libc::rand() } as u64;
@@ -82,11 +86,12 @@ mod test {
 
             let lower = Arc::new(Lower::new(
                 THREADS,
-                &mut buffer,
+                buffer.as_ptr().into(),
+                buffer.len(),
                 Init::Overwrite,
                 true,
             ));
-            assert_eq!(lower.dbg_allocated_pages(), 0);
+            assert_eq!(lower.allocated_frames(), 0);
 
             let stop = StopRand::new(THREADS, seed);
             thread::parallel(0..THREADS, |t| {
@@ -102,7 +107,7 @@ mod test {
                 }
             });
 
-            assert_eq!(lower.dbg_allocated_pages(), 0);
+            assert_eq!(lower.allocated_frames(), 0);
         }
     }
 
@@ -113,7 +118,7 @@ mod test {
 
         const THREADS: usize = 6;
         let mut pages = [0; PT_LEN];
-        let mut buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
+        let buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
         for _ in 0..8 {
             let seed = unsafe { libc::rand() } as u64;
@@ -121,11 +126,12 @@ mod test {
 
             let lower = Arc::new(Lower::new(
                 THREADS,
-                &mut buffer,
+                buffer.as_ptr().into(),
+                buffer.len(),
                 Init::Overwrite,
                 true,
             ));
-            assert_eq!(lower.dbg_allocated_pages(), 0);
+            assert_eq!(lower.allocated_frames(), 0);
 
             for page in &mut pages[..PT_LEN - 3] {
                 *page = lower.get(0, 0).unwrap();
@@ -142,7 +148,7 @@ mod test {
                 }
             });
 
-            assert_eq!(lower.dbg_allocated_pages(), PT_LEN - 3);
+            assert_eq!(lower.allocated_frames(), PT_LEN - 3);
         }
     }
 }

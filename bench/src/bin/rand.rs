@@ -7,7 +7,8 @@ use log::warn;
 use nvalloc::mmap::{madvise, MAdvise, MMap};
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
-use nvalloc::util::{avg_bounds, logging, Page, WyRand};
+use nvalloc::util::{avg_bounds, logging, WyRand};
+use nvalloc::Page;
 
 /// Benchmark for freeing randomly allocated memory regions.
 #[derive(Parser, Debug)]
@@ -125,9 +126,5 @@ fn mapping(
             return MMap::dax(begin, length, f);
         }
     }
-    if private {
-        MMap::anon_private(begin, length, populate)
-    } else {
-        MMap::anon(begin, length, populate)
-    }
+    MMap::anon(begin, length, !private, populate)
 }

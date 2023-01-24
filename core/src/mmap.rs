@@ -5,7 +5,11 @@ use core::ops::{Deref, DerefMut};
 use std::fs::File;
 use std::os::unix::prelude::AsRawFd;
 
-use crate::util::{align_down, Page};
+#[allow(unused)]
+use alloc::boxed::Box;
+
+use crate::util::align_down;
+use crate::Page;
 
 /// Chunk of mapped memory.
 /// Wrapper for POSIX mmap syscalls.
@@ -17,6 +21,7 @@ pub struct MMap<T: 'static> {
 }
 
 impl<T> MMap<T> {
+    #[cfg(target_family = "unix")]
     pub fn file(begin: usize, len: usize, file: File) -> Result<MMap<T>, ()> {
         assert!(len > 0);
 
@@ -68,7 +73,8 @@ impl<T> MMap<T> {
         }
     }
 
-    pub fn anon(begin: usize, len: usize, populate: bool) -> Result<MMap<T>, ()> {
+    #[cfg(target_family = "unix")]
+    pub fn anon(begin: usize, len: usize, shared: bool, populate: bool) -> Result<MMap<T>, ()> {
         if len == 0 {
             return Ok(MMap {
                 slice: unsafe { std::slice::from_raw_parts_mut(begin as _, len) },
@@ -76,14 +82,18 @@ impl<T> MMap<T> {
             });
         }
 
+        let visibility = if shared {
+            libc::MAP_SHARED
+        } else {
+            libc::MAP_PRIVATE
+        };
+
         let addr = unsafe {
             libc::mmap(
                 begin as _,
                 (len * size_of::<T>()) as _,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED
-                    | libc::MAP_ANONYMOUS
-                    | if populate { libc::MAP_POPULATE } else { 0 },
+                libc::MAP_ANONYMOUS | visibility | if populate { libc::MAP_POPULATE } else { 0 },
                 -1,
                 0,
             )
@@ -99,37 +109,16 @@ impl<T> MMap<T> {
         }
     }
 
-    pub fn anon_private(begin: usize, len: usize, populate: bool) -> Result<MMap<T>, ()> {
-        if len == 0 {
-            return Ok(MMap {
-                slice: unsafe { std::slice::from_raw_parts_mut(begin as _, len) },
-                fd: None,
-            });
-        }
-
-        let addr = unsafe {
-            libc::mmap(
-                begin as _,
-                (len * size_of::<T>()) as _,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE
-                    | libc::MAP_ANONYMOUS
-                    | if populate { libc::MAP_POPULATE } else { 0 },
-                -1,
-                0,
-            )
-        };
-        if addr != libc::MAP_FAILED {
-            Ok(MMap {
-                slice: unsafe { std::slice::from_raw_parts_mut(addr as _, len) },
-                fd: None,
-            })
-        } else {
-            unsafe { libc::perror(b"mmap failed\0".as_ptr().cast()) };
-            Err(())
-        }
+    /// Fallback for systems without mmap
+    #[cfg(not(target_family = "unix"))]
+    pub fn anon(_begin: usize, len: usize, _shared: bool, _populate: bool) -> Result<MMap<T>, ()> {
+        Ok(Self {
+            slice: unsafe { Box::leak(Box::new_uninit_slice(len).assume_init()) },
+            fd: None,
+        })
     }
 
+    #[cfg(target_family = "unix")]
     pub fn f_sync(&self) {
         unsafe {
             if let Some(fd) = self.fd {
@@ -141,6 +130,7 @@ impl<T> MMap<T> {
     }
 }
 
+#[cfg(target_family = "unix")]
 pub fn m_async<T>(slice: &mut [T]) {
     unsafe {
         if libc::msync(
@@ -168,6 +158,7 @@ impl<T> DerefMut for MMap<T> {
 }
 
 impl<T> Drop for MMap<T> {
+    #[cfg(target_family = "unix")]
     fn drop(&mut self) {
         if self.len() > 0 {
             let ret = unsafe {
@@ -187,8 +178,15 @@ impl<T> Drop for MMap<T> {
             }
         }
     }
+    #[cfg(not(target_family = "unix"))]
+    fn drop(&mut self) {
+        if self.len() > 0 {
+            drop(unsafe { Box::from_raw(self.slice) });
+        }
+    }
 }
 
+#[cfg(target_family = "unix")]
 #[repr(i32)]
 pub enum MAdvise {
     Normal = libc::MADV_NORMAL,
@@ -215,6 +213,7 @@ pub enum MAdvise {
     PageOut = 21,
 }
 
+#[cfg(target_family = "unix")]
 pub fn madvise(mem: &mut [Page], advise: MAdvise) {
     let ret = unsafe {
         libc::madvise(
@@ -243,7 +242,7 @@ pub fn test_mapping(begin: usize, length: usize) -> core::result::Result<MMap<Pa
             .unwrap();
         return MMap::dax(begin, length, f);
     }
-    MMap::anon(begin, length, true)
+    MMap::anon(begin, length, false, true)
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -254,10 +253,11 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::util::Page;
+    use crate::Page;
 
+    #[cfg(target_family = "unix")]
     #[test]
-    fn mapping() {
+    fn file() {
         let f = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -304,7 +304,7 @@ mod test {
     fn anonymous() {
         logging();
 
-        let mut mapping = MMap::anon(0x0000_1000_0000_0000, Page::SIZE, true).unwrap();
+        let mut mapping = MMap::anon(0x0000_1000_0000_0000, Page::SIZE, false, true).unwrap();
 
         mapping[0] = 42;
         assert_eq!(mapping[0], 42);

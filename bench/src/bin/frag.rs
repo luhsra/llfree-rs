@@ -11,9 +11,10 @@ use log::warn;
 use nvalloc::lower::*;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
+use nvalloc::thread;
 use nvalloc::upper::*;
-use nvalloc::util::{Page, WyRand};
-use nvalloc::{thread, util};
+use nvalloc::util::{self, WyRand};
+use nvalloc::{pfn_range, Page, PFN};
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
@@ -65,13 +66,13 @@ fn main() {
 
     // Map memory for the allocator and initialize it
     let pages = memory * PT_LEN * PT_LEN;
-    let mut mapping = mapping(0x1000_0000_0000, pages, dax).unwrap();
-    let alloc = Allocator::new(threads, &mut mapping, Init::Volatile, true).unwrap();
+    let mapping = mapping(0x1000_0000_0000, pages, dax).unwrap();
+    let alloc = Allocator::new(threads, pfn_range(&mapping), Init::Volatile, true).unwrap();
 
     let out = Mutex::new({
         let mut out = File::create(outfile).unwrap();
         write!(out, "i,num_pages,allocs").unwrap();
-        for i in 0..alloc.pages().div_ceil(PT_LEN) {
+        for i in 0..alloc.frames().div_ceil(PT_LEN) {
             write!(out, ",{i}").unwrap();
         }
         writeln!(out).unwrap();
@@ -85,7 +86,7 @@ fn main() {
 
     let all_pages = {
         let mut v = Vec::with_capacity(threads);
-        v.resize_with(threads, || Mutex::new(Vec::<u64>::new()));
+        v.resize_with(threads, || Mutex::new(Vec::<PFN>::new()));
         v
     };
 
@@ -112,7 +113,7 @@ fn main() {
             }
             warn!("shuffle {}", all.len());
             assert!(all.len() > threads * allocs);
-            assert_eq!(all.len(), alloc.pages());
+            assert_eq!(all.len(), alloc.frames());
 
             rng.shuffle(&mut all);
             for (chunk, pages) in all
@@ -165,16 +166,16 @@ fn main() {
 
 static mut FREE_PER_HUGE: Vec<u16> = Vec::new();
 
-fn count_pte2(free: usize) {
+fn count_pte2(_pfn: PFN, free: usize) {
     unsafe { FREE_PER_HUGE.push(free as _) };
 }
 
 /// count and output stats
 fn stats(out: &mut File, alloc: &Allocator, i: usize) -> io::Result<()> {
     unsafe { FREE_PER_HUGE.clear() };
-    alloc.dbg_for_each_huge_page(count_pte2);
+    alloc.for_each_huge_frame(count_pte2);
 
-    write!(out, "{i},{},{}", alloc.pages(), alloc.dbg_allocated_pages(),)?;
+    write!(out, "{i},{},{}", alloc.frames(), alloc.allocated_frames(),)?;
     for b in unsafe { &FREE_PER_HUGE } {
         write!(out, ",{b}")?;
     }
@@ -204,5 +205,5 @@ fn mapping(
             return MMap::dax(begin, length, f);
         }
     }
-    MMap::anon(begin, length, false)
+    MMap::anon(begin, length, false, true)
 }

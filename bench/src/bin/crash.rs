@@ -8,7 +8,8 @@ use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::upper::*;
-use nvalloc::util::{self, align_up, Page, WyRand};
+use nvalloc::util::{self, align_up, WyRand};
+use nvalloc::{pfn_range, Page, PFN};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]
@@ -50,7 +51,8 @@ fn main() {
             let out_size = align_up(allocs + 2, Page::SIZE) * threads;
             // Shared memory where the allocated pages are backupped
             // Layout: [ ( idx | realloc | pages... ) for each thread ]
-            let mut out_mapping = MMap::<u64>::anon(0x1100_0000_0000, out_size, true).unwrap();
+            let mut out_mapping =
+                MMap::<usize>::anon(0x1100_0000_0000, out_size, true, true).unwrap();
             let out_size = out_size / threads;
             // Initialize with zero
             for out in out_mapping.chunks_mut(out_size) {
@@ -83,7 +85,7 @@ fn execute(
     threads: usize,
     order: usize,
     mut mapping: MMap<Page>,
-    mut out_mapping: MMap<u64>,
+    mut out_mapping: MMap<usize>,
 ) {
     // Align to prevent false-sharing
     let out_size = align_up(allocs + 2, Page::SIZE);
@@ -94,7 +96,7 @@ fn execute(
     }
 
     alloc
-        .init(threads, &mut mapping, Init::Overwrite, true)
+        .init(threads, pfn_range(&mapping), Init::Overwrite, true)
         .unwrap();
     warn!("initialized");
 
@@ -112,7 +114,7 @@ fn execute(
 
         for (i, page) in data.iter_mut().enumerate() {
             *idx = i as _;
-            *page = alloc.get(t, order).unwrap();
+            *page = alloc.get(t, order).unwrap().0;
         }
 
         warn!("repeat");
@@ -123,8 +125,8 @@ fn execute(
             let i = rng.range(0..allocs as u64) as usize;
             *idx = i as _;
 
-            alloc.put(t, data[i], order).unwrap();
-            data[i] = alloc.get(t, order).unwrap();
+            alloc.put(t, PFN(data[i]), order).unwrap();
+            data[i] = alloc.get(t, order).unwrap().0;
         }
     });
 }
@@ -136,8 +138,8 @@ fn monitor(
     threads: usize,
     order: usize,
     child: i32,
-    mut mapping: MMap<Page>,
-    out_mapping: MMap<u64>,
+    mapping: MMap<Page>,
+    out_mapping: MMap<usize>,
 ) {
     let out_size = align_up(allocs + 2, Page::SIZE);
 
@@ -183,11 +185,11 @@ fn monitor(
 
     // Recover allocator
     alloc
-        .init(threads, &mut mapping, Init::Recover, true)
+        .init(threads, pfn_range(&mapping), Init::Recover, true)
         .unwrap();
 
     let expected = allocs * threads - threads;
-    let actual = alloc.dbg_allocated_pages();
+    let actual = alloc.allocated_frames();
     warn!("expected={expected} actual={actual}");
     assert!(expected <= actual && actual <= expected + threads);
 
@@ -207,14 +209,14 @@ fn monitor(
         let (_realloc, data) = data.split_first().unwrap();
 
         for (i, addr) in data[0..allocs].iter().enumerate() {
-            if i != *idx as usize {
-                alloc.put(t, *addr, order).unwrap();
+            if i != *idx {
+                alloc.put(t, PFN(*addr), order).unwrap();
             }
         }
     }
     // Check if the remaining pages, that were allocated/freed during the crash,
     // is less equal to the number of concurrent threads (upper bound).
-    assert!(alloc.dbg_allocated_pages() <= threads);
+    assert!(alloc.allocated_frames() <= threads);
     warn!("Ok");
     drop(alloc); // Free alloc first
 }
@@ -241,5 +243,5 @@ fn mapping(
             return MMap::dax(begin, length, f);
         }
     }
-    MMap::anon(begin, length, false)
+    MMap::anon(begin, length, true, true)
 }

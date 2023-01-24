@@ -1,6 +1,6 @@
 use core::fmt;
+use core::mem::align_of;
 use core::mem::transmute;
-use core::mem::{align_of, size_of};
 use core::ops::{Add, Deref, DerefMut, Div, Range};
 
 /// Align v up to next `align` (power of two!)
@@ -15,32 +15,6 @@ pub const fn align_up(v: usize, align: usize) -> usize {
 pub const fn align_down(v: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     v & !(align - 1)
-}
-
-/// Correctly sized and aligned page.
-#[derive(Clone)]
-#[repr(align(0x1000))]
-pub struct Page {
-    _data: [u8; Self::SIZE],
-}
-const _: () = assert!(size_of::<Page>() == Page::SIZE);
-const _: () = assert!(align_of::<Page>() == Page::SIZE);
-impl Page {
-    pub const SIZE: usize = 0x1000;
-    pub const SIZE_BITS: usize = Self::SIZE.ilog2() as _;
-    pub const fn new() -> Self {
-        Self {
-            _data: [0; Self::SIZE],
-        }
-    }
-    pub fn cast<T>(&self) -> &T {
-        debug_assert!(size_of::<T>() <= size_of::<Self>());
-        unsafe { transmute(self) }
-    }
-    pub fn cast_mut<T>(&mut self) -> &mut T {
-        debug_assert!(size_of::<T>() <= size_of::<Self>());
-        unsafe { transmute(self) }
-    }
 }
 
 /// Cache alignment for T

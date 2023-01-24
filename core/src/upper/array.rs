@@ -1,6 +1,6 @@
 use core::fmt;
 use core::mem::{align_of, size_of};
-use core::ops::Index;
+use core::ops::{Index, Range};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use log::{error, info, warn};
@@ -8,21 +8,21 @@ use log::{error, info, warn};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use super::{Alloc, Init, Local, MAGIC, MAX_PAGES};
+use super::{Alloc, Init, Local, MAGIC};
 use crate::atomic::Atom;
 use crate::entry::{ReservedTree, Tree};
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_down, spin_wait, CacheLine, Page};
-use crate::{Error, Result};
+use crate::util::{align_down, spin_wait, CacheLine};
+use crate::{Error, PFNRange, Page, Result, PFN};
 
 /// Non-Volatile global metadata
 #[repr(align(0x1000))]
 pub struct Meta {
     /// A magic number used to check if the persistent memory contains the allocator state
     magic: AtomicUsize,
-    /// Number of pages managed by the persistent allocator
-    pages: AtomicUsize,
+    /// Number of frames managed by the persistent allocator
+    frames: AtomicUsize,
     /// Flag that stores if the system has crashed or was shutdown correctly
     crashed: AtomicBool,
 }
@@ -47,7 +47,7 @@ pub struct Array<const F: usize, L: LowerAlloc>
 where
     [(); L::N]:,
 {
-    /// Pointer to the metadata page at the end of the allocators persistent memory range
+    /// Pointer to the metadata frame at the end of the allocators persistent memory range
     pub meta: Option<&'static Meta>,
     /// CPU local data (only shared between CPUs if the memory area is too small)
     pub local: Box<[Local<F>]>,
@@ -71,20 +71,20 @@ where
             f,
             "    memory: {:?} ({})",
             self.lower.memory(),
-            self.lower.pages()
+            self.lower.frames()
         )?;
 
-        writeln!(f, "    trees: {:?} ({} pages)", self.trees, L::N)?;
-        let free_pages = self.dbg_free_pages();
-        let free_huge_pages = self.dbg_free_huge_pages();
+        writeln!(f, "    trees: {:?} ({} frames)", self.trees, L::N)?;
+        let free_frames = self.free_frames();
+        let free_huge_frames = self.free_huge_frames();
         writeln!(
             f,
-            "    free pages: {free_pages} ({free_huge_pages} huge, {} trees)",
-            free_pages.div_ceil(L::N)
+            "    free frames: {free_frames} ({free_huge_frames} huge, {} trees)",
+            free_frames.div_ceil(L::N)
         )?;
 
         for (t, local) in self.local.iter().enumerate() {
-            writeln!(f, "    L{t:>2}: {:?}", local.reserved.load())?;
+            writeln!(f, "    L{t:>2}: {:?}", local.preferred.load())?;
         }
 
         write!(f, "}}")?;
@@ -100,19 +100,20 @@ where
     fn init(
         &mut self,
         mut cores: usize,
-        mut memory: &mut [Page],
+        mut memory: Range<PFN>,
         init: Init,
         free_all: bool,
     ) -> Result<()> {
-        info!(
-            "initializing c={cores} {:?} {}",
-            memory.as_ptr_range(),
-            memory.len()
-        );
+        info!("initializing c={cores} {memory:?} {}", memory.len());
+        if memory.start.0 % (1 << L::MAX_ORDER) != 0 {
+            error!("Unexpected memory alignment");
+            return Err(Error::Initialization);
+        }
+
         if memory.len() < L::N * cores {
             warn!("memory {} < {}", memory.len(), L::N * cores);
             if memory.len() < 1 << L::HUGE_ORDER {
-                error!("Expecting at least {} pages", 1 << L::HUGE_ORDER);
+                error!("Expecting at least {} frames", 1 << L::HUGE_ORDER);
                 return Err(Error::Memory);
             }
             cores = 1.max(memory.len() / L::N);
@@ -120,8 +121,8 @@ where
 
         if init != Init::Volatile {
             // Last frame is reserved for metadata
-            let (m, rem) = memory.split_at_mut((memory.len() - 1).min(MAX_PAGES));
-            self.meta = Some(unsafe { &*rem.as_ptr().cast::<Meta>() });
+            let m = memory.start..PFN(memory.end.0 - 1);
+            self.meta = Some(unsafe { &*m.end.as_ptr().cast() });
             memory = m;
         }
 
@@ -131,7 +132,7 @@ where
         self.local = local.into();
 
         // Create lower allocator
-        self.lower = L::new(cores, memory, init, free_all);
+        self.lower = L::new(cores, memory.start, memory.len(), init, free_all);
 
         if init == Init::Recover {
             match self.recover() {
@@ -141,10 +142,10 @@ where
             }
         }
 
-        self.trees.init(self.pages(), free_all);
+        self.trees.init(self.frames(), free_all);
 
         if let Some(meta) = self.meta {
-            meta.pages.store(self.pages(), Ordering::SeqCst);
+            meta.frames.store(self.frames(), Ordering::SeqCst);
             meta.magic.store(MAGIC, Ordering::SeqCst);
             meta.crashed.store(true, Ordering::SeqCst);
         }
@@ -152,7 +153,7 @@ where
         Ok(())
     }
 
-    fn get(&self, core: usize, order: usize) -> Result<u64> {
+    fn get(&self, core: usize, order: usize) -> Result<PFN> {
         if order > L::MAX_ORDER {
             error!("invalid order: !{order} <= {}", L::MAX_ORDER);
             return Err(Error::Memory);
@@ -171,22 +172,22 @@ where
         Err(Error::Memory)
     }
 
-    fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
-        let page = self.addr_to_page(addr, order)?;
+    fn put(&self, core: usize, addr: PFN, order: usize) -> Result<()> {
+        let frame = self.addr_to_frame(addr, order)?;
 
-        // First free the page in the lower allocator
-        self.lower.put(page, order)?;
+        // First free the frame in the lower allocator
+        self.lower.put(frame, order)?;
 
         // Then update local / global counters
-        let i = page / L::N;
+        let i = frame / L::N;
         let local = &self.local[core % self.local.len()];
-        let max = (self.pages() - i * L::N).min(L::N);
+        let max = (self.frames() - i * L::N).min(L::N);
 
         // Try update own tree first
-        let num_pages = 1 << order;
+        let num_frames = 1 << order;
         if let Err(tree) = local
-            .reserved
-            .fetch_update(|v| v.inc(num_pages, max, |s| s / L::N == i))
+            .preferred
+            .fetch_update(|v| v.inc(num_frames, max, |s| s / L::N == i))
         {
             if tree.start() / L::N == i {
                 error!("inc failed L{i}: {tree:?} o={order}");
@@ -199,13 +200,13 @@ where
         };
 
         // Tree not owned by us -> update global
-        match self.trees[i].fetch_update(|v| v.inc(num_pages, max)) {
+        match self.trees[i].fetch_update(|v| v.inc(num_frames, max)) {
             Ok(tree) => {
-                let new_pages = tree.free() + num_pages;
-                if !tree.reserved() && new_pages > Trees::<{ L::N }>::almost_allocated() {
+                let new_frames = tree.free() + num_frames;
+                if !tree.reserved() && new_frames > Trees::<{ L::N }>::almost_allocated() {
                     // put-reserve optimization:
                     // Try to reserve the tree that was targeted by the recent frees
-                    if local.frees_in_tree(i) && self.reserve_entry(&local.reserved, i)? {
+                    if local.frees_in_tree(i) && self.reserve_entry(&local.preferred, i)? {
                         return Ok(());
                     }
                 }
@@ -219,42 +220,42 @@ where
         }
     }
 
-    fn is_free(&self, addr: u64, order: usize) -> bool {
-        if let Ok(page) = self.addr_to_page(addr, order) {
-            self.lower.is_free(page, order)
+    fn is_free(&self, addr: PFN, order: usize) -> bool {
+        if let Ok(frame) = self.addr_to_frame(addr, order) {
+            self.lower.is_free(frame, order)
         } else {
             false
         }
     }
 
-    fn pages(&self) -> usize {
-        self.lower.pages()
+    fn frames(&self) -> usize {
+        self.lower.frames()
     }
 
     fn drain(&self, core: usize) -> Result<()> {
         let local = &self.local[core % self.local.len()];
-        match self.cas_reserved(&local.reserved, ReservedTree::default(), false) {
+        match self.cas_reserved(&local.preferred, ReservedTree::default(), false) {
             Err(Error::Retry) => Ok(()), // ignore cas errors
             r => r,
         }
     }
 
-    fn dbg_free_pages(&self) -> usize {
-        let mut pages = 0;
+    fn free_frames(&self) -> usize {
+        let mut frames = 0;
         // Global array
         for tree in self.trees.entries.iter() {
-            pages += tree.load().free();
+            frames += tree.load().free();
         }
-        // Pages allocated in reserved trees
+        // Frames allocated in reserved trees
         for local in self.local.iter() {
-            pages += local.reserved.load().free();
+            frames += local.preferred.load().free();
         }
-        pages
+        frames
     }
 
-    fn dbg_free_huge_pages(&self) -> usize {
+    fn free_huge_frames(&self) -> usize {
         let mut counter = 0;
-        self.lower.dbg_for_each_huge_page(|c| {
+        self.lower.for_each_huge_frame(|_, c| {
             if c == (1 << L::HUGE_ORDER) {
                 counter += 1;
             }
@@ -263,8 +264,8 @@ where
     }
 
     #[cold]
-    fn dbg_for_each_huge_page(&self, f: fn(usize)) {
-        self.lower.dbg_for_each_huge_page(f)
+    fn for_each_huge_frame(&self, f: fn(PFN, usize)) {
+        self.lower.for_each_huge_frame(|frame, c| f(self.lower.begin().off(frame), c))
     }
 }
 
@@ -297,13 +298,13 @@ where
     [(); L::N]:,
 {
     /// Recover the allocator from NVM after reboot.
-    /// If crashed then the level 1 page tables are traversed and diverging counters are corrected.
+    /// If crashed then the level 1 frame tables are traversed and diverging counters are corrected.
     fn recover(&mut self) -> Result<()> {
         if let Some(meta) = self.meta {
-            if meta.pages.load(Ordering::SeqCst) == self.pages()
+            if meta.frames.load(Ordering::SeqCst) == self.frames()
                 && meta.magic.load(Ordering::SeqCst) == MAGIC
             {
-                info!("recover p={}", self.pages());
+                info!("recover p={}", self.frames());
                 // The active flag is set on boot and reset on a successful shutdown
                 // If it is already set, the allocator has been crashed
                 // In this case, we have to initiate a deep recovery, correcting all the counters
@@ -312,12 +313,12 @@ where
                     warn!("Try recover crashed allocator!");
                 }
 
-                let mut trees = Vec::with_capacity(self.pages().div_ceil(L::N));
+                let mut trees = Vec::with_capacity(self.frames().div_ceil(L::N));
                 // Recover each tree one-by-one
-                for i in 0..self.pages().div_ceil(L::N) {
-                    let page = i * L::N;
-                    let pages = self.lower.recover(page, deep)?;
-                    trees.push(Atom::new(Tree::new_with(pages, false)));
+                for i in 0..self.frames().div_ceil(L::N) {
+                    let frame = i * L::N;
+                    let frames = self.lower.recover(frame, deep)?;
+                    trees.push(Atom::new(Tree::new_with(frames, false)));
                 }
                 self.trees.entries = trees.into();
 
@@ -333,57 +334,51 @@ where
         }
     }
 
-    /// Convert an address to the page index
-    fn addr_to_page(&self, addr: u64, order: usize) -> Result<usize> {
+    /// Convert an address to the frame index
+    fn addr_to_frame(&self, addr: PFN, order: usize) -> Result<usize> {
         if order > L::MAX_ORDER {
             error!("invalid order: {order} > {}", L::MAX_ORDER);
             return Err(Error::Memory);
         }
 
         // Check alignment and if this addr is within our address range
-        if addr % ((1 << order) * Page::SIZE) as u64 != 0
-            || !self.lower.memory().contains(&(addr as _))
-        {
-            error!(
-                "invalid addr 0x{addr:x} r={:?} o={order}",
-                self.lower.memory()
-            );
+        if addr.0 % (1 << order) != 0 || !self.lower.memory().contains(&addr) {
+            error!("invalid addr {addr} r={:?} o={order}", self.lower.memory());
             return Err(Error::Address);
         }
 
-        let page = unsafe { (addr as *const Page).offset_from(self.lower.memory().start) } as usize;
-        Ok(page)
+        Ok(addr.0 - self.lower.begin().0)
     }
 
-    /// Try to allocate a page with the given order
-    fn get_inner(&self, core: usize, order: usize) -> Result<u64> {
+    /// Try to allocate a frame with the given order
+    fn get_inner(&self, core: usize, order: usize) -> Result<PFN> {
         // Select local data (which can be shared between cores if we do not have enough memory)
         let c = core % self.local.len();
         let local = &self.local[c];
         // Update the upper counters first
-        match local.reserved.fetch_update(|v| v.dec(1 << order)) {
+        match local.preferred.fetch_update(|v| v.dec(1 << order)) {
             Ok(old) => {
                 // The start point for the search
                 let start = old.start();
                 // Try allocating with the lower allocator
                 match self.lower.get(start, order) {
-                    Ok(page) => {
+                    Ok(frame) => {
                         // Success
                         if order < 64usize.ilog2() as usize
-                            && align_down(start, 64) != align_down(page, 64)
+                            && align_down(start, 64) != align_down(frame, 64)
                         {
                             // Save start index for lower allocations
                             let new = old.dec(1 << order).unwrap();
-                            let ret = local.reserved.compare_exchange(new, new.with_start(page));
+                            let ret = local.preferred.compare_exchange(new, new.with_start(frame));
                             debug_assert!(ret.is_ok());
                         }
-                        Ok(unsafe { self.lower.memory().start.add(page as _) } as u64)
+                        Ok(self.lower.begin().off(frame))
                     }
                     Err(Error::Memory) => {
                         // Failure (e.g. due to fragmentation)
                         // Reset counters, reserve new entry and retry allocation
                         info!("alloc failed o={order} => retry");
-                        let max = (self.pages() - align_down(start, L::N)).min(L::N);
+                        let max = (self.frames() - align_down(start, L::N)).min(L::N);
                         // Increment global to prevent race condition with concurrent reservation
                         if let Err(old) =
                             self.trees[start / L::N].fetch_update(|v| v.inc(1 << order, max))
@@ -391,7 +386,7 @@ where
                             error!("Counter reset failed o={order} {old:?}");
                             Err(Error::Corruption)
                         } else {
-                            self.reserve_or_wait(core, order, &local.reserved, old, true)?;
+                            self.reserve_or_wait(core, order, &local.preferred, old, true)?;
                             Err(Error::Retry)
                         }
                     }
@@ -401,15 +396,15 @@ where
             Err(old) => {
                 // If the local counter is large enough we do not have to reserve a new tree
                 // Just update the local counter and reuse the current tree
-                self.try_sync_with_global(&local.reserved, old)?;
+                self.try_sync_with_global(&local.preferred, old)?;
 
                 // The local tree is full -> reserve a new one
-                self.reserve_or_wait(core, order, &local.reserved, old, false)?;
+                self.reserve_or_wait(core, order, &local.preferred, old, false)?;
 
                 // TODO: Steal from other CPUs on Error::Memory
                 // Stealing in general should not only be done after the whole array has been searched,
                 // due to the terrible performance.
-                // We probably need a stealing mode where a CPU steals the next N pages from another CPU.
+                // We probably need a stealing mode where a CPU steals the next N frames from another CPU.
 
                 // Reservation successfull -> retry the allocation
                 Err(Error::Retry)
@@ -421,11 +416,7 @@ where
     ///
     /// If successful returns `Error::CAS` -> retry.
     /// Returns Ok if the global counter was not large enough -> fallback to normal reservation.
-    fn try_sync_with_global(
-        &self,
-        local: &Atom<ReservedTree>,
-        old: ReservedTree,
-    ) -> Result<()> {
+    fn try_sync_with_global(&self, local: &Atom<ReservedTree>, old: ReservedTree) -> Result<()> {
         let i = old.start() / L::N;
         if i < self.trees.entries.len()
             && old.free() + self.trees[i].load().free() > Trees::<{ L::N }>::almost_allocated()
@@ -535,7 +526,7 @@ where
                 Err(Error::Retry) => {
                     warn!("rollback {i}");
                     // Rollback reservation
-                    let max = (self.pages() - i * L::N).min(L::N);
+                    let max = (self.frames() - i * L::N).min(L::N);
                     if self.trees[i]
                         .fetch_update(|v| v.unreserve_add(entry.free(), max))
                         .is_err()
@@ -566,7 +557,7 @@ where
             .fetch_update(|v| (v.locked() == expect_locked).then_some(new))
             .map_err(|_| Error::Retry)?;
 
-        self.trees.unreserve(old, self.pages())
+        self.trees.unreserve(old, self.frames())
     }
 }
 
@@ -604,13 +595,13 @@ impl<const LN: usize> fmt::Debug for Trees<LN> {
 
 impl<const LN: usize> Trees<LN> {
     /// Initialize the tree array
-    fn init(&mut self, pages: usize, free_all: bool) {
-        let len = pages.div_ceil(LN);
+    fn init(&mut self, frames: usize, free_all: bool) {
+        let len = frames.div_ceil(LN);
         let mut entries = Vec::with_capacity(len);
         if free_all {
             entries.resize_with(len - 1, || Atom::new(Tree::new_with(LN, false)));
             // The last one might be cut off
-            let max = ((pages - 1) % LN) + 1;
+            let max = ((frames - 1) % LN) + 1;
             entries.push(Atom::new(Tree::new_with(max, false)));
         } else {
             entries.resize_with(len, || Atom::new(Tree::new()));
@@ -618,24 +609,24 @@ impl<const LN: usize> Trees<LN> {
         self.entries = entries.into();
     }
 
-    /// Almost no free pages left
+    /// Almost no free frames left
     const fn almost_allocated() -> usize {
         1 << 10 // MAX_ORDER
     }
 
-    /// Almost all pages are free
+    /// Almost all frames are free
     const fn almost_free() -> usize {
         LN - (1 << 10) // MAX_ORDER
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    fn unreserve(&self, entry: ReservedTree, pages: usize) -> Result<()> {
+    fn unreserve(&self, entry: ReservedTree, frames: usize) -> Result<()> {
         if !entry.has_start() {
             return Ok(());
         }
 
         let i = entry.start() / LN;
-        let max = (pages - i * LN).min(LN);
+        let max = (frames - i * LN).min(LN);
         if let Ok(_) = self[i].fetch_update(|v| v.unreserve_add(entry.free(), max)) {
             Ok(())
         } else {
@@ -693,14 +684,14 @@ impl<const LN: usize> Trees<LN> {
     /// Fallback to search for any suitable tree
     fn reserve_any(&self, start: usize, order: usize) -> Option<ReservedTree> {
         // Just search linearly through the array
-        let num_pages = 1 << order;
+        let num_frames = 1 << order;
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
-            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(num_pages..)) {
+            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(num_frames..)) {
                 return Some(ReservedTree::new_with(entry.free(), i * LN));
             }
         }
-        warn!("no pages left");
+        warn!("no frames left");
         None
     }
 

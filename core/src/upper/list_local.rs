@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 use core::fmt;
-use core::ops::Index;
+use core::ops::{Index, Range};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -9,8 +9,7 @@ use log::{error, info};
 use super::{Alloc, Init, MIN_PAGES};
 use crate::atomic::Atom;
 use crate::entry::Next;
-use crate::util::Page;
-use crate::{Error, Result};
+use crate::{Error, PFNRange, Result, PFN};
 
 /// Simple volatile 4K page allocator that uses CPU-local linked lists.
 /// During initialization allocators memory is split into pages
@@ -25,7 +24,7 @@ pub struct ListLocal {
     frames: Box<[PageFrame]>,
     /// CPU local metadata
     local: Box<[UnsafeCell<Local>]>,
-    offset: u64,
+    begin: PFN,
     len: usize,
 }
 
@@ -49,7 +48,7 @@ impl Default for ListLocal {
         Self {
             frames: Box::new([]),
             local: Box::new([]),
-            offset: 0,
+            begin: PFN(0),
             len: 0,
         }
     }
@@ -57,19 +56,9 @@ impl Default for ListLocal {
 
 impl Alloc for ListLocal {
     #[cold]
-    fn init(
-        &mut self,
-        cores: usize,
-        memory: &mut [Page],
-        init: Init,
-        free_all: bool,
-    ) -> Result<()> {
+    fn init(&mut self, cores: usize, memory: Range<PFN>, init: Init, free_all: bool) -> Result<()> {
         debug_assert!(init == Init::Volatile);
-        info!(
-            "initializing c={cores} {:?} {}",
-            memory.as_ptr_range(),
-            memory.len()
-        );
+        info!("initializing c={cores} {memory:?} {}", memory.len());
         if memory.len() < cores * MIN_PAGES {
             error!("Not enough memory {} < {}", memory.len(), cores * MIN_PAGES);
             return Err(Error::Memory);
@@ -83,7 +72,7 @@ impl Alloc for ListLocal {
         self.frames = struct_pages.into();
 
         self.len = (memory.len() / cores) * cores;
-        self.offset = memory.as_ptr() as u64 / Page::SIZE as u64;
+        self.begin = memory.start;
         self.local = local.into();
 
         if free_all {
@@ -95,7 +84,7 @@ impl Alloc for ListLocal {
         Ok(())
     }
 
-    fn get(&self, core: usize, order: usize) -> Result<u64> {
+    fn get(&self, core: usize, order: usize) -> Result<PFN> {
         if order != 0 {
             error!("order {order:?} not supported");
             return Err(Error::Memory);
@@ -104,35 +93,35 @@ impl Alloc for ListLocal {
         let local = self.local(core);
         if let Some(index) = local.next.pop(self) {
             local.counter += 1;
-            Ok(self.from_pfn(index))
+            Ok(self.from_frame(index))
         } else {
             error!("No memory");
             Err(Error::Memory)
         }
     }
 
-    fn put(&self, core: usize, addr: u64, order: usize) -> Result<()> {
+    fn put(&self, core: usize, addr: PFN, order: usize) -> Result<()> {
         if order != 0 {
             error!("order {order:?} not supported");
             return Err(Error::Address);
         }
 
-        let pfn = self.to_pfn(addr)?;
+        let pfn = self.to_frame(addr)?;
         let local = self.local(core);
         local.next.push(self, pfn);
         local.counter -= 1;
         Ok(())
     }
 
-    fn is_free(&self, _addr: u64, _order: usize) -> bool {
+    fn is_free(&self, _addr: PFN, _order: usize) -> bool {
         false
     }
 
-    fn pages(&self) -> usize {
+    fn frames(&self) -> usize {
         self.len
     }
 
-    fn dbg_free_pages(&self) -> usize {
+    fn free_frames(&self) -> usize {
         let mut pages = self.len;
         for local in self.local.iter() {
             let local = unsafe { &*local.get() };
@@ -173,19 +162,15 @@ impl ListLocal {
         for core in 0..cores {
             let l = self.local(core);
             l.next.set(Next::Outside);
-            l.counter = self.pages() / cores;
+            l.counter = self.frames() / cores;
         }
         Ok(())
     }
 
     #[inline]
-    fn to_pfn(&self, addr: u64) -> Result<usize> {
-        if addr % Page::SIZE as u64 != 0 {
-            return Err(Error::Address);
-        }
-        let off = addr / (Page::SIZE as u64);
-        if let Some(pfn) = off.checked_sub(self.offset) {
-            if (pfn as usize) < self.len {
+    fn to_frame(&self, addr: PFN) -> Result<usize> {
+        if let Some(pfn) = addr.0.checked_sub(self.begin.0) {
+            if pfn < self.len {
                 Ok(pfn as _)
             } else {
                 Err(Error::Address)
@@ -195,9 +180,9 @@ impl ListLocal {
         }
     }
     #[inline]
-    fn from_pfn(&self, pfn: usize) -> u64 {
-        debug_assert!(pfn < self.len);
-        (self.offset + pfn as u64) * Page::SIZE as u64
+    fn from_frame(&self, frame: usize) -> PFN {
+        debug_assert!(frame < self.len);
+        self.begin.off(frame)
     }
 }
 
@@ -279,8 +264,8 @@ mod test {
     use crate::mmap::test_mapping;
     use crate::table::PT_LEN;
     use crate::upper::{Alloc, AllocExt, Init};
-    use crate::util::{logging, Page};
-    use crate::Error;
+    use crate::util::logging;
+    use crate::{pfn_range, Error, Page};
 
     use super::ListLocal;
 
@@ -291,18 +276,19 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
-        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let area = pfn_range(&mapping);
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
 
-        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
+        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
 
-        assert_eq!(alloc.dbg_free_pages(), alloc.pages());
+        assert_eq!(alloc.free_frames(), alloc.frames());
 
         warn!("start alloc...");
         let small = alloc.get(0, 0).unwrap();
 
-        assert_eq!(alloc.dbg_allocated_pages(), 1, "{alloc:?}");
+        assert_eq!(alloc.allocated_frames(), 1, "{alloc:?}");
         warn!("stress test...");
 
         // Stress test
@@ -318,15 +304,15 @@ mod test {
         warn!("allocated {}", 1 + pages.len());
         warn!("check...");
 
-        assert_eq!(alloc.dbg_allocated_pages(), 1 + pages.len());
-        assert_eq!(alloc.dbg_allocated_pages(), alloc.pages());
+        assert_eq!(alloc.allocated_frames(), 1 + pages.len());
+        assert_eq!(alloc.allocated_frames(), alloc.frames());
         pages.sort_unstable();
 
         // Check that the same page was not allocated twice
         for i in 0..pages.len() - 1 {
             let p1 = pages[i];
             let p2 = pages[i + 1];
-            assert!(mapping.as_ptr_range().contains(&(p1 as _)));
+            assert!(area.contains(&p1));
             assert!(p1 != p2);
         }
 
@@ -339,7 +325,7 @@ mod test {
         }
 
         assert_eq!(
-            alloc.dbg_allocated_pages(),
+            alloc.allocated_frames(),
             1 + pages.len() - FREE_NUM,
             "{alloc:?}"
         );
@@ -357,6 +343,6 @@ mod test {
             alloc.put(0, *page, 0).unwrap();
         }
 
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
     }
 }

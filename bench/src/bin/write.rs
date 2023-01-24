@@ -6,8 +6,8 @@ use clap::Parser;
 use log::warn;
 use nvalloc::mmap::{madvise, MAdvise, MMap};
 use nvalloc::table::PT_LEN;
-use nvalloc::thread;
-use nvalloc::util::{avg_bounds, logging, Page};
+use nvalloc::util::{avg_bounds, logging};
+use nvalloc::{thread, Page};
 
 /// Benchmarking the page-fault performance of a mapped memory region.
 #[derive(Parser, Debug)]
@@ -116,9 +116,5 @@ fn mapping(
             return MMap::dax(begin, length, f);
         }
     }
-    if private {
-        MMap::anon_private(begin, length, populate)
-    } else {
-        MMap::anon(begin, length, populate)
-    }
+    MMap::anon(begin, length, !private, populate)
 }

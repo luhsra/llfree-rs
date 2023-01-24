@@ -159,32 +159,32 @@ impl Atomic for Child {
     type I = AtomicU16;
 }
 impl Child {
-    pub fn new_page() -> Self {
+    pub fn new_frame() -> Self {
         Self::new().with_count(u16::MAX)
     }
     pub fn new_free(free: usize) -> Self {
         Self::new().with_count(free as _)
     }
-    pub fn page(self) -> bool {
+    pub fn allocated(self) -> bool {
         self.count() == u16::MAX
     }
     pub fn free(self) -> usize {
-        if !self.page() {
+        if !self.allocated() {
             self.count() as _
         } else {
             0
         }
     }
-    pub fn mark_page(self, span: usize) -> Option<Self> {
+    pub fn mark_allocated(self, span: usize) -> Option<Self> {
         if self.free() == span {
-            Some(Self::new_page())
+            Some(Self::new_frame())
         } else {
             None
         }
     }
     /// Decrement the free pages counter.
     pub fn dec(self, num_pages: usize) -> Option<Self> {
-        if !self.page() && self.free() >= num_pages {
+        if !self.allocated() && self.free() >= num_pages {
             Some(Self::new_free(self.free() - num_pages))
         } else {
             None
@@ -192,7 +192,7 @@ impl Child {
     }
     /// Increments the free pages counter.
     pub fn inc(self, span: usize, num_pages: usize) -> Option<Self> {
-        if !self.page() && self.free() <= span - num_pages {
+        if !self.allocated() && self.free() <= span - num_pages {
             Some(Self::new_free(self.free() + num_pages))
         } else {
             None

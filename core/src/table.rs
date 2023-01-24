@@ -7,7 +7,7 @@ use log::error;
 
 use crate::atomic::{Atom, Atomic};
 use crate::util::align_down;
-use crate::util::Page;
+use crate::Page;
 use crate::{Error, Result};
 
 pub const PT_ORDER: usize = 9;
@@ -459,7 +459,7 @@ impl<const L: usize> Mapping<L> {
 #[cfg(all(test, feature = "std"))]
 mod test {
     use crate::table::Mapping;
-    use crate::util::Page;
+    use crate::Page;
 
     #[test]
     fn pt_size() {

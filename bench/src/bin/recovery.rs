@@ -14,8 +14,8 @@ use nvalloc::lower::Cache;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::upper::{Alloc, AllocExt, Array, Init};
-use nvalloc::util::{Page, WyRand};
-use nvalloc::{thread, util};
+use nvalloc::util::{self, WyRand};
+use nvalloc::{pfn_range, thread, Page, PFN};
 
 /// Benchmarking the (crashed) recovery.
 #[derive(Parser, Debug)]
@@ -102,20 +102,17 @@ fn main() {
     writeln!(out, "min,avg,max\n{time_min},{time_avg},{time_max}").unwrap();
 }
 
-fn initialize(memory: usize, dax: &String, threads: usize, crash: bool) {
-    let mut mapping = map(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
-    let alloc = Allocator::new(threads, &mut mapping, Init::Overwrite, false).unwrap();
+fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
+    let mapping = map(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
+    let alloc = Allocator::new(threads, pfn_range(&mapping), Init::Overwrite, false).unwrap();
     warn!("Prepare alloc");
     thread::parallel(
-        mapping[..alloc.pages()]
-            .chunks(alloc.pages().div_ceil(threads))
+        mapping[..alloc.frames()]
+            .chunks(alloc.frames().div_ceil(threads))
             .enumerate(),
         |(t, chunk)| {
             let mut rng = WyRand::new(t as u64);
-            let mut pages = chunk
-                .iter()
-                .map(|p| p as *const _ as u64)
-                .collect::<Vec<_>>();
+            let mut pages = chunk.iter().map(|p| PFN::from_ptr(p)).collect::<Vec<_>>();
             rng.shuffle(&mut pages);
 
             let frees = chunk.len() / 2;
@@ -136,22 +133,22 @@ fn initialize(memory: usize, dax: &String, threads: usize, crash: bool) {
         },
     );
     assert!(!crash);
-    let num_allocated = alloc.dbg_allocated_pages();
+    let num_allocated = alloc.allocated_frames();
     warn!("Allocated: {num_allocated}");
-    assert!(0 < num_allocated && num_allocated < alloc.pages());
+    assert!(0 < num_allocated && num_allocated < alloc.frames());
 }
 
 fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
-    let mut mapping = map(0x1000_0000_0000, memory * PT_LEN * PT_LEN, &dax).unwrap();
+    let mapping = map(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
 
     warn!("Recover alloc");
     let timer = Instant::now();
-    let alloc = Allocator::new(threads, &mut mapping, Init::Recover, false).unwrap();
+    let alloc = Allocator::new(threads, pfn_range(&mapping), Init::Recover, false).unwrap();
     let time = timer.elapsed().as_nanos();
 
-    let num_alloc = alloc.dbg_allocated_pages();
+    let num_alloc = alloc.allocated_frames();
     warn!("Recovered {num_alloc} allocations in {time} ns");
-    let expected = alloc.pages() / 2;
+    let expected = alloc.frames() / 2;
     assert!(expected - threads <= num_alloc && num_alloc <= expected + threads);
 
     time
@@ -171,7 +168,7 @@ fn map(begin: usize, length: usize, dax: &str) -> Result<MMap<Page>, ()> {
             .write(true)
             .open(dax)
             .unwrap();
-        return MMap::dax(begin, length, f);
+        MMap::dax(begin, length, f)
     }
     #[cfg(not(target_os = "linux"))]
     unimplemented!("No NVRAM!")

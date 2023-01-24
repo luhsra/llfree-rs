@@ -11,9 +11,9 @@ use log::warn;
 use nvalloc::lower::Cache;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
-use nvalloc::thread;
 use nvalloc::upper::{Alloc, Array, Init};
-use nvalloc::util::{logging, Page};
+use nvalloc::util::logging;
+use nvalloc::{pfn_range, thread, Page};
 
 type Allocator = Array<3, Cache<128>>;
 
@@ -66,7 +66,7 @@ fn main() {
 
         let mut alloc = Allocator::default();
         alloc
-            .init(threads, &mut mapping, Init::Overwrite, true)
+            .init(threads, pfn_range(&mapping), Init::Overwrite, true)
             .unwrap();
 
         warn!("init time {}ms", timer.elapsed().as_millis());
@@ -115,7 +115,7 @@ fn main() {
             perf
         });
 
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
         drop(alloc);
 
         for t in t_times {
@@ -199,5 +199,5 @@ fn mapping(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page
             return MMap::dax(begin, length, f);
         }
     }
-    MMap::anon(begin, length, false)
+    MMap::anon(begin, length, false, true)
 }

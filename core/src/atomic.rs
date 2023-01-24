@@ -129,7 +129,11 @@ macro_rules! atomic_impl {
             fn compare_exchange(&self, current: Self::V, new: Self::V) -> Result<Self::V, Self::V> {
                 self.compare_exchange(current, new, AcqRel, Acquire)
             }
-            fn compare_exchange_weak(&self, current: Self::V, new: Self::V) -> Result<Self::V, Self::V> {
+            fn compare_exchange_weak(
+                &self,
+                current: Self::V,
+                new: Self::V,
+            ) -> Result<Self::V, Self::V> {
                 self.compare_exchange_weak(current, new, AcqRel, Acquire)
             }
             fn fetch_update<F: FnMut(Self::V) -> Option<Self::V>>(
@@ -201,7 +205,10 @@ impl<'a, T> Deref for SpinGuard<'a, T> {
 }
 impl<'a, T> DerefMut for SpinGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *(&self.spin.value as *const _ as *mut _) }
+        #[allow(clippy::cast_ref_to_mut)]
+        unsafe {
+            &mut *(&self.spin.value as *const _ as *mut _)
+        }
     }
 }
 impl<'a, T> Drop for SpinGuard<'a, T> {

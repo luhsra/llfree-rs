@@ -13,9 +13,10 @@ use log::warn;
 use nvalloc::lower::*;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
+use nvalloc::thread;
 use nvalloc::upper::*;
-use nvalloc::util::{Page, WyRand};
-use nvalloc::{thread, util};
+use nvalloc::util::{self, WyRand};
+use nvalloc::{pfn_range, Page, PFN};
 
 /// Number of allocations per block
 const RAND_BLOCK_SIZE: usize = 8;
@@ -157,7 +158,7 @@ fn mapping(
             return MMap::dax(begin, length, f);
         }
     }
-    MMap::anon(begin, length, false)
+    MMap::anon(begin, length, true, true)
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -211,9 +212,11 @@ fn bulk(
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
+    alloc
+        .init(threads, pfn_range(mapping), Init::Overwrite, true)
+        .unwrap();
     let init = timer.elapsed().as_millis();
-    let allocs = alloc.pages() / max_threads / 2 / (1 << order);
+    let allocs = alloc.frames() / max_threads / 2 / (1 << order);
 
     let barrier = Barrier::new(threads);
     let mut perf = Perf::avg(thread::parallel(0..threads, |t| {
@@ -256,7 +259,7 @@ fn bulk(
             allocs: allocs * (1 << order),
         }
     }));
-    assert_eq!(alloc.dbg_allocated_pages(), 0, "{alloc:?}");
+    assert_eq!(alloc.allocated_frames(), 0, "{alloc:?}");
 
     perf.init = init;
     perf.allocs = allocs;
@@ -271,10 +274,12 @@ fn repeat(
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
+    alloc
+        .init(threads, pfn_range(mapping), Init::Overwrite, true)
+        .unwrap();
     let init = timer.elapsed().as_millis();
 
-    let allocs = alloc.pages() / max_threads / 2 / (1 << order);
+    let allocs = alloc.frames() / max_threads / 2 / (1 << order);
     let barrier = Barrier::new(threads);
     let mut perf = Perf::avg(thread::parallel(0..threads, |t| {
         thread::pin(t);
@@ -305,7 +310,7 @@ fn repeat(
             allocs,
         }
     }));
-    assert_eq!(alloc.dbg_allocated_pages(), allocs * threads * (1 << order));
+    assert_eq!(alloc.allocated_frames(), allocs * threads * (1 << order));
 
     perf.init = init;
     perf.allocs = allocs;
@@ -320,13 +325,15 @@ fn rand(
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
+    alloc
+        .init(threads, pfn_range(mapping), Init::Overwrite, true)
+        .unwrap();
     let init = timer.elapsed().as_millis();
 
-    let allocs = alloc.pages() / max_threads / 2 / (1 << order);
+    let allocs = alloc.frames() / max_threads / 2 / (1 << order);
     let barrier = Barrier::new(threads);
 
-    let mut all_pages = vec![0u64; allocs * threads];
+    let mut all_pages = vec![PFN(0); allocs * threads];
     let all_pages_ptr = all_pages.as_mut_ptr() as usize;
 
     let chunks = all_pages.chunks_mut(allocs).enumerate();
@@ -347,7 +354,7 @@ fn rand(
             barrier.wait();
             if t == 0 {
                 assert_eq!(pages.len(), allocs);
-                assert_eq!(alloc.dbg_allocated_pages(), allocs * threads * (1 << order));
+                assert_eq!(alloc.allocated_frames(), allocs * threads * (1 << order));
                 // Shuffle between all cores
                 let pages = unsafe {
                     slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads)
@@ -377,7 +384,7 @@ fn rand(
             allocs,
         }
     }));
-    assert_eq!(alloc.dbg_allocated_pages(), 0);
+    assert_eq!(alloc.allocated_frames(), 0);
 
     perf.init = init;
     perf.allocs = allocs;
@@ -393,13 +400,15 @@ fn rand_block(
     threads: usize,
 ) -> Perf {
     let timer = Instant::now();
-    alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
+    alloc
+        .init(threads, pfn_range(mapping), Init::Overwrite, true)
+        .unwrap();
     let init = timer.elapsed().as_millis();
 
-    let allocs = alloc.pages() / max_threads / 2 / (1 << order);
+    let allocs = alloc.frames() / max_threads / 2 / (1 << order);
     let barrier = Barrier::new(threads);
 
-    let mut all_pages = vec![0u64; allocs * threads];
+    let mut all_pages = vec![PFN(0); allocs * threads];
     let all_pages_ptr = all_pages.as_mut_ptr() as usize;
 
     let chunks = all_pages.chunks_mut(allocs).enumerate();
@@ -448,7 +457,7 @@ fn rand_block(
             allocs,
         }
     }));
-    assert_eq!(alloc.dbg_allocated_pages(), 0);
+    assert_eq!(alloc.allocated_frames(), 0);
 
     perf.init = init;
     perf.allocs = allocs;
@@ -463,17 +472,19 @@ fn filling(
     x: usize,
 ) -> Perf {
     let timer = Instant::now();
-    alloc.init(threads, mapping, Init::Overwrite, true).unwrap();
+    alloc
+        .init(threads, pfn_range(mapping), Init::Overwrite, true)
+        .unwrap();
     let init = timer.elapsed().as_millis();
 
-    let allocs = alloc.pages() / threads / (1 << order);
+    let allocs = alloc.frames() / threads / (1 << order);
 
     // Allocate to filling level
     let fill = (allocs * x) / 100;
     let allocs = allocs / 100; // allocate 1%
     warn!("fill={fill} allocs={allocs}");
 
-    assert!((fill + allocs) * threads < alloc.pages());
+    assert!((fill + allocs) * threads < alloc.frames());
 
     let barrier = Barrier::new(threads);
     let mut perf = Perf::avg(thread::parallel(0..threads, |t| {
@@ -526,7 +537,7 @@ fn filling(
             allocs,
         }
     }));
-    assert_eq!(alloc.dbg_allocated_pages(), fill * threads * (1 << order));
+    assert_eq!(alloc.allocated_frames(), fill * threads * (1 << order));
 
     perf.init = init;
     perf.allocs = allocs;

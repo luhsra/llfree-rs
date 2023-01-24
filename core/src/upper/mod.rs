@@ -1,14 +1,14 @@
 use core::any::type_name;
 use core::fmt;
+use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use bitfield_struct::bitfield;
 
 use crate::atomic::Atom;
 use crate::entry::ReservedTree;
-use crate::table::PT_LEN;
-use crate::util::{CacheLine, Page};
-use crate::Result;
+use crate::util::CacheLine;
+use crate::{Result, PFN};
 
 mod array;
 pub use array::Array;
@@ -23,27 +23,27 @@ pub use list_cas::ListCAS;
 pub const CAS_RETRIES: usize = 16;
 /// Magic marking the meta page.
 pub const MAGIC: usize = 0x_dead_beef;
+
 /// Minimal number of pages an allocator needs (1G).
-pub const MIN_PAGES: usize = PT_LEN * PT_LEN;
+pub const MIN_PAGES: usize = 1 << 9;
 /// Maximal number of pages an allocator can manage (about 256TiB).
-pub const MAX_PAGES: usize = PT_LEN * PT_LEN * PT_LEN * PT_LEN;
+pub const MAX_PAGES: usize = 1 << (4 * 9);
 
 /// The general interface of the allocator implementations.
 pub trait Alloc: Sync + Send + fmt::Debug {
     /// Initialize the allocator.
     #[cold]
-    fn init(&mut self, cores: usize, memory: &mut [Page], init: Init, free_all: bool)
-        -> Result<()>;
+    fn init(&mut self, cores: usize, area: Range<PFN>, init: Init, free_all: bool) -> Result<()>;
 
     /// Allocate a new page.
-    fn get(&self, core: usize, order: usize) -> Result<u64>;
+    fn get(&self, core: usize, order: usize) -> Result<PFN>;
     /// Free the given page.
-    fn put(&self, core: usize, addr: u64, order: usize) -> Result<()>;
+    fn put(&self, core: usize, frame: PFN, order: usize) -> Result<()>;
     /// Returns if the page is free. This might be racy!
-    fn is_free(&self, addr: u64, order: usize) -> bool;
+    fn is_free(&self, frame: PFN, order: usize) -> bool;
 
     /// Return the total number of pages the allocator manages.
-    fn pages(&self) -> usize;
+    fn frames(&self) -> usize;
 
     /// Unreserve cpu-local pages
     fn drain(&self, _core: usize) -> Result<()> {
@@ -51,19 +51,19 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     }
 
     /// Return the number of allocated pages.
-    fn dbg_allocated_pages(&self) -> usize {
-        self.pages() - self.dbg_free_pages()
+    fn allocated_frames(&self) -> usize {
+        self.frames() - self.free_frames()
     }
     /// Return the number of free pages.
-    fn dbg_free_pages(&self) -> usize;
+    fn free_frames(&self) -> usize;
     /// Return the number of free huge pages or 0 if the allocator cannot allocate huge pages.
-    fn dbg_free_huge_pages(&self) -> usize {
+    fn free_huge_frames(&self) -> usize {
         0
     }
     /// Execute f for each huge page with the number of free pages
     /// in this huge page as parameter.
     #[cold]
-    fn dbg_for_each_huge_page(&self, _f: fn(usize)) {}
+    fn for_each_huge_frame(&self, _f: fn(PFN, usize)) {}
     /// Return the name of the allocator.
     #[cold]
     fn name(&self) -> AllocName {
@@ -87,9 +87,9 @@ pub enum Init {
 pub trait AllocExt: Sized + Alloc + Default {
     /// Create and initialize the allocator.
     #[cold]
-    fn new(cores: usize, memory: &mut [Page], init: Init, free_all: bool) -> Result<Self> {
+    fn new(cores: usize, area: Range<PFN>, init: Init, free_all: bool) -> Result<Self> {
         let mut a = Self::default();
-        a.init(cores, memory, init, free_all)?;
+        a.init(cores, area, init, free_all)?;
         Ok(a)
     }
 }
@@ -177,7 +177,7 @@ pub struct LastFrees {
 /// Per core data.
 pub struct Local<const F: usize> {
     /// Local copy of the reserved level 3 entry
-    pub reserved: CacheLine<Atom<ReservedTree>>,
+    pub preferred: CacheLine<Atom<ReservedTree>>,
     /// Last frees
     pub last_frees: CacheLine<AtomicU64>,
 }
@@ -185,7 +185,7 @@ pub struct Local<const F: usize> {
 impl<const F: usize> Local<F> {
     fn new() -> Self {
         Self {
-            reserved: CacheLine(Atom::new(ReservedTree::default())),
+            preferred: CacheLine(Atom::new(ReservedTree::default())),
             last_frees: CacheLine(AtomicU64::new(LastFrees::default().into())),
         }
     }
@@ -229,7 +229,7 @@ impl<const F: usize> Local<F> {
 impl<const F: usize> fmt::Debug for Local<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Local")
-            .field("reserved", &self.reserved.load())
+            .field("reserved", &self.preferred.load())
             .field(
                 "frees",
                 &LastFrees::from(self.last_frees.load(Ordering::Relaxed)),
@@ -261,11 +261,13 @@ mod test {
 
     use crate::lower::*;
     use crate::mmap::test_mapping;
+    use crate::pfn_range;
     use crate::table::PT_LEN;
     use crate::thread;
     use crate::upper::*;
-    use crate::util::{logging, Page, WyRand};
-    use crate::Error;
+    use crate::util::{logging, WyRand};
+    use crate::PFNRange;
+    use crate::{Error, Page, PFN};
 
     type Lower = Cache<32>;
     type Allocator = Array<4, Lower>;
@@ -331,20 +333,18 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 1 << 30;
-        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
-        let range = mapping.as_ptr_range();
-        let range = range.start as u64..range.end as u64;
+        let area = PFN(0)..PFN(MEM_SIZE / Page::SIZE);
 
-        info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
+        info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
 
-        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
+        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
 
-        assert_eq!(alloc.dbg_free_pages(), alloc.pages());
+        assert_eq!(alloc.free_frames(), alloc.frames());
 
         warn!("start alloc...");
         let small = alloc.get(0, 0).unwrap();
 
-        assert_eq!(alloc.dbg_allocated_pages(), 1, "{alloc:?}");
+        assert_eq!(alloc.allocated_frames(), 1, "{alloc:?}");
         warn!("stress test...");
 
         // Stress test
@@ -360,14 +360,14 @@ mod test {
         warn!("allocated {}", 1 + pages.len());
         warn!("check...");
 
-        assert_eq!(alloc.dbg_allocated_pages(), 1 + pages.len());
-        assert_eq!(alloc.dbg_allocated_pages(), alloc.pages());
+        assert_eq!(alloc.allocated_frames(), 1 + pages.len());
+        assert_eq!(alloc.allocated_frames(), alloc.frames());
         pages.sort_unstable();
 
         // Check that the same page was not allocated twice
         for &[a, b] in pages.array_windows() {
             assert_ne!(a, b);
-            assert!(range.contains(&a) && range.contains(&b));
+            assert!(area.contains(&a) && area.contains(&b));
         }
 
         warn!("realloc...");
@@ -379,7 +379,7 @@ mod test {
         }
 
         assert_eq!(
-            alloc.dbg_allocated_pages(),
+            alloc.allocated_frames(),
             1 + pages.len() - FREE_NUM,
             "{alloc:?}"
         );
@@ -397,7 +397,7 @@ mod test {
             alloc.put(0, *page, 0).unwrap();
         }
 
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
     }
 
     #[test]
@@ -405,13 +405,11 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 4 << 30;
-        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
-        let range = mapping.as_ptr_range();
-        let range = range.start as u64..range.end as u64;
+        let area = PFN(0)..PFN(MEM_SIZE / Page::SIZE);
 
-        info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
+        info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
 
-        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
+        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
 
         warn!("start alloc...");
         const ALLOCS: usize = MEM_SIZE / Page::SIZE / 4 * 3;
@@ -422,12 +420,12 @@ mod test {
         warn!("allocated {}", pages.len());
 
         warn!("check...");
-        assert_eq!(alloc.dbg_allocated_pages(), pages.len());
+        assert_eq!(alloc.allocated_frames(), pages.len());
         // Check that the same page was not allocated twice
         pages.sort_unstable();
         for &[a, b] in pages.array_windows() {
             assert_ne!(a, b);
-            assert!(range.contains(&a) && range.contains(&b));
+            assert!(area.contains(&a) && area.contains(&b));
         }
 
         warn!("reallocate rand...");
@@ -441,12 +439,12 @@ mod test {
         }
 
         warn!("check...");
-        assert_eq!(alloc.dbg_allocated_pages(), pages.len());
+        assert_eq!(alloc.allocated_frames(), pages.len());
         // Check that the same page was not allocated twice
         pages.sort_unstable();
         for &[a, b] in pages.array_windows() {
             assert_ne!(a, b);
-            assert!(range.contains(&a) && range.contains(&b));
+            assert!(area.contains(&a) && area.contains(&b));
         }
 
         warn!("free...");
@@ -454,7 +452,7 @@ mod test {
         for page in &pages {
             alloc.put(0, *page, 0).unwrap();
         }
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
     }
 
     #[test]
@@ -464,12 +462,10 @@ mod test {
         const ALLOCS: usize = ((MEM_SIZE / THREADS) / 4) * 3;
 
         logging();
-        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE).unwrap();
-        let range = mapping.as_ptr_range();
-        info!("mmap {MEM_SIZE} bytes at {range:?}");
-        let range = range.start as u64..range.end as u64;
+        let area = PFN(0)..PFN(MEM_SIZE);
+        info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
 
         let barrier = Barrier::new(THREADS);
         thread::parallel(0..THREADS, |t| {
@@ -488,7 +484,7 @@ mod test {
             pages.sort_unstable();
             for &[a, b] in pages.array_windows() {
                 assert_ne!(a, b);
-                assert!(range.contains(&a) && range.contains(&b));
+                assert!(area.contains(&a) && area.contains(&b));
             }
 
             barrier.wait();
@@ -507,7 +503,7 @@ mod test {
             pages.sort_unstable();
             for &[a, b] in pages.array_windows() {
                 assert_ne!(a, b);
-                assert!(range.contains(&a) && range.contains(&b));
+                assert!(area.contains(&a) && area.contains(&b));
             }
 
             warn!("free...");
@@ -517,7 +513,7 @@ mod test {
             }
         });
 
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
     }
 
     #[test]
@@ -525,42 +521,40 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
-        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
-        let range = mapping.as_ptr_range();
-        let range = range.start as u64..range.end as u64;
+        let area = PFN(0)..PFN(MEM_SIZE / Page::SIZE);
 
-        info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
+        info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
 
-        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
+        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
 
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
 
         warn!("start alloc");
         let small = alloc.get(0, 0).unwrap();
         let huge = alloc.get(0, 9).unwrap();
 
         let expected_pages = 1 + (1 << 9);
-        assert_eq!(alloc.dbg_allocated_pages(), expected_pages);
+        assert_eq!(alloc.allocated_frames(), expected_pages);
         assert!(small != huge);
 
         warn!("start stress test");
 
         // Stress test
-        let mut pages = vec![0; PT_LEN * PT_LEN];
+        let mut pages = vec![PFN(0); PT_LEN * PT_LEN];
         for page in &mut pages {
             *page = alloc.get(0, 0).unwrap();
         }
 
         warn!("check");
 
-        assert_eq!(alloc.dbg_allocated_pages(), expected_pages + pages.len());
+        assert_eq!(alloc.allocated_frames(), expected_pages + pages.len());
 
         pages.sort_unstable();
 
         // Check that the same page was not allocated twice
         for &[a, b] in pages.array_windows() {
             assert_ne!(a, b);
-            assert!(range.contains(&a) && range.contains(&b));
+            assert!(area.contains(&a) && area.contains(&b));
         }
 
         warn!("free some...");
@@ -589,7 +583,7 @@ mod test {
             alloc.put(0, *page, 0).unwrap();
         }
 
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
     }
 
     #[test]
@@ -600,14 +594,12 @@ mod test {
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
         const PAGES: usize = 2 * THREADS * PT_LEN * PT_LEN;
 
-        let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
-        let range = mapping.as_ptr_range();
-        let range = range.start as u64..range.end as u64;
+        let area = PFN(0)..PFN(PAGES);
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
 
         // Stress test
-        let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
+        let mut pages = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
@@ -624,14 +616,14 @@ mod test {
         );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        assert_eq!(alloc.dbg_allocated_pages(), pages.len());
+        assert_eq!(alloc.allocated_frames(), pages.len());
         warn!("allocated pages: {}", pages.len());
 
         // Check that the same page was not allocated twice
         pages.sort_unstable();
         for &[a, b] in pages.array_windows() {
             assert_ne!(a, b);
-            assert!(range.contains(&a) && range.contains(&b));
+            assert!(area.contains(&a) && area.contains(&b));
         }
     }
 
@@ -644,14 +636,12 @@ mod test {
         const PAGES: usize = 4096;
         const ALLOC_PER_THREAD: usize = PAGES / THREADS - THREADS;
 
-        let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
-        let range = mapping.as_ptr_range();
-        let range = range.start as u64..range.end as u64;
+        let area = PFN(0)..PFN(PAGES);
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
 
         // Stress test
-        let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
+        let mut pages = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
@@ -668,14 +658,14 @@ mod test {
         );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        assert_eq!(alloc.dbg_allocated_pages(), pages.len());
+        assert_eq!(alloc.allocated_frames(), pages.len());
         warn!("allocated pages: {}", pages.len());
 
         // Check that the same page was not allocated twice
         pages.sort_unstable();
         for &[a, b] in pages.array_windows() {
             assert_ne!(a, b);
-            assert!(range.contains(&a) && range.contains(&b));
+            assert!(area.contains(&a) && area.contains(&b));
         }
 
         thread::parallel(pages.chunks(ALLOC_PER_THREAD).enumerate(), |(t, pages)| {
@@ -687,7 +677,7 @@ mod test {
             }
         });
 
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
     }
 
     #[test]
@@ -699,14 +689,12 @@ mod test {
         // additional space for the allocators metadata
         const PAGES: usize = THREADS * (ALLOC_PER_THREAD + 2) * PT_LEN;
 
-        let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
-        let range = mapping.as_ptr_range();
-        let range = range.start as u64..range.end as u64;
+        let area = PFN(0)..PFN(PAGES);
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
 
         // Stress test
-        let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
+        let mut pages = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
@@ -723,14 +711,14 @@ mod test {
         );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        assert_eq!(alloc.dbg_allocated_pages(), pages.len() * PT_LEN);
+        assert_eq!(alloc.allocated_frames(), pages.len() * PT_LEN);
         warn!("allocated pages: {}", pages.len());
 
         // Check that the same page was not allocated twice
         pages.sort_unstable();
         for &[a, b] in pages.array_windows() {
             assert_ne!(a, b);
-            assert!(range.contains(&a) && range.contains(&b));
+            assert!(area.contains(&a) && area.contains(&b));
         }
     }
 
@@ -829,9 +817,9 @@ mod test {
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
         const MEM_SIZE: usize = 2 * THREADS * PT_LEN * PT_LEN * Page::SIZE;
 
-        let mut mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let area = PFN(0)..PFN(MEM_SIZE / Page::SIZE);
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, area, Init::Volatile, true).unwrap();
         let barrier = Barrier::new(THREADS);
 
         // Stress test
@@ -839,7 +827,7 @@ mod test {
             thread::pin(t);
             barrier.wait();
 
-            let mut pages = vec![0; ALLOC_PER_THREAD];
+            let mut pages = vec![PFN(0); ALLOC_PER_THREAD];
 
             for page in &mut pages {
                 *page = alloc.get(t, 0).unwrap();
@@ -854,7 +842,7 @@ mod test {
         });
 
         warn!("check");
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
     }
 
     #[test]
@@ -863,13 +851,13 @@ mod test {
         const THREADS: usize = 2;
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 10) / 2;
 
-        let mut mapping = test_mapping(0x1000_0000_0000, 4 * PT_LEN * PT_LEN).unwrap();
+        let area = PFN(0)..PFN(4 * PT_LEN * PT_LEN);
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
+        let alloc = Allocator::new(THREADS, area, Init::Volatile, true).unwrap();
 
         // Alloc on first thread
         thread::pin(0);
-        let mut pages = vec![0; ALLOC_PER_THREAD];
+        let mut pages = vec![PFN(0); ALLOC_PER_THREAD];
         for page in &mut pages {
             *page = alloc.get(0, 0).unwrap();
         }
@@ -885,7 +873,7 @@ mod test {
                 }
             });
 
-            let mut pages = vec![0; ALLOC_PER_THREAD];
+            let mut pages = vec![PFN(0); ALLOC_PER_THREAD];
 
             barrier.wait();
 
@@ -896,35 +884,37 @@ mod test {
         });
 
         warn!("check");
-        assert_eq!(alloc.dbg_allocated_pages(), ALLOC_PER_THREAD);
+        assert_eq!(alloc.allocated_frames(), ALLOC_PER_THREAD);
     }
 
     #[test]
     fn recover() {
         logging();
 
-        let mut mapping = test_mapping(0x1000_0000_0000, 8 << 18).unwrap();
+        let mapping = test_mapping(0x1000_0000_0000, 8 << 18).unwrap();
+        let area = pfn_range(&mapping);
+        warn!("{area:?}");
         thread::pin(0);
 
         let expected_pages = (PT_LEN + 2) * (1 + (1 << 9));
 
         {
-            let alloc = Allocator::new(1, &mut mapping, Init::Overwrite, true).unwrap();
+            let alloc = Allocator::new(1, area.clone(), Init::Overwrite, true).unwrap();
 
             for _ in 0..PT_LEN + 2 {
                 alloc.get(0, 0).unwrap();
                 alloc.get(0, 9).unwrap();
             }
 
-            assert_eq!(alloc.dbg_allocated_pages(), expected_pages);
+            assert_eq!(alloc.allocated_frames(), expected_pages);
 
             // leak (crash)
             std::mem::forget(alloc);
         }
 
         let mut alloc = Allocator::default();
-        alloc.init(1, &mut mapping, Init::Recover, true).unwrap();
-        assert_eq!(alloc.dbg_allocated_pages(), expected_pages);
+        alloc.init(1, area, Init::Recover, true).unwrap();
+        assert_eq!(alloc.allocated_frames(), expected_pages);
     }
 
     #[test]
@@ -934,8 +924,8 @@ mod test {
 
         logging();
 
-        let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * (THREADS * 2 + 1)).unwrap();
-        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, true).unwrap();
+        let area = PFN(0)..PFN(Lower::N * (THREADS * 2 + 1));
+        let alloc = Allocator::new(THREADS, area, Init::Volatile, true).unwrap();
 
         let barrier = Barrier::new(THREADS);
 
@@ -946,7 +936,7 @@ mod test {
             let mut pages = Vec::new();
             for order in 0..=MAX_ORDER {
                 for _ in 0..1 << (MAX_ORDER - order) {
-                    pages.push((order, 0));
+                    pages.push((order, PFN(0)));
                     num_pages += 1 << order;
                 }
             }
@@ -960,11 +950,7 @@ mod test {
                     Ok(page) => page,
                     Err(e) => panic!("{e:?} o={order} {alloc:?}"),
                 };
-                assert!(
-                    *page % ((1 << *order) * Page::SIZE) as u64 == 0,
-                    "{page:x} {:x}",
-                    (1 << *order) * Page::SIZE
-                );
+                assert!(page.0 % (1 << *order) == 0, "{page} {:x}", 1 << *order);
             }
 
             let mut rng = WyRand::new(t as _);
@@ -978,7 +964,7 @@ mod test {
             }
         });
 
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
     }
 
     #[test]
@@ -988,35 +974,32 @@ mod test {
         const THREADS: usize = 2;
         const PAGES: usize = 8 << 18;
 
-        let mut mapping = test_mapping(0x1000_0000_0000, PAGES).unwrap();
-        let pages = mapping
-            .chunks_exact(1 << Lower::MAX_ORDER)
-            .map(|p| p.as_ptr() as u64)
-            .collect::<Vec<_>>();
+        let area = PFN(0)..PFN(PAGES);
 
-        let alloc = Allocator::new(THREADS, &mut mapping, Init::Volatile, false).unwrap();
-        assert_eq!(alloc.dbg_allocated_pages(), PAGES);
+        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, false).unwrap();
+        assert_eq!(alloc.frames(), PAGES);
+        assert_eq!(alloc.allocated_frames(), PAGES);
 
-        for page in pages {
-            alloc.put(0, page, Lower::MAX_ORDER).unwrap();
+        for page in area.as_range().step_by(1 << Lower::HUGE_ORDER).map(PFN) {
+            alloc.put(0, page, Lower::HUGE_ORDER).unwrap();
         }
-        assert_eq!(alloc.dbg_allocated_pages(), 0);
+        assert_eq!(alloc.allocated_frames(), 0);
 
         thread::parallel(0..THREADS, |core| {
             thread::pin(core);
-            for _ in 0..(PAGES / THREADS) / (1 << Lower::MAX_ORDER) {
-                alloc.get(core, Lower::MAX_ORDER).unwrap();
+            for _ in 0..(PAGES / THREADS) / (1 << Lower::HUGE_ORDER) {
+                alloc.get(core, Lower::HUGE_ORDER).unwrap();
             }
         });
-        assert_eq!(alloc.dbg_allocated_pages(), PAGES);
+        assert_eq!(alloc.allocated_frames(), PAGES);
     }
 
     #[test]
     fn fragmentation_retry() {
         logging();
 
-        let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * 2).unwrap();
-        let alloc = Allocator::new(1, &mut mapping, Init::Volatile, true).unwrap();
+        let area = PFN(0)..PFN(Lower::N * 2);
+        let alloc = Allocator::new(1, area, Init::Volatile, true).unwrap();
 
         // Alloc a whole subtree
         let mut pages = Vec::with_capacity(Lower::N / 2);
@@ -1039,8 +1022,8 @@ mod test {
 
     #[test]
     fn drain() {
-        let mut mapping = test_mapping(0x1000_0000_0000, Lower::N * 2).unwrap();
-        let alloc = Allocator::new(2, &mut mapping, Init::Volatile, true).unwrap();
+        let area = PFN(0)..PFN(Lower::N * 2);
+        let alloc = Allocator::new(2, area, Init::Volatile, true).unwrap();
         // should not change anything
         alloc.drain(0).unwrap();
         alloc.drain(1).unwrap();
