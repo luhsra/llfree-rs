@@ -12,7 +12,7 @@ use crate::atomic::Atomic;
 #[bitfield(u64, debug = false)]
 #[derive(PartialEq, Eq)]
 pub struct ReservedTree {
-    /// Number of free 4K pages.
+    /// Number of free 4K frames.
     #[bits(16)]
     pub free: usize,
     /// If this subtree is locked by a CPU.
@@ -32,7 +32,7 @@ impl Default for ReservedTree {
 impl ReservedTree {
     const START_RAW_MAX: usize = (1 << Self::START_RAW_BITS) - 1;
 
-    /// Creates a new entry referring to a level 2 page table.
+    /// Creates a new entry.
     pub fn new_with(free: usize, start: usize) -> Self {
         Self::new().with_free(free).with_start(start)
     }
@@ -56,27 +56,27 @@ impl ReservedTree {
         *self = self.with_start(start);
     }
 
-    /// Decrements the free pages counter.
-    pub fn dec(self, num_pages: usize) -> Option<Self> {
-        if self.has_start() && self.free() >= num_pages {
-            Some(self.with_free(self.free() - num_pages))
+    /// Decrements the free frames counter.
+    pub fn dec(self, num_frames: usize) -> Option<Self> {
+        if self.has_start() && self.free() >= num_frames {
+            Some(self.with_free(self.free() - num_frames))
         } else {
             None
         }
     }
-    /// Increments the free pages counter.
+    /// Increments the free frames counter.
     pub fn inc<F: FnOnce(usize) -> bool>(
         self,
-        num_pages: usize,
+        num_frames: usize,
         max: usize,
         check_start: F,
     ) -> Option<Self> {
         if !check_start(self.start()) {
             return None;
         }
-        let pages = self.free() + num_pages;
-        if pages <= max {
-            Some(self.with_free(pages))
+        let frames = self.free() + num_frames;
+        if frames <= max {
+            Some(self.with_free(frames))
         } else {
             None
         }
@@ -100,7 +100,7 @@ impl fmt::Debug for ReservedTree {
 #[bitfield(u16)]
 #[derive(Default, PartialEq, Eq)]
 pub struct Tree {
-    /// Number of free 4K pages.
+    /// Number of free 4K frames.
     #[bits(15)]
     pub free: usize,
     /// If this subtree is reserved by a CPU.
@@ -114,21 +114,21 @@ impl Tree {
         debug_assert!(span < (1 << 15));
         Self::new().with_free(span)
     }
-    /// Creates a new entry referring to a level 2 page table.
-    pub fn new_with(pages: usize, reserved: bool) -> Self {
-        debug_assert!(pages < (1 << 15));
-        Self::new().with_free(pages).with_reserved(reserved)
+    /// Creates a new entry.
+    pub fn new_with(frames: usize, reserved: bool) -> Self {
+        debug_assert!(frames < (1 << 15));
+        Self::new().with_free(frames).with_reserved(reserved)
     }
-    /// Increments the free pages counter.
-    pub fn inc(self, num_pages: usize, max: usize) -> Option<Self> {
-        let pages = self.free() + num_pages;
-        if pages <= max {
-            Some(self.with_free(pages))
+    /// Increments the free frames counter.
+    pub fn inc(self, num_frames: usize, max: usize) -> Option<Self> {
+        let frames = self.free() + num_frames;
+        if frames <= max {
+            Some(self.with_free(frames))
         } else {
             None
         }
     }
-    /// Reserves this entry if its page count is in `range`.
+    /// Reserves this entry if its frame count is in `range`.
     pub fn reserve<R: RangeBounds<usize>>(self, free: R) -> Option<Self> {
         if !self.reserved() && free.contains(&self.free()) {
             Some(self.with_reserved(true).with_free(0))
@@ -136,14 +136,14 @@ impl Tree {
             None
         }
     }
-    /// Add the pages from the `other` entry to the reserved `self` entry and unreserve it.
+    /// Add the frames from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
     pub fn unreserve_add(self, add: usize, max: usize) -> Option<Self> {
-        let pages = self.free() + add;
-        if self.reserved() && pages <= max {
-            Some(self.with_free(pages).with_reserved(false))
+        let frames = self.free() + add;
+        if self.reserved() && frames <= max {
+            Some(self.with_free(frames).with_reserved(false))
         } else {
-            error!("{self:?} + {add}, {pages} <= {max}");
+            error!("{self:?} + {add}, {frames} <= {max}");
             None
         }
     }
@@ -152,7 +152,7 @@ impl Tree {
 #[bitfield(u16)]
 #[derive(Default, PartialEq, Eq)]
 pub struct Child {
-    /// Number of free 4K pages or u16::MAX for a huge page.
+    /// Number of free 4K frames or u16::MAX for a huge frame.
     count: u16,
 }
 impl Atomic for Child {
@@ -182,18 +182,18 @@ impl Child {
             None
         }
     }
-    /// Decrement the free pages counter.
-    pub fn dec(self, num_pages: usize) -> Option<Self> {
-        if !self.allocated() && self.free() >= num_pages {
-            Some(Self::new_free(self.free() - num_pages))
+    /// Decrement the free frames counter.
+    pub fn dec(self, num_frames: usize) -> Option<Self> {
+        if !self.allocated() && self.free() >= num_frames {
+            Some(Self::new_free(self.free() - num_frames))
         } else {
             None
         }
     }
-    /// Increments the free pages counter.
-    pub fn inc(self, span: usize, num_pages: usize) -> Option<Self> {
-        if !self.allocated() && self.free() <= span - num_pages {
-            Some(Self::new_free(self.free() + num_pages))
+    /// Increments the free frames counter.
+    pub fn inc(self, span: usize, num_frames: usize) -> Option<Self> {
+        if !self.allocated() && self.free() <= span - num_frames {
+            Some(Self::new_free(self.free() + num_frames))
         } else {
             None
         }

@@ -14,7 +14,7 @@ use crate::entry::{ReservedTree, Tree};
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
 use crate::util::{align_down, spin_wait, CacheLine};
-use crate::{Error, PFNRange, Page, Result, PFN};
+use crate::{Error, PFNRange, Frame, Result, PFN};
 
 /// Non-Volatile global metadata
 #[repr(align(0x1000))]
@@ -26,7 +26,7 @@ pub struct Meta {
     /// Flag that stores if the system has crashed or was shutdown correctly
     crashed: AtomicBool,
 }
-const _: () = assert!(core::mem::size_of::<Meta>() <= Page::SIZE);
+const _: () = assert!(core::mem::size_of::<Meta>() <= Frame::SIZE);
 
 /// This allocator splits its memory range into chunks.
 /// These chunks are reserved by CPUs to reduce sharing.

@@ -15,7 +15,7 @@ use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::upper::{Alloc, AllocExt, Array, Init};
 use nvalloc::util::{self, WyRand};
-use nvalloc::{pfn_range, thread, Page, PFN};
+use nvalloc::{pfn_range, thread, Frame, PFN};
 
 /// Benchmarking the (crashed) recovery.
 #[derive(Parser, Debug)]
@@ -155,13 +155,13 @@ fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
 }
 
 #[allow(unused_variables)]
-fn map(begin: usize, length: usize, dax: &str) -> Result<MMap<Page>, ()> {
+fn map(begin: usize, length: usize, dax: &str) -> Result<MMap<Frame>, ()> {
     #[cfg(target_os = "linux")]
     {
         warn!(
             "MMap file {dax} l={}G ({:x})",
-            (length * std::mem::size_of::<Page>()) >> 30,
-            length * std::mem::size_of::<Page>()
+            (length * std::mem::size_of::<Frame>()) >> 30,
+            length * std::mem::size_of::<Frame>()
         );
         let f = std::fs::OpenOptions::new()
             .read(true)

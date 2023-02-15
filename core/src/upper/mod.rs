@@ -21,12 +21,12 @@ pub use list_cas::ListCAS;
 
 /// Number of retries if an atomic operation fails.
 pub const CAS_RETRIES: usize = 16;
-/// Magic marking the meta page.
+/// Magic marking the meta frame.
 pub const MAGIC: usize = 0x_dead_beef;
 
-/// Minimal number of pages an allocator needs (1G).
+/// Minimal number of frames an allocator needs (1G).
 pub const MIN_PAGES: usize = 1 << 9;
-/// Maximal number of pages an allocator can manage (about 256TiB).
+/// Maximal number of frames an allocator can manage (about 256TiB).
 pub const MAX_PAGES: usize = 1 << (4 * 9);
 
 /// The general interface of the allocator implementations.
@@ -35,33 +35,33 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     #[cold]
     fn init(&mut self, cores: usize, area: Range<PFN>, init: Init, free_all: bool) -> Result<()>;
 
-    /// Allocate a new page.
+    /// Allocate a new frame of `order` on the given `core`.
     fn get(&self, core: usize, order: usize) -> Result<PFN>;
-    /// Free the given page.
+    /// Free the `frame` of `order` on the given `core`..
     fn put(&self, core: usize, frame: PFN, order: usize) -> Result<()>;
-    /// Returns if the page is free. This might be racy!
+    /// Returns if `frame` is free. This might be racy!
     fn is_free(&self, frame: PFN, order: usize) -> bool;
 
-    /// Return the total number of pages the allocator manages.
+    /// Return the total number of frames the allocator manages.
     fn frames(&self) -> usize;
 
-    /// Unreserve cpu-local pages
+    /// Unreserve cpu-local frames
     fn drain(&self, _core: usize) -> Result<()> {
         Ok(())
     }
 
-    /// Return the number of allocated pages.
+    /// Return the number of allocated frames.
     fn allocated_frames(&self) -> usize {
         self.frames() - self.free_frames()
     }
-    /// Return the number of free pages.
+    /// Return the number of free frames.
     fn free_frames(&self) -> usize;
-    /// Return the number of free huge pages or 0 if the allocator cannot allocate huge pages.
+    /// Return the number of free huge frames or 0 if the allocator cannot allocate huge frames.
     fn free_huge_frames(&self) -> usize {
         0
     }
-    /// Execute f for each huge page with the number of free pages
-    /// in this huge page as parameter.
+    /// Execute f for each huge frame with the number of free frames
+    /// in this huge frame as parameter.
     #[cold]
     fn for_each_huge_frame(&self, _f: fn(PFN, usize)) {}
     /// Return the name of the allocator.
@@ -192,6 +192,7 @@ impl<const F: usize> Local<F> {
     /// Add a tree index to the history.
     pub fn frees_push(&self, tree_index: usize) {
         // If the update of this heuristic fails, ignore it
+        // Relaxed ordering is enough, as this is not shared between CPUs
         let _ = self
             .last_frees
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
@@ -267,7 +268,7 @@ mod test {
     use crate::upper::*;
     use crate::util::{logging, WyRand};
     use crate::PFNRange;
-    use crate::{Error, Page, PFN};
+    use crate::{Error, Frame, PFN};
 
     type Lower = Cache<32>;
     type Allocator = Array<4, Lower>;
@@ -298,12 +299,12 @@ mod test {
         println!("  Size per GiB: {}B", C32::size_per_gib());
     }
 
-    /// Testing the related pages heuristic for frees
+    /// Testing the related frames heuristic for frees
     #[test]
     fn last_frees() {
         let local = Local::<4>::new();
-        let page1 = 43;
-        let i1 = page1 / (512 * 512);
+        let frame1 = 43;
+        let i1 = frame1 / (512 * 512);
         assert!(!local.frees_in_tree(i1));
         local.frees_push(i1);
         local.frees_push(i1);
@@ -311,8 +312,8 @@ mod test {
         assert!(!local.frees_in_tree(i1));
         local.frees_push(i1);
         assert!(local.frees_in_tree(i1));
-        let page2 = 512 * 512 + 43;
-        let i2 = page2 / (512 * 512);
+        let frame2 = 512 * 512 + 43;
+        let i2 = frame2 / (512 * 512);
         assert_ne!(i1, i2);
         local.frees_push(i2);
         assert!(!local.frees_in_tree(i1));
@@ -333,7 +334,7 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 1 << 30;
-        let area = PFN(0)..PFN(MEM_SIZE / Page::SIZE);
+        let area = PFN(0)..PFN(MEM_SIZE / Frame::SIZE);
 
         info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
 
@@ -348,24 +349,24 @@ mod test {
         warn!("stress test...");
 
         // Stress test
-        let mut pages = Vec::new();
+        let mut frames = Vec::new();
         loop {
             match alloc.get(0, 0) {
-                Ok(page) => pages.push(page),
+                Ok(frame) => frames.push(frame),
                 Err(Error::Memory) => break,
                 Err(e) => panic!("{e:?}"),
             }
         }
 
-        warn!("allocated {}", 1 + pages.len());
+        warn!("allocated {}", 1 + frames.len());
         warn!("check...");
 
-        assert_eq!(alloc.allocated_frames(), 1 + pages.len());
+        assert_eq!(alloc.allocated_frames(), 1 + frames.len());
         assert_eq!(alloc.allocated_frames(), alloc.frames());
-        pages.sort_unstable();
+        frames.sort_unstable();
 
-        // Check that the same page was not allocated twice
-        for &[a, b] in pages.array_windows() {
+        // Check that the same frame was not allocated twice
+        for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
             assert!(area.contains(&a) && area.contains(&b));
         }
@@ -374,27 +375,27 @@ mod test {
 
         // Free some
         const FREE_NUM: usize = PT_LEN * PT_LEN - 10;
-        for page in &pages[..FREE_NUM] {
-            alloc.put(0, *page, 0).unwrap();
+        for frame in &frames[..FREE_NUM] {
+            alloc.put(0, *frame, 0).unwrap();
         }
 
         assert_eq!(
             alloc.allocated_frames(),
-            1 + pages.len() - FREE_NUM,
+            1 + frames.len() - FREE_NUM,
             "{alloc:?}"
         );
 
         // Realloc
-        for page in &mut pages[..FREE_NUM] {
-            *page = alloc.get(0, 0).unwrap();
+        for frame in &mut frames[..FREE_NUM] {
+            *frame = alloc.get(0, 0).unwrap();
         }
 
         warn!("free...");
 
         alloc.put(0, small, 0).unwrap();
         // Free all
-        for page in &pages {
-            alloc.put(0, *page, 0).unwrap();
+        for frame in &frames {
+            alloc.put(0, *frame, 0).unwrap();
         }
 
         assert_eq!(alloc.allocated_frames(), 0);
@@ -405,52 +406,52 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 4 << 30;
-        let area = PFN(0)..PFN(MEM_SIZE / Page::SIZE);
+        let area = PFN(0)..PFN(MEM_SIZE / Frame::SIZE);
 
         info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
 
         let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
 
         warn!("start alloc...");
-        const ALLOCS: usize = MEM_SIZE / Page::SIZE / 4 * 3;
-        let mut pages = Vec::with_capacity(ALLOCS);
+        const ALLOCS: usize = MEM_SIZE / Frame::SIZE / 4 * 3;
+        let mut frames = Vec::with_capacity(ALLOCS);
         for _ in 0..ALLOCS {
-            pages.push(alloc.get(0, 0).unwrap());
+            frames.push(alloc.get(0, 0).unwrap());
         }
-        warn!("allocated {}", pages.len());
+        warn!("allocated {}", frames.len());
 
         warn!("check...");
-        assert_eq!(alloc.allocated_frames(), pages.len());
-        // Check that the same page was not allocated twice
-        pages.sort_unstable();
-        for &[a, b] in pages.array_windows() {
+        assert_eq!(alloc.allocated_frames(), frames.len());
+        // Check that the same frame was not allocated twice
+        frames.sort_unstable();
+        for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
             assert!(area.contains(&a) && area.contains(&b));
         }
 
         warn!("reallocate rand...");
         let mut rng = WyRand::new(100);
-        rng.shuffle(&mut pages);
+        rng.shuffle(&mut frames);
 
-        for _ in 0..pages.len() {
-            let i = rng.range(0..pages.len() as _) as usize;
-            alloc.put(0, pages[i], 0).unwrap();
-            pages[i] = alloc.get(0, 0).unwrap();
+        for _ in 0..frames.len() {
+            let i = rng.range(0..frames.len() as _) as usize;
+            alloc.put(0, frames[i], 0).unwrap();
+            frames[i] = alloc.get(0, 0).unwrap();
         }
 
         warn!("check...");
-        assert_eq!(alloc.allocated_frames(), pages.len());
-        // Check that the same page was not allocated twice
-        pages.sort_unstable();
-        for &[a, b] in pages.array_windows() {
+        assert_eq!(alloc.allocated_frames(), frames.len());
+        // Check that the same frame was not allocated twice
+        frames.sort_unstable();
+        for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
             assert!(area.contains(&a) && area.contains(&b));
         }
 
         warn!("free...");
-        rng.shuffle(&mut pages);
-        for page in &pages {
-            alloc.put(0, *page, 0).unwrap();
+        rng.shuffle(&mut frames);
+        for frame in &frames {
+            alloc.put(0, *frame, 0).unwrap();
         }
         assert_eq!(alloc.allocated_frames(), 0);
     }
@@ -458,7 +459,7 @@ mod test {
     #[test]
     fn multirand() {
         const THREADS: usize = 4;
-        const MEM_SIZE: usize = (8 << 30) / Page::SIZE;
+        const MEM_SIZE: usize = (8 << 30) / Frame::SIZE;
         const ALLOCS: usize = ((MEM_SIZE / THREADS) / 4) * 3;
 
         logging();
@@ -473,16 +474,16 @@ mod test {
 
             barrier.wait();
             warn!("start alloc...");
-            let mut pages = Vec::with_capacity(ALLOCS);
+            let mut frames = Vec::with_capacity(ALLOCS);
             for _ in 0..ALLOCS {
-                pages.push(alloc.get(t, 0).unwrap());
+                frames.push(alloc.get(t, 0).unwrap());
             }
-            warn!("allocated {}", pages.len());
+            warn!("allocated {}", frames.len());
 
             warn!("check...");
-            // Check that the same page was not allocated twice
-            pages.sort_unstable();
-            for &[a, b] in pages.array_windows() {
+            // Check that the same frame was not allocated twice
+            frames.sort_unstable();
+            for &[a, b] in frames.array_windows() {
                 assert_ne!(a, b);
                 assert!(area.contains(&a) && area.contains(&b));
             }
@@ -490,26 +491,26 @@ mod test {
             barrier.wait();
             warn!("reallocate rand...");
             let mut rng = WyRand::new(t as _);
-            rng.shuffle(&mut pages);
+            rng.shuffle(&mut frames);
 
-            for _ in 0..pages.len() {
-                let i = rng.range(0..pages.len() as _) as usize;
-                alloc.put(t, pages[i], 0).unwrap();
-                pages[i] = alloc.get(t, 0).unwrap();
+            for _ in 0..frames.len() {
+                let i = rng.range(0..frames.len() as _) as usize;
+                alloc.put(t, frames[i], 0).unwrap();
+                frames[i] = alloc.get(t, 0).unwrap();
             }
 
             warn!("check...");
-            // Check that the same page was not allocated twice
-            pages.sort_unstable();
-            for &[a, b] in pages.array_windows() {
+            // Check that the same frame was not allocated twice
+            frames.sort_unstable();
+            for &[a, b] in frames.array_windows() {
                 assert_ne!(a, b);
                 assert!(area.contains(&a) && area.contains(&b));
             }
 
             warn!("free...");
-            rng.shuffle(&mut pages);
-            for page in &pages {
-                alloc.put(t, *page, 0).unwrap();
+            rng.shuffle(&mut frames);
+            for frame in &frames {
+                alloc.put(t, *frame, 0).unwrap();
             }
         });
 
@@ -521,7 +522,7 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
-        let area = PFN(0)..PFN(MEM_SIZE / Page::SIZE);
+        let area = PFN(0)..PFN(MEM_SIZE / Frame::SIZE);
 
         info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
 
@@ -533,26 +534,26 @@ mod test {
         let small = alloc.get(0, 0).unwrap();
         let huge = alloc.get(0, 9).unwrap();
 
-        let expected_pages = 1 + (1 << 9);
-        assert_eq!(alloc.allocated_frames(), expected_pages);
+        let expected_frames = 1 + (1 << 9);
+        assert_eq!(alloc.allocated_frames(), expected_frames);
         assert!(small != huge);
 
         warn!("start stress test");
 
         // Stress test
-        let mut pages = vec![PFN(0); PT_LEN * PT_LEN];
-        for page in &mut pages {
-            *page = alloc.get(0, 0).unwrap();
+        let mut frames = vec![PFN(0); PT_LEN * PT_LEN];
+        for frame in &mut frames {
+            *frame = alloc.get(0, 0).unwrap();
         }
 
         warn!("check");
 
-        assert_eq!(alloc.allocated_frames(), expected_pages + pages.len());
+        assert_eq!(alloc.allocated_frames(), expected_frames + frames.len());
 
-        pages.sort_unstable();
+        frames.sort_unstable();
 
-        // Check that the same page was not allocated twice
-        for &[a, b] in pages.array_windows() {
+        // Check that the same frame was not allocated twice
+        for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
             assert!(area.contains(&a) && area.contains(&b));
         }
@@ -560,8 +561,8 @@ mod test {
         warn!("free some...");
 
         // Free some
-        for page in &pages[10..PT_LEN + 10] {
-            alloc.put(0, *page, 0).unwrap();
+        for frame in &frames[10..PT_LEN + 10] {
+            alloc.put(0, *frame, 0).unwrap();
         }
 
         warn!("free special...");
@@ -572,15 +573,15 @@ mod test {
         warn!("realloc...");
 
         // Realloc
-        for page in &mut pages[10..PT_LEN + 10] {
-            *page = alloc.get(0, 0).unwrap();
+        for frame in &mut frames[10..PT_LEN + 10] {
+            *frame = alloc.get(0, 0).unwrap();
         }
 
         warn!("free...");
 
         // Free all
-        for page in &pages {
-            alloc.put(0, *page, 0).unwrap();
+        for frame in &frames {
+            alloc.put(0, *frame, 0).unwrap();
         }
 
         assert_eq!(alloc.allocated_frames(), 0);
@@ -599,29 +600,29 @@ mod test {
         let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
 
         // Stress test
-        let mut pages = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
         thread::parallel(
-            pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            |(t, pages)| {
+            frames.chunks_mut(ALLOC_PER_THREAD).enumerate(),
+            |(t, frames)| {
                 thread::pin(t);
                 barrier.wait();
 
-                for page in pages {
-                    *page = alloc.get(t, 0).unwrap();
+                for frame in frames {
+                    *frame = alloc.get(t, 0).unwrap();
                 }
             },
         );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        assert_eq!(alloc.allocated_frames(), pages.len());
-        warn!("allocated pages: {}", pages.len());
+        assert_eq!(alloc.allocated_frames(), frames.len());
+        warn!("allocated frames: {}", frames.len());
 
-        // Check that the same page was not allocated twice
-        pages.sort_unstable();
-        for &[a, b] in pages.array_windows() {
+        // Check that the same frame was not allocated twice
+        frames.sort_unstable();
+        for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
             assert!(area.contains(&a) && area.contains(&b));
         }
@@ -641,39 +642,39 @@ mod test {
         let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
 
         // Stress test
-        let mut pages = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
         thread::parallel(
-            pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            |(t, pages)| {
+            frames.chunks_mut(ALLOC_PER_THREAD).enumerate(),
+            |(t, frames)| {
                 thread::pin(t);
                 barrier.wait();
 
-                for page in pages {
-                    *page = alloc.get(t, 0).unwrap();
+                for frame in frames {
+                    *frame = alloc.get(t, 0).unwrap();
                 }
             },
         );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        assert_eq!(alloc.allocated_frames(), pages.len());
-        warn!("allocated pages: {}", pages.len());
+        assert_eq!(alloc.allocated_frames(), frames.len());
+        warn!("allocated frames: {}", frames.len());
 
-        // Check that the same page was not allocated twice
-        pages.sort_unstable();
-        for &[a, b] in pages.array_windows() {
+        // Check that the same frame was not allocated twice
+        frames.sort_unstable();
+        for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
             assert!(area.contains(&a) && area.contains(&b));
         }
 
-        thread::parallel(pages.chunks(ALLOC_PER_THREAD).enumerate(), |(t, pages)| {
+        thread::parallel(frames.chunks(ALLOC_PER_THREAD).enumerate(), |(t, frames)| {
             thread::pin(t);
             barrier.wait();
 
-            for page in pages {
-                alloc.put(t, *page, 0).unwrap();
+            for frame in frames {
+                alloc.put(t, *frame, 0).unwrap();
             }
         });
 
@@ -694,29 +695,29 @@ mod test {
         let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
 
         // Stress test
-        let mut pages = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
         thread::parallel(
-            pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            |(t, pages)| {
+            frames.chunks_mut(ALLOC_PER_THREAD).enumerate(),
+            |(t, frames)| {
                 thread::pin(t);
                 barrier.wait();
 
-                for page in pages {
-                    *page = alloc.get(t, 9).unwrap();
+                for frame in frames {
+                    *frame = alloc.get(t, 9).unwrap();
                 }
             },
         );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        assert_eq!(alloc.allocated_frames(), pages.len() * PT_LEN);
-        warn!("allocated pages: {}", pages.len());
+        assert_eq!(alloc.allocated_frames(), frames.len() * PT_LEN);
+        warn!("allocated frames: {}", frames.len());
 
-        // Check that the same page was not allocated twice
-        pages.sort_unstable();
-        for &[a, b] in pages.array_windows() {
+        // Check that the same frame was not allocated twice
+        frames.sort_unstable();
+        for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
             assert!(area.contains(&a) && area.contains(&b));
         }
@@ -731,30 +732,30 @@ mod test {
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
 
         // Stress test
-        let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![0u64; ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
         thread::parallel(
-            pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            |(t, pages)| {
+            frames.chunks_mut(ALLOC_PER_THREAD).enumerate(),
+            |(t, frames)| {
                 thread::pin(t);
                 barrier.wait();
 
-                for page in pages {
-                    *page = unsafe { libc::malloc(Page::SIZE) } as u64;
-                    assert!(*page != 0);
+                for frame in frames {
+                    *frame = unsafe { libc::malloc(Frame::SIZE) } as u64;
+                    assert!(*frame != 0);
                 }
             },
         );
 
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
-        warn!("allocated pages: {}", pages.len());
+        warn!("allocated frames: {}", frames.len());
 
-        // Check that the same page was not allocated twice
-        pages.sort_unstable();
+        // Check that the same frame was not allocated twice
+        frames.sort_unstable();
         let mut last = None;
-        for p in pages {
+        for p in frames {
             assert!(last != Some(p));
             unsafe { libc::free(p as _) };
             last = Some(p);
@@ -770,41 +771,41 @@ mod test {
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
 
         // Stress test
-        let mut pages = vec![0u64; ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![0u64; ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
         thread::parallel(
-            pages.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            |(t, pages)| {
+            frames.chunks_mut(ALLOC_PER_THREAD).enumerate(),
+            |(t, frames)| {
                 thread::pin(t);
                 barrier.wait();
 
-                for page in pages {
-                    *page = unsafe {
+                for frame in frames {
+                    *frame = unsafe {
                         libc::mmap(
                             null_mut(),
-                            Page::SIZE,
+                            Frame::SIZE,
                             libc::PROT_READ | libc::PROT_WRITE,
                             libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
                             -1,
                             0,
                         )
                     } as u64;
-                    assert!(*page != 0);
+                    assert!(*frame != 0);
                 }
             },
         );
 
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
-        warn!("allocated pages: {}", pages.len());
+        warn!("allocated frames: {}", frames.len());
 
-        // Check that the same page was not allocated twice
-        pages.sort_unstable();
+        // Check that the same frame was not allocated twice
+        frames.sort_unstable();
         let mut last = None;
-        for p in pages {
+        for p in frames {
             assert!(last != Some(p));
-            unsafe { libc::munmap(p as _, Page::SIZE) };
+            unsafe { libc::munmap(p as _, Frame::SIZE) };
             last = Some(p);
         }
     }
@@ -815,9 +816,9 @@ mod test {
 
         const THREADS: usize = 4;
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
-        const MEM_SIZE: usize = 2 * THREADS * PT_LEN * PT_LEN * Page::SIZE;
+        const MEM_SIZE: usize = 2 * THREADS * PT_LEN * PT_LEN * Frame::SIZE;
 
-        let area = PFN(0)..PFN(MEM_SIZE / Page::SIZE);
+        let area = PFN(0)..PFN(MEM_SIZE / Frame::SIZE);
 
         let alloc = Allocator::new(THREADS, area, Init::Volatile, true).unwrap();
         let barrier = Barrier::new(THREADS);
@@ -827,17 +828,17 @@ mod test {
             thread::pin(t);
             barrier.wait();
 
-            let mut pages = vec![PFN(0); ALLOC_PER_THREAD];
+            let mut frames = vec![PFN(0); ALLOC_PER_THREAD];
 
-            for page in &mut pages {
-                *page = alloc.get(t, 0).unwrap();
+            for frame in &mut frames {
+                *frame = alloc.get(t, 0).unwrap();
             }
 
             let mut rng = WyRand::new(t as _);
-            rng.shuffle(&mut pages);
+            rng.shuffle(&mut frames);
 
-            for page in pages {
-                alloc.put(t, page, 0).unwrap();
+            for frame in frames {
+                alloc.put(t, frame, 0).unwrap();
             }
         });
 
@@ -857,9 +858,9 @@ mod test {
 
         // Alloc on first thread
         thread::pin(0);
-        let mut pages = vec![PFN(0); ALLOC_PER_THREAD];
-        for page in &mut pages {
-            *page = alloc.get(0, 0).unwrap();
+        let mut frames = vec![PFN(0); ALLOC_PER_THREAD];
+        for frame in &mut frames {
+            *frame = alloc.get(0, 0).unwrap();
         }
 
         let barrier = Barrier::new(THREADS);
@@ -868,18 +869,18 @@ mod test {
                 thread::pin(1);
                 barrier.wait();
                 // Free on another thread
-                for page in &pages {
-                    alloc.put(1, *page, 0).unwrap();
+                for frame in &frames {
+                    alloc.put(1, *frame, 0).unwrap();
                 }
             });
 
-            let mut pages = vec![PFN(0); ALLOC_PER_THREAD];
+            let mut frames = vec![PFN(0); ALLOC_PER_THREAD];
 
             barrier.wait();
 
             // Simultaneously alloc on first thread
-            for page in &mut pages {
-                *page = alloc.get(0, 0).unwrap();
+            for frame in &mut frames {
+                *frame = alloc.get(0, 0).unwrap();
             }
         });
 
@@ -896,7 +897,7 @@ mod test {
         warn!("{area:?}");
         thread::pin(0);
 
-        let expected_pages = (PT_LEN + 2) * (1 + (1 << 9));
+        let expected_frames = (PT_LEN + 2) * (1 + (1 << 9));
 
         {
             let alloc = Allocator::new(1, area.clone(), Init::Overwrite, true).unwrap();
@@ -906,7 +907,7 @@ mod test {
                 alloc.get(0, 9).unwrap();
             }
 
-            assert_eq!(alloc.allocated_frames(), expected_pages);
+            assert_eq!(alloc.allocated_frames(), expected_frames);
 
             // leak (crash)
             std::mem::forget(alloc);
@@ -914,7 +915,7 @@ mod test {
 
         let mut alloc = Allocator::default();
         alloc.init(1, area, Init::Recover, true).unwrap();
-        assert_eq!(alloc.allocated_frames(), expected_pages);
+        assert_eq!(alloc.allocated_frames(), expected_frames);
     }
 
     #[test]
@@ -932,32 +933,32 @@ mod test {
         thread::parallel(0..THREADS, |t| {
             thread::pin(t);
             let mut rng = WyRand::new(42 + t as u64);
-            let mut num_pages = 0;
-            let mut pages = Vec::new();
+            let mut num_frames = 0;
+            let mut frames = Vec::new();
             for order in 0..=MAX_ORDER {
                 for _ in 0..1 << (MAX_ORDER - order) {
-                    pages.push((order, PFN(0)));
-                    num_pages += 1 << order;
+                    frames.push((order, PFN(0)));
+                    num_frames += 1 << order;
                 }
             }
-            rng.shuffle(&mut pages);
+            rng.shuffle(&mut frames);
 
-            warn!("allocate {num_pages} pages up to order <{MAX_ORDER}");
+            warn!("allocate {num_frames} frames up to order <{MAX_ORDER}");
             barrier.wait();
 
-            for (order, page) in &mut pages {
-                *page = match alloc.get(t, *order) {
-                    Ok(page) => page,
+            for (order, frame) in &mut frames {
+                *frame = match alloc.get(t, *order) {
+                    Ok(frame) => frame,
                     Err(e) => panic!("{e:?} o={order} {alloc:?}"),
                 };
-                assert!(page.0 % (1 << *order) == 0, "{page} {:x}", 1 << *order);
+                assert!(frame.0 % (1 << *order) == 0, "{frame} {:x}", 1 << *order);
             }
 
             let mut rng = WyRand::new(t as _);
-            rng.shuffle(&mut pages);
+            rng.shuffle(&mut frames);
 
-            for (order, page) in pages {
-                match alloc.put(t, page, order) {
+            for (order, frame) in frames {
+                match alloc.put(t, frame, order) {
                     Ok(_) => {}
                     Err(e) => panic!("{e:?} o={order} {alloc:?}"),
                 }
@@ -980,8 +981,8 @@ mod test {
         assert_eq!(alloc.frames(), PAGES);
         assert_eq!(alloc.allocated_frames(), PAGES);
 
-        for page in area.as_range().step_by(1 << Lower::HUGE_ORDER).map(PFN) {
-            alloc.put(0, page, Lower::HUGE_ORDER).unwrap();
+        for frame in area.as_range().step_by(1 << Lower::HUGE_ORDER).map(PFN) {
+            alloc.put(0, frame, Lower::HUGE_ORDER).unwrap();
         }
         assert_eq!(alloc.allocated_frames(), 0);
 
@@ -1002,17 +1003,17 @@ mod test {
         let alloc = Allocator::new(1, area, Init::Volatile, true).unwrap();
 
         // Alloc a whole subtree
-        let mut pages = Vec::with_capacity(Lower::N / 2);
+        let mut frames = Vec::with_capacity(Lower::N / 2);
         for i in 0..Lower::N {
             if i % 2 == 0 {
-                pages.push(alloc.get(0, 0).unwrap());
+                frames.push(alloc.get(0, 0).unwrap());
             } else {
                 alloc.get(0, 0).unwrap();
             }
         }
         // Free every second one -> fragmentation
-        for page in pages {
-            alloc.put(0, page, 0).unwrap();
+        for frame in frames {
+            alloc.put(0, frame, 0).unwrap();
         }
 
         let huge = alloc.get(0, 9).unwrap();

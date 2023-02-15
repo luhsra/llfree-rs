@@ -14,7 +14,7 @@ use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::upper::*;
 use nvalloc::util::{self, WyRand};
-use nvalloc::{pfn_range, Page, PFN};
+use nvalloc::{pfn_range, Frame, PFN};
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
@@ -188,14 +188,14 @@ fn mapping(
     begin: usize,
     length: usize,
     dax: Option<String>,
-) -> core::result::Result<MMap<Page>, ()> {
+) -> core::result::Result<MMap<Frame>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {
         if let Some(file) = dax {
             warn!(
                 "MMap file {file} l={}G ({:x})",
-                (length * std::mem::size_of::<Page>()) >> 30,
-                length * std::mem::size_of::<Page>()
+                (length * std::mem::size_of::<Frame>()) >> 30,
+                length * std::mem::size_of::<Frame>()
             );
             let f = std::fs::OpenOptions::new()
                 .read(true)

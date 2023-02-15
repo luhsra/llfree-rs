@@ -12,7 +12,7 @@ use crate::entry::{Child, ChildPair};
 use crate::table::AtomicArray;
 use crate::upper::{Init, CAS_RETRIES};
 use crate::util::{align_down, align_up, spin_wait, CacheLine};
-use crate::{Error, Page, Result, PFN};
+use crate::{Error, Frame, Result, PFN};
 
 use super::LowerAlloc;
 
@@ -70,7 +70,7 @@ where
             let size_bitfields = align_up(size_bitfields, size_of::<[Child; HP]>()); // correct alignment
             let size_tables = num_bitfields * size_of::<[Child; HP]>();
             // Num of frames occupied by the tables
-            let metadata_frames = (size_bitfields + size_tables).div_ceil(Page::SIZE);
+            let metadata_frames = (size_bitfields + size_tables).div_ceil(Frame::SIZE);
 
             debug_assert!(metadata_frames < len);
             let len = len - metadata_frames;
@@ -290,7 +290,7 @@ where
     }
 
     fn size_per_gib() -> usize {
-        let frames = 1usize << (30 - Page::SIZE_BITS);
+        let frames = 1usize << (30 - Frame::SIZE_BITS);
         let size_bitfields = frames.div_ceil(8); // 1 bit per frame
         let size_tables = size_of::<Child>() * frames.div_ceil(Bitfield::LEN);
         size_bitfields + size_tables

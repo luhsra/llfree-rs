@@ -7,7 +7,7 @@ use log::error;
 
 use crate::atomic::{Atom, Atomic};
 use crate::util::align_down;
-use crate::Page;
+use crate::Frame;
 use crate::{Error, Result};
 
 pub const PT_ORDER: usize = 9;
@@ -329,7 +329,7 @@ fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
 }
 
 /// Specifies the different table sizes from level 1 to N.
-/// Level 0 are the pages below the first level of page tables.
+/// Level 0 are the frames below the first level of tables.
 /// Each entry contains the number of bits that are used to index the table.
 /// The total sum of bits has to be less than the systems pointer size.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,14 +353,14 @@ impl<const L: usize> Mapping<L> {
     }
 
     /// Memory bytes that the `level` covers.
-    /// 0 is always 1 page.
+    /// 0 is always 1 frame.
     #[inline(always)]
     pub const fn m_span(&self, level: usize) -> usize {
-        self.span(level) << Page::SIZE_BITS
+        self.span(level) << Frame::SIZE_BITS
     }
 
-    /// Number of pages that the `level` covers.
-    /// 0 is always 1 page.
+    /// Number of frames that the `level` covers.
+    /// 0 is always 1 frame.
     #[inline(always)]
     pub const fn span(&self, level: usize) -> usize {
         debug_assert!(level <= Self::LEVELS);
@@ -368,7 +368,7 @@ impl<const L: usize> Mapping<L> {
         1 << self.order(level)
     }
 
-    /// Log2 of the number of pages that the `level` covers.
+    /// Log2 of the number of frames that the `level` covers.
     #[inline(always)]
     pub const fn order(&self, level: usize) -> usize {
         debug_assert!(level <= Self::LEVELS);
@@ -387,45 +387,45 @@ impl<const L: usize> Mapping<L> {
         self.order(Self::LEVELS)
     }
 
-    /// Returns pt index that contains the `page`
+    /// Returns pt index that contains the `frame`
     #[inline(always)]
-    pub const fn idx(&self, level: usize, page: usize) -> usize {
+    pub const fn idx(&self, level: usize, frame: usize) -> usize {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
-        (page / self.span(level - 1)) % self.len(level)
+        (frame / self.span(level - 1)) % self.len(level)
     }
 
-    /// Returns the starting page of the corresponding page table
+    /// Returns the starting frame of the corresponding table
     #[inline(always)]
-    pub const fn round(&self, level: usize, page: usize) -> usize {
-        align_down(page, self.span(level))
+    pub const fn round(&self, level: usize, frame: usize) -> usize {
+        align_down(frame, self.span(level))
     }
 
-    /// Returns the page at the given index `i`
+    /// Returns the frame at the given index `i`
     #[inline(always)]
-    pub const fn page(&self, level: usize, start: usize, i: usize) -> usize {
+    pub const fn frame(&self, level: usize, start: usize, i: usize) -> usize {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
         self.round(level, start) + i * self.span(level - 1)
     }
 
-    /// Returns the number of page tables needed to manage the number of `pages`
+    /// Returns the number of tables needed to manage the number of `frames`
     #[inline(always)]
-    pub const fn num_pts(&self, level: usize, pages: usize) -> usize {
+    pub const fn num_tables(&self, level: usize, frames: usize) -> usize {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
-        pages.div_ceil(self.span(level))
+        frames.div_ceil(self.span(level))
     }
 
-    /// Computes the index range for the given page range
+    /// Computes the index range for the given frame range
     #[inline(always)]
-    pub const fn range(&self, level: usize, pages: Range<usize>) -> Range<usize> {
+    pub const fn range(&self, level: usize, frames: Range<usize>) -> Range<usize> {
         debug_assert!(0 < level && level <= Self::LEVELS);
 
-        if pages.start < pages.end {
+        if frames.start < frames.end {
             let span_m1 = self.span(level - 1);
-            let start_d = pages.start / span_m1;
-            let end_d = pages.end.div_ceil(span_m1);
+            let start_d = frames.start / span_m1;
+            let end_d = frames.end.div_ceil(span_m1);
 
             let entries = self.len(level);
             let max = align_down(start_d, entries) + entries;
@@ -440,44 +440,30 @@ impl<const L: usize> Mapping<L> {
             0..0
         }
     }
-
-    /// Iterates over the table pages beginning with `start`.
-    /// It wraps around the end and ends one before `start`.
-    #[deprecated = "generates non-optimal code"]
-    pub fn iterate(&self, level: usize, start: usize) -> impl Iterator<Item = usize> {
-        debug_assert!(0 < level && level <= Self::LEVELS);
-
-        let span_m1 = self.span(level - 1);
-        let span = self.span(level);
-        let rounded = self.round(level, start);
-        let offset = self.round(level - 1, start - rounded);
-        core::iter::once(start)
-            .chain((1..self.len(level)).map(move |v| rounded + (v * span_m1 + offset) % span))
-    }
 }
 
 #[cfg(all(test, feature = "std"))]
 mod test {
     use crate::table::Mapping;
-    use crate::Page;
+    use crate::Frame;
 
     #[test]
     fn pt_size() {
         const MAPPING: Mapping<3> = Mapping([9, 9, 9]);
 
-        assert_eq!(MAPPING.m_span(0), Page::SIZE);
-        assert_eq!(MAPPING.m_span(1), Page::SIZE * 512);
-        assert_eq!(MAPPING.m_span(2), Page::SIZE * 512 * 512);
+        assert_eq!(MAPPING.m_span(0), Frame::SIZE);
+        assert_eq!(MAPPING.m_span(1), Frame::SIZE * 512);
+        assert_eq!(MAPPING.m_span(2), Frame::SIZE * 512 * 512);
 
         assert_eq!(MAPPING.span(0), 1);
         assert_eq!(MAPPING.span(1), 512);
         assert_eq!(MAPPING.span(2), 512 * 512);
 
-        assert_eq!(MAPPING.num_pts(1, 0), 0);
-        assert_eq!(MAPPING.num_pts(1, MAPPING.span(1)), 1);
-        assert_eq!(MAPPING.num_pts(1, 2 * MAPPING.span(1) + 1), 3);
+        assert_eq!(MAPPING.num_tables(1, 0), 0);
+        assert_eq!(MAPPING.num_tables(1, MAPPING.span(1)), 1);
+        assert_eq!(MAPPING.num_tables(1, 2 * MAPPING.span(1) + 1), 3);
         assert_eq!(
-            MAPPING.num_pts(1, MAPPING.span(3)),
+            MAPPING.num_tables(1, MAPPING.span(3)),
             MAPPING.len(2) * MAPPING.len(3)
         );
     }
@@ -486,20 +472,20 @@ mod test {
     fn pt_size_verying() {
         const MAPPING: Mapping<3> = Mapping([9, 6, 5]);
 
-        assert_eq!(MAPPING.m_span(0), Page::SIZE);
-        assert_eq!(MAPPING.m_span(1), Page::SIZE * 512);
-        assert_eq!(MAPPING.m_span(2), Page::SIZE * 512 * 64);
+        assert_eq!(MAPPING.m_span(0), Frame::SIZE);
+        assert_eq!(MAPPING.m_span(1), Frame::SIZE * 512);
+        assert_eq!(MAPPING.m_span(2), Frame::SIZE * 512 * 64);
 
         assert_eq!(MAPPING.span(0), 1);
         assert_eq!(MAPPING.span(1), 512);
         assert_eq!(MAPPING.span(2), 512 * 64);
         assert_eq!(MAPPING.span(3), 512 * 64 * 32);
 
-        assert_eq!(MAPPING.num_pts(1, 0), 0);
-        assert_eq!(MAPPING.num_pts(1, MAPPING.span(1)), 1);
-        assert_eq!(MAPPING.num_pts(1, 2 * MAPPING.span(1) + 1), 3);
+        assert_eq!(MAPPING.num_tables(1, 0), 0);
+        assert_eq!(MAPPING.num_tables(1, MAPPING.span(1)), 1);
+        assert_eq!(MAPPING.num_tables(1, 2 * MAPPING.span(1) + 1), 3);
         assert_eq!(
-            MAPPING.num_pts(1, MAPPING.span(3)),
+            MAPPING.num_tables(1, MAPPING.span(3)),
             MAPPING.len(2) * MAPPING.len(3)
         );
     }
@@ -515,11 +501,11 @@ mod test {
         assert_eq!(MAPPING.round(3, MAPPING.span(2)), 0);
         assert_eq!(MAPPING.round(3, 2 * MAPPING.span(3)), 2 * MAPPING.span(3));
 
-        assert_eq!(MAPPING.page(1, 15, 2), 2);
-        assert_eq!(MAPPING.page(1, 512, 2), 512 + 2);
-        assert_eq!(MAPPING.page(1, MAPPING.span(2), 0), MAPPING.span(2));
+        assert_eq!(MAPPING.frame(1, 15, 2), 2);
+        assert_eq!(MAPPING.frame(1, 512, 2), 512 + 2);
+        assert_eq!(MAPPING.frame(1, MAPPING.span(2), 0), MAPPING.span(2));
         assert_eq!(
-            MAPPING.page(2, MAPPING.span(2), 1),
+            MAPPING.frame(2, MAPPING.span(2), 1),
             MAPPING.span(2) + MAPPING.span(1)
         );
 
@@ -541,11 +527,11 @@ mod test {
         assert_eq!(MAPPING.round(3, MAPPING.span(2)), 0);
         assert_eq!(MAPPING.round(3, 2 * MAPPING.span(3)), 2 * MAPPING.span(3));
 
-        assert_eq!(MAPPING.page(1, 15, 2), 2);
-        assert_eq!(MAPPING.page(1, 512, 2), 512 + 2);
-        assert_eq!(MAPPING.page(1, MAPPING.span(2), 0), MAPPING.span(2));
+        assert_eq!(MAPPING.frame(1, 15, 2), 2);
+        assert_eq!(MAPPING.frame(1, 512, 2), 512 + 2);
+        assert_eq!(MAPPING.frame(1, MAPPING.span(2), 0), MAPPING.span(2));
         assert_eq!(
-            MAPPING.page(2, MAPPING.span(2), 1),
+            MAPPING.frame(2, MAPPING.span(2), 1),
             MAPPING.span(2) + MAPPING.span(1)
         );
 
@@ -598,77 +584,6 @@ mod test {
         assert_eq!(MAPPING.range(3, 0..MAPPING.span(3)), 0..MAPPING.len(3));
 
         assert_eq!(MAPPING.range(3, 0..1), 0..1);
-    }
-
-    #[test]
-    fn iterate() {
-        #![allow(deprecated)]
-
-        const MAPPING: Mapping<3> = Mapping([9, 9, 9]);
-
-        let mut iter = MAPPING.iterate(1, 0).enumerate();
-        assert_eq!(iter.next(), Some((0, 0)));
-        assert_eq!(iter.last(), Some((511, 511)));
-
-        // 5 -> 5, 6, .., 511, 0, 1, 2, 3, 4,
-        let mut iter = MAPPING.iterate(1, 5).enumerate();
-        assert_eq!(iter.next(), Some((0, 5)));
-        assert_eq!(iter.next(), Some((1, 6)));
-        assert_eq!(iter.last(), Some((511, 4)));
-
-        let mut iter = MAPPING.iterate(1, 5 + 2 * MAPPING.span(1)).enumerate();
-        assert_eq!(iter.next(), Some((0, 5 + 2 * MAPPING.span(1))));
-        assert_eq!(iter.next(), Some((1, 6 + 2 * MAPPING.span(1))));
-        assert_eq!(iter.last(), Some((511, 4 + 2 * MAPPING.span(1))));
-
-        let mut iter = MAPPING.iterate(2, 5 * MAPPING.span(1)).enumerate();
-        assert_eq!(iter.next(), Some((0, 5 * MAPPING.span(1))));
-        assert_eq!(iter.last(), Some((511, 4 * MAPPING.span(1))));
-
-        let mut iter = MAPPING.iterate(2, 0).enumerate();
-        assert_eq!(iter.next(), Some((0, 0)));
-        assert_eq!(iter.next(), Some((1, MAPPING.span(1))));
-        assert_eq!(iter.last(), Some((511, 511 * MAPPING.span(1))));
-
-        let mut iter = MAPPING.iterate(2, 500).enumerate();
-        assert_eq!(iter.next(), Some((0, 500)));
-        assert_eq!(iter.next(), Some((1, MAPPING.span(1))));
-        assert_eq!(iter.next(), Some((2, 2 * MAPPING.span(1))));
-        assert_eq!(iter.last(), Some((511, 511 * MAPPING.span(1))));
-
-        let mut iter = MAPPING.iterate(2, 499 * MAPPING.span(1)).enumerate();
-        assert_eq!(iter.next(), Some((0, 499 * MAPPING.span(1))));
-        assert_eq!(iter.last(), Some((511, 498 * MAPPING.span(1))));
-    }
-
-    #[test]
-    fn iterate_varying() {
-        #![allow(deprecated)]
-
-        const MAPPING: Mapping<3> = Mapping([9, 6, 5]);
-
-        let mut iter = MAPPING.iterate(1, 0).enumerate();
-        assert_eq!(iter.next(), Some((0, 0)));
-        assert_eq!(iter.last(), Some((511, 511)));
-
-        // 5 -> 5, 6, .., 511, 0, 1, 2, 3, 4,
-        let mut iter = MAPPING.iterate(1, 5).enumerate();
-        assert_eq!(iter.next(), Some((0, 5)));
-        assert_eq!(iter.next(), Some((1, 6)));
-        assert_eq!(iter.last(), Some((511, 4)));
-
-        let mut iter = MAPPING.iterate(1, 5 + 2 * MAPPING.span(1)).enumerate();
-        assert_eq!(iter.next(), Some((0, 5 + 2 * MAPPING.span(1))));
-        assert_eq!(iter.next(), Some((1, 6 + 2 * MAPPING.span(1))));
-        assert_eq!(iter.last(), Some((511, 4 + 2 * MAPPING.span(1))));
-
-        let mut iter = MAPPING.iterate(2, 5 * MAPPING.span(1)).enumerate();
-        assert_eq!(iter.next(), Some((0, 5 * MAPPING.span(1))));
-        assert_eq!(iter.last(), Some((63, 4 * MAPPING.span(1))));
-
-        let mut iter = MAPPING.iterate(3, 5 * MAPPING.span(2)).enumerate();
-        assert_eq!(iter.next(), Some((0, 5 * MAPPING.span(2))));
-        assert_eq!(iter.last(), Some((31, 4 * MAPPING.span(2))));
     }
 
     #[test]

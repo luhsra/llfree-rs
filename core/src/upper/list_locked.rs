@@ -11,7 +11,7 @@ use crate::atomic::{Atom, Spin};
 use crate::entry::Next;
 use crate::{Error, PFNRange, Result, PFN};
 
-/// Simple volatile 4K page allocator that uses a single shared linked lists
+/// Simple volatile 4K frame allocator that uses a single shared linked lists
 /// protected by a ticked lock.
 /// The linked list pointers are stored similar to Linux's in the struct pages.
 ///
@@ -23,7 +23,7 @@ pub struct ListLocked {
     frames: Box<[PageFrame]>,
     /// CPU local metadata
     local: Box<[LocalCounter]>,
-    /// Per page metadata
+    /// Per frame metadata
     next: Spin<Node>,
 }
 
@@ -248,7 +248,7 @@ mod test {
     use crate::table::PT_LEN;
     use crate::upper::{Alloc, AllocExt, Init};
     use crate::util::logging;
-    use crate::{pfn_range, Error, Page};
+    use crate::{pfn_range, Error, Frame};
 
     use super::ListLocked;
 
@@ -259,7 +259,7 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
-        let mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Page::SIZE).unwrap();
+        let mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Frame::SIZE).unwrap();
         let area = pfn_range(&mapping);
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());
@@ -275,26 +275,26 @@ mod test {
         warn!("stress test...");
 
         // Stress test
-        let mut pages = Vec::new();
+        let mut frames = Vec::new();
         loop {
             match alloc.get(0, 0) {
-                Ok(page) => pages.push(page),
+                Ok(frame) => frames.push(frame),
                 Err(Error::Memory) => break,
                 Err(e) => panic!("{e:?}"),
             }
         }
 
-        warn!("allocated {}", 1 + pages.len());
+        warn!("allocated {}", 1 + frames.len());
         warn!("check...");
 
-        assert_eq!(alloc.allocated_frames(), 1 + pages.len());
+        assert_eq!(alloc.allocated_frames(), 1 + frames.len());
         assert_eq!(alloc.allocated_frames(), alloc.frames());
-        pages.sort_unstable();
+        frames.sort_unstable();
 
-        // Check that the same page was not allocated twice
-        for i in 0..pages.len() - 1 {
-            let p1 = pages[i];
-            let p2 = pages[i + 1];
+        // Check that the same frame was not allocated twice
+        for i in 0..frames.len() - 1 {
+            let p1 = frames[i];
+            let p2 = frames[i + 1];
             assert!(area.contains(&p1));
             assert!(p1 != p2);
         }
@@ -303,27 +303,27 @@ mod test {
 
         // Free some
         const FREE_NUM: usize = PT_LEN * PT_LEN - 10;
-        for page in &pages[..FREE_NUM] {
-            alloc.put(0, *page, 0).unwrap();
+        for frame in &frames[..FREE_NUM] {
+            alloc.put(0, *frame, 0).unwrap();
         }
 
         assert_eq!(
             alloc.allocated_frames(),
-            1 + pages.len() - FREE_NUM,
+            1 + frames.len() - FREE_NUM,
             "{alloc:?}"
         );
 
         // Realloc
-        for page in &mut pages[..FREE_NUM] {
-            *page = alloc.get(0, 0).unwrap();
+        for frame in &mut frames[..FREE_NUM] {
+            *frame = alloc.get(0, 0).unwrap();
         }
 
         warn!("free...");
 
         alloc.put(0, small, 0).unwrap();
         // Free all
-        for page in &pages {
-            alloc.put(0, *page, 0).unwrap();
+        for frame in &frames {
+            alloc.put(0, *frame, 0).unwrap();
         }
 
         assert_eq!(alloc.allocated_frames(), 0);

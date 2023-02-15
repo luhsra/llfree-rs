@@ -59,14 +59,14 @@ pub type Result<T> = core::result::Result<T, Error>;
 pub struct PFN(pub usize);
 
 impl PFN {
-    pub fn from_ptr(ptr: *const Page) -> Self {
-        Self(ptr as usize / Page::SIZE)
+    pub fn from_ptr(ptr: *const Frame) -> Self {
+        Self(ptr as usize / Frame::SIZE)
     }
-    pub fn as_ptr(self) -> *const Page {
-        (self.0 * Page::SIZE) as _
+    pub fn as_ptr(self) -> *const Frame {
+        (self.0 * Frame::SIZE) as _
     }
-    pub fn as_ptr_mut(self) -> *mut Page {
-        (self.0 * Page::SIZE) as _
+    pub fn as_ptr_mut(self) -> *mut Frame {
+        (self.0 * Frame::SIZE) as _
     }
     pub fn off(self, offset: usize) -> Self {
         Self(self.0 + offset)
@@ -83,12 +83,12 @@ impl From<PFN> for usize {
         value.0
     }
 }
-impl From<*const Page> for PFN {
-    fn from(value: *const Page) -> Self {
+impl From<*const Frame> for PFN {
+    fn from(value: *const Frame) -> Self {
         Self::from_ptr(value)
     }
 }
-impl From<PFN> for *const Page {
+impl From<PFN> for *const Frame {
     fn from(value: PFN) -> Self {
         value.as_ptr()
     }
@@ -112,13 +112,13 @@ pub trait PFNRange: Sized {
         self.len() == 0
     }
     fn as_range(&self) -> Range<usize>;
-    fn as_ptr_range(&self) -> Range<*const Page> {
+    fn as_ptr_range(&self) -> Range<*const Frame> {
         let Range { start, end } = self.as_range();
-        (start * Page::SIZE) as _..(end * Page::SIZE) as _
+        (start * Frame::SIZE) as _..(end * Frame::SIZE) as _
     }
 }
 
-pub fn pfn_range(slice: &[Page]) -> Range<PFN> {
+pub fn pfn_range(slice: &[Frame]) -> Range<PFN> {
     let Range { start, end } = slice.as_ptr_range();
     start.into()..end.into()
 }
@@ -132,15 +132,15 @@ impl PFNRange for Range<PFN> {
     }
 }
 
-/// Correctly sized and aligned page.
+/// Correctly sized and aligned page frame.
 #[derive(Clone)]
 #[repr(align(0x1000))]
-pub struct Page {
+pub struct Frame {
     _data: [u8; Self::SIZE],
 }
-const _: () = assert!(size_of::<Page>() == Page::SIZE);
-const _: () = assert!(align_of::<Page>() == Page::SIZE);
-impl Page {
+const _: () = assert!(size_of::<Frame>() == Frame::SIZE);
+const _: () = assert!(align_of::<Frame>() == Frame::SIZE);
+impl Frame {
     pub const SIZE: usize = 0x1000;
     pub const SIZE_BITS: usize = Self::SIZE.ilog2() as _;
     pub const fn new() -> Self {

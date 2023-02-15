@@ -16,7 +16,7 @@ use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::upper::*;
 use nvalloc::util::{self, WyRand};
-use nvalloc::{pfn_range, Page, PFN};
+use nvalloc::{pfn_range, Frame, PFN};
 
 /// Number of allocations per block
 const RAND_BLOCK_SIZE: usize = 8;
@@ -141,14 +141,14 @@ fn mapping(
     begin: usize,
     length: usize,
     dax: Option<String>,
-) -> core::result::Result<MMap<Page>, ()> {
+) -> core::result::Result<MMap<Frame>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {
         if let Some(file) = dax {
             warn!(
                 "MMap file {file} l={}G ({:x})",
-                (length * std::mem::size_of::<Page>()) >> 30,
-                length * std::mem::size_of::<Page>()
+                (length * std::mem::size_of::<Frame>()) >> 30,
+                length * std::mem::size_of::<Frame>()
             );
             let f = std::fs::OpenOptions::new()
                 .read(true)
@@ -187,7 +187,7 @@ impl Benchmark {
     fn run(
         self,
         alloc: &mut dyn Alloc,
-        mapping: &mut [Page],
+        mapping: &mut [Frame],
         order: usize,
         threads: usize,
         x: usize,
@@ -206,7 +206,7 @@ impl Benchmark {
 
 fn bulk(
     alloc: &mut dyn Alloc,
-    mapping: &mut [Page],
+    mapping: &mut [Frame],
     order: usize,
     max_threads: usize,
     threads: usize,
@@ -268,7 +268,7 @@ fn bulk(
 
 fn repeat(
     alloc: &mut dyn Alloc,
-    mapping: &mut [Page],
+    mapping: &mut [Frame],
     order: usize,
     max_threads: usize,
     threads: usize,
@@ -319,7 +319,7 @@ fn repeat(
 
 fn rand(
     alloc: &mut dyn Alloc,
-    mapping: &mut [Page],
+    mapping: &mut [Frame],
     order: usize,
     max_threads: usize,
     threads: usize,
@@ -394,7 +394,7 @@ fn rand(
 /// reallocate multiple in close proximity at once
 fn rand_block(
     alloc: &mut dyn Alloc,
-    mapping: &mut [Page],
+    mapping: &mut [Frame],
     order: usize,
     max_threads: usize,
     threads: usize,
@@ -466,7 +466,7 @@ fn rand_block(
 
 fn filling(
     alloc: &mut dyn Alloc,
-    mapping: &mut [Page],
+    mapping: &mut [Frame],
     order: usize,
     threads: usize,
     x: usize,

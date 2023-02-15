@@ -9,7 +9,7 @@ use std::os::unix::prelude::AsRawFd;
 use alloc::boxed::Box;
 
 use crate::util::align_down;
-use crate::Page;
+use crate::Frame;
 
 /// Chunk of mapped memory.
 /// Wrapper for POSIX mmap syscalls.
@@ -134,7 +134,7 @@ impl<T> MMap<T> {
 pub fn m_async<T>(slice: &mut [T]) {
     unsafe {
         if libc::msync(
-            align_down(slice.as_mut_ptr() as usize, Page::SIZE) as *mut _,
+            align_down(slice.as_mut_ptr() as usize, Frame::SIZE) as *mut _,
             slice.len() * size_of::<T>(),
             libc::MS_ASYNC,
         ) != 0
@@ -214,11 +214,11 @@ pub enum MAdvise {
 }
 
 #[cfg(target_family = "unix")]
-pub fn madvise(mem: &mut [Page], advise: MAdvise) {
+pub fn madvise(mem: &mut [Frame], advise: MAdvise) {
     let ret = unsafe {
         libc::madvise(
             mem.as_mut_ptr() as *mut _,
-            Page::SIZE * mem.len(),
+            Frame::SIZE * mem.len(),
             advise as _,
         )
     };
@@ -229,12 +229,12 @@ pub fn madvise(mem: &mut [Page], advise: MAdvise) {
 }
 
 #[cfg(test)]
-pub fn test_mapping(begin: usize, length: usize) -> core::result::Result<MMap<Page>, ()> {
+pub fn test_mapping(begin: usize, length: usize) -> core::result::Result<MMap<Frame>, ()> {
     use log::warn;
 
     #[cfg(target_os = "linux")]
     if let Ok(file) = std::env::var("NVM_FILE") {
-        warn!("MMap file {file} l={}G", (length * Page::SIZE) >> 30);
+        warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
         let f = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -253,7 +253,7 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::Page;
+    use crate::Frame;
 
     #[cfg(target_family = "unix")]
     #[test]
@@ -264,9 +264,9 @@ mod test {
             .write(true)
             .open("memfile")
             .unwrap();
-        f.set_len(Page::SIZE as _).unwrap();
+        f.set_len(Frame::SIZE as _).unwrap();
 
-        let mut mapping = MMap::file(0x0000_1000_0000_0000, Page::SIZE, f).unwrap();
+        let mut mapping = MMap::file(0x0000_1000_0000_0000, Frame::SIZE, f).unwrap();
 
         mapping[0] = 42;
         assert_eq!(mapping[0], 42);
@@ -304,7 +304,7 @@ mod test {
     fn anonymous() {
         logging();
 
-        let mut mapping = MMap::anon(0x0000_1000_0000_0000, Page::SIZE, false, true).unwrap();
+        let mut mapping = MMap::anon(0x0000_1000_0000_0000, Frame::SIZE, false, true).unwrap();
 
         mapping[0] = 42;
         assert_eq!(mapping[0], 42);

@@ -13,7 +13,7 @@ use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::upper::{Alloc, Array, Init};
 use nvalloc::util::logging;
-use nvalloc::{pfn_range, thread, Page};
+use nvalloc::{pfn_range, thread, Frame};
 
 type Allocator = Array<3, Cache<128>>;
 
@@ -183,13 +183,13 @@ impl Perf {
 }
 
 #[allow(unused_variables)]
-fn mapping(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Page>, ()> {
+fn mapping(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Frame>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {
         if let Some(file) = dax {
             warn!(
                 "MMap file {file} l={}G",
-                (length * std::mem::size_of::<Page>()) >> 30
+                (length * std::mem::size_of::<Frame>()) >> 30
             );
             let f = std::fs::OpenOptions::new()
                 .read(true)

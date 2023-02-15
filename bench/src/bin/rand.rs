@@ -8,7 +8,7 @@ use nvalloc::mmap::{madvise, MAdvise, MMap};
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::util::{avg_bounds, logging, WyRand};
-use nvalloc::Page;
+use nvalloc::Frame;
 
 /// Benchmark for freeing randomly allocated memory regions.
 #[derive(Parser, Debug)]
@@ -109,14 +109,14 @@ fn mapping(
     dax: Option<String>,
     private: bool,
     populate: bool,
-) -> core::result::Result<MMap<Page>, ()> {
+) -> core::result::Result<MMap<Frame>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {
         if let Some(file) = dax {
             warn!(
                 "MMap file {file} l={}G ({:x})",
-                (length * std::mem::size_of::<Page>()) >> 30,
-                length * std::mem::size_of::<Page>()
+                (length * std::mem::size_of::<Frame>()) >> 30,
+                length * std::mem::size_of::<Frame>()
             );
             let f = std::fs::OpenOptions::new()
                 .read(true)

@@ -9,7 +9,7 @@ use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::upper::*;
 use nvalloc::util::{self, align_up, WyRand};
-use nvalloc::{pfn_range, Page, PFN};
+use nvalloc::{pfn_range, Frame, PFN};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]
@@ -48,7 +48,7 @@ fn main() {
     for a in allocs {
         if format!("{}", a.name()) == alloc {
             let allocs = pages / threads / 2 / (1 << order);
-            let out_size = align_up(allocs + 2, Page::SIZE) * threads;
+            let out_size = align_up(allocs + 2, Frame::SIZE) * threads;
             // Shared memory where the allocated pages are backupped
             // Layout: [ ( idx | realloc | pages... ) for each thread ]
             let mut out_mapping =
@@ -84,11 +84,11 @@ fn execute(
     allocs: usize,
     threads: usize,
     order: usize,
-    mut mapping: MMap<Page>,
+    mut mapping: MMap<Frame>,
     mut out_mapping: MMap<usize>,
 ) {
     // Align to prevent false-sharing
-    let out_size = align_up(allocs + 2, Page::SIZE);
+    let out_size = align_up(allocs + 2, Frame::SIZE);
 
     // Warmup
     for page in &mut mapping[..] {
@@ -138,10 +138,10 @@ fn monitor(
     threads: usize,
     order: usize,
     child: i32,
-    mapping: MMap<Page>,
+    mapping: MMap<Frame>,
     out_mapping: MMap<usize>,
 ) {
-    let out_size = align_up(allocs + 2, Page::SIZE);
+    let out_size = align_up(allocs + 2, Frame::SIZE);
 
     // Wait for the allocator to finish initialization
     warn!("wait");
@@ -226,14 +226,14 @@ fn mapping(
     begin: usize,
     length: usize,
     dax: Option<String>,
-) -> core::result::Result<MMap<Page>, ()> {
+) -> core::result::Result<MMap<Frame>, ()> {
     #[cfg(target_os = "linux")]
     if length > 0 {
         if let Some(file) = dax {
             warn!(
                 "MMap file {file} l={}G ({:x})",
-                (length * std::mem::size_of::<Page>()) >> 30,
-                length * std::mem::size_of::<Page>()
+                (length * std::mem::size_of::<Frame>()) >> 30,
+                length * std::mem::size_of::<Frame>()
             );
             let f = std::fs::OpenOptions::new()
                 .read(true)

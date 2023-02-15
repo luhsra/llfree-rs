@@ -18,9 +18,12 @@ macro_rules! stop {
 mod cache;
 pub use cache::Cache;
 
-/// Level 2 page allocator.
+/// Lower-level frame allocator.
+///
+/// This level implements the actual allocation/free operations.
+/// Each allocation/free is limited to a chunk of [LowerAlloc::N] frames.
 pub trait LowerAlloc: Default + fmt::Debug {
-    /// Pages per tree
+    /// Pages per chunk. Every alloc only searches in a chunk of this size.
     const N: usize;
     /// The maximal allowed order of this allocator
     const MAX_ORDER: usize;
@@ -36,21 +39,22 @@ pub trait LowerAlloc: Default + fmt::Debug {
         self.begin()..PFN(self.begin().0 + self.frames())
     }
 
-    /// Recover the level 2 page table at `start`.
-    /// If deep, the level 1 pts are also traversed and false counters are corrected.
-    /// Returns the number of recovered pages.
+    /// Recovers the data structures for the [LowerAlloc::N] sized chunk at `start`.
+    /// `deep` indicates that the allocator has crashed and the
+    /// recovery might have to be more extensive.
+    /// Returns the number of recovered frames.
     fn recover(&self, start: usize, deep: bool) -> Result<usize>;
 
-    /// Try allocating a new `huge` page in the subtree at `start`.
+    /// Try allocating a new `frame` in the [LowerAlloc::N] sized chunk at `start`.
     fn get(&self, start: usize, order: usize) -> Result<usize>;
-    /// Try freeing a page. Returns if it was huge.
-    fn put(&self, page: usize, order: usize) -> Result<()>;
-    /// Returns if the page is free. This might be racy!
-    fn is_free(&self, page: usize, order: usize) -> bool;
+    /// Try freeing a `frame`.
+    fn put(&self, frame: usize, order: usize) -> Result<()>;
+    /// Returns if the frame is free. This might be racy!
+    fn is_free(&self, frame: usize, order: usize) -> bool;
 
-    /// Debug function, returning the number of allocated pages and performing internal checks.
+    /// Debug function, returning the number of allocated frames and performing internal checks.
     fn allocated_frames(&self) -> usize;
-    /// Debug function returning number of free pages in each order 9 chunk
+    /// Debug function returning number of free frames in each order 9 chunk
     fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, f: F);
 
     fn size_per_gib() -> usize;
@@ -68,7 +72,7 @@ mod test {
     use crate::thread;
     use crate::upper::Init;
     use crate::util::logging;
-    use crate::Page;
+    use crate::Frame;
 
     type Lower = super::cache::Cache<512>;
 
@@ -78,7 +82,7 @@ mod test {
         logging();
 
         const THREADS: usize = 6;
-        let buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
+        let buffer = vec![Frame::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
         for _ in 0..8 {
             let seed = unsafe { libc::rand() } as u64;
@@ -97,12 +101,12 @@ mod test {
             thread::parallel(0..THREADS, |t| {
                 let _stopper = Stopper::init(stop.clone(), t);
 
-                let mut pages = [0; 4];
-                for p in &mut pages {
+                let mut frames = [0; 4];
+                for p in &mut frames {
                     *p = lower.get(0, 0).unwrap();
                 }
-                pages.reverse();
-                for p in pages {
+                frames.reverse();
+                for p in frames {
                     lower.put(p, 0).unwrap();
                 }
             });
@@ -117,8 +121,8 @@ mod test {
         logging();
 
         const THREADS: usize = 6;
-        let mut pages = [0; PT_LEN];
-        let buffer = vec![Page::new(); 2 * THREADS * PT_LEN * PT_LEN];
+        let mut frames = [0; PT_LEN];
+        let buffer = vec![Frame::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
         for _ in 0..8 {
             let seed = unsafe { libc::rand() } as u64;
@@ -133,8 +137,8 @@ mod test {
             ));
             assert_eq!(lower.allocated_frames(), 0);
 
-            for page in &mut pages[..PT_LEN - 3] {
-                *page = lower.get(0, 0).unwrap();
+            for frame in &mut frames[..PT_LEN - 3] {
+                *frame = lower.get(0, 0).unwrap();
             }
 
             let stop = StopRand::new(THREADS, seed);
@@ -142,7 +146,7 @@ mod test {
                 let _stopper = Stopper::init(stop.clone(), t);
 
                 if t < THREADS / 2 {
-                    lower.put(pages[t], 0).unwrap();
+                    lower.put(frames[t], 0).unwrap();
                 } else {
                     lower.get(0, 0).unwrap();
                 }

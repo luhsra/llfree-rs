@@ -4,6 +4,8 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{Ordering::*, *};
 
 /// Atomic value
+///
+/// See [core::sync::atomic::AtomicU64] for the documentation.
 #[repr(transparent)]
 pub struct Atom<T: Atomic>(T::I);
 
