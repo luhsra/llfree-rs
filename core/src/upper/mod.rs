@@ -1,13 +1,12 @@
 use core::any::type_name;
 use core::fmt;
 use core::ops::Range;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::AtomicU64;
 
 use bitfield_struct::bitfield;
 
-use crate::atomic::Atom;
+use crate::atomic::{Atom, Atomic};
 use crate::entry::ReservedTree;
-use crate::util::CacheLine;
 use crate::{Result, PFN};
 
 mod array;
@@ -168,61 +167,46 @@ impl PartialEq<AllocName> for &str {
 #[bitfield(u64)]
 #[derive(Default, PartialEq, Eq)]
 pub struct LastFrees {
-    #[bits(47)]
+    #[bits(48)]
     tree_index: usize,
-    #[bits(17)]
+    #[bits(16)]
     count: usize,
 }
+impl Atomic for LastFrees {
+    type I = AtomicU64;
+}
 
+#[derive(Default)]
 /// Per core data.
 pub struct Local<const F: usize> {
     /// Local copy of the reserved level 3 entry
-    pub preferred: CacheLine<Atom<ReservedTree>>,
+    pub preferred: Atom<ReservedTree>,
     /// Last frees
-    pub last_frees: CacheLine<AtomicU64>,
+    pub last_frees: Atom<LastFrees>,
 }
 
 impl<const F: usize> Local<F> {
-    fn new() -> Self {
-        Self {
-            preferred: CacheLine(Atom::new(ReservedTree::default())),
-            last_frees: CacheLine(AtomicU64::new(LastFrees::default().into())),
-        }
-    }
     /// Add a tree index to the history.
     pub fn frees_push(&self, tree_index: usize) {
         // If the update of this heuristic fails, ignore it
         // Relaxed ordering is enough, as this is not shared between CPUs
-        let _ = self
-            .last_frees
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                let v = LastFrees::from(v);
-                if v.tree_index() == tree_index {
-                    if v.count() < F {
-                        Some(v.with_count(v.count() + 1).into())
-                    } else {
-                        None
-                    }
-                } else {
-                    Some(
-                        LastFrees::new()
-                            .with_tree_index(tree_index)
-                            .with_count(1)
-                            .into(),
-                    )
-                }
-            });
-    }
-    /// Calls frees_push on scope exit.
-    /// # Note
-    /// Bind the return value to a **named** variable!
-    #[must_use]
-    pub fn defer_frees_push(&self, tree_index: usize) -> LocalFreePush<'_, F> {
-        LocalFreePush(self, tree_index)
+        let _ = self.last_frees.fetch_update(|v| {
+            let v = LastFrees::from(v);
+            if v.tree_index() == tree_index {
+                (v.count() < F).then_some(v.with_count(v.count() + 1))
+            } else {
+                Some(
+                    LastFrees::new()
+                        .with_tree_index(tree_index)
+                        .with_count(1)
+                        .into(),
+                )
+            }
+        });
     }
     /// Checks if the previous `count` frees had the same tree index.
     pub fn frees_in_tree(&self, tree_index: usize) -> bool {
-        let lf = LastFrees::from(self.last_frees.load(Ordering::Relaxed));
+        let lf = LastFrees::from(self.last_frees.load());
         lf.tree_index() == tree_index && lf.count() >= F
     }
 }
@@ -231,19 +215,8 @@ impl<const F: usize> fmt::Debug for Local<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Local")
             .field("reserved", &self.preferred.load())
-            .field(
-                "frees",
-                &LastFrees::from(self.last_frees.load(Ordering::Relaxed)),
-            )
+            .field("frees", &LastFrees::from(self.last_frees.load()))
             .finish()
-    }
-}
-
-/// Calls `frees_push` on scope exit.
-pub struct LocalFreePush<'a, const F: usize>(&'a Local<F>, usize);
-impl<'a, const F: usize> Drop for LocalFreePush<'a, F> {
-    fn drop(&mut self) {
-        self.0.frees_push(self.1);
     }
 }
 
@@ -266,7 +239,7 @@ mod test {
     use crate::table::PT_LEN;
     use crate::thread;
     use crate::upper::*;
-    use crate::util::{logging, WyRand};
+    use crate::util::{logging, CacheLine, WyRand};
     use crate::PFNRange;
     use crate::{Error, Frame, PFN};
 
@@ -295,14 +268,14 @@ mod test {
         type A4C32 = Array<4, C32>;
         println!("{}:", AllocName::new::<A4C32>());
         println!("  Static size {}B", size_of::<A4C32>());
-        println!("  Size per CPU: {}B", size_of::<Local<4>>());
+        println!("  Size per CPU: {}B", size_of::<CacheLine<Local<4>>>());
         println!("  Size per GiB: {}B", C32::size_per_gib());
     }
 
     /// Testing the related frames heuristic for frees
     #[test]
     fn last_frees() {
-        let local = Local::<4>::new();
+        let local = Local::<4>::default();
         let frame1 = 43;
         let i1 = frame1 / (512 * 512);
         assert!(!local.frees_in_tree(i1));
@@ -318,15 +291,6 @@ mod test {
         local.frees_push(i2);
         assert!(!local.frees_in_tree(i1));
         assert!(!local.frees_in_tree(i2));
-
-        {
-            let _push1 = local.defer_frees_push(i1);
-            local.frees_push(i1);
-            local.frees_push(i1);
-            let _push2 = local.defer_frees_push(i1);
-            assert!(!local.frees_in_tree(i1));
-        };
-        assert!(local.frees_in_tree(i1));
     }
 
     #[test]
@@ -669,14 +633,17 @@ mod test {
             assert!(area.contains(&a) && area.contains(&b));
         }
 
-        thread::parallel(frames.chunks(ALLOC_PER_THREAD).enumerate(), |(t, frames)| {
-            thread::pin(t);
-            barrier.wait();
+        thread::parallel(
+            frames.chunks(ALLOC_PER_THREAD).enumerate(),
+            |(t, frames)| {
+                thread::pin(t);
+                barrier.wait();
 
-            for frame in frames {
-                alloc.put(t, *frame, 0).unwrap();
-            }
-        });
+                for frame in frames {
+                    alloc.put(t, *frame, 0).unwrap();
+                }
+            },
+        );
 
         assert_eq!(alloc.allocated_frames(), 0);
     }

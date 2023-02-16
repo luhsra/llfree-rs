@@ -1,4 +1,5 @@
 use core::fmt;
+use core::hint::spin_loop;
 use core::mem::{align_of, size_of};
 use core::ops::{Index, Range};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -13,8 +14,8 @@ use crate::atomic::Atom;
 use crate::entry::{ReservedTree, Tree};
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_down, spin_wait, CacheLine};
-use crate::{Error, PFNRange, Frame, Result, PFN};
+use crate::util::{align_down, CacheLine};
+use crate::{Error, Frame, PFNRange, Result, PFN};
 
 /// Non-Volatile global metadata
 #[repr(align(0x1000))]
@@ -42,6 +43,7 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Frame::SIZE);
 ///
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
+#[derive(Default)]
 #[repr(align(64))]
 pub struct Array<const F: usize, L: LowerAlloc>
 where
@@ -50,7 +52,7 @@ where
     /// Pointer to the metadata frame at the end of the allocators persistent memory range
     pub meta: Option<&'static Meta>,
     /// CPU local data (only shared between CPUs if the memory area is too small)
-    pub local: Box<[Local<F>]>,
+    pub local: Box<[CacheLine<Local<F>>]>,
     /// Metadata of the lower alloc
     pub lower: L,
     /// Manages the allocators trees
@@ -128,7 +130,7 @@ where
 
         // Init per-cpu data
         let mut local = Vec::with_capacity(cores);
-        local.resize_with(cores, Local::new);
+        local.resize_with(cores, Default::default);
         self.local = local.into();
 
         // Create lower allocator
@@ -158,16 +160,18 @@ where
             error!("invalid order: !{order} <= {}", L::MAX_ORDER);
             return Err(Error::Memory);
         }
+        // We might have more cores than cpu-local data
+        let core = core % self.local.len();
 
         // Retry allocation up to n times if it fails due to a concurrent update
         for _ in 0..CAS_RETRIES {
             match self.get_inner(core, order) {
+                Ok(frame) => return Ok(self.lower.begin().off(frame)),
                 Err(Error::Retry) => continue,
-                Ok(addr) => return Ok(addr),
+                Err(Error::Memory) => return self.drain_and_steal(core, order),
                 Err(e) => return Err(e),
             }
         }
-
         error!("Exceeding retries");
         Err(Error::Memory)
     }
@@ -206,7 +210,7 @@ where
                 if !tree.reserved() && new_frames > Trees::<{ L::N }>::almost_allocated() {
                     // put-reserve optimization:
                     // Try to reserve the tree that was targeted by the recent frees
-                    if local.frees_in_tree(i) && self.reserve_entry(&local.preferred, i)? {
+                    if local.frees_in_tree(i) && self.reserve_for_put(&local.preferred, i)? {
                         return Ok(());
                     }
                 }
@@ -265,7 +269,8 @@ where
 
     #[cold]
     fn for_each_huge_frame(&self, f: fn(PFN, usize)) {
-        self.lower.for_each_huge_frame(|frame, c| f(self.lower.begin().off(frame), c))
+        self.lower
+            .for_each_huge_frame(|frame, c| f(self.lower.begin().off(frame), c))
     }
 }
 
@@ -276,19 +281,6 @@ where
     fn drop(&mut self) {
         if let Some(meta) = self.meta {
             meta.crashed.store(false, Ordering::SeqCst);
-        }
-    }
-}
-impl<const F: usize, L: LowerAlloc> Default for Array<F, L>
-where
-    [(); L::N]:,
-{
-    fn default() -> Self {
-        Self {
-            meta: None,
-            trees: Default::default(),
-            local: Default::default(),
-            lower: Default::default(),
         }
     }
 }
@@ -351,65 +343,63 @@ where
     }
 
     /// Try to allocate a frame with the given order
-    fn get_inner(&self, core: usize, order: usize) -> Result<PFN> {
+    fn get_inner(&self, core: usize, order: usize) -> Result<usize> {
         // Select local data (which can be shared between cores if we do not have enough memory)
-        let c = core % self.local.len();
-        let local = &self.local[c];
+        let local = &self.local[core];
+
         // Update the upper counters first
-        match local.preferred.fetch_update(|v| v.dec(1 << order)) {
-            Ok(old) => {
-                // The start point for the search
-                let start = old.start();
-                // Try allocating with the lower allocator
-                match self.lower.get(start, order) {
-                    Ok(frame) => {
-                        // Success
-                        if order < 64usize.ilog2() as usize
-                            && align_down(start, 64) != align_down(frame, 64)
-                        {
-                            // Save start index for lower allocations
-                            let new = old.dec(1 << order).unwrap();
-                            let ret = local.preferred.compare_exchange(new, new.with_start(frame));
-                            debug_assert!(ret.is_ok());
-                        }
-                        Ok(self.lower.begin().off(frame))
-                    }
-                    Err(Error::Memory) => {
-                        // Failure (e.g. due to fragmentation)
-                        // Reset counters, reserve new entry and retry allocation
-                        info!("alloc failed o={order} => retry");
-                        let max = (self.frames() - align_down(start, L::N)).min(L::N);
-                        // Increment global to prevent race condition with concurrent reservation
-                        if let Err(old) =
-                            self.trees[start / L::N].fetch_update(|v| v.inc(1 << order, max))
-                        {
-                            error!("Counter reset failed o={order} {old:?}");
-                            Err(Error::Corruption)
-                        } else {
-                            self.reserve_or_wait(core, order, &local.preferred, old, true)?;
-                            Err(Error::Retry)
-                        }
-                    }
-                    Err(e) => Err(e),
-                }
-            }
+        let old = match local.preferred.fetch_update(|v| v.dec(1 << order)) {
+            Ok(old) => old,
             Err(old) => {
                 // If the local counter is large enough we do not have to reserve a new tree
                 // Just update the local counter and reuse the current tree
                 self.try_sync_with_global(&local.preferred, old)?;
 
                 // The local tree is full -> reserve a new one
-                self.reserve_or_wait(core, order, &local.preferred, old, false)?;
-
-                // TODO: Steal from other CPUs on Error::Memory
-                // Stealing in general should not only be done after the whole array has been searched,
-                // due to the terrible performance.
-                // We probably need a stealing mode where a CPU steals the next N frames from another CPU.
-
-                // Reservation successfull -> retry the allocation
-                Err(Error::Retry)
+                return self.reserve_or_wait(core, order, old, false);
             }
+        };
+
+        // The start point for the search
+        let start = old.start();
+        // Try allocating with the lower allocator
+        match self.get_lower(old, order) {
+            Ok((reserved, frame)) => {
+                // Success
+                let bits = u64::BITS as usize;
+                if (1 << order) <= bits && align_down(start, bits) != align_down(frame, bits) {
+                    // Save start index for lower allocations
+                    let _ = local
+                        .preferred
+                        .compare_exchange(reserved.with_start(start), reserved);
+                }
+                Ok(frame)
+            }
+            Err(Error::Memory) => {
+                // Failure (e.g. due to fragmentation)
+                // Reset counters, reserve new entry and retry allocation
+                info!("alloc failed o={order} => retry");
+                // Increment global to prevent race condition with concurrent reservation
+                if let Err(_) = self.trees[start / L::N].fetch_update(|v| v.inc(1 << order, L::N)) {
+                    error!("Counter reset failed");
+                    Err(Error::Corruption)
+                } else {
+                    self.reserve_or_wait(core, order, old, true)
+                }
+            }
+            Err(e) => Err(e),
         }
+    }
+
+    /// Allocate a frame in the lower allocator
+    fn get_lower(&self, reserved: ReservedTree, order: usize) -> Result<(ReservedTree, usize)> {
+        let frame = self.lower.get(reserved.start(), order)?;
+        Ok((
+            reserved
+                .with_free(reserved.free() - (1 << order))
+                .with_start(frame),
+            frame,
+        ))
     }
 
     /// Frees from other CPUs update the global entry -> sync free counters.
@@ -448,75 +438,109 @@ where
     }
 
     /// Try to reserve a new tree or wait for concurrent reservations to finish.
+    /// We directly try to allocate in the tree and continues the search if it is fragmented.
     ///
-    /// If `retry`, tries to reserve a less fragmented tree
+    /// If `fragmented`, prioritize less fragmented trees
     fn reserve_or_wait(
         &self,
         core: usize,
         order: usize,
-        local: &Atom<ReservedTree>,
         old: ReservedTree,
-        retry: bool,
-    ) -> Result<()> {
+        fragmented: bool,
+    ) -> Result<usize> {
+        let local = &self.local[core].preferred;
+
         // Set the reserved flag, locking the reservation
         if !old.locked() && local.fetch_update(|v| v.toggle_locked(true)).is_ok() {
             // Try reserve new tree
-            let start = if old.has_start() {
-                old.start() / L::N
-            } else {
-                // Different initial starting point for every core
-                self.trees.entries.len() / self.local.len() * core
-                // TODO: Reset start periodically to space CPUs more evenly over the memory zone
-            };
-            let new = match self.trees.reserve(order, self.local.len(), start, retry) {
-                Ok(entry) => entry,
-                Err(Error::Memory) => {
-                    // Drain all
-                    for core in 0..self.local.len() {
-                        self.drain(core)?;
-                    }
-                    // Steal drained trees
-                    if let Some(entry) = self.trees.reserve_any(start, order) {
-                        entry
-                    } else {
-                        // Clear reserve flag
-                        if local.fetch_update(|v| v.toggle_locked(false)).is_err() {
-                            error!("unexpected reserve state");
-                            return Err(Error::Corruption);
-                        }
-                        return Err(Error::Memory);
-                    }
-                }
-                Err(e) => {
-                    // Clear reserve flag
-                    if local.fetch_update(|v| v.toggle_locked(false)).is_err() {
-                        error!("unexpected reserve state");
-                        return Err(Error::Corruption);
-                    }
-                    return Err(e);
-                }
-            };
-            match self.cas_reserved(local, new, true) {
-                Ok(_) => Ok(()),
-                Err(Error::Retry) => {
-                    error!("unexpected reserve state");
-                    Err(Error::Corruption)
-                }
-                Err(e) => Err(e),
-            }
+            self.reserve_and_get(core, order, old, fragmented)
         } else {
             // Wait for concurrent reservation to end
-            if spin_wait(2 * CAS_RETRIES, || !local.load().locked()) {
-                Ok(())
-            } else {
-                error!("Timeout reservation wait");
-                Err(Error::Corruption)
+            for _ in 0..CAS_RETRIES {
+                let reserved = local.load();
+                if !reserved.locked() {
+                    // Try allocation on new tree
+                    return match self.lower.get(reserved.start(), order) {
+                        Err(Error::Memory) => Err(Error::Retry),
+                        r => r,
+                    };
+                }
+                spin_loop()
             }
+            warn!("Timeout reservation wait");
+            Err(Error::Retry)
         }
     }
 
-    // Reserve an entry for bulk frees
-    fn reserve_entry(&self, local: &Atom<ReservedTree>, i: usize) -> Result<bool> {
+    /// Reserve a new tree and allocate the frame in it
+    fn reserve_and_get(
+        &self,
+        core: usize,
+        order: usize,
+        old: ReservedTree,
+        fragmented: bool,
+    ) -> Result<usize> {
+        let local = &self.local[core].preferred;
+
+        // Try reserve new tree
+        let start = if old.has_start() {
+            old.start() / L::N
+        } else {
+            // Different initial starting point for every core
+            self.trees.entries.len() / self.local.len() * core
+        };
+
+        // Reserved a new tree an allocate a frame in it
+        let cores = self.local.len();
+        let (new, frame) = match self.trees.reserve(order, cores, start, fragmented, |r| {
+            self.get_lower(r, order)
+        }) {
+            Ok(entry) => entry,
+            Err(e) => {
+                // Rollback: Clear reserve flag
+                local
+                    .fetch_update(|v| v.toggle_locked(false))
+                    .map_err(|_| Error::Corruption)?;
+                return Err(e);
+            }
+        };
+
+        match self.cas_reserved(local, new, true) {
+            Ok(_) => Ok(frame),
+            Err(Error::Retry) => {
+                error!("unexpected reserve state");
+                Err(Error::Corruption)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Fallback if all trees are full
+    fn drain_and_steal(&self, core: usize, order: usize) -> Result<PFN> {
+        warn!("drain and steal");
+        // Drain all
+        for core in 0..self.local.len() {
+            self.drain(core)?;
+        }
+        // Steal drained trees
+        let start = self.frames() / self.local.len() * core;
+        let (reserved, frame) = self
+            .trees
+            .reserve_any(start, order, |r| self.get_lower(r, order))?;
+
+        let local = &self.local[core].preferred;
+        match self.cas_reserved(local, reserved, true) {
+            Ok(_) => Ok(self.lower.begin().off(frame)),
+            Err(Error::Retry) => {
+                error!("unexpected reserve state");
+                Err(Error::Corruption)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Reserve an entry for bulk frees
+    fn reserve_for_put(&self, local: &Atom<ReservedTree>, i: usize) -> Result<bool> {
         if let Ok(entry) =
             self.trees[i].fetch_update(|v| v.reserve(Trees::<{ L::N }>::almost_allocated()..))
         {
@@ -636,19 +660,35 @@ impl<const LN: usize> Trees<LN> {
     }
 
     /// Find and reserve a free tree
-    fn reserve_free(&self, start: usize) -> Option<ReservedTree> {
+    fn reserve_free(
+        &self,
+        start: usize,
+        mut get_lower: impl FnMut(ReservedTree) -> Result<(ReservedTree, usize)>,
+    ) -> Result<(ReservedTree, usize)> {
         // Just search linearly through the array
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
             if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::almost_free()..)) {
-                return Some(ReservedTree::new_with(entry.free(), i * LN));
+                match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
+                    Err(Error::Memory) => {
+                        self[i]
+                            .fetch_update(|v| v.unreserve_add(entry.free(), LN))
+                            .map_err(|_| Error::Corruption)?;
+                    }
+                    r => return r,
+                }
             }
         }
-        None
+        Err(Error::Memory)
     }
 
     /// Find and reserve a partial tree in the vicinity
-    fn reserve_partial(&self, cores: usize, start: usize) -> Option<ReservedTree> {
+    fn reserve_partial(
+        &self,
+        cores: usize,
+        start: usize,
+        mut get_lower: impl FnMut(ReservedTree) -> Result<(ReservedTree, usize)>,
+    ) -> Result<(ReservedTree, usize)> {
         const ENTRIES_PER_CACHELINE: usize = align_of::<CacheLine>() / size_of::<Tree>();
         // One quater of the per-CPU memory
         let vicinity = ((self.entries.len() / cores) / 4).max(1) as isize;
@@ -663,7 +703,15 @@ impl<const LN: usize> Trees<LN> {
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
             if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::almost_allocated()..)) {
-                return Some(ReservedTree::new_with(entry.free(), i * LN));
+                match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
+                    Err(Error::Memory) => {
+                        warn!("Fragmentation -> continue reservation");
+                        self[i]
+                            .fetch_update(|v| v.unreserve_add(entry.free(), LN))
+                            .map_err(|_| Error::Corruption)?;
+                    }
+                    r => return r,
+                }
             }
         }
 
@@ -675,24 +723,45 @@ impl<const LN: usize> Trees<LN> {
             if let Ok(entry) =
                 self[i].fetch_update(|v| v.reserve(Self::almost_allocated()..Self::almost_free()))
             {
-                return Some(ReservedTree::new_with(entry.free(), i * LN));
+                match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
+                    Err(Error::Memory) => {
+                        warn!("Fragmentation -> continue reservation");
+                        self[i]
+                            .fetch_update(|v| v.unreserve_add(entry.free(), LN))
+                            .map_err(|_| Error::Corruption)?;
+                    }
+                    r => return r,
+                }
             }
         }
-        None
+        Err(Error::Memory)
     }
 
     /// Fallback to search for any suitable tree
-    fn reserve_any(&self, start: usize, order: usize) -> Option<ReservedTree> {
+    fn reserve_any(
+        &self,
+        start: usize,
+        order: usize,
+        mut get_lower: impl FnMut(ReservedTree) -> Result<(ReservedTree, usize)>,
+    ) -> Result<(ReservedTree, usize)> {
         // Just search linearly through the array
         let num_frames = 1 << order;
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
             if let Ok(entry) = self[i].fetch_update(|v| v.reserve(num_frames..)) {
-                return Some(ReservedTree::new_with(entry.free(), i * LN));
+                match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
+                    Err(Error::Memory) => {
+                        warn!("Fragmentation -> continue reservation");
+                        self[i]
+                            .fetch_update(|v| v.unreserve_add(entry.free(), LN))
+                            .map_err(|_| Error::Corruption)?;
+                    }
+                    r => return r,
+                }
             }
         }
         warn!("no frames left");
-        None
+        Err(Error::Memory)
     }
 
     /// Reserves a new tree, prioritizing partially filled trees.
@@ -701,19 +770,26 @@ impl<const LN: usize> Trees<LN> {
         order: usize,
         cores: usize,
         start: usize,
-        prioritize_free: bool,
-    ) -> Result<ReservedTree> {
-        if prioritize_free {
+        fragmented: bool,
+        get_lower: impl FnMut(ReservedTree) -> Result<(ReservedTree, usize)> + Copy,
+    ) -> Result<(ReservedTree, usize)> {
+        if fragmented {
             // try free trees first
-            self.reserve_free(start)
-                .or_else(|| self.reserve_partial(cores, start))
-                .or_else(|| self.reserve_any(start, order))
-                .ok_or(Error::Memory)
+            match self.reserve_free(start, get_lower) {
+                Err(Error::Memory) => match self.reserve_partial(cores, start, get_lower) {
+                    Err(Error::Memory) => self.reserve_any(start, order, get_lower),
+                    r => r,
+                },
+                r => r,
+            }
         } else {
-            self.reserve_partial(cores, start)
-                .or_else(|| self.reserve_free(start))
-                .or_else(|| self.reserve_any(start, order))
-                .ok_or(Error::Memory)
+            match self.reserve_partial(cores, start, get_lower) {
+                Err(Error::Memory) => match self.reserve_free(start, get_lower) {
+                    Err(Error::Memory) => self.reserve_any(start, order, get_lower),
+                    r => r,
+                },
+                r => r,
+            }
         }
     }
 }

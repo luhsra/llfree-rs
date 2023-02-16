@@ -44,7 +44,11 @@ impl<T: Atomic> Atom<T> {
         }
     }
 }
-
+impl<T: Atomic + Default> Default for Atom<T> {
+    fn default() -> Self {
+        Self::new(Default::default())
+    }
+}
 impl<T: Atomic + fmt::Debug> fmt::Debug for Atom<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.load().fmt(f)
