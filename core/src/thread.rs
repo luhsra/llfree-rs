@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 pub static STRIDE: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
-    pub static PINNED: AtomicUsize = AtomicUsize::new(0);
+    static PINNED: AtomicUsize = AtomicUsize::new(usize::MAX);
 }
 
 /// Returns the number of virtual cores.
@@ -14,6 +14,10 @@ pub fn cores() -> usize {
     let cores = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as usize };
     assert!(cores > 0, "sysconf");
     cores
+}
+
+pub fn pinned() -> usize {
+    PINNED.with(|p| p.load(Ordering::Acquire))
 }
 
 /// Pins the current thread to the given virtual core
@@ -36,7 +40,7 @@ pub fn pin(core: usize) {
     }
 
     PINNED.with(|p| {
-        p.store(core, Ordering::SeqCst);
+        p.store(core, Ordering::Release);
     });
 }
 
@@ -133,15 +137,9 @@ mod test {
         println!("max cores: {cores}");
 
         super::pin(0);
-        println!(
-            "Pinned to {}",
-            super::PINNED.with(|v| v.load(Ordering::SeqCst))
-        );
+        println!("Pinned to {}", super::pinned());
         super::pin(cores - 1);
-        println!(
-            "Pinned to {}",
-            super::PINNED.with(|v| v.load(Ordering::SeqCst))
-        );
+        println!("Pinned to {}", super::pinned());
     }
 
     #[test]
@@ -153,15 +151,9 @@ mod test {
         println!("max cores: {cores}");
 
         super::pin(0);
-        println!(
-            "Pinned to {}",
-            super::PINNED.with(|v| v.load(Ordering::SeqCst))
-        );
+        println!("Pinned to {}", super::pinned());
         super::pin(cores / 2);
-        println!(
-            "Pinned to {}",
-            super::PINNED.with(|v| v.load(Ordering::SeqCst))
-        );
+        println!("Pinned to {}", super::pinned());
 
         STRIDE.store(old, Ordering::Relaxed);
     }

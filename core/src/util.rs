@@ -47,17 +47,12 @@ impl<T> From<T> for CacheLine<T> {
     }
 }
 
-#[cfg(feature = "std")]
-fn core() -> usize {
-    use crate::thread::PINNED;
-    use core::sync::atomic::Ordering;
-    PINNED.with(|p| p.load(Ordering::SeqCst))
-}
 
 #[cfg(feature = "std")]
 pub fn logging() {
     use std::io::Write;
     use std::thread::ThreadId;
+    use crate::thread::pinned;
 
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format(move |buf, record| {
@@ -75,7 +70,7 @@ pub fn logging() {
                 color,
                 record.level(),
                 unsafe { transmute::<ThreadId, u64>(std::thread::current().id()) },
-                core(),
+                pinned(),
                 record.file().unwrap_or_default(),
                 record.line().unwrap_or_default(),
                 record.args()
