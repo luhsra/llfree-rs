@@ -191,22 +191,16 @@ impl<const F: usize> Local<F> {
         // If the update of this heuristic fails, ignore it
         // Relaxed ordering is enough, as this is not shared between CPUs
         let _ = self.last_frees.fetch_update(|v| {
-            let v = LastFrees::from(v);
             if v.tree_index() == tree_index {
                 (v.count() < F).then_some(v.with_count(v.count() + 1))
             } else {
-                Some(
-                    LastFrees::new()
-                        .with_tree_index(tree_index)
-                        .with_count(1)
-                        .into(),
-                )
+                Some(LastFrees::new().with_tree_index(tree_index).with_count(1))
             }
         });
     }
     /// Checks if the previous `count` frees had the same tree index.
     pub fn frees_in_tree(&self, tree_index: usize) -> bool {
-        let lf = LastFrees::from(self.last_frees.load());
+        let lf = self.last_frees.load();
         lf.tree_index() == tree_index && lf.count() >= F
     }
 }
@@ -215,7 +209,7 @@ impl<const F: usize> fmt::Debug for Local<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Local")
             .field("reserved", &self.preferred.load())
-            .field("frees", &LastFrees::from(self.last_frees.load()))
+            .field("frees", &self.last_frees.load())
             .finish()
     }
 }
