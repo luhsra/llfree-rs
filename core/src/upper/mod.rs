@@ -19,7 +19,7 @@ mod list_cas;
 pub use list_cas::ListCAS;
 
 /// Number of retries if an atomic operation fails.
-pub const CAS_RETRIES: usize = 16;
+pub const CAS_RETRIES: usize = 4;
 /// Magic marking the meta frame.
 pub const MAGIC: usize = 0x_dead_beef;
 
