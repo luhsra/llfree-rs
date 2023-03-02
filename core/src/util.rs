@@ -101,8 +101,8 @@ impl WyRand {
         val + range.start
     }
     pub fn shuffle<T>(&mut self, target: &mut [T]) {
-        for i in 0..target.len() {
-            target.swap(i, self.range(0..target.len() as u64) as usize);
+        for i in 0..target.len() - 1 {
+            target.swap(i, self.range(i as u64..target.len() as u64) as usize);
         }
     }
 }
