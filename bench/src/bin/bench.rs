@@ -53,9 +53,6 @@ struct Args {
     /// Use every n-th cpu.
     #[arg(long, default_value_t = 1)]
     stride: usize,
-    /// Write into every page before benchmarking.
-    #[arg(long)]
-    warmup: bool,
 }
 
 fn main() {
@@ -70,7 +67,6 @@ fn main() {
         order,
         memory,
         stride,
-        warmup,
     } = Args::parse();
 
     util::logging();
@@ -88,20 +84,10 @@ fn main() {
 
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
 
-    if warmup {
-        thread::parallel(mapping.chunks_mut(threads), |chunk| {
-            for page in chunk {
-                *page.cast_mut::<usize>() = 1;
-            }
-        });
-    }
-
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
 
-    type C32 = Cache<32>;
-    let mut allocs: [Box<dyn Alloc>; 5] = [
-        Box::<Array<0, C32>>::default(),
-        Box::<Array<3, C32>>::default(),
+    let mut allocs: [Box<dyn Alloc>; 4] = [
+        Box::<Array<4, Cache<32>>>::default(),
         Box::<ListLocal>::default(),
         Box::<ListCAS>::default(),
         Box::<ListLocked>::default(),
@@ -122,13 +108,19 @@ fn main() {
 
         for alloc in &mut allocs {
             let name = alloc.name();
-            if alloc_names.contains(&format!("{name}"))
-                && conditions.get(&name).map(|f| f(t, order)).unwrap_or(true)
-            {
-                for i in 0..iterations {
-                    let perf = bench.run(alloc.as_mut(), &mut mapping, order, threads, x);
-                    writeln!(out, "{name},{x},{i},{memory},{perf}").unwrap();
+            if !alloc_names.contains(&format!("{name}")) {
+                continue;
+            }
+
+            if let Some(check) = conditions.get(&name) {
+                if !check(t, order) {
+                    continue;
                 }
+            }
+
+            for i in 0..iterations {
+                let perf = bench.run(alloc.as_mut(), &mut mapping, order, threads, x);
+                writeln!(out, "{name},{x},{i},{memory},{perf}").unwrap();
             }
         }
     }
