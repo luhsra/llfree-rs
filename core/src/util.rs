@@ -7,14 +7,16 @@ use core::ops::{Add, Deref, DerefMut, Div, Range};
 #[inline(always)]
 pub const fn align_up(v: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
-    (v + align - 1) & !(align - 1)
+    let mask = align - 1;
+    (v + mask) & !mask
 }
 
 /// Align v up to previous `align` (power of two!)
 #[inline(always)]
 pub const fn align_down(v: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
-    v & !(align - 1)
+    let mask = align - 1;
+    v & !mask
 }
 
 /// Cache alignment for T

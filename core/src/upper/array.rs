@@ -367,7 +367,7 @@ where
             Ok((reserved, frame)) => {
                 // Success
                 let bits = u64::BITS as usize;
-                if (1 << order) <= bits && align_down(start, bits) != align_down(frame, bits) {
+                if (1 << order) <= bits && start != reserved.start() {
                     // Save start index for lower allocations
                     let _ = local
                         .preferred

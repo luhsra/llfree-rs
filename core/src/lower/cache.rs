@@ -178,15 +178,10 @@ where
     fn get(&self, start: usize, order: usize) -> Result<usize> {
         debug_assert!(order <= Self::MAX_ORDER);
 
-        if order == Self::MAX_ORDER {
-            self.get_max(start)
-        } else if order == Self::HUGE_ORDER {
-            self.get_huge(start)
-        } else if order < Self::HUGE_ORDER {
-            self.get_small(start, order)
-        } else {
-            error!("Invalid order");
-            Err(Error::Corruption)
+        match order {
+            Self::MAX_ORDER => self.get_max(start),
+            Self::HUGE_ORDER => self.get_huge(start),
+            _ => self.get_small(start, order),
         }
     }
 
@@ -377,19 +372,14 @@ where
     fn get_small(&self, start: usize, order: usize) -> Result<usize> {
         debug_assert!(order < Bitfield::ORDER);
 
+        let first_bf_i = align_down(start / Bitfield::LEN, HP);
+        let start_bf_e = (start / Bitfield::ENTRY_BITS) % Bitfield::ENTRIES;
         let table = &self.children[start / Self::N];
 
         for _ in 0..CAS_RETRIES {
-            // Begin iteration by start idx
             let off = (start / Bitfield::LEN) % HP;
             for j in 0..HP {
                 let i = (j + off) % HP;
-
-                let newstart = if j == 0 {
-                    start // Don't round the start pfn
-                } else {
-                    align_down(start, Self::N) + i * Bitfield::LEN
-                };
 
                 #[cfg(feature = "stop")]
                 {
@@ -401,11 +391,12 @@ where
                 }
 
                 if table[i].fetch_update(|v| v.dec(1 << order)).is_ok() {
-                    let bi = newstart % Bitfield::LEN;
-                    let bitfield = &self.bitfields[newstart / Bitfield::LEN];
+                    let bf_i = first_bf_i + i;
+                    // start with the last bitfield entry
+                    let bf_e = if j == 0 { start_bf_e } else { 0 };
 
-                    if let Ok(offset) = bitfield.set_first_zeros(bi, order) {
-                        return Ok(align_down(newstart, Bitfield::LEN) + offset);
+                    if let Ok(offset) = self.bitfields[bf_i].set_first_zeros(bf_e, order) {
+                        return Ok(bf_i * Bitfield::LEN + offset);
                     } else {
                         // Revert conter
                         if let Err(_) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order))

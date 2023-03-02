@@ -150,7 +150,7 @@ fn mapping(
             return MMap::dax(begin, length, f);
         }
     }
-    MMap::anon(begin, length, true, true)
+    MMap::anon(begin, length, false, false)
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

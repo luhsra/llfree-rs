@@ -170,16 +170,15 @@ where
     ///
     /// # Warning
     /// Orders above 6 need multiple CAS operations, which might lead to race conditions!
-    pub fn set_first_zeros(&self, start_i: usize, order: usize) -> Result<usize> {
-        let offset = start_i / Self::ENTRY_BITS;
-        debug_assert!(offset < Self::ENTRIES);
+    pub fn set_first_zeros(&self, start_entry: usize, order: usize) -> Result<usize> {
+        debug_assert!(start_entry < Self::ENTRIES);
 
         if order > Self::ENTRY_BITS.ilog2() as usize {
             return self.set_first_zero_entries(order);
         }
 
         for i in 0..self.data.len() {
-            let i = (i + offset) % self.data.len();
+            let i = (i + start_entry) % self.data.len();
 
             #[cfg(all(test, feature = "stop"))]
             {
