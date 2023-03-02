@@ -157,7 +157,7 @@ where
 
     fn get(&self, core: usize, order: usize) -> Result<PFN> {
         if order > L::MAX_ORDER {
-            error!("invalid order: !{order} <= {}", L::MAX_ORDER);
+            error!("invalid order");
             return Err(Error::Memory);
         }
         // We might have more cores than cpu-local data
@@ -366,8 +366,7 @@ where
         match self.get_lower(old, order) {
             Ok((reserved, frame)) => {
                 // Success
-                let bits = u64::BITS as usize;
-                if (1 << order) <= bits && start != reserved.start() {
+                if order < 6 && start != reserved.start() {
                     // Save start index for lower allocations
                     let _ = local
                         .preferred
@@ -378,7 +377,7 @@ where
             Err(Error::Memory) => {
                 // Failure (e.g. due to fragmentation)
                 // Reset counters, reserve new entry and retry allocation
-                info!("alloc failed o={order} => retry");
+                warn!("alloc failed o={order} => retry");
                 // Increment global to prevent race condition with concurrent reservation
                 if let Err(_) = self.trees[start / L::N].fetch_update(|v| v.inc(1 << order, L::N)) {
                     error!("Counter reset failed");
@@ -517,7 +516,6 @@ where
 
     /// Fallback if all trees are full
     fn drain_and_steal(&self, core: usize, order: usize) -> Result<PFN> {
-        warn!("drain and steal");
         // Drain all
         for core in 0..self.local.len() {
             self.drain(core)?;
@@ -705,7 +703,7 @@ impl<const LN: usize> Trees<LN> {
             if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::almost_allocated()..)) {
                 match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
                     Err(Error::Memory) => {
-                        warn!("Fragmentation -> continue reservation");
+                        info!("Fragmentation -> continue reservation");
                         self[i]
                             .fetch_update(|v| v.unreserve_add(entry.free(), LN))
                             .map_err(|_| Error::Corruption)?;
@@ -725,7 +723,7 @@ impl<const LN: usize> Trees<LN> {
             {
                 match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
                     Err(Error::Memory) => {
-                        warn!("Fragmentation -> continue reservation");
+                        info!("Fragmentation -> continue reservation");
                         self[i]
                             .fetch_update(|v| v.unreserve_add(entry.free(), LN))
                             .map_err(|_| Error::Corruption)?;
@@ -751,7 +749,7 @@ impl<const LN: usize> Trees<LN> {
             if let Ok(entry) = self[i].fetch_update(|v| v.reserve(num_frames..)) {
                 match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
                     Err(Error::Memory) => {
-                        warn!("Fragmentation -> continue reservation");
+                        info!("Fragmentation -> continue reservation");
                         self[i]
                             .fetch_update(|v| v.unreserve_add(entry.free(), LN))
                             .map_err(|_| Error::Corruption)?;
@@ -760,7 +758,7 @@ impl<const LN: usize> Trees<LN> {
                 }
             }
         }
-        warn!("no frames left");
+        info!("no frames left");
         Err(Error::Memory)
     }
 

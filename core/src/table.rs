@@ -166,6 +166,22 @@ where
         }
     }
 
+    pub fn is_zero(&self, i: usize, order: usize) -> bool {
+        let num_bits = 1 << order;
+        debug_assert!(i < Bitfield::LEN && order <= Bitfield::ORDER);
+        debug_assert!(i % num_bits == 0, "not aligned");
+
+        let entry_i = i / Bitfield::ENTRY_BITS;
+        if num_bits > Self::ENTRY_BITS {
+            let end_i = (i + num_bits) / Bitfield::ENTRY_BITS;
+            (entry_i..end_i).all(|i| self.get_entry(i) == 0)
+        } else {
+            let entry = self.get_entry(entry_i);
+            let mask = (u64::MAX >> (u64::BITS as usize - num_bits)) << (i % Bitfield::ENTRY_BITS);
+            (entry & mask) == 0
+        }
+    }
+
     /// Set the first aligned 2^`order` zero bits, returning the bit offset
     ///
     /// # Warning
@@ -214,6 +230,7 @@ where
     fn set_first_zero_entries(&self, order: usize) -> Result<usize> {
         debug_assert!(order > Self::ENTRY_BITS.ilog2() as usize);
         debug_assert!(order <= Self::ORDER);
+
         let num_entries = 1 << (order - Self::ENTRY_BITS.ilog2() as usize);
 
         for (i, chunk) in self.data.chunks(num_entries).enumerate() {
@@ -361,20 +378,33 @@ mod test {
     #[test]
     fn bit_toggle() {
         let bitfield = super::Bitfield::<2>::default();
+
+        assert!(bitfield.is_zero(8, 3));
         bitfield.toggle(8, 3, false).unwrap();
         assert_eq!(bitfield.get_entry(0), 0xff00);
         assert_eq!(bitfield.get_entry(1), 0);
+        assert!(!bitfield.is_zero(8, 3));
+
+        assert!(bitfield.is_zero(16, 2));
         bitfield.toggle(16, 2, false).unwrap();
         assert_eq!(bitfield.get_entry(0), 0xfff00);
         assert_eq!(bitfield.get_entry(1), 0);
+        assert!(!bitfield.is_zero(16, 2));
+
+        assert!(bitfield.is_zero(20, 2));
         bitfield.toggle(20, 2, false).unwrap();
         assert_eq!(bitfield.get_entry(0), 0xffff00);
         assert_eq!(bitfield.get_entry(1), 0);
+        assert!(!bitfield.is_zero(16, 2));
+
+        assert!(!bitfield.is_zero(8, 3));
         bitfield.toggle(8, 3, false).expect_err("");
         bitfield.toggle(8, 3, true).unwrap();
         bitfield.toggle(16, 3, true).unwrap();
         assert_eq!(bitfield.get_entry(0), 0);
         assert_eq!(bitfield.get_entry(1), 0);
+        assert!(bitfield.is_zero(0, super::Bitfield::<2>::ORDER));
+
         bitfield.toggle(0, 6, false).unwrap();
         assert_eq!(bitfield.get_entry(0), u64::MAX);
         assert_eq!(bitfield.get_entry(1), 0);

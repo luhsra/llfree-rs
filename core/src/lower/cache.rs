@@ -205,7 +205,7 @@ where
             } else {
                 Ok(())
             }
-        } else if order < Self::HUGE_ORDER {
+        } else {
             let i = (frame / Bitfield::LEN) % HP;
             let table = &self.children[frame / Self::N];
 
@@ -218,9 +218,6 @@ where
                 error!("Addr p={frame:x} o={order} {old:?}");
                 Err(Error::Address)
             }
-        } else {
-            error!("Invalid order!");
-            Err(Error::Corruption)
         }
     }
 
@@ -240,28 +237,14 @@ where
             let table = &self.children[frame / Self::N];
             let i = (frame / Bitfield::LEN) % HP;
             let entry = table[i].load();
-            let num_frames = 1 << order;
 
-            if entry.free() < num_frames {
-                return false;
-            }
-            if entry.free() == Bitfield::LEN {
-                return true;
-            }
-
-            if num_frames > u64::BITS as usize {
-                // larger than 64 frames
-                let bitfield = &self.bitfields[frame / Bitfield::LEN];
-                let start = frame / Bitfield::ENTRY_BITS;
-                let end = (frame + num_frames) / Bitfield::ENTRY_BITS;
-                (start..end).all(|i| bitfield.get_entry(i) == 0)
+            if entry.free() < (1 << order) {
+                false
+            } else if entry.free() == Bitfield::LEN {
+                true
             } else {
-                // small allocations
                 let bitfield = &self.bitfields[frame / Bitfield::LEN];
-                let entry = bitfield.get_entry(frame / Bitfield::ENTRY_BITS);
-                let mask = (u64::MAX >> (u64::BITS as usize - num_frames))
-                    << (frame % Bitfield::ENTRY_BITS);
-                (entry & mask) == 0
+                bitfield.is_zero(frame % Bitfield::LEN, order)
             }
         }
     }
