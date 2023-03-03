@@ -521,13 +521,13 @@ where
             self.drain(core)?;
         }
         // Steal drained trees
-        let start = self.frames() / self.local.len() * core;
+        let start = self.trees.entries.len() / self.local.len() * core;
         let (reserved, frame) = self
             .trees
             .reserve_any(start, order, |r| self.get_lower(r, order))?;
 
         let local = &self.local[core].preferred;
-        match self.cas_reserved(local, reserved, true) {
+        match self.cas_reserved(local, reserved, false) {
             Ok(_) => Ok(self.lower.begin().off(frame)),
             Err(Error::Retry) => {
                 error!("unexpected reserve state");
