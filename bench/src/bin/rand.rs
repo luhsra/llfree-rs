@@ -8,7 +8,7 @@ use nvalloc::mmap::{madvise, MAdvise, MMap};
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::util::{avg_bounds, logging, WyRand};
-use nvalloc::Frame;
+use nvalloc::frame::Frame;
 
 /// Benchmark for freeing randomly allocated memory regions.
 #[derive(Parser, Debug)]

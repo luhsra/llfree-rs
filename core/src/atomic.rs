@@ -7,12 +7,9 @@ use core::sync::atomic::{Ordering::*, *};
 ///
 /// See [core::sync::atomic::AtomicU64] for the documentation.
 #[repr(transparent)]
-pub struct Atom<T: Atomic>(T::I);
+pub struct Atom<T: Atomic>(pub T::I);
 
 impl<T: Atomic> Atom<T> {
-    pub const fn raw(v: T::I) -> Self {
-        Self(v)
-    }
     pub fn new(v: T) -> Self {
         Self(T::I::new(v.into()))
     }

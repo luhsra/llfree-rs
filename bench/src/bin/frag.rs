@@ -14,7 +14,7 @@ use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::upper::*;
 use nvalloc::util::{self, WyRand};
-use nvalloc::{pfn_range, Frame, PFN};
+use nvalloc::frame::{pfn_range, Frame, PFN};
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]

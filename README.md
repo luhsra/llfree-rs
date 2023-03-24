@@ -24,9 +24,7 @@ The `nightly` version `1.62.0` (or newer) is required to have access to inline a
 cargo build -r
 
 # Running unit-tests
-cargo test
-# Running race condition tests
-cargo test --features stop -- lower
+cargo test -- --test-threads 1
 
 # Running a benchmark (see down below for more infos on benchmarking)
 cargo perf <benchmark> -- <args>

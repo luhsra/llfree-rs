@@ -83,7 +83,7 @@ pub fn logging() {
 
 /// Simple bare bones random number generator based on wyhash.
 ///
-/// @see https://github.com/wangyi-fudan/wyhash
+/// - See <https://github.com/wangyi-fudan/wyhash>
 pub struct WyRand {
     pub seed: u64,
 }

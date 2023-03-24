@@ -41,8 +41,9 @@ const _: () = assert!(Bitfield::<2>::ORDER == 7);
 
 impl<const N: usize> Default for Bitfield<N> {
     fn default() -> Self {
-        const A: Atom<u64> = Atom::raw(AtomicU64::new(0));
-        Self { data: [A; N] }
+        Self {
+            data: [const { Atom(AtomicU64::new(0)) }; N],
+        }
     }
 }
 
@@ -195,15 +196,6 @@ where
 
         for i in 0..self.data.len() {
             let i = (i + start_entry) % self.data.len();
-
-            #[cfg(all(test, feature = "stop"))]
-            {
-                // Skip full entries for the tests
-                if self.data[i].load() == u64::MAX {
-                    continue;
-                }
-                crate::stop::stop().unwrap();
-            }
 
             let mut offset = 0;
             if self.data[i]

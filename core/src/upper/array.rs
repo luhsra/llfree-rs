@@ -12,10 +12,11 @@ use alloc::vec::Vec;
 use super::{Alloc, Init, Local, MAGIC};
 use crate::atomic::Atom;
 use crate::entry::{ReservedTree, Tree};
+use crate::frame::{Frame, PFNRange, PFN};
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
 use crate::util::{align_down, CacheLine};
-use crate::{Error, Frame, PFNRange, Result, PFN};
+use crate::{Error, Result};
 
 /// Non-Volatile global metadata
 #[repr(align(0x1000))]
@@ -353,7 +354,10 @@ where
             Err(old) => {
                 // If the local counter is large enough we do not have to reserve a new tree
                 // Just update the local counter and reuse the current tree
-                self.try_sync_with_global(&local.preferred, old)?;
+                if self.try_sync_with_global(&local.preferred, old)? {
+                    // Success -> Retry allocation
+                    return Err(Error::Retry);
+                }
 
                 // The local tree is full -> reserve a new one
                 return self.reserve_or_wait(core, order, old, false);
@@ -403,9 +407,8 @@ where
 
     /// Frees from other CPUs update the global entry -> sync free counters.
     ///
-    /// If successful returns `Error::CAS` -> retry.
-    /// Returns Ok if the global counter was not large enough -> fallback to normal reservation.
-    fn try_sync_with_global(&self, local: &Atom<ReservedTree>, old: ReservedTree) -> Result<()> {
+    /// Returns if the global counter was large enough
+    fn try_sync_with_global(&self, local: &Atom<ReservedTree>, old: ReservedTree) -> Result<bool> {
         let i = old.start() / L::N;
         if i < self.trees.entries.len()
             && old.free() + self.trees[i].load().free() > Trees::<{ L::N }>::almost_allocated()
@@ -420,7 +423,7 @@ where
                     .is_ok()
                 {
                     // Sync successfull -> retry allocation
-                    return Err(Error::Retry);
+                    return Ok(true);
                 } else {
                     // undo global change
                     if self.trees[i]
@@ -433,7 +436,7 @@ where
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Try to reserve a new tree or wait for concurrent reservations to finish.

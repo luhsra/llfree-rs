@@ -233,23 +233,6 @@ impl From<ChildPair> for u32 {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
-mod test {
-    use core::sync::atomic::AtomicU64;
-
-    use crate::atomic::Atom;
-    use crate::table::PT_LEN;
-
-    #[test]
-    fn pt() {
-        const A: Atom<u64> = Atom::raw(AtomicU64::new(0));
-        let pt: [Atom<u64>; PT_LEN] = [A; PT_LEN];
-        pt[0].compare_exchange(0, 42).unwrap();
-        pt[0].fetch_update(|v| Some(v + 1)).unwrap();
-        assert_eq!(pt[0].load(), 43);
-    }
-}
-
 /// Next element of a list
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Next {
@@ -297,4 +280,20 @@ impl From<Next> for u64 {
 }
 impl Atomic for Next {
     type I = AtomicU64;
+}
+
+#[cfg(all(test, feature = "std"))]
+mod test {
+    use core::sync::atomic::AtomicU64;
+
+    use crate::atomic::Atom;
+    use crate::table::PT_LEN;
+
+    #[test]
+    fn pt() {
+        let pt: [Atom<u64>; PT_LEN] = [const { Atom(AtomicU64::new(0)) }; PT_LEN];
+        pt[0].compare_exchange(0, 42).unwrap();
+        pt[0].fetch_update(|v| Some(v + 1)).unwrap();
+        assert_eq!(pt[0].load(), 43);
+    }
 }

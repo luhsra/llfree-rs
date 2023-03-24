@@ -4,10 +4,11 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
+use nvalloc::frame::Frame;
 use nvalloc::mmap::{madvise, MAdvise, MMap};
 use nvalloc::table::PT_LEN;
+use nvalloc::thread;
 use nvalloc::util::{avg_bounds, logging};
-use nvalloc::{thread, Frame};
 
 /// Benchmarking the page-fault performance of a mapped memory region.
 #[derive(Parser, Debug)]

@@ -16,7 +16,7 @@ use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::upper::*;
 use nvalloc::util::{self, WyRand};
-use nvalloc::{pfn_range, Frame, PFN};
+use nvalloc::frame::{pfn_range, Frame, PFN};
 
 /// Number of allocations per block
 const RAND_BLOCK_SIZE: usize = 8;

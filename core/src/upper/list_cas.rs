@@ -10,7 +10,8 @@ use log::{error, info};
 use super::{Alloc, Init, MIN_PAGES};
 use crate::atomic::{Atom, Atomic};
 use crate::entry::Next;
-use crate::{Error, PFNRange, Result, PFN};
+use crate::frame::{PFNRange, PFN};
+use crate::{Error, Result};
 
 /// Simple volatile 4K frame allocator that uses a single shared linked lists
 /// protected by a ticked lock.
@@ -355,13 +356,13 @@ mod test {
     use log::{info, warn};
 
     use crate::atomic::Atom;
+    use crate::frame::{pfn_range, Frame};
     use crate::mmap::test_mapping;
     use crate::table::PT_LEN;
     use crate::upper::list_cas::{AtomicStack, AtomicStackDbg, Next};
     use crate::upper::{Alloc, AllocExt, Init};
     use crate::util::{self, logging};
-    use crate::{pfn_range, thread};
-    use crate::{Error, Frame};
+    use crate::{thread, Error};
 
     use super::ListCAS;
 
@@ -445,7 +446,7 @@ mod test {
     #[test]
     fn atomic_stack() {
         util::logging();
-        const DATA_V: Atom<Next> = Atom::raw(AtomicU64::new(u64::MAX));
+        const DATA_V: Atom<Next> = Atom(AtomicU64::new(u64::MAX));
         const N: usize = 640;
         let data: [Atom<Next>; N] = [DATA_V; N];
 
@@ -495,7 +496,7 @@ mod test {
     fn atomic_stack_repeat() {
         util::logging();
         const THREADS: usize = 6;
-        const DATA_V: Atom<Next> = Atom::raw(AtomicU64::new(u64::MAX));
+        const DATA_V: Atom<Next> = Atom(AtomicU64::new(u64::MAX));
         let data: [Atom<Next>; THREADS] = [DATA_V; THREADS];
 
         let stack = AtomicStack::default();

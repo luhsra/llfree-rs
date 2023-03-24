@@ -9,7 +9,7 @@ use nvalloc::table::PT_LEN;
 use nvalloc::thread;
 use nvalloc::upper::*;
 use nvalloc::util::{self, align_up, WyRand};
-use nvalloc::{pfn_range, Frame, PFN};
+use nvalloc::frame::{pfn_range, Frame, PFN};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]

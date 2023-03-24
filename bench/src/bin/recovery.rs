@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use log::warn;
 
+use nvalloc::frame::{pfn_range, Frame, PFN};
 use nvalloc::lower::Cache;
 use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
+use nvalloc::thread;
 use nvalloc::upper::{Alloc, AllocExt, Array, Init};
 use nvalloc::util::{self, WyRand};
-use nvalloc::{pfn_range, thread, Frame, PFN};
 
 /// Benchmarking the (crashed) recovery.
 #[derive(Parser, Debug)]

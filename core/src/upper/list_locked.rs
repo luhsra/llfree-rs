@@ -9,7 +9,8 @@ use log::{error, info};
 use super::{Alloc, Init, MIN_PAGES};
 use crate::atomic::{Atom, Spin};
 use crate::entry::Next;
-use crate::{Error, PFNRange, Result, PFN};
+use crate::frame::{PFNRange, PFN};
+use crate::{Error, Result};
 
 /// Simple volatile 4K frame allocator that uses a single shared linked lists
 /// protected by a ticked lock.
@@ -244,11 +245,12 @@ mod test {
     use alloc::vec::Vec;
     use log::{info, warn};
 
+    use crate::frame::{pfn_range, Frame};
     use crate::mmap::test_mapping;
     use crate::table::PT_LEN;
     use crate::upper::{Alloc, AllocExt, Init};
     use crate::util::logging;
-    use crate::{pfn_range, Error, Frame};
+    use crate::Error;
 
     use super::ListLocked;
 

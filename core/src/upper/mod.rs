@@ -7,7 +7,8 @@ use bitfield_struct::bitfield;
 
 use crate::atomic::{Atom, Atomic};
 use crate::entry::ReservedTree;
-use crate::{Result, PFN};
+use crate::frame::PFN;
+use crate::Result;
 
 mod array;
 pub use array::Array;
@@ -227,15 +228,14 @@ mod test {
 
     use log::{info, warn};
 
+    use crate::frame::{pfn_range, Frame, PFNRange, PFN};
     use crate::lower::*;
     use crate::mmap::test_mapping;
-    use crate::pfn_range;
     use crate::table::PT_LEN;
     use crate::thread;
     use crate::upper::*;
     use crate::util::{logging, CacheLine, WyRand};
-    use crate::PFNRange;
-    use crate::{Error, Frame, PFN};
+    use crate::Error;
 
     type Lower = Cache<32>;
     type Allocator = Array<4, Lower>;

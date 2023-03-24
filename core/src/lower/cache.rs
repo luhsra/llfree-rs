@@ -9,10 +9,11 @@ use alloc::string::String;
 
 use crate::atomic::Atom;
 use crate::entry::{Child, ChildPair};
+use crate::frame::{Frame, PFN};
 use crate::table::AtomicArray;
 use crate::upper::{Init, CAS_RETRIES};
 use crate::util::{align_down, align_up, spin_wait, CacheLine};
-use crate::{Error, Frame, Result, PFN};
+use crate::{Error, Result};
 
 use super::LowerAlloc;
 
@@ -189,7 +190,6 @@ where
     fn put(&self, frame: usize, order: usize) -> Result<()> {
         debug_assert!(order <= Self::MAX_ORDER);
         debug_assert!(frame < self.frames());
-        stop!();
 
         if order == Self::MAX_ORDER {
             self.put_max(frame)
@@ -364,15 +364,6 @@ where
             for j in 0..HP {
                 let i = (j + off) % HP;
 
-                #[cfg(feature = "stop")]
-                {
-                    let entry = table[i].load();
-                    if entry.allocated() || entry.free() < (1 << order) {
-                        continue;
-                    }
-                    stop!();
-                }
-
                 if table[i].fetch_update(|v| v.dec(1 << order)).is_ok() {
                     let bf_i = first_bf_i + i;
                     // start with the last bitfield entry
@@ -438,16 +429,12 @@ where
     fn put_small(&self, frame: usize, order: usize) -> Result<()> {
         debug_assert!(order < Self::HUGE_ORDER);
 
-        stop!();
-
         let bitfield = &self.bitfields[frame / Bitfield::LEN];
         let i = frame % Bitfield::LEN;
         if bitfield.toggle(i, order, true).is_err() {
             error!("L1 put failed i{i} p={frame}");
             return Err(Error::Address);
         }
-
-        stop!();
 
         let table = &self.children[frame / Self::N];
         let i = (frame / Bitfield::LEN) % HP;
@@ -529,18 +516,17 @@ impl<const HP: usize> Drop for Cache<HP> {
     }
 }
 
-#[cfg(feature = "stop")]
 #[cfg(all(test, feature = "std"))]
 mod test {
     use alloc::vec::Vec;
     use log::warn;
 
     use super::{Bitfield, Cache};
+    use crate::frame::PFN;
     use crate::lower::LowerAlloc;
-    use crate::stop::{StopVec, Stopper};
+    use crate::thread;
     use crate::upper::Init;
     use crate::util::{logging, WyRand};
-    use crate::{thread, PFN};
 
     type Allocator = Cache<64>;
 
@@ -556,211 +542,135 @@ mod test {
     fn alloc_normal() {
         logging();
 
-        let orders = [
-            vec![0, 0, 1, 1],
-            vec![0, 0, 1, 1, 1, 0, 0],
-            vec![1, 1, 0, 0, 0, 1, 1],
-            vec![1, 0, 1, 0, 0],
-            vec![1, 1, 0, 0],
-        ];
+        const FRAMES: usize = 4 * Allocator::N;
+        let lower = Allocator::new(2, PFN(0), FRAMES, Init::Volatile, true);
+        lower.get(0, 0).unwrap();
 
-        for order in orders {
-            warn!("order: {order:?}");
-            const FRAMES: usize = 4 * Allocator::N;
-            let lower = Allocator::new(2, PFN(0), FRAMES, Init::Volatile, true);
-            lower.get(0, 0).unwrap();
+        thread::parallel(0..2, |t| {
+            thread::pin(t);
 
-            let stop = StopVec::new(2, order);
+            let frame = lower.get(0, 0).unwrap();
+            assert!(frame < FRAMES);
+        });
 
-            thread::parallel(0..2, |t| {
-                thread::pin(t);
-                let key = Stopper::init(stop, t as _);
-
-                let frame = lower.get(0, 0).unwrap();
-                drop(key);
-                assert!(frame < FRAMES);
-            });
-
-            assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 3);
-            assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 3);
-        }
+        assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 3);
+        assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 3);
     }
 
     #[test]
     fn alloc_first() {
         logging();
 
-        let orders = [
-            vec![0, 0, 1, 1],
-            vec![0, 1, 1, 0, 0],
-            vec![0, 1, 0, 1, 1],
-            vec![1, 1, 0, 0],
-        ];
+        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-        for order in orders {
-            warn!("order: {order:?}");
-            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        thread::parallel(0..2, |t| {
+            thread::pin(t);
 
-            let stop = StopVec::new(2, order);
-            thread::parallel(0..2, |t| {
-                thread::pin(t);
-                let _stopper = Stopper::init(stop, t as _);
+            lower.get(0, 0).unwrap();
+        });
 
-                lower.get(0, 0).unwrap();
-            });
-
-            let entry2 = lower.children[0][0].load();
-            assert_eq!(entry2.free(), Bitfield::LEN - 2);
-            assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 2);
-        }
+        let entry2 = lower.children[0][0].load();
+        assert_eq!(entry2.free(), Bitfield::LEN - 2);
+        assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 2);
     }
 
     #[test]
     fn alloc_last() {
         logging();
 
-        let orders = [
-            vec![0, 0, 1, 1, 1],
-            vec![0, 1, 1, 0, 1, 1, 0],
-            vec![1, 0, 0, 1, 0],
-            vec![1, 1, 0, 0, 0],
-        ];
+        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-        for order in orders {
-            warn!("order: {order:?}");
-            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
-
-            for _ in 0..Bitfield::LEN - 1 {
-                lower.get(0, 0).unwrap();
-            }
-
-            let stop = StopVec::new(2, order);
-            thread::parallel(0..2, |t| {
-                thread::pin(t);
-                let _stopper = Stopper::init(stop, t as _);
-
-                lower.get(0, 0).unwrap();
-            });
-
-            let table = &lower.children[0];
-            assert_eq!(table[0].load().free(), 0);
-            assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
-            assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
+        for _ in 0..Bitfield::LEN - 1 {
+            lower.get(0, 0).unwrap();
         }
+
+        thread::parallel(0..2, |t| {
+            thread::pin(t);
+
+            lower.get(0, 0).unwrap();
+        });
+
+        let table = &lower.children[0];
+        assert_eq!(table[0].load().free(), 0);
+        assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
+        assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
     }
 
     #[test]
     fn free_normal() {
         logging();
 
-        let orders = [
-            vec![0, 0, 0, 1, 1, 1], // first 0, then 1
-            vec![0, 1, 0, 1, 0, 1, 0, 1],
-            vec![0, 0, 1, 1, 1, 0, 0],
-        ];
-
         let mut frames = [0; 2];
 
-        for order in orders {
-            warn!("order: {order:?}");
-            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-            frames[0] = lower.get(0, 0).unwrap();
-            frames[1] = lower.get(0, 0).unwrap();
+        frames[0] = lower.get(0, 0).unwrap();
+        frames[1] = lower.get(0, 0).unwrap();
 
-            let stop = StopVec::new(2, order);
-            thread::parallel(0..2, |t| {
-                let _stopper = Stopper::init(stop, t as _);
+        thread::parallel(0..2, |t| {
+            thread::pin(t);
 
-                lower.put(frames[t as usize], 0).unwrap();
-            });
+            lower.put(frames[t as usize], 0).unwrap();
+        });
 
-            assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
-        }
+        assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
     }
 
     #[test]
     fn free_last() {
         logging();
 
-        let orders = [
-            vec![0, 0, 0, 1, 1, 1],
-            vec![0, 1, 0, 1, 0, 1, 0, 1],
-            vec![0, 1, 1, 0, 0, 1, 1, 0],
-        ];
-
         let mut frames = [0; Bitfield::LEN];
 
-        for order in orders {
-            warn!("order: {order:?}");
-            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-            for frame in &mut frames {
-                *frame = lower.get(0, 0).unwrap();
-            }
-
-            let stop = StopVec::new(2, order);
-            thread::parallel(0..2, |t| {
-                let _stopper = Stopper::init(stop, t as _);
-
-                lower.put(frames[t as usize], 0).unwrap();
-            });
-
-            let table = &lower.children[0];
-            assert_eq!(table[0].load().free(), 2);
-            assert_eq!(count(&lower.bitfields[0]), 2);
+        for frame in &mut frames {
+            *frame = lower.get(0, 0).unwrap();
         }
+
+        thread::parallel(0..2, |t| {
+            thread::pin(t);
+
+            lower.put(frames[t as usize], 0).unwrap();
+        });
+
+        let table = &lower.children[0];
+        assert_eq!(table[0].load().free(), 2);
+        assert_eq!(count(&lower.bitfields[0]), 2);
     }
 
     #[test]
     fn realloc_last() {
         logging();
 
-        let orders = [
-            vec![0, 0, 0, 1, 1], // free then alloc
-            vec![1, 1, 0, 0, 0], // alloc last then free last
-            vec![0, 1, 1, 0, 0],
-            vec![0, 0, 1, 1, 0],
-            vec![1, 0, 1, 0, 0],
-            vec![0, 1, 0, 1, 0],
-            vec![0, 0, 1, 0, 1],
-            vec![1, 0, 0, 0, 1],
-        ];
-
         let mut frames = [0; Bitfield::LEN];
 
-        for order in orders {
-            warn!("order: {order:?}");
-            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-            for frame in &mut frames[..Bitfield::LEN - 1] {
-                *frame = lower.get(0, 0).unwrap();
-            }
-            let stop = StopVec::new(2, order);
+        for frame in &mut frames[..Bitfield::LEN - 1] {
+            *frame = lower.get(0, 0).unwrap();
+        }
 
-            std::thread::scope(|s| {
-                let st = stop.clone();
-                s.spawn(|| {
-                    let _stopper = Stopper::init(st, 1);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                thread::pin(0);
 
-                    lower.get(0, 0).unwrap();
-                });
-
-                let _stopper = Stopper::init(stop, 0);
-
-                lower.put(frames[0], 0).unwrap();
+                lower.get(0, 0).unwrap();
             });
+            thread::pin(1);
 
-            let table = &lower.children[0];
-            if table[0].load().free() == 1 {
-                assert_eq!(count(&lower.bitfields[0]), 1);
-            } else {
-                // Table entry skipped
-                assert_eq!(table[0].load().free(), 2);
-                assert_eq!(count(&lower.bitfields[0]), 2);
-                assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
-                assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
-            }
+            lower.put(frames[0], 0).unwrap();
+        });
+
+        let table = &lower.children[0];
+        if table[0].load().free() == 1 {
+            assert_eq!(count(&lower.bitfields[0]), 1);
+        } else {
+            // Table entry skipped
+            assert_eq!(table[0].load().free(), 2);
+            assert_eq!(count(&lower.bitfields[0]), 2);
+            assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
+            assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
         }
     }
 
@@ -768,71 +678,46 @@ mod test {
     fn alloc_normal_large() {
         logging();
 
-        let orders = [
-            vec![0, 0, 1, 1],
-            vec![0, 0, 1, 1, 1, 0, 0],
-            vec![1, 1, 0, 0, 0, 1, 1],
-            vec![1, 0, 1, 0, 0],
-            vec![1, 1, 0, 0],
-        ];
+        const FRAMES: usize = 4 * Allocator::N;
+        let lower = Allocator::new(2, PFN(0), FRAMES, Init::Volatile, true);
+        lower.get(0, 0).unwrap();
 
-        for order in orders {
-            warn!("order: {order:?}");
-            const FRAMES: usize = 4 * Allocator::N;
-            let lower = Allocator::new(2, PFN(0), FRAMES, Init::Volatile, true);
-            lower.get(0, 0).unwrap();
+        thread::parallel(0..2, |t| {
+            thread::pin(t);
 
-            let stop = StopVec::new(2, order);
+            let order = t + 1; // order 1 and 2
+            let frame = lower.get(0, order).unwrap();
+            assert!(frame < FRAMES);
+        });
 
-            thread::parallel(0..2, |t| {
-                thread::pin(t);
-                let key = Stopper::init(stop, t as _);
-
-                let order = t + 1; // order 1 and 2
-                let frame = lower.get(0, order).unwrap();
-                drop(key);
-                assert!(frame < FRAMES);
-            });
-
-            let allocated = 1 + 2 + 4;
-            assert_eq!(
-                lower.children[0][0].load().free(),
-                Bitfield::LEN - allocated
-            );
-            assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - allocated);
-        }
+        let allocated = 1 + 2 + 4;
+        assert_eq!(
+            lower.children[0][0].load().free(),
+            Bitfield::LEN - allocated
+        );
+        assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - allocated);
     }
 
     #[test]
     fn free_normal_large() {
         logging();
 
-        let orders = [
-            vec![0, 0, 0, 1, 1, 1], // first 0, then 1
-            vec![0, 1, 0, 1, 0, 1, 0, 1],
-            vec![0, 0, 1, 1, 1, 0, 0],
-        ];
-
         let mut frames = [0; 2];
 
-        for order in orders {
-            warn!("order: {order:?}");
-            let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
 
-            frames[0] = lower.get(0, 1).unwrap();
-            frames[1] = lower.get(0, 2).unwrap();
+        frames[0] = lower.get(0, 1).unwrap();
+        frames[1] = lower.get(0, 2).unwrap();
 
-            assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 2 - 4);
+        assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 2 - 4);
 
-            let stop = StopVec::new(2, order);
-            thread::parallel(0..2, |t| {
-                let _stopper = Stopper::init(stop, t as _);
+        thread::parallel(0..2, |t| {
+            thread::pin(t);
 
-                lower.put(frames[t as usize], t + 1).unwrap();
-            });
+            lower.put(frames[t as usize], t + 1).unwrap();
+        });
 
-            assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
-        }
+        assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
     }
 
     #[test]
@@ -863,7 +748,6 @@ mod test {
             *frame = lower.get(0, *order).unwrap();
         }
 
-        lower.dump(0);
         assert_eq!(lower.allocated_frames(), num_frames);
 
         for (order, frame) in &frames {
@@ -903,7 +787,5 @@ mod test {
         lower.put(0, 0).unwrap();
 
         assert_eq!(lower.allocated_frames(), Allocator::N - 2);
-
-        lower.dump(0);
     }
 }

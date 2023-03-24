@@ -2,6 +2,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use alloc::vec::Vec;
 
+/// Changes the order in which cores are selected for pinning.
+///
+/// The `core` argument of [pin] is multiplied with stride to get the actual core:
+/// - Pinning to 2 with stride 2 results in core 4=2*2
+/// - This accurately wraps around the number of cores
 pub static STRIDE: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
@@ -16,6 +21,7 @@ pub fn cores() -> usize {
     cores
 }
 
+/// Returns the core on which we are pinned or [usize::MAX]
 pub fn pinned() -> usize {
     PINNED.with(|p| p.load(Ordering::Acquire))
 }

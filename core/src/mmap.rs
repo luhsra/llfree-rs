@@ -9,7 +9,7 @@ use std::os::unix::prelude::AsRawFd;
 use alloc::boxed::Box;
 
 use crate::util::align_down;
-use crate::Frame;
+use crate::frame::Frame;
 
 /// Chunk of mapped memory.
 /// Wrapper for POSIX mmap syscalls.
@@ -253,7 +253,7 @@ mod test {
     use log::info;
 
     use crate::mmap::MMap;
-    use crate::Frame;
+    use crate::frame::Frame;
 
     #[cfg(target_family = "unix")]
     #[test]

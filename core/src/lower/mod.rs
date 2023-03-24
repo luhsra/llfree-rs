@@ -1,19 +1,9 @@
 use core::fmt;
 use core::ops::Range;
 
+use crate::frame::PFN;
 use crate::upper::Init;
-use crate::{Result, PFN};
-
-#[cfg(all(test, feature = "stop"))]
-macro_rules! stop {
-    () => {
-        crate::stop::stop().unwrap()
-    };
-}
-#[cfg(not(all(test, feature = "stop")))]
-macro_rules! stop {
-    () => {};
-}
+use crate::Result;
 
 mod cache;
 pub use cache::Cache;
@@ -60,21 +50,18 @@ pub trait LowerAlloc: Default + fmt::Debug {
     fn size_per_gib() -> usize;
 }
 
-#[cfg(all(test, feature = "stop"))]
+#[cfg(all(test, feature = "std"))]
 mod test {
     use std::sync::Arc;
 
-    use log::warn;
-
+    use crate::frame::Frame;
     use crate::lower::LowerAlloc;
-    use crate::stop::{StopRand, Stopper};
     use crate::table::PT_LEN;
     use crate::thread;
     use crate::upper::Init;
     use crate::util::logging;
-    use crate::Frame;
 
-    type Lower = super::cache::Cache<512>;
+    type Lower = super::cache::Cache<32>;
 
     #[test]
     #[ignore]
@@ -85,9 +72,6 @@ mod test {
         let buffer = vec![Frame::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
         for _ in 0..8 {
-            let seed = unsafe { libc::rand() } as u64;
-            warn!("order: {seed:x}");
-
             let lower = Arc::new(Lower::new(
                 THREADS,
                 buffer.as_ptr().into(),
@@ -97,9 +81,8 @@ mod test {
             ));
             assert_eq!(lower.allocated_frames(), 0);
 
-            let stop = StopRand::new(THREADS, seed);
             thread::parallel(0..THREADS, |t| {
-                let _stopper = Stopper::init(stop.clone(), t);
+                thread::pin(t);
 
                 let mut frames = [0; 4];
                 for p in &mut frames {
@@ -125,9 +108,6 @@ mod test {
         let buffer = vec![Frame::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
         for _ in 0..8 {
-            let seed = unsafe { libc::rand() } as u64;
-            warn!("order: {seed:x}");
-
             let lower = Arc::new(Lower::new(
                 THREADS,
                 buffer.as_ptr().into(),
@@ -141,9 +121,8 @@ mod test {
                 *frame = lower.get(0, 0).unwrap();
             }
 
-            let stop = StopRand::new(THREADS, seed);
             thread::parallel(0..THREADS, |t| {
-                let _stopper = Stopper::init(stop.clone(), t);
+                thread::pin(t);
 
                 if t < THREADS / 2 {
                     lower.put(frames[t], 0).unwrap();

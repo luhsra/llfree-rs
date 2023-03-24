@@ -13,7 +13,8 @@ use nvalloc::mmap::MMap;
 use nvalloc::table::PT_LEN;
 use nvalloc::upper::{Alloc, Array, Init};
 use nvalloc::util::logging;
-use nvalloc::{pfn_range, thread, Frame};
+use nvalloc::frame::{pfn_range, Frame};
+use nvalloc::thread;
 
 type Allocator = Array<3, Cache<128>>;
 
