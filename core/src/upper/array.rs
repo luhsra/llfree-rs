@@ -108,15 +108,16 @@ where
         free_all: bool,
     ) -> Result<()> {
         info!("initializing c={cores} {memory:?} {}", memory.len());
+
         if memory.start.0 % (1 << L::MAX_ORDER) != 0 {
-            error!("Unexpected memory alignment");
-            return Err(Error::Initialization);
+            warn!("Unexpected memory alignment {:x}", memory.start.0);
+            memory.start.0 = align_down(memory.start.0, 1 << L::MAX_ORDER);
         }
 
         if memory.len() < L::N * cores {
             warn!("memory {} < {}", memory.len(), L::N * cores);
-            if memory.len() < 1 << L::HUGE_ORDER {
-                error!("Expecting at least {} frames", 1 << L::HUGE_ORDER);
+            if memory.len() < 2 {
+                error!("Expecting at least {} frames", 2);
                 return Err(Error::Memory);
             }
             cores = 1.max(memory.len() / L::N);
@@ -129,13 +130,13 @@ where
             memory = m;
         }
 
+        // Create lower allocator
+        self.lower = L::new(cores, memory.start, memory.len(), init, free_all);
+
         // Init per-cpu data
         let mut local = Vec::with_capacity(cores);
         local.resize_with(cores, Default::default);
         self.local = local.into();
-
-        // Create lower allocator
-        self.lower = L::new(cores, memory.start, memory.len(), init, free_all);
 
         if init == Init::Recover {
             match self.recover() {
