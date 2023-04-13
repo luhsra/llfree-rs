@@ -1,4 +1,5 @@
 use crate::util::CacheLine;
+use core::cell::UnsafeCell;
 use core::fmt;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{Ordering::*, *};
@@ -163,14 +164,14 @@ atomic_impl!(usize, AtomicUsize);
 pub struct Spin<T> {
     lock: AtomicBool,
     /// Cache aligned value -> no races with lock
-    value: CacheLine<T>,
+    value: CacheLine<UnsafeCell<T>>,
 }
 
 impl<T> Spin<T> {
     pub const fn new(value: T) -> Self {
         Self {
             lock: AtomicBool::new(false),
-            value: CacheLine(value),
+            value: CacheLine(UnsafeCell::new(value)),
         }
     }
     pub fn lock(&self) -> SpinGuard<T> {
@@ -203,15 +204,12 @@ impl<'a, T> Deref for SpinGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.spin.value
+        unsafe { &*self.spin.value.get() }
     }
 }
 impl<'a, T> DerefMut for SpinGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        #[allow(clippy::cast_ref_to_mut)]
-        unsafe {
-            &mut *(&self.spin.value as *const _ as *mut _)
-        }
+        unsafe { &mut *self.spin.value.get() }
     }
 }
 impl<'a, T> Drop for SpinGuard<'a, T> {
