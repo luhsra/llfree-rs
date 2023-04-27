@@ -1,4 +1,5 @@
 use core::any::type_name;
+use core::ffi::c_void;
 use core::fmt;
 use core::ops::Range;
 use core::sync::atomic::AtomicU64;
@@ -63,7 +64,8 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     /// Execute f for each huge frame with the number of free frames
     /// in this huge frame as parameter.
     #[cold]
-    fn for_each_huge_frame(&self, _f: fn(PFN, usize)) {}
+    fn for_each_huge_frame(&self, _ctx: *mut c_void, _f: fn(*mut c_void, PFN, usize)) {}
+
     /// Return the name of the allocator.
     #[cold]
     fn name(&self) -> AllocName {
@@ -83,7 +85,7 @@ pub enum Init {
     Overwrite,
 }
 
-/// Wrapper for creating a new allocator instance
+/// Extending the dynamic [Alloc] interface
 pub trait AllocExt: Sized + Alloc + Default {
     /// Create and initialize the allocator.
     #[cold]
@@ -91,6 +93,13 @@ pub trait AllocExt: Sized + Alloc + Default {
         let mut a = Self::default();
         a.init(cores, area, init, free_all)?;
         Ok(a)
+    }
+    /// Calls f for every huge page
+    fn each_huge_frame<F: FnMut(PFN, usize)>(&self, mut f: F) {
+        self.for_each_huge_frame((&mut f) as *mut F as *mut c_void, |ctx, pfn, free| {
+            let f = unsafe { &mut *ctx.cast::<F>() };
+            f(pfn, free)
+        })
     }
 }
 // Implement for all default initializable allocators

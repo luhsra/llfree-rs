@@ -1,3 +1,4 @@
+use core::ffi::c_void;
 use core::fmt;
 use core::hint::spin_loop;
 use core::mem::{align_of, size_of};
@@ -270,9 +271,9 @@ where
     }
 
     #[cold]
-    fn for_each_huge_frame(&self, f: fn(PFN, usize)) {
+    fn for_each_huge_frame(&self, ctx: *mut c_void, f: fn(*mut c_void, PFN, usize)) {
         self.lower
-            .for_each_huge_frame(|frame, c| f(self.lower.begin().off(frame), c))
+            .for_each_huge_frame(|frame, c| f(ctx, self.lower.begin().off(frame), c))
     }
 }
 

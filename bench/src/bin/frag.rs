@@ -164,20 +164,17 @@ fn main() {
     warn!("{alloc:?}");
 }
 
-static mut FREE_PER_HUGE: Vec<u16> = Vec::new();
-
-fn count_pte2(_pfn: PFN, free: usize) {
-    unsafe { FREE_PER_HUGE.push(free as _) };
-}
-
 /// count and output stats
 fn stats(out: &mut File, alloc: &Allocator, i: usize) -> io::Result<()> {
-    unsafe { FREE_PER_HUGE.clear() };
-    alloc.for_each_huge_frame(count_pte2);
+
+    let mut free_per_huge = Vec::with_capacity(alloc.frames() / 512);
+    alloc.each_huge_frame(|_pfn, free| {
+        free_per_huge.push(free as u16);
+    });
 
     write!(out, "{i},{},{}", alloc.frames(), alloc.allocated_frames(),)?;
-    for b in unsafe { &FREE_PER_HUGE } {
-        write!(out, ",{b}")?;
+    for free in free_per_huge {
+        write!(out, ",{free}")?;
     }
     writeln!(out)?;
     Ok(())
