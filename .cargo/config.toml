@@ -1,12 +1,12 @@
 [alias]
-perf = ["run", "-pnvalloc-bench", "-r", "--bin"]
-perf-build = ["build", "-pnvalloc-bench", "-r", "--bin"]
+perf = ["run", "-pllfree-bench", "-r", "--bin"]
+perf-build = ["build", "-pllfree-bench", "-r", "--bin"]
 
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=skylake"]
 
 [target.x86_64-unknown-none]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=skylake"]
 
 [unstable]
 build-std-features = ["compiler-builtins-mem"]

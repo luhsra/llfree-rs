@@ -6,9 +6,9 @@ They are designed for multicore, hybrid systems with volatile and non-volatile m
 The two main design goals are multicore scalability and crash consistency.
 
 **Related Projects**
-- Benchmarks: https://scm.sra.uni-hannover.de/research/nvalloc-bench
-- Modified Linux: https://scm.sra.uni-hannover.de/research/nvalloc-linux
-- Benchmark Module: https://scm.sra.uni-hannover.de/research/linux-alloc-bench
+- Benchmarks: https://github.com/luhsra/llfree-bench
+- Modified Linux: https://github.com/luhsra/llfree-linux
+- Benchmark Module: https://github.com/luhsra/linux-alloc-bench
 
 ## Usage
 
@@ -33,7 +33,7 @@ cargo perf bench -- -h
 
 ## Project structure
 
-The [core](core/) directory contains the main `nvalloc` crate and all the allocators.
+The [core](core/) directory contains the main `llfree` crate and all the allocators.
 The persistent lower allocators can be found in [lower](core/src/lower/).
 Their interface is defined in [lower.rs](core/src/lower.rs).
 These lower allocators manage the level-one and level-two page tables that are optionally persistent on non-volatile memory.
@@ -55,12 +55,12 @@ The allocator's data structures are defined in [core/src/entry.rs](core/src/entr
 
 ## Benchmarks
 
-The benchmarks can be found in [bench/src/bin](bench/src/bin) and the benchmark evaluation and visualization in the [nvalloc-bench](https://scm.sra.uni-hannover.de/research/nvalloc-bench) repository.
+The benchmarks can be found in [bench/src/bin](bench/src/bin) and the benchmark evaluation and visualization in the [llfree-bench](https://github.com/luhsra/llfree-bench) repository.
 
 These benchmarks can be executed with:
 
 ```bash
-cargo perf bench -- bulk -x1 -x2 -x4 -t4 -m24 -o results/bench.csv ArrayAtomicA128
+cargo perf bench -- bulk -x1 -x2 -x4 -t4 -m8 -o results/bench.csv Array4C32
 ```
 
 This runs the `bulk` benchmark for 1, 2, and 4 threads (`-t4` max 4 threads) on 24G DRAM and stores the result in `results/bench.csv`.
@@ -74,7 +74,7 @@ To execute the benchmark on NVM, use the `--dax` flag to specify a DAX file to b
 
 ## Integrating into the Linux Kernel
 
-- See: https://scm.sra.uni-hannover.de/research/nvalloc-linux
+- See: https://github.com/luhsra/llfree-linux
 
 
 ## Profiling
