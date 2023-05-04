@@ -8,13 +8,13 @@ use std::time::Instant;
 
 use clap::Parser;
 use log::warn;
-use nvalloc::frame::{pfn_range, Frame};
-use nvalloc::lower::Cache;
-use nvalloc::mmap::MMap;
-use nvalloc::table::PT_LEN;
-use nvalloc::thread;
-use nvalloc::upper::{Alloc, Array, Init};
-use nvalloc::util::logging;
+use llfree::frame::{pfn_range, Frame};
+use llfree::lower::Cache;
+use llfree::mmap::MMap;
+use llfree::table::PT_LEN;
+use llfree::thread;
+use llfree::upper::{Alloc, Array, Init};
+use llfree::util::logging;
 
 type Allocator = Array<3, Cache<128>>;
 

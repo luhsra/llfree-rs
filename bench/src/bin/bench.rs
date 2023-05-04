@@ -10,13 +10,13 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 use log::warn;
 
-use nvalloc::lower::*;
-use nvalloc::mmap::MMap;
-use nvalloc::table::PT_LEN;
-use nvalloc::thread;
-use nvalloc::upper::*;
-use nvalloc::util::{self, WyRand};
-use nvalloc::frame::{pfn_range, Frame, PFN};
+use llfree::lower::*;
+use llfree::mmap::MMap;
+use llfree::table::PT_LEN;
+use llfree::thread;
+use llfree::upper::*;
+use llfree::util::{self, WyRand};
+use llfree::frame::{pfn_range, Frame, PFN};
 
 /// Number of allocations per block
 const RAND_BLOCK_SIZE: usize = 8;

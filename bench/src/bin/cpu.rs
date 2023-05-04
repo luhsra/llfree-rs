@@ -19,7 +19,7 @@ fn getcpu() -> (usize, usize) {
 /// Checking certain cpu features.
 #[cfg(target_arch = "x86_64")]
 fn main() {
-    use nvalloc::thread;
+    use llfree::thread;
     use raw_cpuid::CpuId;
     let cpuid = CpuId::new();
     if let Some(info) = cpuid.get_vendor_info() {

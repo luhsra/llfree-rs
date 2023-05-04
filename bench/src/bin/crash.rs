@@ -3,13 +3,13 @@ use std::time::Duration;
 
 use clap::Parser;
 use log::{error, warn};
-use nvalloc::lower::*;
-use nvalloc::mmap::MMap;
-use nvalloc::table::PT_LEN;
-use nvalloc::thread;
-use nvalloc::upper::*;
-use nvalloc::util::{self, align_up, WyRand};
-use nvalloc::frame::{pfn_range, Frame, PFN};
+use llfree::lower::*;
+use llfree::mmap::MMap;
+use llfree::table::PT_LEN;
+use llfree::thread;
+use llfree::upper::*;
+use llfree::util::{self, align_up, WyRand};
+use llfree::frame::{pfn_range, Frame, PFN};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]

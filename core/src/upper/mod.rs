@@ -108,7 +108,7 @@ impl<A: Sized + Alloc + Default> AllocExt for A {}
 /// The short name of an allocator.
 ///
 /// E.g.: `Array4C32` for
-/// `nvalloc::upper::array::Array<4, nvalloc::lower::cache::Cache<32>>`
+/// `lldfree::upper::array::Array<4, lldfree::lower::cache::Cache<32>>`
 #[derive(PartialEq, Eq, Hash, Debug)]
 pub struct AllocName([&'static str; 4]);
 

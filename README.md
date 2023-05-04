@@ -1,7 +1,7 @@
-# Non-Volatile Memory Allocator
+# LLFree: Lock- and Log-free
 
-This repository contains prototypes of a page allocator for non-volatile memory.
-They are designed for a hybrid system with volatile and non-volatile memory in the same address space.
+This repository contains prototypes of page allocators.
+They are designed for multicore, hybrid systems with volatile and non-volatile memory.
 
 The two main design goals are multicore scalability and crash consistency.
 
@@ -17,7 +17,7 @@ The two main design goals are multicore scalability and crash consistency.
 
 To compile and test the allocator, you have to [install rust](https://www.rust-lang.org/learn/get-started).
 
-The `nightly` version `1.62.0` (or newer) is required to have access to inline assembly and custom compiler toolchains.
+The `nightly` version `1.62.0` (or newer) is required for inline assembly and custom compiler toolchains.
 
 ```sh
 # Release build
@@ -39,30 +39,26 @@ cargo perf bench -- -h
 The [core](core/) directory contains the main `nvalloc` crate and all the allocators.
 The persistent lower allocators can be found in [lower](core/src/lower/).
 Their interface is defined in [lower.rs](core/src/lower.rs).
-These lower allocators are responsible for managing the level one and level two-page tables that are persisted on the non-volatile memory.
+These lower allocators manage the level-one and level-two page tables that are optionally persistent on non-volatile memory.
 They allocate pages of 4K up to 4M in these subtrees.
 
 - [`Cache`](core/src/lower/cache.rs): This allocator has a 512-bit-large bit field at the lowest level. It stores which 4K pages are allocated. The second level consists of tables with N 16-bit entries, one for each bit field. These entries contain a counter of free pages in the related bit field and a flag if the whole subtree is allocated as a 2M huge page.
 The number of entries N in the second-level tables can be defined at compile-time.
 
 The [upper](core/src/upper/) directory contains the different upper allocator variants.
-The general interface is defined in [upper.rs](core/src/upper.rs), together with various unit tests and stress tests.
+The general interface is defined in [upper.rs](core/src/upper.rs), along with various unit and stress tests.
 Most of the upper allocators depend on the lower allocator for the actual allocations and only manage the higher-level subtrees.
 The upper allocators are completely volatile and have to be rebuilt on boot.
 The different implementations are listed down below:
 
-- [`Array`](core/src/upper/array.rs): Similar to `ArrayAtomic` allocator, but doesn't use lists for free and partial subtrees. Instead, the array is linearly searched for the appropriate subtrees.
+- [`Array`](core/src/upper/array.rs): It consists of a single array of tree entries, which is linearly searched for the appropriate subtrees.
 - [`ListLocal`](core/src/upper/list_local.rs), [`ListLocked`](core/src/upper/list_locked.rs), and [`ListCAS`](core/src/upper/list_cas.rs): These reference implementations are used to evaluate the performance of allocators.
 
-The lower allocator is heavily tested for race conditions using synchronization points (`stop`) to control the execution order of parallel threads.
-They are similar to barriers where, on every synchronization point, the next running CPU is chosen either by a previously defined order or in a pseudo-randomized manner.
-This mechanism is implemented in [stop.rs](core/src/stop.rs).
-
-The paging data structures are defined in [core/src/entry.rs](core/src/entry.rs) and [core/src/table.rs](core/src/table.rs).
+The allocator's data structures are defined in [core/src/entry.rs](core/src/entry.rs) and [core/src/table.rs](core/src/table.rs).
 
 ## Benchmarks
 
-The benchmarks can be found in [bench/src/bin/bench.rs](bench/src/bin/bench.rs) and the benchmark evaluation and visualization in the [nvalloc-bench](https://scm.sra.uni-hannover.de/research/nvalloc-bench) repository.
+The benchmarks can be found in [bench/src/bin](bench/src/bin) and the benchmark evaluation and visualization in the [nvalloc-bench](https://scm.sra.uni-hannover.de/research/nvalloc-bench) repository.
 
 These benchmarks can be executed with:
 

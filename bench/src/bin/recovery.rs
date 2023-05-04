@@ -10,13 +10,13 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use log::warn;
 
-use nvalloc::frame::{pfn_range, Frame, PFN};
-use nvalloc::lower::Cache;
-use nvalloc::mmap::MMap;
-use nvalloc::table::PT_LEN;
-use nvalloc::thread;
-use nvalloc::upper::{Alloc, AllocExt, Array, Init};
-use nvalloc::util::{self, WyRand};
+use llfree::frame::{pfn_range, Frame, PFN};
+use llfree::lower::Cache;
+use llfree::mmap::MMap;
+use llfree::table::PT_LEN;
+use llfree::thread;
+use llfree::upper::{Alloc, AllocExt, Array, Init};
+use llfree::util::{self, WyRand};
 
 /// Benchmarking the (crashed) recovery.
 #[derive(Parser, Debug)]
