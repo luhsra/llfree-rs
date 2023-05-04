@@ -9,9 +9,6 @@ The two main design goals are multicore scalability and crash consistency.
 - Benchmarks: https://scm.sra.uni-hannover.de/research/nvalloc-bench
 - Modified Linux: https://scm.sra.uni-hannover.de/research/nvalloc-linux
 - Benchmark Module: https://scm.sra.uni-hannover.de/research/linux-alloc-bench
-- Paper: https://scm.sra.uni-hannover.de/papers/2022/eurosys23-nvalloc
-- MA Thesis: https://scm.sra.uni-hannover.de/theses/2021/MA_lar.wrenger
-
 
 ## Usage
 
