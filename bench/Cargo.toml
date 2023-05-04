@@ -10,7 +10,7 @@ log = { version = "0.4", default-features = false }
 clap = { version = "4.1", default-features = false, features = ["std", "derive", "help"] }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-raw-cpuid = { version = "10.6" }
+raw-cpuid = { version = "11.0" }
 
 # binaries
 
@@ -30,17 +30,7 @@ test = false
 bench = false
 
 [[bin]]
-name = "detail"
-test = false
-bench = false
-
-[[bin]]
 name = "dist"
-test = false
-bench = false
-
-[[bin]]
-name = "mmap"
 test = false
 bench = false
 

@@ -8,7 +8,7 @@ use nvalloc::frame::Frame;
 use nvalloc::mmap::{madvise, MAdvise, MMap};
 use nvalloc::table::PT_LEN;
 use nvalloc::thread;
-use nvalloc::util::{avg_bounds, logging};
+use nvalloc::util::{avg_bounds, logging, WyRand};
 
 /// Benchmarking the page-fault performance of a mapped memory region.
 #[derive(Parser, Debug)]
@@ -32,7 +32,15 @@ struct Args {
     /// Use hugepages
     #[arg(long)]
     huge: bool,
+    /// Allocate randomly
+    #[arg(long)]
+    rand: bool,
 }
+
+/// Trust me, I really want to send this.
+#[repr(transparent)]
+struct DoSend<T>(T);
+unsafe impl<T> Send for DoSend<T> {}
 
 fn main() {
     let Args {
@@ -42,6 +50,7 @@ fn main() {
         private,
         populate,
         huge,
+        rand,
     } = Args::parse();
 
     logging();
@@ -67,16 +76,22 @@ fn main() {
     madvise(&mut mapping, adv);
 
     let chunk_size = mapping.len().div_ceil(threads);
-    let times = thread::parallel(mapping.chunks_mut(chunk_size), |chunk| {
+
+    let mut pages = mapping.iter_mut().map(DoSend).collect::<Vec<_>>();
+    if rand {
+        WyRand::new(42).shuffle(&mut pages);
+    }
+    let times = thread::parallel(pages.chunks_mut(chunk_size), |chunk| {
         let timer = Instant::now();
         for page in chunk {
-            *page.cast_mut::<usize>() = 1;
+            *page.0.cast_mut::<usize>() = 1;
         }
         timer.elapsed().as_millis()
     });
 
     let (t_amin, t_aavg, t_amax) = avg_bounds(times).unwrap_or_default();
 
+    // Measure freeing pages
     let times = thread::parallel(mapping.chunks_mut(chunk_size), |chunk| {
         let timer = Instant::now();
         madvise(chunk, MAdvise::DontNeed);
