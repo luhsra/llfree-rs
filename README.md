@@ -1,4 +1,4 @@
-# LLFree: Lock- and Log-free
+# LLFree: Lock- and Log-free Allocator
 
 This repository contains prototypes of page allocators.
 They are designed for multicore, hybrid systems with volatile and non-volatile memory.

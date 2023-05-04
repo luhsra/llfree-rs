@@ -1,5 +1,0 @@
-alloc,x,iteration,pages,get_min,get_avg,get_max,put_min,put_avg,put_max,init,total
-ArrayAtomicF,96,0,1398101,626,699,765,553,720,776,490,1030
-ArrayAtomicF,96,1,1398101,581,648,704,539,696,760,490,979
-ArrayAtomicF,96,2,1398101,350,492,608,528,696,767,493,910
-ArrayAtomicF,96,3,1398101,493,654,760,534,725,785,498,1037

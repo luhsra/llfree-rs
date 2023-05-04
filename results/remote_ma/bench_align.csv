@@ -1,5 +1,0 @@
-alloc,x,iteration,pages,get_min,get_avg,get_max,put_min,put_avg,put_max,init,total
-ArrayAlignedF,96,0,1398101,638,869,991,698,750,816,490,1170
-ArrayAlignedF,96,1,1398101,607,677,772,558,704,808,494,1028
-ArrayAlignedF,96,2,1398101,327,497,614,540,716,777,494,929
-ArrayAlignedF,96,3,1398101,449,602,719,528,724,786,500,1007
