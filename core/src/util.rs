@@ -1,6 +1,5 @@
 use core::fmt;
 use core::mem::align_of;
-use core::mem::transmute;
 use core::ops::{Add, Deref, DerefMut, Div, Range};
 
 /// Align v up to next `align` (power of two!)
@@ -54,6 +53,8 @@ impl<T> From<T> for CacheLine<T> {
 pub fn logging() {
     use std::io::Write;
     use std::thread::ThreadId;
+    use core::mem::transmute;
+
     use crate::thread::pinned;
 
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))

@@ -8,9 +8,11 @@ use std::os::unix::prelude::AsRawFd;
 
 use crate::frame::Frame;
 
+/// Create an private anonymous mapping
 pub fn anon<T>(begin: usize, len: usize, shared: bool, populate: bool) -> Box<[T], MMap> {
-    unsafe { Box::new_zeroed_slice_in(len, MMap::anon(begin, shared, populate)).assume_init() }
+    unsafe { Box::new_uninit_slice_in(len, MMap::anon(begin, shared, populate)).assume_init() }
 }
+/// Create an file backed mapping (optionally DAX)
 pub fn file<T>(begin: usize, len: usize, path: &str, dax: bool) -> Box<[T], MMap> {
     let file = std::fs::OpenOptions::new()
         .read(true)

@@ -1,9 +1,9 @@
 use core::ffi::c_void;
-use core::fmt;
 use core::hint::spin_loop;
 use core::mem::{align_of, size_of};
 use core::ops::{Index, Range};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::{fmt, unreachable};
 
 use log::{error, info, warn};
 
@@ -121,7 +121,7 @@ where
                 error!("Expecting at least {} frames", 2);
                 return Err(Error::Memory);
             }
-            cores = 1.max(memory.len() / L::N);
+            cores = memory.len().div_ceil(L::N);
         }
 
         if init != Init::Volatile {
@@ -206,18 +206,27 @@ where
             return Ok(());
         };
 
+        let mut reserved = false;
         // Tree not owned by us -> update global
-        match self.trees[i].fetch_update(|v| v.inc(num_frames, max)) {
+        match self.trees[i].fetch_update(|v| {
+            let mut v = v.inc(num_frames, max)?;
+            if !v.reserved()
+                && v.free() > Trees::<{ L::N }>::almost_allocated()
+                && local.frees_in_tree(i)
+            {
+                // put-reserve optimization:
+                // Reserve the tree that was targeted by the recent frees
+                v = v.with_free(0).with_reserved(true);
+                reserved = true;
+            }
+            Some(v)
+        }) {
             Ok(tree) => {
-                let new_frames = tree.free() + num_frames;
-                if !tree.reserved() && new_frames > Trees::<{ L::N }>::almost_allocated() {
-                    // put-reserve optimization:
-                    // Try to reserve the tree that was targeted by the recent frees
-                    if local.frees_in_tree(i) && self.reserve_for_put(&local.preferred, i)? {
-                        return Ok(());
-                    }
+                // Update preferred tree if reserved
+                let free = tree.free() + num_frames;
+                if !reserved || !self.reserve_for_put(free, &local.preferred, i)? {
+                    local.frees_push(i);
                 }
-                local.frees_push(i);
                 Ok(())
             }
             Err(tree) => {
@@ -412,32 +421,33 @@ where
     /// Returns if the global counter was large enough
     fn try_sync_with_global(&self, local: &Atom<ReservedTree>, old: ReservedTree) -> Result<bool> {
         let i = old.start() / L::N;
-        if i < self.trees.entries.len()
-            && old.free() + self.trees[i].load().free() > Trees::<{ L::N }>::almost_allocated()
-        {
-            if let Ok(entry) =
-                self.trees[i].fetch_update(|e| e.reserved().then_some(e.with_free(0)))
+        if i >= self.trees.entries.len() {
+            return Ok(false);
+        }
+
+        if let Ok(entry) = self.trees[i].fetch_update(|e| {
+            (e.reserved() && e.free() + old.free() > Trees::<{ L::N }>::almost_allocated())
+                .then_some(e.with_free(0))
+        }) {
+            debug_assert!(old.free() + entry.free() <= L::N);
+
+            if local
+                .compare_exchange(old, old.with_free(old.free() + entry.free()))
+                .is_ok()
             {
-                if local
-                    .fetch_update(|e| {
-                        (e.start() / L::N == i).then_some(e.with_free(e.free() + entry.free()))
-                    })
-                    .is_ok()
+                // Sync successfull -> retry allocation
+                return Ok(true);
+            } else {
+                // undo global change
+                if self.trees[i]
+                    .fetch_update(|e| Some(e.with_free(e.free() + entry.free())))
+                    .is_err()
                 {
-                    // Sync successfull -> retry allocation
-                    return Ok(true);
-                } else {
-                    // undo global change
-                    if self.trees[i]
-                        .fetch_update(|e| Some(e.with_free(e.free() + entry.free())))
-                        .is_err()
-                    {
-                        error!("Failed undo sync");
-                        return Err(Error::Corruption);
-                    }
+                    unreachable!("Failed undo sync");
                 }
             }
         }
+
         Ok(false)
     }
 
@@ -455,25 +465,27 @@ where
         let local = &self.local[core].preferred;
 
         // Set the reserved flag, locking the reservation
-        if !old.locked() && local.fetch_update(|v| v.toggle_locked(true)).is_ok() {
-            // Try reserve new tree
-            self.reserve_and_get(core, order, old, fragmented)
-        } else {
-            // Wait for concurrent reservation to end
-            for _ in 0..CAS_RETRIES {
-                let reserved = local.load();
-                if !reserved.locked() {
-                    // Try allocation on new tree
-                    return match self.lower.get(reserved.start(), order) {
-                        Err(Error::Memory) => Err(Error::Retry),
-                        r => r,
-                    };
-                }
-                spin_loop()
+        if !old.locked() {
+            if let Ok(old) = local.fetch_update(|v| v.toggle_locked(true)) {
+                // Try reserve new tree
+                return self.reserve_and_get(core, order, old, fragmented);
             }
-            warn!("Timeout reservation wait");
-            Err(Error::Retry)
         }
+
+        // Wait for concurrent reservation to end
+        for _ in 0..CAS_RETRIES {
+            let reserved = local.load();
+            if !reserved.locked() {
+                // Try allocation on new tree
+                return match self.lower.get(reserved.start(), order) {
+                    Err(Error::Memory) => Err(Error::Retry),
+                    r => r,
+                };
+            }
+            spin_loop()
+        }
+        warn!("Timeout reservation wait");
+        Err(Error::Retry)
     }
 
     /// Reserve a new tree and allocate the frame in it
@@ -543,30 +555,24 @@ where
     }
 
     /// Reserve an entry for bulk frees
-    fn reserve_for_put(&self, local: &Atom<ReservedTree>, i: usize) -> Result<bool> {
-        if let Ok(entry) =
-            self.trees[i].fetch_update(|v| v.reserve(Trees::<{ L::N }>::almost_allocated()..))
-        {
-            let entry = ReservedTree::new_with(entry.free(), i * L::N);
-            match self.cas_reserved(local, entry, false) {
-                Ok(_) => Ok(true),
-                Err(Error::Retry) => {
-                    warn!("rollback {i}");
-                    // Rollback reservation
-                    let max = (self.frames() - i * L::N).min(L::N);
-                    if self.trees[i]
-                        .fetch_update(|v| v.unreserve_add(entry.free(), max))
-                        .is_err()
-                    {
-                        error!("put - reservation rollback failed");
-                        return Err(Error::Corruption);
-                    }
-                    Ok(false)
+    fn reserve_for_put(&self, free: usize, local: &Atom<ReservedTree>, i: usize) -> Result<bool> {
+        let entry = ReservedTree::new_with(free, i * L::N);
+        match self.cas_reserved(local, entry, false) {
+            Ok(_) => Ok(true),
+            Err(Error::Retry) => {
+                warn!("rollback {i}");
+                // Rollback reservation
+                let max = (self.frames() - i * L::N).min(L::N);
+                if self.trees[i]
+                    .fetch_update(|v| v.unreserve_add(free, max))
+                    .is_err()
+                {
+                    error!("put - reservation rollback failed");
+                    return Err(Error::Corruption);
                 }
-                Err(e) => Err(e),
+                Ok(false)
             }
-        } else {
-            Ok(false)
+            Err(e) => Err(e),
         }
     }
 
