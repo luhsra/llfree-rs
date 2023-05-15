@@ -278,7 +278,7 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
-        let mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Frame::SIZE).unwrap();
+        let mapping = test_mapping(0x1000_0000_0000, MEM_SIZE / Frame::SIZE);
         let area = pfn_range(&mapping);
 
         info!("mmap {MEM_SIZE} bytes at {:?}", mapping.as_ptr());

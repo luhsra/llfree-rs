@@ -1,4 +1,6 @@
 #![feature(int_roundings)]
+#![feature(allocator_api)]
+#![feature(new_uninit)]
 
 use std::fs::File;
 use std::io::Write;
@@ -10,7 +12,7 @@ use clap::Parser;
 use log::warn;
 use llfree::frame::{pfn_range, Frame};
 use llfree::lower::Cache;
-use llfree::mmap::MMap;
+use llfree::mmap::{MMap, self};
 use llfree::table::PT_LEN;
 use llfree::thread;
 use llfree::upper::{Alloc, Array, Init};
@@ -57,7 +59,7 @@ fn main() {
     assert!(threads >= 1);
     assert!(threads <= std::thread::available_parallelism().unwrap().get());
 
-    let mut mapping = mapping(0x1000_0000_0000, PT_LEN * PT_LEN * threads, dax).unwrap();
+    let mut mapping = mapping(0x1000_0000_0000, PT_LEN * PT_LEN * threads, dax);
 
     // Populate mapping
     warn!("populate {} pages", mapping.len());
@@ -147,21 +149,11 @@ fn main() {
 }
 
 #[allow(unused_variables)]
-fn mapping(begin: usize, length: usize, dax: Option<String>) -> Result<MMap<Frame>, ()> {
+pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame], MMap> {
     #[cfg(target_os = "linux")]
-    if length > 0 {
-        if let Some(file) = dax {
-            warn!(
-                "MMap file {file} l={}G",
-                (length * std::mem::size_of::<Frame>()) >> 30
-            );
-            let f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(file)
-                .unwrap();
-            return MMap::dax(begin, length, f);
-        }
+    if let Some(file) = dax {
+        warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
+        return mmap::file(begin, length, &file, true);
     }
-    MMap::anon(begin, length, false, true)
+    mmap::anon(begin, length, false, true)
 }

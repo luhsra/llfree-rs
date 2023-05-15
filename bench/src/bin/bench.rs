@@ -1,3 +1,6 @@
+#![feature(allocator_api)]
+#![feature(new_uninit)]
+
 use core::iter::FromIterator;
 use core::{fmt, slice};
 use std::collections::{HashMap, HashSet};
@@ -10,13 +13,13 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 use log::warn;
 
+use llfree::frame::{pfn_range, Frame, PFN};
 use llfree::lower::*;
-use llfree::mmap::MMap;
+use llfree::mmap::{self, MMap};
 use llfree::table::PT_LEN;
 use llfree::thread;
 use llfree::upper::*;
 use llfree::util::{self, WyRand};
-use llfree::frame::{pfn_range, Frame, PFN};
 
 /// Number of allocations per block
 const RAND_BLOCK_SIZE: usize = 8;
@@ -82,7 +85,7 @@ fn main() {
 
     warn!("Allocating order {order}");
 
-    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
+    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
 
     let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
 
@@ -129,28 +132,13 @@ fn main() {
 }
 
 #[allow(unused_variables)]
-fn mapping(
-    begin: usize,
-    length: usize,
-    dax: Option<String>,
-) -> core::result::Result<MMap<Frame>, ()> {
+pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame], MMap> {
     #[cfg(target_os = "linux")]
-    if length > 0 {
-        if let Some(file) = dax {
-            warn!(
-                "MMap file {file} l={}G ({:x})",
-                (length * std::mem::size_of::<Frame>()) >> 30,
-                length * std::mem::size_of::<Frame>()
-            );
-            let f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(file)
-                .unwrap();
-            return MMap::dax(begin, length, f);
-        }
+    if let Some(file) = dax {
+        warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
+        return mmap::file(begin, length, &file, true);
     }
-    MMap::anon(begin, length, false, false)
+    mmap::anon(begin, length, false, true)
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

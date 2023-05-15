@@ -1,15 +1,18 @@
+#![feature(allocator_api)]
+#![feature(new_uninit)]
+
 use std::sync::Barrier;
 use std::time::Duration;
 
 use clap::Parser;
-use log::{error, warn};
-use llfree::lower::*;
+use llfree::frame::{pfn_range, Frame, PFN};
+use llfree::{lower::*, mmap};
 use llfree::mmap::MMap;
 use llfree::table::PT_LEN;
 use llfree::thread;
 use llfree::upper::*;
 use llfree::util::{self, align_up, WyRand};
-use llfree::frame::{pfn_range, Frame, PFN};
+use log::{error, warn};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]
@@ -51,8 +54,10 @@ fn main() {
             let out_size = align_up(allocs + 2, Frame::SIZE) * threads;
             // Shared memory where the allocated pages are backupped
             // Layout: [ ( idx | realloc | pages... ) for each thread ]
-            let mut out_mapping =
-                MMap::<usize>::anon(0x1100_0000_0000, out_size, true, true).unwrap();
+            let mut out_mapping = unsafe {
+                Box::new_zeroed_slice_in(out_size, MMap::anon(0x1100_0000_0000, true, true))
+                    .assume_init()
+            };
             let out_size = out_size / threads;
             // Initialize with zero
             for out in out_mapping.chunks_mut(out_size) {
@@ -60,7 +65,7 @@ fn main() {
                 out[1] = 0; // realloc = 0
             }
             // Allocator mapping
-            let mapping = mapping(0x1000_0000_0000, pages, dax).unwrap();
+            let mapping = mapping(0x1000_0000_0000, pages, dax);
             warn!("Alloc manages {pages} with {} allocs", allocs * threads);
 
             let pid = unsafe { libc::fork() };
@@ -84,8 +89,8 @@ fn execute(
     allocs: usize,
     threads: usize,
     order: usize,
-    mut mapping: MMap<Frame>,
-    mut out_mapping: MMap<usize>,
+    mut mapping: Box<[Frame], MMap>,
+    mut out_mapping: Box<[usize], MMap>,
 ) {
     // Align to prevent false-sharing
     let out_size = align_up(allocs + 2, Frame::SIZE);
@@ -138,8 +143,8 @@ fn monitor(
     threads: usize,
     order: usize,
     child: i32,
-    mapping: MMap<Frame>,
-    out_mapping: MMap<usize>,
+    mapping: Box<[Frame], MMap>,
+    out_mapping: Box<[usize], MMap>,
 ) {
     let out_size = align_up(allocs + 2, Frame::SIZE);
 
@@ -222,26 +227,11 @@ fn monitor(
 }
 
 #[allow(unused_variables)]
-fn mapping(
-    begin: usize,
-    length: usize,
-    dax: Option<String>,
-) -> core::result::Result<MMap<Frame>, ()> {
+pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame], MMap> {
     #[cfg(target_os = "linux")]
-    if length > 0 {
-        if let Some(file) = dax {
-            warn!(
-                "MMap file {file} l={}G ({:x})",
-                (length * std::mem::size_of::<Frame>()) >> 30,
-                length * std::mem::size_of::<Frame>()
-            );
-            let f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(file)
-                .unwrap();
-            return MMap::dax(begin, length, f);
-        }
+    if let Some(file) = dax {
+        warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
+        return mmap::file(begin, length, &file, true);
     }
-    MMap::anon(begin, length, true, true)
+    mmap::anon(begin, length, false, true)
 }

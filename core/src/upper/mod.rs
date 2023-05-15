@@ -862,7 +862,7 @@ mod test {
     fn recover() {
         logging();
 
-        let mapping = test_mapping(0x1000_0000_0000, 8 << 18).unwrap();
+        let mapping = test_mapping(0x1000_0000_0000, 8 << 18);
         let area = pfn_range(&mapping);
         warn!("{area:?}");
         thread::pin(0);

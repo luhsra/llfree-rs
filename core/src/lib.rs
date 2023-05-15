@@ -8,6 +8,7 @@
 #![feature(generic_const_exprs)]
 #![feature(associated_type_bounds)]
 #![feature(inline_const)]
+#![feature(allocator_api)]
 
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]

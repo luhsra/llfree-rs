@@ -1,6 +1,7 @@
 #![feature(int_roundings)]
+#![feature(allocator_api)]
+#![feature(new_uninit)]
 
-use core::result::Result;
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
@@ -12,7 +13,7 @@ use log::warn;
 
 use llfree::frame::{pfn_range, Frame, PFN};
 use llfree::lower::Cache;
-use llfree::mmap::MMap;
+use llfree::mmap::{self, MMap};
 use llfree::table::PT_LEN;
 use llfree::thread;
 use llfree::upper::{Alloc, AllocExt, Array, Init};
@@ -104,7 +105,7 @@ fn main() {
 }
 
 fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
-    let mapping = map(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
+    let mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
     let alloc = Allocator::new(threads, pfn_range(&mapping), Init::Overwrite, false).unwrap();
     warn!("Prepare alloc");
     thread::parallel(
@@ -140,7 +141,7 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 }
 
 fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
-    let mapping = map(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax).unwrap();
+    let mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
 
     warn!("Recover alloc");
     let timer = Instant::now();
@@ -156,21 +157,12 @@ fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
 }
 
 #[allow(unused_variables)]
-fn map(begin: usize, length: usize, dax: &str) -> Result<MMap<Frame>, ()> {
+pub fn mapping(begin: usize, length: usize, dax: &str) -> Box<[Frame], MMap> {
     #[cfg(target_os = "linux")]
     {
-        warn!(
-            "MMap file {dax} l={}G ({:x})",
-            (length * std::mem::size_of::<Frame>()) >> 30,
-            length * std::mem::size_of::<Frame>()
-        );
-        let f = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(dax)
-            .unwrap();
-        MMap::dax(begin, length, f)
+        warn!("MMap file {dax} l={}G", (length * Frame::SIZE) >> 30);
+        mmap::file(begin, length, dax, true)
     }
     #[cfg(not(target_os = "linux"))]
-    unimplemented!("No NVRAM!")
+    panic!("No NVRAM!")
 }

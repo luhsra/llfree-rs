@@ -1,14 +1,16 @@
 #![feature(int_roundings)]
+#![feature(allocator_api)]
+#![feature(new_uninit)]
 
 use std::time::Instant;
 
 use clap::Parser;
-use log::warn;
 use llfree::frame::Frame;
-use llfree::mmap::{madvise, MAdvise, MMap};
+use llfree::mmap::{madvise, MAdvise, MMap, self};
 use llfree::table::PT_LEN;
 use llfree::thread;
 use llfree::util::{avg_bounds, logging, WyRand};
+use log::warn;
 
 /// Benchmarking the page-fault performance of a mapped memory region.
 #[derive(Parser, Debug)]
@@ -64,8 +66,7 @@ fn main() {
         dax,
         private,
         populate,
-    )
-    .unwrap();
+    );
     let t_map = t_map.elapsed().as_millis();
 
     let adv = if huge {
@@ -109,28 +110,17 @@ fn main() {
 }
 
 #[allow(unused_variables)]
-fn mapping(
+pub fn mapping(
     begin: usize,
     length: usize,
     dax: Option<String>,
     private: bool,
     populate: bool,
-) -> core::result::Result<MMap<Frame>, ()> {
+) -> Box<[Frame], MMap> {
     #[cfg(target_os = "linux")]
-    if length > 0 {
-        if let Some(file) = dax {
-            warn!(
-                "MMap file {file} l={}G ({:x})",
-                (length * std::mem::size_of::<Frame>()) >> 30,
-                length * std::mem::size_of::<Frame>()
-            );
-            let f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(file)
-                .unwrap();
-            return MMap::dax(begin, length, f);
-        }
+    if let Some(file) = dax {
+        warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
+        return mmap::file(begin, length, &file, true);
     }
-    MMap::anon(begin, length, !private, populate)
+    mmap::anon(begin, length, !private, populate)
 }
