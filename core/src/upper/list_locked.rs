@@ -168,12 +168,8 @@ impl ListLocked {
 
     #[inline]
     fn to_frame(&self, addr: PFN) -> Result<usize> {
-        if let Some(pfn) = addr.0.checked_sub(self.offset.0) {
-            if pfn < self.len {
-                Ok(pfn as _)
-            } else {
-                Err(Error::Address)
-            }
+        if let Some(pfn) = addr.0.checked_sub(self.offset.0) && pfn < self.len {
+            Ok(pfn as _)
         } else {
             Err(Error::Address)
         }

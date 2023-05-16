@@ -54,7 +54,7 @@ pub trait LowerAlloc: Default + fmt::Debug {
 mod test {
     use std::sync::Arc;
 
-    use crate::frame::Frame;
+    use crate::frame::{Frame, PFN};
     use crate::lower::LowerAlloc;
     use crate::table::PT_LEN;
     use crate::thread;
@@ -74,7 +74,7 @@ mod test {
         for _ in 0..8 {
             let lower = Arc::new(Lower::new(
                 THREADS,
-                buffer.as_ptr().into(),
+                PFN::from_ptr(buffer.as_ptr()),
                 buffer.len(),
                 Init::Overwrite,
                 true,
@@ -110,7 +110,7 @@ mod test {
         for _ in 0..8 {
             let lower = Arc::new(Lower::new(
                 THREADS,
-                buffer.as_ptr().into(),
+                PFN::from_ptr(buffer.as_ptr()),
                 buffer.len(),
                 Init::Overwrite,
                 true,

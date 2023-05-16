@@ -32,16 +32,6 @@ impl From<PFN> for usize {
         value.0
     }
 }
-impl From<*const Frame> for PFN {
-    fn from(value: *const Frame) -> Self {
-        Self::from_ptr(value)
-    }
-}
-impl From<PFN> for *const Frame {
-    fn from(value: PFN) -> Self {
-        value.as_ptr()
-    }
-}
 
 impl fmt::Display for PFN {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -50,7 +40,7 @@ impl fmt::Display for PFN {
 }
 impl fmt::Debug for PFN {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x{:x}", self.0)
+        fmt::Display::fmt(self, f)
     }
 }
 
@@ -69,7 +59,7 @@ pub trait PFNRange: Sized {
 
 pub fn pfn_range(slice: &[Frame]) -> Range<PFN> {
     let Range { start, end } = slice.as_ptr_range();
-    start.into()..end.into()
+    PFN::from_ptr(start)..PFN::from_ptr(end)
 }
 
 impl PFNRange for Range<PFN> {

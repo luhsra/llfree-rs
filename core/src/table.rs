@@ -198,17 +198,11 @@ where
             let i = (i + start_entry) % self.data.len();
 
             let mut offset = 0;
-            if self.data[i]
-                .fetch_update(|e| {
-                    if let Some((val, o)) = first_zeros_aligned(e, order) {
-                        offset = o;
-                        Some(val)
-                    } else {
-                        None
-                    }
-                })
-                .is_ok()
-            {
+            if let Ok(_) = self.data[i].fetch_update(|e| {
+                let (val, o) = first_zeros_aligned(e, order)?;
+                offset = o;
+                Some(val)
+            }) {
                 return Ok(i * Self::ENTRY_BITS + offset);
             }
         }
@@ -323,13 +317,7 @@ fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
                 None
             }
         }
-        6 => {
-            if v == 0 {
-                Some((u64::MAX, 0))
-            } else {
-                None
-            }
-        }
+        6 => (v == 0).then_some((u64::MAX, 0)),
         // All other orders are handled differently
         _ => unreachable!(),
     }

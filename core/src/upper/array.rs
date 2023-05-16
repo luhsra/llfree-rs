@@ -563,10 +563,7 @@ where
                 warn!("rollback {i}");
                 // Rollback reservation
                 let max = (self.frames() - i * L::N).min(L::N);
-                if self.trees[i]
-                    .fetch_update(|v| v.unreserve_add(free, max))
-                    .is_err()
-                {
+                if let Err(_) = self.trees[i].fetch_update(|v| v.unreserve_add(free, max)) {
                     error!("put - reservation rollback failed");
                     return Err(Error::Corruption);
                 }

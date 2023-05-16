@@ -113,7 +113,7 @@ impl WyRand {
 /// Retries the condition n times and returns if it was successfull.
 /// This pauses the CPU between retries if possible.
 #[inline(always)]
-pub fn spin_wait<F: FnMut() -> bool>(n: usize, mut cond: F) -> bool {
+pub fn spin_wait(n: usize, mut cond: impl FnMut() -> bool) -> bool {
     for _ in 0..n {
         if cond() {
             return true;

@@ -9,9 +9,11 @@
 #![feature(associated_type_bounds)]
 #![feature(inline_const)]
 #![feature(allocator_api)]
+#![feature(let_chains)]
 
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
+#![allow(clippy::redundant_pattern_matching)]
 
 #[cfg(feature = "std")]
 #[macro_use]

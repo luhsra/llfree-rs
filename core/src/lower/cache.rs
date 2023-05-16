@@ -393,10 +393,7 @@ where
         for _ in 0..CAS_RETRIES {
             for i in 0..HP {
                 let i = (offset + i) % HP;
-                if table[i]
-                    .fetch_update(|v| v.mark_allocated(Bitfield::LEN))
-                    .is_ok()
-                {
+                if let Ok(_) = table[i].fetch_update(|v| v.mark_allocated(Bitfield::LEN)) {
                     return Ok(align_down(start, Self::N) + i * Bitfield::LEN);
                 }
             }
@@ -413,9 +410,8 @@ where
         for _ in 0..CAS_RETRIES {
             for i in 0..HP / 2 {
                 let i = (offset + i) % (HP / 2);
-                if table_pair[i]
-                    .fetch_update(|v| v.map(|v| v.mark_allocated(Bitfield::LEN)))
-                    .is_ok()
+                if let Ok(_) =
+                    table_pair[i].fetch_update(|v| v.map(|v| v.mark_allocated(Bitfield::LEN)))
                 {
                     return Ok(align_down(start, Self::N) + 2 * i * Bitfield::LEN);
                 }

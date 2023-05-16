@@ -4,7 +4,6 @@ use core::ops::RangeBounds;
 use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64};
 
 use bitfield_struct::bitfield;
-use log::error;
 
 use crate::atomic::Atomic;
 
@@ -143,7 +142,6 @@ impl Tree {
         if self.reserved() && frames <= max {
             Some(self.with_free(frames).with_reserved(false))
         } else {
-            error!("{self:?} + {add}, {frames} <= {max}");
             None
         }
     }
@@ -213,10 +211,7 @@ const _: () = assert!(align_of::<ChildPair>() == size_of::<ChildPair>());
 
 impl ChildPair {
     pub fn map<F: Fn(Child) -> Option<Child>>(self, f: F) -> Option<ChildPair> {
-        match (f(self.0), f(self.1)) {
-            (Some(a), Some(b)) => Some(ChildPair(a, b)),
-            _ => None,
-        }
+        Some(ChildPair(f(self.0)?, f(self.1)?))
     }
     pub fn all<F: Fn(Child) -> bool>(self, f: F) -> bool {
         f(self.0) && f(self.1)

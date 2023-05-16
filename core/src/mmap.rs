@@ -256,8 +256,6 @@ mod test {
         logging();
 
         let mut mapping = super::anon(0x1000_0000_0000, 1024, false, true);
-        // let mut mapping = MMap::anon(0x0000_1000_0000_0000, Frame::SIZE, false, true).unwrap();
-
         mapping[0] = 42;
         assert_eq!(mapping[0], 42);
 
