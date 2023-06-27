@@ -17,16 +17,11 @@ pub struct ReservedTree {
     /// If this subtree is locked by a CPU.
     pub locked: bool,
     /// Start pfn / 64 within this reserved tree.
-    #[bits(47)]
+    #[bits(47, default = Self::START_RAW_MAX)]
     start_raw: usize,
 }
 impl Atomic for ReservedTree {
     type I = AtomicU64;
-}
-impl Default for ReservedTree {
-    fn default() -> Self {
-        Self::new().with_start_raw(Self::START_RAW_MAX)
-    }
 }
 impl ReservedTree {
     const START_RAW_MAX: usize = (1 << Self::START_RAW_BITS) - 1;
@@ -97,7 +92,7 @@ impl fmt::Debug for ReservedTree {
 }
 
 #[bitfield(u16)]
-#[derive(Default, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct Tree {
     /// Number of free 4K frames.
     #[bits(15)]
@@ -148,7 +143,7 @@ impl Tree {
 }
 
 #[bitfield(u16)]
-#[derive(Default, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct Child {
     /// Number of free 4K frames or u16::MAX for a huge frame.
     count: u16,

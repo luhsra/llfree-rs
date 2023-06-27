@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 libc = { version = "0.2", optional = true }
-bitfield-struct = "0.4"
+bitfield-struct = "0.5"
 log = { version = "0.4", default-features = false }
 env_logger = { version = "0.10", default-features = false, optional = true }
 

@@ -175,7 +175,7 @@ impl PartialEq<AllocName> for &str {
 }
 
 #[bitfield(u64)]
-#[derive(Default, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct LastFrees {
     #[bits(48)]
     tree_index: usize,
