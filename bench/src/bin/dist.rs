@@ -13,7 +13,7 @@ use log::warn;
 use llfree::frame::{pfn_range, Frame};
 use llfree::lower::Cache;
 use llfree::mmap::{MMap, self};
-use llfree::table::PT_LEN;
+use llfree::bitfield::PT_LEN;
 use llfree::thread;
 use llfree::upper::{Alloc, Array, Init};
 use llfree::util::logging;

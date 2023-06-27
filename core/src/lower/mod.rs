@@ -1,3 +1,5 @@
+//! Lower allocator implementations
+
 use core::fmt;
 use core::ops::Range;
 
@@ -54,9 +56,9 @@ pub trait LowerAlloc: Default + fmt::Debug {
 mod test {
     use std::sync::Arc;
 
+    use crate::bitfield::PT_LEN;
     use crate::frame::{Frame, PFN};
     use crate::lower::LowerAlloc;
-    use crate::table::PT_LEN;
     use crate::thread;
     use crate::upper::Init;
     use crate::util::logging;

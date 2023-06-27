@@ -7,7 +7,7 @@ use std::time::Instant;
 use clap::Parser;
 use llfree::frame::Frame;
 use llfree::mmap::{madvise, MAdvise, MMap, self};
-use llfree::table::PT_LEN;
+use llfree::bitfield::PT_LEN;
 use llfree::thread;
 use llfree::util::{avg_bounds, logging, WyRand};
 use log::warn;

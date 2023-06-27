@@ -1,11 +1,31 @@
+//! Packed entries for the allocators data structures
+
 use core::fmt;
 use core::mem::{align_of, size_of};
 use core::ops::RangeBounds;
-use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64};
+use core::sync::atomic::{self, AtomicU16, AtomicU32, AtomicU64, Ordering::Release};
 
 use bitfield_struct::bitfield;
 
-use crate::atomic::Atomic;
+use crate::atomic::{Atom, Atomic};
+
+pub trait AtomicArray<T: Copy, const L: usize> {
+    /// Overwrite the content of the whole array non-atomically.
+    ///
+    /// This is faster than atomics but does not handle race conditions.
+    fn atomic_fill(&self, e: T);
+}
+
+impl<T: Atomic, const L: usize> AtomicArray<T, L> for [Atom<T>; L] {
+    fn atomic_fill(&self, e: T) {
+        // cast to raw memory to let the compiler use vector instructions
+        #[allow(cast_ref_to_mut)]
+        let mem = unsafe { &mut *(self.as_ptr() as *mut [T; L]) };
+        mem.fill(e);
+        // memory ordering has to be enforced with a memory barrier
+        atomic::fence(Release);
+    }
+}
 
 /// Level 3 entry
 #[bitfield(u64, debug = false)]
@@ -277,7 +297,7 @@ mod test {
     use core::sync::atomic::AtomicU64;
 
     use crate::atomic::Atom;
-    use crate::table::PT_LEN;
+    use crate::bitfield::PT_LEN;
 
     #[test]
     fn pt() {

@@ -9,7 +9,7 @@ use clap::Parser;
 use llfree::frame::{pfn_range, Frame, PFN};
 use llfree::lower::*;
 use llfree::mmap::{self, MMap};
-use llfree::table::PT_LEN;
+use llfree::bitfield::PT_LEN;
 use llfree::thread;
 use llfree::upper::*;
 use llfree::util::{self, align_up, WyRand};

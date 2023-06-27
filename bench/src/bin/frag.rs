@@ -12,7 +12,7 @@ use log::warn;
 
 use llfree::{lower::*, mmap};
 use llfree::mmap::MMap;
-use llfree::table::PT_LEN;
+use llfree::bitfield::PT_LEN;
 use llfree::thread;
 use llfree::upper::*;
 use llfree::util::{self, WyRand};

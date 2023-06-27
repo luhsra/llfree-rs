@@ -1,3 +1,5 @@
+//! Threading and core pinning
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use alloc::vec::Vec;

@@ -352,9 +352,9 @@ mod test {
     use log::{info, warn};
 
     use crate::atomic::Atom;
+    use crate::bitfield::PT_LEN;
     use crate::frame::{pfn_range, Frame};
     use crate::mmap::test_mapping;
-    use crate::table::PT_LEN;
     use crate::upper::list_cas::{AtomicStack, AtomicStackDbg, Next};
     use crate::upper::{Alloc, AllocExt, Init};
     use crate::util::{self, logging};

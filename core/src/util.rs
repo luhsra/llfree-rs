@@ -1,3 +1,5 @@
+//! General utility functions
+
 use core::fmt;
 use core::mem::align_of;
 use core::ops::{Add, Deref, DerefMut, Div, Range};

@@ -1,6 +1,7 @@
 //! # Persistent non-volatile memory allocator
 //!
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
+
 #![no_std]
 #![feature(new_uninit)]
 #![feature(int_roundings)]
@@ -10,7 +11,6 @@
 #![feature(inline_const)]
 #![feature(allocator_api)]
 #![feature(let_chains)]
-
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
@@ -29,13 +29,14 @@ pub mod mmap;
 pub mod thread;
 
 pub mod atomic;
+pub mod bitfield;
 pub mod entry;
 pub mod frame;
 pub mod lower;
-pub mod table;
 pub mod upper;
 pub mod util;
 
+/// Allocation error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// Not enough memory
@@ -50,4 +51,5 @@ pub enum Error {
     Corruption = 5,
 }
 
+/// Allocation result
 pub type Result<T> = core::result::Result<T, Error>;

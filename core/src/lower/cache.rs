@@ -8,16 +8,16 @@ use alloc::slice;
 use alloc::string::String;
 
 use crate::atomic::Atom;
+use crate::entry::AtomicArray;
 use crate::entry::{Child, ChildPair};
 use crate::frame::{Frame, PFN};
-use crate::table::AtomicArray;
 use crate::upper::{Init, CAS_RETRIES};
 use crate::util::{align_down, align_up, spin_wait, CacheLine};
 use crate::{Error, Result};
 
 use super::LowerAlloc;
 
-type Bitfield = crate::table::Bitfield<8>;
+type Bitfield = crate::bitfield::Bitfield<8>;
 
 /// Tree allocator which is able to allocate order 0..11 frames.
 ///

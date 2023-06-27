@@ -241,9 +241,9 @@ mod test {
     use alloc::vec::Vec;
     use log::{info, warn};
 
+    use crate::bitfield::PT_LEN;
     use crate::frame::{pfn_range, Frame};
     use crate::mmap::test_mapping;
-    use crate::table::PT_LEN;
     use crate::upper::{Alloc, AllocExt, Init};
     use crate::util::logging;
     use crate::Error;

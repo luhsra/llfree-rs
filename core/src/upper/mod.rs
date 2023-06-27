@@ -1,3 +1,5 @@
+//! Upper allocator implementations
+
 use core::any::type_name;
 use core::ffi::c_void;
 use core::fmt;
@@ -237,10 +239,10 @@ mod test {
 
     use log::{info, warn};
 
+    use crate::bitfield::PT_LEN;
     use crate::frame::{pfn_range, Frame, PFNRange, PFN};
     use crate::lower::*;
     use crate::mmap::test_mapping;
-    use crate::table::PT_LEN;
     use crate::thread;
     use crate::upper::*;
     use crate::util::{logging, CacheLine, WyRand};

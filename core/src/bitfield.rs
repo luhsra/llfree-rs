@@ -1,3 +1,5 @@
+//! Atomic bitfield
+
 use core::mem::size_of;
 use core::ops::{Not, Range};
 use core::sync::atomic::{self, AtomicU64, Ordering::*};
@@ -10,24 +12,6 @@ use crate::{Error, Result};
 
 pub const PT_ORDER: usize = 9;
 pub const PT_LEN: usize = 1 << PT_ORDER;
-
-pub trait AtomicArray<T: Copy, const L: usize> {
-    /// Overwrite the content of the whole array non-atomically.
-    ///
-    /// This is faster than atomics but does not handle race conditions.
-    fn atomic_fill(&self, e: T);
-}
-
-impl<T: Atomic, const L: usize> AtomicArray<T, L> for [Atom<T>; L] {
-    fn atomic_fill(&self, e: T) {
-        // cast to raw memory to let the compiler use vector instructions
-        #[allow(cast_ref_to_mut)]
-        let mem = unsafe { &mut *(self.as_ptr() as *mut [T; L]) };
-        mem.fill(e);
-        // memory ordering has to be enforced with a memory barrier
-        atomic::fence(Release);
-    }
-}
 
 /// Bitfield replacing the level one table.
 pub struct Bitfield<const N: usize> {
@@ -169,16 +153,16 @@ where
 
     pub fn is_zero(&self, i: usize, order: usize) -> bool {
         let num_bits = 1 << order;
-        debug_assert!(i < Bitfield::LEN && order <= Bitfield::ORDER);
+        debug_assert!(i < Self::LEN && order <= Self::ORDER);
         debug_assert!(i % num_bits == 0, "not aligned");
 
-        let entry_i = i / Bitfield::ENTRY_BITS;
+        let entry_i = i / Self::ENTRY_BITS;
         if num_bits > Self::ENTRY_BITS {
-            let end_i = (i + num_bits) / Bitfield::ENTRY_BITS;
+            let end_i = (i + num_bits) / Self::ENTRY_BITS;
             (entry_i..end_i).all(|i| self.get_entry(i) == 0)
         } else {
             let entry = self.get_entry(entry_i);
-            let mask = (u64::MAX >> (u64::BITS as usize - num_bits)) << (i % Bitfield::ENTRY_BITS);
+            let mask = (u64::MAX >> (u64::BITS as usize - num_bits)) << (i % Self::ENTRY_BITS);
             (entry & mask) == 0
         }
     }

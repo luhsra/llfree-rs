@@ -1,3 +1,5 @@
+//! Page frame utilities
+
 use core::fmt;
 use core::mem::{align_of, size_of, transmute};
 use core::ops::Range;

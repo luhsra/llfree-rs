@@ -1,3 +1,5 @@
+//! Generic atomics
+
 use crate::util::CacheLine;
 use core::cell::UnsafeCell;
 use core::fmt;
