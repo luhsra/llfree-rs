@@ -1,9 +1,8 @@
 #![feature(allocator_api)]
 #![feature(new_uninit)]
 
-use core::iter::FromIterator;
 use core::{fmt, slice};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
@@ -13,10 +12,10 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 use log::warn;
 
+use llfree::bitfield::PT_LEN;
 use llfree::frame::{pfn_range, Frame, PFN};
 use llfree::lower::*;
 use llfree::mmap::{self, MMap};
-use llfree::bitfield::PT_LEN;
 use llfree::thread;
 use llfree::upper::*;
 use llfree::util::{self, WyRand};
@@ -61,7 +60,7 @@ struct Args {
 fn main() {
     let Args {
         bench,
-        allocs,
+        allocs: alloc_names,
         x,
         threads,
         outfile,
@@ -87,8 +86,6 @@ fn main() {
 
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
 
-    let alloc_names: HashSet<String> = HashSet::from_iter(allocs.into_iter());
-
     let mut allocs: [Box<dyn Alloc>; 4] = [
         Box::<Array<4, Cache<32>>>::default(),
         Box::<ListLocal>::default(),
@@ -99,9 +96,7 @@ fn main() {
     // Additional constraints (perf)
     let mut conditions = HashMap::<AllocName, &'static dyn Fn(usize, usize) -> bool>::new();
     conditions.insert(AllocName::new::<ListLocal>(), &|_, order| order == 0);
-    conditions.insert(AllocName::new::<ListLocked>(), &|_, order| {
-        order == 0 //&& (cores <= 16 || cores == 32)
-    });
+    conditions.insert(AllocName::new::<ListLocked>(), &|_, order| order == 0);
 
     for x in x {
         let t = bench.threads(threads, x);
@@ -111,7 +106,7 @@ fn main() {
 
         for alloc in &mut allocs {
             let name = alloc.name();
-            if !alloc_names.contains(&format!("{name}")) {
+            if !alloc_names.iter().any(|n| name == n.trim()) {
                 continue;
             }
 
