@@ -1,15 +1,14 @@
 use core::fmt::Write;
 use core::mem::size_of;
 
-use log::{error, info, warn};
-
 use alloc::boxed::Box;
 use alloc::slice;
 use alloc::string::String;
 
+use log::{error, info, warn};
+
 use crate::atomic::Atom;
-use crate::entry::AtomicArray;
-use crate::entry::{Child, ChildPair};
+use crate::entry::{AtomicArray, HugeEntry, HugePair};
 use crate::frame::{Frame, PFN};
 use crate::upper::{Init, CAS_RETRIES};
 use crate::util::{align_down, align_up, spin_wait, CacheLine};
@@ -41,7 +40,7 @@ pub struct Cache<const HP: usize> {
     pub begin: PFN,
     pub len: usize,
     pub bitfields: Box<[CacheLine<Bitfield>]>,
-    pub children: Box<[CacheLine<[Atom<Child>; HP]>]>,
+    pub children: Box<[CacheLine<[Atom<HugeEntry>; HP]>]>,
     pub persistent: bool,
 }
 
@@ -68,8 +67,8 @@ where
             // Reserve memory within the managed NVM for the l1 and l2 tables
             // These tables are stored at the end of the NVM
             let size_bitfields = num_bitfields * size_of::<Bitfield>();
-            let size_bitfields = align_up(size_bitfields, size_of::<[Child; HP]>()); // correct alignment
-            let size_tables = num_bitfields * size_of::<[Child; HP]>();
+            let size_bitfields = align_up(size_bitfields, size_of::<[HugeEntry; HP]>()); // correct alignment
+            let size_tables = num_bitfields * size_of::<[HugeEntry; HP]>();
             // Num of frames occupied by the tables
             let metadata_frames = (size_bitfields + size_tables).div_ceil(Frame::SIZE);
 
@@ -84,7 +83,7 @@ where
                 unsafe { Box::from_raw(slice::from_raw_parts_mut(metadata.cast(), num_bitfields)) };
 
             let mut offset = num_bitfields * size_of::<Bitfield>();
-            offset = align_up(offset, size_of::<[Child; HP]>()); // correct alignment
+            offset = align_up(offset, size_of::<[HugeEntry; HP]>()); // correct alignment
 
             // Start of the l2 table array
             let children = unsafe {
@@ -139,7 +138,7 @@ where
             let i = start / Bitfield::LEN;
 
             if start > self.frames() {
-                a_entry.store(Child::new());
+                a_entry.store(HugeEntry::new());
                 continue;
             }
 
@@ -147,7 +146,7 @@ where
             let free = entry.free();
             if deep {
                 // Deep recovery updates the counter
-                if entry.allocated() {
+                if entry.huge() {
                     // Check that underlying bitfield is empty
                     let p = self.bitfields[i].count_zeros();
                     if p != Bitfield::LEN {
@@ -164,7 +163,7 @@ where
                     let p = self.bitfields[i].count_zeros();
                     if free != p {
                         warn!("Invalid L2 start=0x{start:x} i{i}: {free} != {p}");
-                        a_entry.store(Child::new_free(p));
+                        a_entry.store(HugeEntry::new_free(p));
                     }
                     frames += p;
                 }
@@ -198,7 +197,7 @@ where
             let table = &self.children[frame / Self::N];
 
             if let Err(old) =
-                table[i].compare_exchange(Child::new_frame(), Child::new_free(Bitfield::LEN))
+                table[i].compare_exchange(HugeEntry::new_huge(), HugeEntry::new_free(Bitfield::LEN))
             {
                 error!("Addr p={frame:x} o={order} {old:?}");
                 Err(Error::Address)
@@ -210,7 +209,7 @@ where
             let table = &self.children[frame / Self::N];
 
             let old = table[i].load();
-            if old.allocated() {
+            if old.huge() {
                 self.partial_put_huge(old, frame, order)
             } else if old.free() <= Bitfield::LEN - (1 << order) {
                 self.put_small(frame, order)
@@ -270,7 +269,7 @@ where
     fn size_per_gib() -> usize {
         let frames = 1usize << (30 - Frame::SIZE_BITS);
         let size_bitfields = frames.div_ceil(8); // 1 bit per frame
-        let size_tables = size_of::<Child>() * frames.div_ceil(Bitfield::LEN);
+        let size_tables = size_of::<HugeEntry>() * frames.div_ceil(Bitfield::LEN);
         size_bitfields + size_tables
     }
 }
@@ -280,7 +279,7 @@ where
     [(); HP / 2]:,
 {
     /// Returns the table with pair entries that can be updated at once.
-    fn table_pair(&self, frame: usize) -> &[Atom<ChildPair>; HP / 2] {
+    fn table_pair(&self, frame: usize) -> &[Atom<HugePair>; HP / 2] {
         let table = &self.children[frame / Self::N];
         unsafe { &*table.as_ptr().cast() }
     }
@@ -290,13 +289,13 @@ where
         let (last, tables) = self.children.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
-            table.atomic_fill(Child::new_free(Bitfield::LEN));
+            table.atomic_fill(HugeEntry::new_free(Bitfield::LEN));
         }
         // Table is only partially included in the memory range
         for (i, entry) in last.iter().enumerate() {
             let frame = tables.len() * Self::N + i * Bitfield::LEN;
             let free = self.frames().saturating_sub(frame).min(Bitfield::LEN);
-            entry.store(Child::new_free(free));
+            entry.store(HugeEntry::new_free(free));
         }
 
         // Init bitfields
@@ -325,17 +324,17 @@ where
         let (last, tables) = self.children.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
-            table.atomic_fill(Child::new_frame());
+            table.atomic_fill(HugeEntry::new_huge());
         }
         // Table is only partially included in the memory range
         let last_i = (self.frames() / Bitfield::LEN) - tables.len() * HP;
         let (included, remainder) = last.split_at(last_i);
         for entry in included {
-            entry.store(Child::new_frame());
+            entry.store(HugeEntry::new_huge());
         }
         // Remainder is allocated as small frames
         for entry in remainder {
-            entry.store(Child::new_free(0));
+            entry.store(HugeEntry::new_free(0));
         }
 
         // Init bitfields
@@ -393,7 +392,7 @@ where
         for _ in 0..CAS_RETRIES {
             for i in 0..HP {
                 let i = (offset + i) % HP;
-                if let Ok(_) = table[i].fetch_update(|v| v.mark_allocated(Bitfield::LEN)) {
+                if let Ok(_) = table[i].fetch_update(|v| v.mark_huge(Bitfield::LEN)) {
                     return Ok(align_down(start, Self::N) + i * Bitfield::LEN);
                 }
             }
@@ -410,8 +409,7 @@ where
         for _ in 0..CAS_RETRIES {
             for i in 0..HP / 2 {
                 let i = (offset + i) % (HP / 2);
-                if let Ok(_) =
-                    table_pair[i].fetch_update(|v| v.map(|v| v.mark_allocated(Bitfield::LEN)))
+                if let Ok(_) = table_pair[i].fetch_update(|v| v.map(|v| v.mark_huge(Bitfield::LEN)))
                 {
                     return Ok(align_down(start, Self::N) + 2 * i * Bitfield::LEN);
                 }
@@ -447,10 +445,10 @@ where
         let i = ((frame / Bitfield::LEN) % HP) / 2;
 
         if let Err(old) = table_pair[i].compare_exchange(
-            ChildPair(Child::new_frame(), Child::new_frame()),
-            ChildPair(
-                Child::new_free(Bitfield::LEN),
-                Child::new_free(Bitfield::LEN),
+            HugePair(HugeEntry::new_huge(), HugeEntry::new_huge()),
+            HugePair(
+                HugeEntry::new_free(Bitfield::LEN),
+                HugeEntry::new_free(Bitfield::LEN),
             ),
         ) {
             error!("Addr {frame} o={} {old:?} i={i}", Self::MAX_ORDER);
@@ -460,7 +458,7 @@ where
         }
     }
 
-    fn partial_put_huge(&self, old: Child, frame: usize, order: usize) -> Result<()> {
+    fn partial_put_huge(&self, old: HugeEntry, frame: usize, order: usize) -> Result<()> {
         info!("partial free of huge frame {frame:x} o={order}");
         let i = (frame / Bitfield::LEN) % HP;
         let table = &self.children[frame / Self::N];
@@ -468,13 +466,13 @@ where
 
         // Try filling the whole bitfield
         if bitfield.fill_cas(true) {
-            if table[i].compare_exchange(old, Child::new()).is_err() {
+            if table[i].compare_exchange(old, HugeEntry::new()).is_err() {
                 error!("Failed partial clear");
                 return Err(Error::Corruption);
             }
         }
         // Wait for parallel partial_put_huge to finish
-        else if !spin_wait(CAS_RETRIES, || !table[i].load().allocated()) {
+        else if !spin_wait(CAS_RETRIES, || !table[i].load().huge()) {
             error!("Exceeding retries");
             return Err(Error::Corruption);
         }

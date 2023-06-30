@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use super::{Alloc, Init, Local, MAGIC};
 use crate::atomic::Atom;
-use crate::entry::{ReservedTree, Tree};
+use crate::entry::{Tree, ReservedTree};
 use crate::frame::{Frame, PFNRange, PFN};
 use crate::lower::LowerAlloc;
 use crate::upper::CAS_RETRIES;
@@ -406,7 +406,11 @@ where
     }
 
     /// Allocate a frame in the lower allocator
-    fn get_lower(&self, reserved: ReservedTree, order: usize) -> Result<(ReservedTree, usize)> {
+    fn get_lower(
+        &self,
+        reserved: ReservedTree,
+        order: usize,
+    ) -> Result<(ReservedTree, usize)> {
         let frame = self.lower.get(reserved.start(), order)?;
         Ok((
             reserved
@@ -419,7 +423,11 @@ where
     /// Frees from other CPUs update the global entry -> sync free counters.
     ///
     /// Returns if the global counter was large enough
-    fn try_sync_with_global(&self, local: &Atom<ReservedTree>, old: ReservedTree) -> Result<bool> {
+    fn try_sync_with_global(
+        &self,
+        local: &Atom<ReservedTree>,
+        old: ReservedTree,
+    ) -> Result<bool> {
         let i = old.start() / L::N;
         if i >= self.trees.entries.len() {
             return Ok(false);
@@ -555,7 +563,12 @@ where
     }
 
     /// Reserve an entry for bulk frees
-    fn reserve_for_put(&self, free: usize, local: &Atom<ReservedTree>, i: usize) -> Result<bool> {
+    fn reserve_for_put(
+        &self,
+        free: usize,
+        local: &Atom<ReservedTree>,
+        i: usize,
+    ) -> Result<bool> {
         let entry = ReservedTree::new_with(free, i * L::N);
         match self.cas_reserved(local, entry, false) {
             Ok(_) => Ok(true),

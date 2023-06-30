@@ -7,7 +7,6 @@
 #![feature(int_roundings)]
 #![feature(array_windows)]
 #![feature(generic_const_exprs)]
-#![feature(associated_type_bounds)]
 #![feature(inline_const)]
 #![feature(allocator_api)]
 #![feature(let_chains)]

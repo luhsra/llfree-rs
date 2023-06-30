@@ -55,23 +55,6 @@ impl<T: Atomic + fmt::Debug> fmt::Debug for Atom<T> {
     }
 }
 
-macro_rules! fn_trivial {
-    ($($name:ident),+) => {
-        $(
-            pub fn $name(&self, v: T) -> T {
-                self.0.$name(v.into()).into()
-            }
-        )+
-    };
-}
-
-// For all types that are the same as the underlying implementation
-impl<T: Atomic<I: AtomicImpl<V = T>>> Atom<T> {
-    fn_trivial![
-        fetch_min, fetch_max, fetch_add, fetch_sub, fetch_and, fetch_or, fetch_xor, fetch_nand
-    ];
-}
-
 /// Types that can be converted from/into atomics
 ///
 /// # Note
@@ -116,6 +99,16 @@ macro_rules! atomic_trivial {
     };
 }
 
+macro_rules! fn_trivial {
+    ($ty:ident ; $($name:ident),+) => {
+        $(
+            pub fn $name(&self, v: $ty) -> $ty {
+                AtomicImpl::$name(&self.0, v)
+            }
+        )+
+    };
+}
+
 macro_rules! atomic_impl {
     ($ty:ident, $atomic:ident) => {
         impl Atomic for $ty {
@@ -149,8 +142,13 @@ macro_rules! atomic_impl {
                 self.fetch_update(AcqRel, Acquire, f)
             }
             atomic_trivial![
-                swap, fetch_min, fetch_max, fetch_add, fetch_sub, fetch_and, fetch_or, fetch_xor,
-                fetch_nand
+                swap, fetch_min, fetch_max, fetch_add, fetch_sub, fetch_and, fetch_or, fetch_xor, fetch_nand
+            ];
+        }
+
+        impl Atom<$ty> {
+            fn_trivial![
+                $ty; fetch_min, fetch_max, fetch_add, fetch_sub, fetch_and, fetch_or, fetch_xor, fetch_nand
             ];
         }
     };

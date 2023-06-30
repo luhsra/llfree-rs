@@ -162,42 +162,48 @@ impl Tree {
     }
 }
 
+/// Manages huge frame, that can be allocated as base frames.
 #[bitfield(u16)]
 #[derive(PartialEq, Eq)]
-pub struct Child {
+pub struct HugeEntry {
     /// Number of free 4K frames or u16::MAX for a huge frame.
     count: u16,
 }
-impl Atomic for Child {
+impl Atomic for HugeEntry {
     type I = AtomicU16;
 }
-impl Child {
-    pub fn new_frame() -> Self {
+impl HugeEntry {
+    /// Creates an entry marked as allocated huge frame.
+    pub fn new_huge() -> Self {
         Self::new().with_count(u16::MAX)
     }
+    /// Creates a new entry with the given free counter.
     pub fn new_free(free: usize) -> Self {
         Self::new().with_count(free as _)
     }
-    pub fn allocated(self) -> bool {
+    /// Returns wether this entry is allocated as huge frame.
+    pub fn huge(self) -> bool {
         self.count() == u16::MAX
     }
+    /// Returns the free frames counter
     pub fn free(self) -> usize {
-        if !self.allocated() {
+        if !self.huge() {
             self.count() as _
         } else {
             0
         }
     }
-    pub fn mark_allocated(self, span: usize) -> Option<Self> {
+    /// Try to allocate this entry as huge frame.
+    pub fn mark_huge(self, span: usize) -> Option<Self> {
         if self.free() == span {
-            Some(Self::new_frame())
+            Some(Self::new_huge())
         } else {
             None
         }
     }
     /// Decrement the free frames counter.
     pub fn dec(self, num_frames: usize) -> Option<Self> {
-        if !self.allocated() && self.free() >= num_frames {
+        if !self.huge() && self.free() >= num_frames {
             Some(Self::new_free(self.free() - num_frames))
         } else {
             None
@@ -205,7 +211,7 @@ impl Child {
     }
     /// Increments the free frames counter.
     pub fn inc(self, span: usize, num_frames: usize) -> Option<Self> {
-        if !self.allocated() && self.free() <= span - num_frames {
+        if !self.huge() && self.free() <= span - num_frames {
             Some(Self::new_free(self.free() + num_frames))
         } else {
             None
@@ -213,33 +219,40 @@ impl Child {
     }
 }
 
-/// Pair of level 2 entries that can be changed at once.
+/// Pair of huge entries that can be changed at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(align(4))]
-pub struct ChildPair(pub Child, pub Child);
-impl Atomic for ChildPair {
+pub struct HugePair(pub HugeEntry, pub HugeEntry);
+impl Atomic for HugePair {
     type I = AtomicU32;
 }
 
-const _: () = assert!(size_of::<ChildPair>() == 2 * size_of::<Child>());
-const _: () = assert!(align_of::<ChildPair>() == size_of::<ChildPair>());
+const _: () = assert!(size_of::<HugePair>() == 2 * size_of::<HugeEntry>());
+const _: () = assert!(align_of::<HugePair>() == size_of::<HugePair>());
 
-impl ChildPair {
-    pub fn map<F: Fn(Child) -> Option<Child>>(self, f: F) -> Option<ChildPair> {
-        Some(ChildPair(f(self.0)?, f(self.1)?))
+impl HugePair {
+    /// Apply `f` to both entries.
+    pub fn map<F: Fn(HugeEntry) -> Option<HugeEntry>>(self, f: F) -> Option<HugePair> {
+        Some(HugePair(f(self.0)?, f(self.1)?))
     }
-    pub fn all<F: Fn(Child) -> bool>(self, f: F) -> bool {
+    /// Check if `f` is true for both entries.
+    pub fn all<F: Fn(HugeEntry) -> bool>(self, f: F) -> bool {
         f(self.0) && f(self.1)
     }
 }
-impl From<u32> for ChildPair {
+impl From<u32> for HugePair {
     fn from(value: u32) -> Self {
-        unsafe { core::mem::transmute(value) }
+        let [a, b, c, d] = value.to_ne_bytes();
+        Self(
+            HugeEntry(u16::from_ne_bytes([a, b])),
+            HugeEntry(u16::from_ne_bytes([c, d])),
+        )
     }
 }
-impl From<ChildPair> for u32 {
-    fn from(value: ChildPair) -> Self {
-        unsafe { core::mem::transmute(value) }
+impl From<HugePair> for u32 {
+    fn from(value: HugePair) -> Self {
+        let ([a, b], [c, d]) = (value.0 .0.to_ne_bytes(), value.1 .0.to_ne_bytes());
+        u32::from_ne_bytes([a, b, c, d])
     }
 }
 
