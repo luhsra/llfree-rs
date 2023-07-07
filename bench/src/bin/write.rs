@@ -5,9 +5,9 @@
 use std::time::Instant;
 
 use clap::Parser;
-use llfree::frame::Frame;
-use llfree::mmap::{madvise, MAdvise, MMap, self};
 use llfree::bitfield::PT_LEN;
+use llfree::frame::Frame;
+use llfree::mmap::{self, madvise, MAdvise, MMap};
 use llfree::thread;
 use llfree::util::{avg_bounds, logging, WyRand};
 use log::warn;
@@ -69,12 +69,15 @@ fn main() {
     );
     let t_map = t_map.elapsed().as_millis();
 
-    let adv = if huge {
-        MAdvise::Hugepage
-    } else {
-        MAdvise::NoHugepage
-    };
-    madvise(&mut mapping, adv);
+    #[cfg(target_os = "linux")]
+    madvise(
+        &mut mapping,
+        if huge {
+            MAdvise::Hugepage
+        } else {
+            MAdvise::NoHugepage
+        },
+    );
 
     let chunk_size = mapping.len().div_ceil(threads);
 

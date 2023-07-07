@@ -28,6 +28,7 @@ pub fn file<T>(begin: usize, len: usize, path: &str, dax: bool) -> Box<[T], MMap
 pub struct MMap {
     begin: usize,
     shared: bool,
+    #[allow(unused)]
     populate: bool,
     file: Option<(File, bool)>,
 }
@@ -66,14 +67,14 @@ unsafe impl Allocator for MMap {
             return Ok(unsafe { std::slice::from_raw_parts(begin as _, 0) }.into());
         }
 
-        let addr = if let Some((file, dax)) = &self.file {
+        let addr = if let Some((file, _dax)) = &self.file {
             let fd = file.as_raw_fd();
 
             #[allow(unused_mut)]
             let mut flags = libc::MAP_SHARED;
 
             #[cfg(target_os = "linux")]
-            if *dax {
+            if *_dax {
                 flags = libc::MAP_SHARED_VALIDATE | libc::MAP_SYNC;
             }
 
@@ -93,7 +94,14 @@ unsafe impl Allocator for MMap {
             } else {
                 libc::MAP_PRIVATE
             };
-            let populate = if self.populate { libc::MAP_POPULATE } else { 0 };
+
+            #[allow(unused_mut)]
+            let mut populate = 0;
+            #[cfg(target_os = "linux")]
+            if self.populate {
+                populate = libc::MAP_POPULATE
+            };
+
             unsafe {
                 libc::mmap(
                     begin as _,
@@ -159,15 +167,26 @@ pub enum MAdvise {
     /// Warn: This is not an advise. This will free the memory range immediately!
     DontNeed = libc::MADV_DONTNEED,
     Free = libc::MADV_FREE,
+
+    #[cfg(target_os = "linux")]
     Remove = libc::MADV_REMOVE,
+    #[cfg(target_os = "linux")]
     DontFork = libc::MADV_DONTFORK,
+    #[cfg(target_os = "linux")]
     DoFork = libc::MADV_DOFORK,
+    #[cfg(target_os = "linux")]
     Mergeable = libc::MADV_MERGEABLE,
+    #[cfg(target_os = "linux")]
     Unmergeable = libc::MADV_UNMERGEABLE,
+    #[cfg(target_os = "linux")]
     Hugepage = libc::MADV_HUGEPAGE,
+    #[cfg(target_os = "linux")]
     NoHugepage = libc::MADV_NOHUGEPAGE,
+    #[cfg(target_os = "linux")]
     DontDump = libc::MADV_DONTDUMP,
+    #[cfg(target_os = "linux")]
     DoDump = libc::MADV_DODUMP,
+    #[cfg(target_os = "linux")]
     HwPoison = libc::MADV_HWPOISON,
 
     /// see /usr/include/bits/mman-linux.h
@@ -193,9 +212,9 @@ pub fn madvise(mem: &mut [Frame], advise: MAdvise) {
 
 #[cfg(test)]
 pub fn test_mapping(begin: usize, length: usize) -> Box<[Frame], MMap> {
-    use log::warn;
     #[cfg(target_os = "linux")]
     if let Ok(f) = std::env::var("NVM_FILE") {
+        use log::warn;
         warn!("MMap file {f} l={}G", (length * Frame::SIZE) >> 30);
         return file(begin, length, &f, true);
     }
