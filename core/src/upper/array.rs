@@ -1,23 +1,81 @@
-use core::ffi::c_void;
+//! Upper allocator implementation
+
+use core::fmt;
 use core::hint::spin_loop;
 use core::mem::{align_of, size_of};
 use core::ops::{Index, Range};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use core::{fmt, unreachable};
-
-use log::{error, info, warn};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::unreachable;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use super::{Alloc, Init, Local, MAGIC};
-use crate::atomic::Atom;
-use crate::entry::{Tree, ReservedTree};
+use bitfield_struct::bitfield;
+use libc::c_void;
+use log::{error, info, warn};
+
+use crate::atomic::{Atom, Atomic};
+use crate::entry::{ReservedTree, Tree};
 use crate::frame::{Frame, PFNRange, PFN};
-use crate::lower::LowerAlloc;
+use crate::lower::Lower;
 use crate::upper::CAS_RETRIES;
-use crate::util::{align_down, CacheLine};
+use crate::util::{align_down, Align};
 use crate::{Error, Result};
+
+use super::{Alloc, Init};
+
+/// Magic marking the meta frame.
+pub const MAGIC: usize = 0x_dead_beef;
+
+#[bitfield(u64)]
+#[derive(PartialEq, Eq)]
+pub struct LastFrees {
+    #[bits(48)]
+    tree_index: usize,
+    #[bits(16)]
+    count: usize,
+}
+impl Atomic for LastFrees {
+    type I = AtomicU64;
+}
+
+#[derive(Default)]
+/// Per core data.
+struct Local<const F: usize> {
+    /// Local copy of the reserved level 3 entry
+    pub preferred: Atom<ReservedTree>,
+    /// Last frees
+    pub last_frees: Atom<LastFrees>,
+}
+
+impl<const F: usize> Local<F> {
+    /// Add a tree index to the history.
+    fn frees_push(&self, tree_index: usize) {
+        // If the update of this heuristic fails, ignore it
+        // Relaxed ordering is enough, as this is not shared between CPUs
+        let _ = self.last_frees.fetch_update(|v| {
+            if v.tree_index() == tree_index {
+                (v.count() < F).then_some(v.with_count(v.count() + 1))
+            } else {
+                Some(LastFrees::new().with_tree_index(tree_index).with_count(1))
+            }
+        });
+    }
+    /// Checks if the previous `count` frees had the same tree index.
+    fn frees_in_tree(&self, tree_index: usize) -> bool {
+        let lf = self.last_frees.load();
+        lf.tree_index() == tree_index && lf.count() >= F
+    }
+}
+
+impl<const F: usize> fmt::Debug for Local<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Local")
+            .field("reserved", &self.preferred.load())
+            .field("frees", &self.last_frees.load())
+            .finish()
+    }
+}
 
 /// Non-Volatile global metadata
 #[repr(align(0x1000))]
@@ -47,29 +105,23 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Frame::SIZE);
 /// the persistent metadata of the lower allocator.
 #[derive(Default)]
 #[repr(align(64))]
-pub struct Array<const F: usize, L: LowerAlloc>
-where
-    [(); L::N]:,
-{
+pub struct Array<const F: usize> {
     /// Pointer to the metadata frame at the end of the allocators persistent memory range
-    pub meta: Option<&'static Meta>,
+    meta: Option<&'static Meta>,
     /// CPU local data (only shared between CPUs if the memory area is too small)
-    pub local: Box<[CacheLine<Local<F>>]>,
+    local: Box<[Align<Local<F>>]>,
     /// Metadata of the lower alloc
-    pub lower: L,
+    lower: Lower,
     /// Manages the allocators trees
-    pub trees: Trees<{ L::N }>,
+    trees: Trees<{ Lower::N }>,
 }
 
-unsafe impl<const F: usize, L: LowerAlloc> Send for Array<F, L> where [(); L::N]: {}
-unsafe impl<const F: usize, L: LowerAlloc> Sync for Array<F, L> where [(); L::N]: {}
+unsafe impl<const F: usize> Send for Array<F> {}
+unsafe impl<const F: usize> Sync for Array<F> {}
 
-impl<const F: usize, L: LowerAlloc> fmt::Debug for Array<F, L>
-where
-    [(); L::N]:,
-{
+impl<const F: usize> fmt::Debug for Array<F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{} {{", self.name())?;
+        writeln!(f, "{} {{", Self::name())?;
 
         writeln!(
             f,
@@ -78,13 +130,13 @@ where
             self.lower.frames()
         )?;
 
-        writeln!(f, "    trees: {:?} ({} frames)", self.trees, L::N)?;
+        writeln!(f, "    trees: {:?} ({} frames)", self.trees, Lower::N)?;
         let free_frames = self.free_frames();
         let free_huge_frames = self.free_huge_frames();
         writeln!(
             f,
             "    free frames: {free_frames} ({free_huge_frames} huge, {} trees)",
-            free_frames.div_ceil(L::N)
+            free_frames.div_ceil(Lower::N)
         )?;
 
         for (t, local) in self.local.iter().enumerate() {
@@ -96,10 +148,14 @@ where
     }
 }
 
-impl<const F: usize, L: LowerAlloc> Alloc for Array<F, L>
-where
-    [(); L::N]:,
-{
+impl<const F: usize> Alloc for Array<F> {
+    /// Return the name of the allocator.
+    #[cold]
+    fn name() -> &'static str {
+        "LLFree"
+    }
+
+    /// Initialize the allocator.
     #[cold]
     fn init(
         &mut self,
@@ -110,18 +166,18 @@ where
     ) -> Result<()> {
         info!("initializing c={cores} {memory:?} {}", memory.len());
 
-        if memory.start.0 % (1 << L::MAX_ORDER) != 0 {
+        if memory.start.0 % (1 << Lower::MAX_ORDER) != 0 {
             warn!("Unexpected memory alignment {:x}", memory.start.0);
-            memory.start.0 = align_down(memory.start.0, 1 << L::MAX_ORDER);
+            memory.start.0 = align_down(memory.start.0, 1 << Lower::MAX_ORDER);
         }
 
-        if memory.len() < L::N * cores {
-            warn!("memory {} < {}", memory.len(), L::N * cores);
+        if memory.len() < Lower::N * cores {
+            warn!("memory {} < {}", memory.len(), Lower::N * cores);
             if memory.len() < 2 {
                 error!("Expecting at least {} frames", 2);
                 return Err(Error::Memory);
             }
-            cores = memory.len().div_ceil(L::N);
+            cores = memory.len().div_ceil(Lower::N);
         }
 
         if init != Init::Volatile {
@@ -132,7 +188,7 @@ where
         }
 
         // Create lower allocator
-        self.lower = L::new(cores, memory.start, memory.len(), init, free_all);
+        self.lower = Lower::new(cores, memory.start, memory.len(), init, free_all);
 
         // Init per-cpu data
         let mut local = Vec::with_capacity(cores);
@@ -158,8 +214,9 @@ where
         Ok(())
     }
 
+    /// Allocate a new frame of `order` on the given `core`.
     fn get(&self, core: usize, order: usize) -> Result<PFN> {
-        if order > L::MAX_ORDER {
+        if order > Lower::MAX_ORDER {
             error!("invalid order");
             return Err(Error::Memory);
         }
@@ -179,6 +236,7 @@ where
         Err(Error::Memory)
     }
 
+    /// Free the `frame` of `order` on the given `core`..
     fn put(&self, core: usize, addr: PFN, order: usize) -> Result<()> {
         let frame = self.addr_to_frame(addr, order)?;
 
@@ -186,17 +244,17 @@ where
         self.lower.put(frame, order)?;
 
         // Then update local / global counters
-        let i = frame / L::N;
+        let i = frame / Lower::N;
         let local = &self.local[core % self.local.len()];
-        let max = (self.frames() - i * L::N).min(L::N);
+        let max = (self.frames() - i * Lower::N).min(Lower::N);
 
         // Try update own tree first
         let num_frames = 1 << order;
         if let Err(tree) = local
             .preferred
-            .fetch_update(|v| v.inc(num_frames, max, |s| s / L::N == i))
+            .fetch_update(|v| v.inc(num_frames, max, |s| s / Lower::N == i))
         {
-            if tree.start() / L::N == i {
+            if tree.start() / Lower::N == i {
                 error!("inc failed L{i}: {tree:?} o={order}");
                 return Err(Error::Corruption);
             }
@@ -211,7 +269,7 @@ where
         match self.trees[i].fetch_update(|v| {
             let mut v = v.inc(num_frames, max)?;
             if !v.reserved()
-                && v.free() > Trees::<{ L::N }>::almost_allocated()
+                && v.free() > Trees::<{ Lower::N }>::almost_allocated()
                 && local.frees_in_tree(i)
             {
                 // put-reserve optimization:
@@ -236,6 +294,7 @@ where
         }
     }
 
+    /// Returns if `frame` is free. This might be racy!
     fn is_free(&self, addr: PFN, order: usize) -> bool {
         if let Ok(frame) = self.addr_to_frame(addr, order) {
             self.lower.is_free(frame, order)
@@ -244,10 +303,17 @@ where
         }
     }
 
+    /// Return the total number of frames the allocator manages.
     fn frames(&self) -> usize {
         self.lower.frames()
     }
 
+    /// Return the number of allocated frames.
+    fn allocated_frames(&self) -> usize {
+        self.frames() - self.free_frames()
+    }
+
+    /// Unreserve cpu-local frames
     fn drain(&self, core: usize) -> Result<()> {
         let local = &self.local[core % self.local.len()];
         match self.cas_reserved(&local.preferred, ReservedTree::default(), false) {
@@ -256,6 +322,7 @@ where
         }
     }
 
+    /// Return the number of free frames.
     fn free_frames(&self) -> usize {
         let mut frames = 0;
         // Global array
@@ -269,38 +336,24 @@ where
         frames
     }
 
+    /// Return the number of free huge frames or 0 if the allocator cannot allocate huge frames.
     fn free_huge_frames(&self) -> usize {
         let mut counter = 0;
         self.lower.for_each_huge_frame(|_, c| {
-            if c == (1 << L::HUGE_ORDER) {
+            if c == (1 << Lower::HUGE_ORDER) {
                 counter += 1;
             }
         });
         counter
     }
 
-    #[cold]
     fn for_each_huge_frame(&self, ctx: *mut c_void, f: fn(*mut c_void, PFN, usize)) {
         self.lower
-            .for_each_huge_frame(|frame, c| f(ctx, self.lower.begin().off(frame), c))
+            .for_each_huge_frame(|frame, c| f(ctx, frame, c))
     }
 }
 
-impl<const F: usize, L: LowerAlloc> Drop for Array<F, L>
-where
-    [(); L::N]:,
-{
-    fn drop(&mut self) {
-        if let Some(meta) = self.meta {
-            meta.crashed.store(false, Ordering::SeqCst);
-        }
-    }
-}
-
-impl<const F: usize, L: LowerAlloc> Array<F, L>
-where
-    [(); L::N]:,
-{
+impl<const F: usize> Array<F> {
     /// Recover the allocator from NVM after reboot.
     /// If crashed then the level 1 frame tables are traversed and diverging counters are corrected.
     fn recover(&mut self) -> Result<()> {
@@ -317,10 +370,10 @@ where
                     warn!("Try recover crashed allocator!");
                 }
 
-                let mut trees = Vec::with_capacity(self.frames().div_ceil(L::N));
+                let mut trees = Vec::with_capacity(self.frames().div_ceil(Lower::N));
                 // Recover each tree one-by-one
-                for i in 0..self.frames().div_ceil(L::N) {
-                    let frame = i * L::N;
+                for i in 0..self.frames().div_ceil(Lower::N) {
+                    let frame = i * Lower::N;
                     let frames = self.lower.recover(frame, deep)?;
                     trees.push(Atom::new(Tree::new_with(frames, false)));
                 }
@@ -340,8 +393,8 @@ where
 
     /// Convert an address to the frame index
     fn addr_to_frame(&self, addr: PFN, order: usize) -> Result<usize> {
-        if order > L::MAX_ORDER {
-            error!("invalid order: {order} > {}", L::MAX_ORDER);
+        if order > Lower::MAX_ORDER {
+            error!("invalid order: {order} > {}", Lower::MAX_ORDER);
             return Err(Error::Memory);
         }
 
@@ -394,7 +447,9 @@ where
                 // Reset counters, reserve new entry and retry allocation
                 warn!("alloc failed o={order} => retry");
                 // Increment global to prevent race condition with concurrent reservation
-                if let Err(_) = self.trees[start / L::N].fetch_update(|v| v.inc(1 << order, L::N)) {
+                if let Err(_) =
+                    self.trees[start / Lower::N].fetch_update(|v| v.inc(1 << order, Lower::N))
+                {
                     error!("Counter reset failed");
                     Err(Error::Corruption)
                 } else {
@@ -406,11 +461,7 @@ where
     }
 
     /// Allocate a frame in the lower allocator
-    fn get_lower(
-        &self,
-        reserved: ReservedTree,
-        order: usize,
-    ) -> Result<(ReservedTree, usize)> {
+    fn get_lower(&self, reserved: ReservedTree, order: usize) -> Result<(ReservedTree, usize)> {
         let frame = self.lower.get(reserved.start(), order)?;
         Ok((
             reserved
@@ -423,21 +474,17 @@ where
     /// Frees from other CPUs update the global entry -> sync free counters.
     ///
     /// Returns if the global counter was large enough
-    fn try_sync_with_global(
-        &self,
-        local: &Atom<ReservedTree>,
-        old: ReservedTree,
-    ) -> Result<bool> {
-        let i = old.start() / L::N;
+    fn try_sync_with_global(&self, local: &Atom<ReservedTree>, old: ReservedTree) -> Result<bool> {
+        let i = old.start() / Lower::N;
         if i >= self.trees.entries.len() {
             return Ok(false);
         }
 
         if let Ok(entry) = self.trees[i].fetch_update(|e| {
-            (e.reserved() && e.free() + old.free() > Trees::<{ L::N }>::almost_allocated())
+            (e.reserved() && e.free() + old.free() > Trees::<{ Lower::N }>::almost_allocated())
                 .then_some(e.with_free(0))
         }) {
-            debug_assert!(old.free() + entry.free() <= L::N);
+            debug_assert!(old.free() + entry.free() <= Lower::N);
 
             if local
                 .compare_exchange(old, old.with_free(old.free() + entry.free()))
@@ -508,7 +555,7 @@ where
 
         // Try reserve new tree
         let start = if old.has_start() {
-            old.start() / L::N
+            old.start() / Lower::N
         } else {
             // Different initial starting point for every core
             self.trees.entries.len() / self.local.len() * core
@@ -563,19 +610,14 @@ where
     }
 
     /// Reserve an entry for bulk frees
-    fn reserve_for_put(
-        &self,
-        free: usize,
-        local: &Atom<ReservedTree>,
-        i: usize,
-    ) -> Result<bool> {
-        let entry = ReservedTree::new_with(free, i * L::N);
+    fn reserve_for_put(&self, free: usize, local: &Atom<ReservedTree>, i: usize) -> Result<bool> {
+        let entry = ReservedTree::new_with(free, i * Lower::N);
         match self.cas_reserved(local, entry, false) {
             Ok(_) => Ok(true),
             Err(Error::Retry) => {
                 warn!("rollback {i}");
                 // Rollback reservation
-                let max = (self.frames() - i * L::N).min(L::N);
+                let max = (self.frames() - i * Lower::N).min(Lower::N);
                 if let Err(_) = self.trees[i].fetch_update(|v| v.unreserve_add(free, max)) {
                     error!("put - reservation rollback failed");
                     return Err(Error::Corruption);
@@ -604,8 +646,16 @@ where
     }
 }
 
+impl<const F: usize> Drop for Array<F> {
+    fn drop(&mut self) {
+        if let Some(meta) = self.meta {
+            meta.crashed.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 #[derive(Default)]
-pub struct Trees<const LN: usize> {
+struct Trees<const LN: usize> {
     /// Array of level 3 entries, which are the roots of the trees
     entries: Box<[Atom<Tree>]>,
 }
@@ -708,7 +758,7 @@ impl<const LN: usize> Trees<LN> {
         start: usize,
         mut get_lower: impl FnMut(ReservedTree) -> Result<(ReservedTree, usize)>,
     ) -> Result<(ReservedTree, usize)> {
-        const ENTRIES_PER_CACHELINE: usize = align_of::<CacheLine>() / size_of::<Tree>();
+        const ENTRIES_PER_CACHELINE: usize = align_of::<Align>() / size_of::<Tree>();
         // One quater of the per-CPU memory
         let vicinity = ((self.entries.len() / cores) / 4).max(1) as isize;
 
@@ -810,5 +860,31 @@ impl<const LN: usize> Trees<LN> {
                 r => r,
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod test {
+    use super::Local;
+
+    /// Testing the related frames heuristic for frees
+    #[test]
+    fn last_frees() {
+        let local = Local::<4>::default();
+        let frame1 = 43;
+        let i1 = frame1 / (512 * 512);
+        assert!(!local.frees_in_tree(i1));
+        local.frees_push(i1);
+        local.frees_push(i1);
+        local.frees_push(i1);
+        assert!(!local.frees_in_tree(i1));
+        local.frees_push(i1);
+        assert!(local.frees_in_tree(i1));
+        let frame2 = 512 * 512 + 43;
+        let i2 = frame2 / (512 * 512);
+        assert_ne!(i1, i2);
+        local.frees_push(i2);
+        assert!(!local.frees_in_tree(i1));
+        assert!(!local.frees_in_tree(i2));
     }
 }

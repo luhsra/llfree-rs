@@ -1,6 +1,6 @@
 //! Generic atomics
 
-use crate::util::CacheLine;
+use crate::util::Align;
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::ops::{Deref, DerefMut};
@@ -164,14 +164,14 @@ atomic_impl!(usize, AtomicUsize);
 pub struct Spin<T> {
     lock: AtomicBool,
     /// Cache aligned value -> no races with lock
-    value: CacheLine<UnsafeCell<T>>,
+    value: Align<UnsafeCell<T>>,
 }
 
 impl<T> Spin<T> {
     pub const fn new(value: T) -> Self {
         Self {
             lock: AtomicBool::new(false),
-            value: CacheLine(UnsafeCell::new(value)),
+            value: Align(UnsafeCell::new(value)),
         }
     }
     pub fn lock(&self) -> SpinGuard<T> {

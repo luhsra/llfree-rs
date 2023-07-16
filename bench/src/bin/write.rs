@@ -10,7 +10,6 @@ use llfree::frame::Frame;
 use llfree::mmap::{self, madvise, MAdvise, MMap};
 use llfree::thread;
 use llfree::util::{avg_bounds, logging, WyRand};
-use log::warn;
 
 /// Benchmarking the page-fault performance of a mapped memory region.
 #[derive(Parser, Debug)]
@@ -122,7 +121,7 @@ pub fn mapping(
 ) -> Box<[Frame], MMap> {
     #[cfg(target_os = "linux")]
     if let Some(file) = dax {
-        warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
+        log::warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
         return mmap::file(begin, length, &file, true);
     }
     mmap::anon(begin, length, !private, populate)

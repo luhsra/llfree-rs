@@ -10,13 +10,13 @@ use std::sync::{Barrier, Mutex};
 use clap::Parser;
 use log::warn;
 
-use llfree::{lower::*, mmap};
-use llfree::mmap::MMap;
 use llfree::bitfield::PT_LEN;
+use llfree::frame::{pfn_range, Frame, PFN};
+use llfree::mmap;
+use llfree::mmap::MMap;
 use llfree::thread;
 use llfree::upper::*;
 use llfree::util::{self, WyRand};
-use llfree::frame::{pfn_range, Frame, PFN};
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
@@ -44,7 +44,7 @@ struct Args {
     stride: usize,
 }
 
-type Allocator = Array<3, Cache<32>>;
+type Allocator = Upper<3>;
 
 fn main() {
     let Args {
@@ -168,7 +168,6 @@ fn main() {
 
 /// count and output stats
 fn stats(out: &mut File, alloc: &Allocator, i: usize) -> io::Result<()> {
-
     let mut free_per_huge = Vec::with_capacity(alloc.frames() / 512);
     alloc.each_huge_frame(|_pfn, free| {
         free_per_huge.push(free as u16);

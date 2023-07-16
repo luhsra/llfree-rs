@@ -1,5 +1,8 @@
+//! Lower allocator implementations
+
 use core::fmt::Write;
 use core::mem::size_of;
+use core::ops::Range;
 
 use alloc::boxed::Box;
 use alloc::slice;
@@ -11,14 +14,15 @@ use crate::atomic::Atom;
 use crate::entry::{AtomicArray, HugeEntry, HugePair};
 use crate::frame::{Frame, PFN};
 use crate::upper::{Init, CAS_RETRIES};
-use crate::util::{align_down, align_up, spin_wait, CacheLine};
+use crate::util::{align_down, align_up, spin_wait, Align};
 use crate::{Error, Result};
-
-use super::LowerAlloc;
 
 type Bitfield = crate::bitfield::Bitfield<8>;
 
-/// Tree allocator which is able to allocate order 0..11 frames.
+/// Lower-level frame allocator.
+///
+/// This level implements the actual allocation/free operations.
+/// Each allocation/free is limited to a chunk of [LowerAlloc::N] frames.
 ///
 /// Here the bitfields are 512 bit large -> strong focus on huge frames.
 /// Upon that is a table for each tree, with an entry per bitfield.
@@ -36,27 +40,31 @@ type Bitfield = crate::bitfield::Bitfield<8>;
 /// RAM: [ Frames ], Bitfields and Tables are allocated elswhere
 /// ```
 #[derive(Default, Debug)]
-pub struct Cache<const HP: usize> {
-    pub begin: PFN,
-    pub len: usize,
-    pub bitfields: Box<[CacheLine<Bitfield>]>,
-    pub children: Box<[CacheLine<[Atom<HugeEntry>; HP]>]>,
-    pub persistent: bool,
+pub struct Lower {
+    begin: PFN,
+    len: usize,
+    bitfields: Box<[Align<Bitfield>]>,
+    children: Box<[Align<[Atom<HugeEntry>; Self::HP]>]>,
+    persistent: bool,
 }
 
-unsafe impl<const HP: usize> Send for Cache<HP> {}
-unsafe impl<const HP: usize> Sync for Cache<HP> {}
+unsafe impl Send for Lower {}
+unsafe impl Sync for Lower {}
 
-impl<const HP: usize> LowerAlloc for Cache<HP>
-where
-    [(); HP / 2]:,
-{
-    const N: usize = HP * Bitfield::LEN;
-    const HUGE_ORDER: usize = Bitfield::ORDER;
-    const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
+const _: () = assert!(Lower::HP < (1 << (u16::BITS as usize - Lower::HUGE_ORDER)));
 
-    fn new(_cores: usize, begin: PFN, len: usize, init: Init, free_all: bool) -> Self {
-        debug_assert!(HP < (1 << (u16::BITS as usize - Self::HUGE_ORDER)));
+impl Lower {
+    /// Number of huge pages managed by a chunk
+    pub const HP: usize = 32;
+    /// Pages per chunk. Every alloc only searches in a chunk of this size.
+    pub const N: usize = Self::HP * Bitfield::LEN;
+    /// The maximal allowed order of this allocator
+    pub const HUGE_ORDER: usize = Bitfield::ORDER;
+    pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
+
+    /// Create a new lower allocator.
+    pub fn new(_cores: usize, begin: PFN, len: usize, init: Init, free_all: bool) -> Self {
+        debug_assert!(Self::HP < (1 << (u16::BITS as usize - Self::HUGE_ORDER)));
 
         // FIXME: Lifetime hack!
         let memory = unsafe { slice::from_raw_parts_mut(begin.as_ptr_mut(), len) };
@@ -67,8 +75,8 @@ where
             // Reserve memory within the managed NVM for the l1 and l2 tables
             // These tables are stored at the end of the NVM
             let size_bitfields = num_bitfields * size_of::<Bitfield>();
-            let size_bitfields = align_up(size_bitfields, size_of::<[HugeEntry; HP]>()); // correct alignment
-            let size_tables = num_bitfields * size_of::<[HugeEntry; HP]>();
+            let size_bitfields = align_up(size_bitfields, size_of::<[HugeEntry; Self::HP]>()); // correct alignment
+            let size_tables = num_bitfields * size_of::<[HugeEntry; Self::HP]>();
             // Num of frames occupied by the tables
             let metadata_frames = (size_bitfields + size_tables).div_ceil(Frame::SIZE);
 
@@ -83,7 +91,7 @@ where
                 unsafe { Box::from_raw(slice::from_raw_parts_mut(metadata.cast(), num_bitfields)) };
 
             let mut offset = num_bitfields * size_of::<Bitfield>();
-            offset = align_up(offset, size_of::<[HugeEntry; HP]>()); // correct alignment
+            offset = align_up(offset, size_of::<[HugeEntry; Self::HP]>()); // correct alignment
 
             // Start of the l2 table array
             let children = unsafe {
@@ -121,15 +129,23 @@ where
         alloc
     }
 
-    fn frames(&self) -> usize {
+    pub fn frames(&self) -> usize {
         self.len
     }
 
-    fn begin(&self) -> PFN {
+    pub fn begin(&self) -> PFN {
         self.begin
     }
 
-    fn recover(&self, start: usize, deep: bool) -> Result<usize> {
+    pub fn memory(&self) -> Range<PFN> {
+        self.begin()..PFN(self.begin().0 + self.frames())
+    }
+
+    /// Recovers the data structures for the [LowerAlloc::N] sized chunk at `start`.
+    /// `deep` indicates that the allocator has crashed and the
+    /// recovery might have to be more extensive.
+    /// Returns the number of recovered frames.
+    pub fn recover(&self, start: usize, deep: bool) -> Result<usize> {
         let mut frames = 0;
 
         let table = &self.children[start / Self::N];
@@ -175,7 +191,8 @@ where
         Ok(frames)
     }
 
-    fn get(&self, start: usize, order: usize) -> Result<usize> {
+    /// Try allocating a new `frame` in the [LowerAlloc::N] sized chunk at `start`.
+    pub fn get(&self, start: usize, order: usize) -> Result<usize> {
         debug_assert!(order <= Self::MAX_ORDER);
 
         match order {
@@ -185,15 +202,15 @@ where
         }
     }
 
-    /// Free single frame and returns if the frame was huge
-    fn put(&self, frame: usize, order: usize) -> Result<()> {
+    /// Free single frame
+    pub fn put(&self, frame: usize, order: usize) -> Result<()> {
         debug_assert!(order <= Self::MAX_ORDER);
         debug_assert!(frame < self.frames());
 
         if order == Self::MAX_ORDER {
             self.put_max(frame)
         } else if order == Self::HUGE_ORDER {
-            let i = (frame / Bitfield::LEN) % HP;
+            let i = (frame / Bitfield::LEN) % Self::HP;
             let table = &self.children[frame / Self::N];
 
             if let Err(old) =
@@ -205,7 +222,7 @@ where
                 Ok(())
             }
         } else {
-            let i = (frame / Bitfield::LEN) % HP;
+            let i = (frame / Bitfield::LEN) % Self::HP;
             let table = &self.children[frame / Self::N];
 
             let old = table[i].load();
@@ -220,7 +237,8 @@ where
         }
     }
 
-    fn is_free(&self, frame: usize, order: usize) -> bool {
+    /// Returns if the frame is free. This might be racy!
+    pub fn is_free(&self, frame: usize, order: usize) -> bool {
         debug_assert!(frame % (1 << order) == 0);
         if order > Self::MAX_ORDER || frame + (1 << order) > self.frames() {
             return false;
@@ -228,13 +246,13 @@ where
 
         if order > Bitfield::ORDER {
             // multiple huge frames
-            let i = (frame / Bitfield::LEN) % HP;
+            let i = (frame / Bitfield::LEN) % Self::HP;
             self.table_pair(frame)[i / 2]
                 .load()
                 .all(|e| e.free() == Bitfield::LEN)
         } else {
             let table = &self.children[frame / Self::N];
-            let i = (frame / Bitfield::LEN) % HP;
+            let i = (frame / Bitfield::LEN) % Self::HP;
             let entry = table[i].load();
 
             if entry.free() < (1 << order) {
@@ -248,7 +266,8 @@ where
         }
     }
 
-    fn allocated_frames(&self) -> usize {
+    /// Debug function, returning the number of allocated frames and performing internal checks.
+    pub fn allocated_frames(&self) -> usize {
         let mut frames = self.frames();
         for table in &*self.children {
             for entry in table.iter() {
@@ -258,28 +277,19 @@ where
         frames
     }
 
-    fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, mut f: F) {
+    /// Debug function returning number of free frames in each order 9 chunk
+    pub fn for_each_huge_frame<F: FnMut(PFN, usize)>(&self, mut f: F) {
         for (ti, table) in self.children.iter().enumerate() {
             for (ci, child) in table.iter().enumerate() {
-                f(ti * HP + ci, child.load().free())
+                f(self.begin().off(ti * Self::HP + ci), child.load().free())
             }
         }
     }
-
-    fn size_per_gib() -> usize {
-        let frames = 1usize << (30 - Frame::SIZE_BITS);
-        let size_bitfields = frames.div_ceil(8); // 1 bit per frame
-        let size_tables = size_of::<HugeEntry>() * frames.div_ceil(Bitfield::LEN);
-        size_bitfields + size_tables
-    }
 }
 
-impl<const HP: usize> Cache<HP>
-where
-    [(); HP / 2]:,
-{
+impl Lower {
     /// Returns the table with pair entries that can be updated at once.
-    fn table_pair(&self, frame: usize) -> &[Atom<HugePair>; HP / 2] {
+    fn table_pair(&self, frame: usize) -> &[Atom<HugePair>; Self::HP / 2] {
         let table = &self.children[frame / Self::N];
         unsafe { &*table.as_ptr().cast() }
     }
@@ -327,7 +337,7 @@ where
             table.atomic_fill(HugeEntry::new_huge());
         }
         // Table is only partially included in the memory range
-        let last_i = (self.frames() / Bitfield::LEN) - tables.len() * HP;
+        let last_i = (self.frames() / Bitfield::LEN) - tables.len() * Self::HP;
         let (included, remainder) = last.split_at(last_i);
         for entry in included {
             entry.store(HugeEntry::new_huge());
@@ -354,14 +364,14 @@ where
     fn get_small(&self, start: usize, order: usize) -> Result<usize> {
         debug_assert!(order < Bitfield::ORDER);
 
-        let first_bf_i = align_down(start / Bitfield::LEN, HP);
+        let first_bf_i = align_down(start / Bitfield::LEN, Self::HP);
         let start_bf_e = (start / Bitfield::ENTRY_BITS) % Bitfield::ENTRIES;
         let table = &self.children[start / Self::N];
 
         for _ in 0..CAS_RETRIES {
-            let off = (start / Bitfield::LEN) % HP;
-            for j in 0..HP {
-                let i = (j + off) % HP;
+            let off = (start / Bitfield::LEN) % Self::HP;
+            for j in 0..Self::HP {
+                let i = (j + off) % Self::HP;
 
                 if table[i].fetch_update(|v| v.dec(1 << order)).is_ok() {
                     let bf_i = first_bf_i + i;
@@ -388,10 +398,10 @@ where
     /// Allocate huge frame
     fn get_huge(&self, start: usize) -> Result<usize> {
         let table = &self.children[start / Self::N];
-        let offset = (start / Bitfield::LEN) % HP;
+        let offset = (start / Bitfield::LEN) % Self::HP;
         for _ in 0..CAS_RETRIES {
-            for i in 0..HP {
-                let i = (offset + i) % HP;
+            for i in 0..Self::HP {
+                let i = (offset + i) % Self::HP;
                 if let Ok(_) = table[i].fetch_update(|v| v.mark_huge(Bitfield::LEN)) {
                     return Ok(align_down(start, Self::N) + i * Bitfield::LEN);
                 }
@@ -405,10 +415,10 @@ where
     /// Allocate multiple huge frames
     fn get_max(&self, start: usize) -> Result<usize> {
         let table_pair = self.table_pair(start);
-        let offset = ((start / Bitfield::LEN) % HP) / 2;
+        let offset = ((start / Bitfield::LEN) % Self::HP) / 2;
         for _ in 0..CAS_RETRIES {
-            for i in 0..HP / 2 {
-                let i = (offset + i) % (HP / 2);
+            for i in 0..Self::HP / 2 {
+                let i = (offset + i) % (Self::HP / 2);
                 if let Ok(_) = table_pair[i].fetch_update(|v| v.map(|v| v.mark_huge(Bitfield::LEN)))
                 {
                     return Ok(align_down(start, Self::N) + 2 * i * Bitfield::LEN);
@@ -431,7 +441,7 @@ where
         }
 
         let table = &self.children[frame / Self::N];
-        let i = (frame / Bitfield::LEN) % HP;
+        let i = (frame / Bitfield::LEN) % Self::HP;
         if let Err(entry) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order)) {
             error!("Inc failed i{i} p={frame} {entry:?}");
             return Err(Error::Corruption);
@@ -442,7 +452,7 @@ where
 
     pub fn put_max(&self, frame: usize) -> Result<()> {
         let table_pair = self.table_pair(frame);
-        let i = ((frame / Bitfield::LEN) % HP) / 2;
+        let i = ((frame / Bitfield::LEN) % Self::HP) / 2;
 
         if let Err(old) = table_pair[i].compare_exchange(
             HugePair(HugeEntry::new_huge(), HugeEntry::new_huge()),
@@ -460,7 +470,7 @@ where
 
     fn partial_put_huge(&self, old: HugeEntry, frame: usize, order: usize) -> Result<()> {
         info!("partial free of huge frame {frame:x} o={order}");
-        let i = (frame / Bitfield::LEN) % HP;
+        let i = (frame / Bitfield::LEN) % Self::HP;
         let table = &self.children[frame / Self::N];
         let bitfield = &self.bitfields[frame / Bitfield::LEN];
 
@@ -500,7 +510,7 @@ where
     }
 }
 
-impl<const HP: usize> Drop for Cache<HP> {
+impl Drop for Lower {
     fn drop(&mut self) {
         if self.persistent {
             // The chunks are part of the allocators managed memory
@@ -515,14 +525,16 @@ mod test {
     use alloc::vec::Vec;
     use log::warn;
 
-    use super::{Bitfield, Cache};
+    use super::Bitfield;
+    use crate::bitfield::PT_LEN;
+    use crate::frame::Frame;
     use crate::frame::PFN;
-    use crate::lower::LowerAlloc;
+    use crate::lower::Lower;
     use crate::thread;
     use crate::upper::Init;
     use crate::util::{logging, WyRand};
 
-    type Allocator = Cache<64>;
+    type Allocator = Lower;
 
     fn count(pt: &Bitfield) -> usize {
         let mut frames = 0;
@@ -781,5 +793,77 @@ mod test {
         lower.put(0, 0).unwrap();
 
         assert_eq!(lower.allocated_frames(), Allocator::N - 2);
+    }
+
+    #[test]
+    #[ignore]
+    fn rand_realloc_first() {
+        logging();
+
+        const THREADS: usize = 6;
+        let buffer = vec![Frame::new(); 2 * THREADS * PT_LEN * PT_LEN];
+
+        for _ in 0..8 {
+            let lower = Allocator::new(
+                THREADS,
+                PFN::from_ptr(buffer.as_ptr()),
+                buffer.len(),
+                Init::Overwrite,
+                true,
+            );
+            assert_eq!(lower.allocated_frames(), 0);
+
+            thread::parallel(0..THREADS, |t| {
+                thread::pin(t);
+
+                let mut frames = [0; 4];
+                for p in &mut frames {
+                    *p = lower.get(0, 0).unwrap();
+                }
+                frames.reverse();
+                for p in frames {
+                    lower.put(p, 0).unwrap();
+                }
+            });
+
+            assert_eq!(lower.allocated_frames(), 0);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn rand_realloc_last() {
+        logging();
+
+        const THREADS: usize = 6;
+        let mut frames = [0; PT_LEN];
+        let buffer = vec![Frame::new(); 2 * THREADS * PT_LEN * PT_LEN];
+
+        for _ in 0..8 {
+            let lower = Allocator::new(
+                THREADS,
+                PFN::from_ptr(buffer.as_ptr()),
+                buffer.len(),
+                Init::Overwrite,
+                true,
+            );
+            assert_eq!(lower.allocated_frames(), 0);
+
+            for frame in &mut frames[..PT_LEN - 3] {
+                *frame = lower.get(0, 0).unwrap();
+            }
+
+            thread::parallel(0..THREADS, |t| {
+                thread::pin(t);
+
+                if t < THREADS / 2 {
+                    lower.put(frames[t], 0).unwrap();
+                } else {
+                    lower.get(0, 0).unwrap();
+                }
+            });
+
+            assert_eq!(lower.allocated_frames(), PT_LEN - 3);
+        }
     }
 }

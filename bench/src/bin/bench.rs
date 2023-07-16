@@ -2,7 +2,6 @@
 #![feature(new_uninit)]
 
 use core::{fmt, slice};
-use std::collections::HashMap;
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
@@ -14,7 +13,6 @@ use log::warn;
 
 use llfree::bitfield::PT_LEN;
 use llfree::frame::{pfn_range, Frame, PFN};
-use llfree::lower::*;
 use llfree::mmap::{self, MMap};
 use llfree::thread;
 use llfree::upper::*;
@@ -57,6 +55,8 @@ struct Args {
     stride: usize,
 }
 
+type Allocator = Upper<4>;
+
 fn main() {
     let Args {
         bench,
@@ -86,44 +86,19 @@ fn main() {
 
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
 
-    let mut allocs: [Box<dyn Alloc>; 4] = [
-        Box::<Array<4, Cache<32>>>::default(),
-        Box::<ListLocal>::default(),
-        Box::<ListCAS>::default(),
-        Box::<ListLocked>::default(),
-    ];
-
-    // Additional constraints (perf)
-    let mut conditions = HashMap::<AllocName, &'static dyn Fn(usize, usize) -> bool>::new();
-    conditions.insert(AllocName::new::<ListLocal>(), &|_, order| order == 0);
-    conditions.insert(AllocName::new::<ListLocked>(), &|_, order| order == 0);
-
     for x in x {
         let t = bench.threads(threads, x);
         if t > threads {
             continue;
         }
+        let name = Upper::name();
 
-        for alloc in &mut allocs {
-            let name = alloc.name();
-            if !alloc_names.iter().any(|n| name == n.trim()) {
-                continue;
-            }
-
-            if let Some(check) = conditions.get(&name) {
-                if !check(t, order) {
-                    continue;
-                }
-            }
-
-            for i in 0..iterations {
-                let perf = bench.run(alloc.as_mut(), &mut mapping, order, threads, x);
-                writeln!(out, "{name},{x},{i},{memory},{perf}").unwrap();
-            }
+        for i in 0..iterations {
+            let perf = bench.run(&mut mapping, order, threads, x);
+            writeln!(out, "{name},{x},{i},{memory},{perf}").unwrap();
         }
     }
     warn!("Ok");
-    drop(allocs); // drop first
 }
 
 #[allow(unused_variables)]
@@ -161,20 +136,19 @@ impl Benchmark {
 
     fn run(
         self,
-        alloc: &mut dyn Alloc,
         mapping: &mut [Frame],
         order: usize,
         threads: usize,
         x: usize,
     ) -> Perf {
-        warn!(">>> bench {self:?} x={x} o={order} {}\n", alloc.name());
+        warn!(">>> bench {self:?} x={x} o={order} {}\n", Allocator::name());
 
         match self {
-            Benchmark::Bulk => bulk(alloc, mapping, order, threads, x),
-            Benchmark::Repeat => repeat(alloc, mapping, order, threads, x),
-            Benchmark::Rand => rand(alloc, mapping, order, threads, x),
-            Benchmark::RandBlock => rand_block(alloc, mapping, order, threads, x),
-            Benchmark::Filling => filling(alloc, mapping, order, threads, x),
+            Benchmark::Bulk => bulk(mapping, order, threads, x),
+            Benchmark::Repeat => repeat(mapping, order, threads, x),
+            Benchmark::Rand => rand(mapping, order, threads, x),
+            Benchmark::RandBlock => rand_block(mapping, order, threads, x),
+            Benchmark::Filling => filling(mapping, order, threads, x),
         }
     }
 }

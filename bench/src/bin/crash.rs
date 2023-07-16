@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use clap::Parser;
 use llfree::frame::{pfn_range, Frame, PFN};
-use llfree::lower::*;
 use llfree::mmap::{self, MMap};
 use llfree::bitfield::PT_LEN;
 use llfree::thread;
@@ -31,7 +30,7 @@ struct Args {
     memory: usize,
 }
 
-type Allocator = Array<4, Cache<32>>;
+type Allocator = Upper<4>;
 
 fn main() {
     let Args {

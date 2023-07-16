@@ -23,30 +23,30 @@ pub const fn align_down(v: usize, align: usize) -> usize {
 /// Cache alignment for T
 #[derive(Clone, Default, Hash, PartialEq, Eq)]
 #[repr(align(64))]
-pub struct CacheLine<T = ()>(pub T);
+pub struct Align<T = ()>(pub T);
 
-const _: () = assert!(align_of::<CacheLine>() == 64);
-const _: () = assert!(align_of::<CacheLine<usize>>() == 64);
+const _: () = assert!(align_of::<Align>() == 64);
+const _: () = assert!(align_of::<Align<usize>>() == 64);
 
-impl<T> Deref for CacheLine<T> {
+impl<T> Deref for Align<T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.0
     }
 }
-impl<T> DerefMut for CacheLine<T> {
+impl<T> DerefMut for Align<T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.0
     }
 }
-impl<T: fmt::Debug> fmt::Debug for CacheLine<T> {
+impl<T: fmt::Debug> fmt::Debug for Align<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.0, f)
     }
 }
-impl<T> From<T> for CacheLine<T> {
+impl<T> From<T> for Align<T> {
     fn from(t: T) -> Self {
-        CacheLine(t)
+        Align(t)
     }
 }
 

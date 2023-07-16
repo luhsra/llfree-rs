@@ -11,12 +11,11 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use log::warn;
 
-use llfree::frame::{pfn_range, Frame, PFN};
-use llfree::lower::Cache;
-use llfree::mmap::{self, MMap};
 use llfree::bitfield::PT_LEN;
+use llfree::frame::{pfn_range, Frame, PFN};
+use llfree::mmap::MMap;
 use llfree::thread;
-use llfree::upper::{Alloc, AllocExt, Array, Init};
+use llfree::upper::{Init, Upper};
 use llfree::util::{self, WyRand};
 
 /// Benchmarking the (crashed) recovery.
@@ -46,7 +45,7 @@ struct Args {
     iter: usize,
 }
 
-type Allocator = Array<3, Cache<32>>;
+type Allocator = Upper<3>;
 
 fn main() {
     util::logging();
@@ -161,7 +160,7 @@ pub fn mapping(begin: usize, length: usize, dax: &str) -> Box<[Frame], MMap> {
     #[cfg(target_os = "linux")]
     {
         warn!("MMap file {dax} l={}G", (length * Frame::SIZE) >> 30);
-        mmap::file(begin, length, dax, true)
+        llfree::mmap::file(begin, length, dax, true)
     }
     #[cfg(not(target_os = "linux"))]
     panic!("No NVRAM!")

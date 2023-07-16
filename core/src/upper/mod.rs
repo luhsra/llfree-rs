@@ -1,36 +1,17 @@
 //! Upper allocator implementations
 
-use core::any::type_name;
-use core::ffi::c_void;
 use core::fmt;
 use core::ops::Range;
-use core::sync::atomic::AtomicU64;
 
-use bitfield_struct::bitfield;
-
-use crate::atomic::{Atom, Atomic};
-use crate::entry::ReservedTree;
 use crate::frame::PFN;
 use crate::Result;
 
 mod array;
 pub use array::Array;
-mod list_local;
-pub use list_local::ListLocal;
-mod list_locked;
-pub use list_locked::ListLocked;
-mod list_cas;
-pub use list_cas::ListCAS;
+use libc::c_void;
 
 /// Number of retries if an atomic operation fails.
 pub const CAS_RETRIES: usize = 4;
-/// Magic marking the meta frame.
-pub const MAGIC: usize = 0x_dead_beef;
-
-/// Minimal number of frames an allocator needs (1G).
-pub const MIN_PAGES: usize = 1 << 9;
-/// Maximal number of frames an allocator can manage (about 256TiB).
-pub const MAX_PAGES: usize = 1 << (4 * 9);
 
 /// The general interface of the allocator implementations.
 pub trait Alloc: Sync + Send + fmt::Debug {
@@ -65,13 +46,12 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     }
     /// Execute f for each huge frame with the number of free frames
     /// in this huge frame as parameter.
-    #[cold]
     fn for_each_huge_frame(&self, _ctx: *mut c_void, _f: fn(*mut c_void, PFN, usize)) {}
 
     /// Return the name of the allocator.
     #[cold]
-    fn name(&self) -> AllocName {
-        AllocName::new::<Self>()
+    fn name() -> &'static str {
+        "Unknown"
     }
 }
 
@@ -107,130 +87,8 @@ pub trait AllocExt: Sized + Alloc + Default {
 // Implement for all default initializable allocators
 impl<A: Sized + Alloc + Default> AllocExt for A {}
 
-/// The short name of an allocator.
-///
-/// E.g.: `Array4C32` for
-/// `lldfree::upper::array::Array<4, lldfree::lower::cache::Cache<32>>`
-#[derive(PartialEq, Eq, Hash, Debug)]
-pub struct AllocName([&'static str; 4]);
-
-impl fmt::Display for AllocName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for part in self.0 {
-            write!(f, "{part}")?;
-        }
-        Ok(())
-    }
-}
-
-impl AllocName {
-    pub fn new<A: Alloc + ?Sized>() -> Self {
-        let name = type_name::<A>();
-        // Add first letter of generic type as suffix
-        let (name, first, second, size) = if let Some((prefix, suffix)) = name.split_once('<') {
-            // Aligned / Unaligned allocator
-            let (first, suffix) = if let Some((first, suffix)) = suffix.split_once(", ") {
-                // Strip path
-                let first = first.rsplit_once(':').map_or(first, |s| s.1);
-                (&first[0..1], suffix)
-            } else {
-                ("", suffix)
-            };
-
-            // Strip path
-            let suffix = suffix.rsplit_once(':').map_or(suffix, |s| s.1);
-            // Lower allocator size
-            let size = suffix
-                .split_once('<')
-                .map(|(_, s)| s.split_once('>').map_or(s, |s| s.0))
-                .unwrap_or_default();
-            (prefix, first, &suffix[0..1], size)
-        } else {
-            (name, "", "", "")
-        };
-
-        // Strip namespaces
-        let base = name.rsplit_once(':').map_or(name, |s| s.1);
-        let base = base.strip_suffix("Alloc").unwrap_or(base);
-        Self([base, first, second, size])
-    }
-}
-
-impl PartialEq<&str> for AllocName {
-    fn eq(&self, other: &&str) -> bool {
-        let mut remainder = *other;
-        for part in self.0 {
-            if let Some(r) = remainder.strip_prefix(part) {
-                remainder = r;
-            } else {
-                return false;
-            };
-        }
-        remainder.is_empty()
-    }
-}
-
-impl PartialEq<AllocName> for &str {
-    fn eq(&self, other: &AllocName) -> bool {
-        other.eq(self)
-    }
-}
-
-#[bitfield(u64)]
-#[derive(PartialEq, Eq)]
-pub struct LastFrees {
-    #[bits(48)]
-    tree_index: usize,
-    #[bits(16)]
-    count: usize,
-}
-impl Atomic for LastFrees {
-    type I = AtomicU64;
-}
-
-#[derive(Default)]
-/// Per core data.
-pub struct Local<const F: usize> {
-    /// Local copy of the reserved level 3 entry
-    pub preferred: Atom<ReservedTree>,
-    /// Last frees
-    pub last_frees: Atom<LastFrees>,
-}
-
-impl<const F: usize> Local<F> {
-    /// Add a tree index to the history.
-    pub fn frees_push(&self, tree_index: usize) {
-        // If the update of this heuristic fails, ignore it
-        // Relaxed ordering is enough, as this is not shared between CPUs
-        let _ = self.last_frees.fetch_update(|v| {
-            if v.tree_index() == tree_index {
-                (v.count() < F).then_some(v.with_count(v.count() + 1))
-            } else {
-                Some(LastFrees::new().with_tree_index(tree_index).with_count(1))
-            }
-        });
-    }
-    /// Checks if the previous `count` frees had the same tree index.
-    pub fn frees_in_tree(&self, tree_index: usize) -> bool {
-        let lf = self.last_frees.load();
-        lf.tree_index() == tree_index && lf.count() >= F
-    }
-}
-
-impl<const F: usize> fmt::Debug for Local<F> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Local")
-            .field("reserved", &self.preferred.load())
-            .field("frees", &self.last_frees.load())
-            .finish()
-    }
-}
-
 #[cfg(all(test, feature = "std"))]
 mod test {
-
-    use core::any::type_name;
-    use core::mem::size_of;
     use core::ptr::null_mut;
     use std::time::Instant;
 
@@ -245,58 +103,12 @@ mod test {
     use crate::mmap::test_mapping;
     use crate::thread;
     use crate::upper::*;
-    use crate::util::{logging, CacheLine, WyRand};
+    use crate::util::{logging, WyRand};
     use crate::Error;
 
-    type Lower = Cache<32>;
-    type Allocator = Array<4, Lower>;
+    use super::Array;
 
-    #[test]
-    fn names() {
-        println!(
-            "{}\n -> {}",
-            type_name::<Array<4, Lower>>(),
-            AllocName::new::<Array<4, Lower>>()
-        );
-        assert_eq!("Array4C32", AllocName::new::<Array<4, Lower>>());
-        println!(
-            "{}\n -> {}",
-            type_name::<ListLocal>(),
-            AllocName::new::<ListLocal>()
-        );
-        assert_eq!("ListLocal", AllocName::new::<ListLocal>());
-    }
-
-    #[test]
-    fn sizes() {
-        type C32 = Cache<32>;
-        type A4C32 = Array<4, C32>;
-        println!("{}:", AllocName::new::<A4C32>());
-        println!("  Static size {}B", size_of::<A4C32>());
-        println!("  Size per CPU: {}B", size_of::<CacheLine<Local<4>>>());
-        println!("  Size per GiB: {}B", C32::size_per_gib());
-    }
-
-    /// Testing the related frames heuristic for frees
-    #[test]
-    fn last_frees() {
-        let local = Local::<4>::default();
-        let frame1 = 43;
-        let i1 = frame1 / (512 * 512);
-        assert!(!local.frees_in_tree(i1));
-        local.frees_push(i1);
-        local.frees_push(i1);
-        local.frees_push(i1);
-        assert!(!local.frees_in_tree(i1));
-        local.frees_push(i1);
-        assert!(local.frees_in_tree(i1));
-        let frame2 = 512 * 512 + 43;
-        let i2 = frame2 / (512 * 512);
-        assert_ne!(i1, i2);
-        local.frees_push(i2);
-        assert!(!local.frees_in_tree(i1));
-        assert!(!local.frees_in_tree(i2));
-    }
+    type Allocator = Array<4>;
 
     #[test]
     fn simple() {
