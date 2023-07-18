@@ -6,13 +6,13 @@ use std::sync::Barrier;
 use std::time::Duration;
 
 use clap::Parser;
-use llfree::frame::{pfn_range, Frame, PFN};
-use llfree::mmap::{self, MMap};
-use llfree::bitfield::PT_LEN;
-use llfree::thread;
-use llfree::upper::*;
-use llfree::util::{self, align_up, WyRand};
 use log::{error, warn};
+
+use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
+use llfree::mmap::{self, MMap};
+use llfree::thread;
+use llfree::util::{self, align_up, WyRand};
+use llfree::{Alloc, AllocExt, Init, LLFree};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]
@@ -30,7 +30,7 @@ struct Args {
     memory: usize,
 }
 
-type Allocator = Upper<4>;
+type Allocator = LLFree;
 
 fn main() {
     let Args {
@@ -43,7 +43,6 @@ fn main() {
     util::logging();
 
     let pages = memory * PT_LEN * PT_LEN;
-    assert!(pages >= MIN_PAGES * threads);
 
     let allocs = pages / threads / 2 / (1 << order);
     let out_size = align_up(allocs + 2, Frame::SIZE) * threads;

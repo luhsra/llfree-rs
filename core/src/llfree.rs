@@ -18,76 +18,11 @@ use crate::atomic::{Atom, Atomic};
 use crate::entry::{ReservedTree, Tree};
 use crate::frame::{Frame, PFNRange, PFN};
 use crate::lower::Lower;
-use crate::upper::CAS_RETRIES;
+use crate::CAS_RETRIES;
 use crate::util::{align_down, Align};
 use crate::{Error, Result};
 
 use super::{Alloc, Init};
-
-/// Magic marking the meta frame.
-pub const MAGIC: usize = 0x_dead_beef;
-
-#[bitfield(u64)]
-#[derive(PartialEq, Eq)]
-pub struct LastFrees {
-    #[bits(48)]
-    tree_index: usize,
-    #[bits(16)]
-    count: usize,
-}
-impl Atomic for LastFrees {
-    type I = AtomicU64;
-}
-
-#[derive(Default)]
-/// Per core data.
-struct Local<const F: usize> {
-    /// Local copy of the reserved level 3 entry
-    pub preferred: Atom<ReservedTree>,
-    /// Last frees
-    pub last_frees: Atom<LastFrees>,
-}
-
-impl<const F: usize> Local<F> {
-    /// Add a tree index to the history.
-    fn frees_push(&self, tree_index: usize) {
-        // If the update of this heuristic fails, ignore it
-        // Relaxed ordering is enough, as this is not shared between CPUs
-        let _ = self.last_frees.fetch_update(|v| {
-            if v.tree_index() == tree_index {
-                (v.count() < F).then_some(v.with_count(v.count() + 1))
-            } else {
-                Some(LastFrees::new().with_tree_index(tree_index).with_count(1))
-            }
-        });
-    }
-    /// Checks if the previous `count` frees had the same tree index.
-    fn frees_in_tree(&self, tree_index: usize) -> bool {
-        let lf = self.last_frees.load();
-        lf.tree_index() == tree_index && lf.count() >= F
-    }
-}
-
-impl<const F: usize> fmt::Debug for Local<F> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Local")
-            .field("reserved", &self.preferred.load())
-            .field("frees", &self.last_frees.load())
-            .finish()
-    }
-}
-
-/// Non-Volatile global metadata
-#[repr(align(0x1000))]
-pub struct Meta {
-    /// A magic number used to check if the persistent memory contains the allocator state
-    magic: AtomicUsize,
-    /// Number of frames managed by the persistent allocator
-    frames: AtomicUsize,
-    /// Flag that stores if the system has crashed or was shutdown correctly
-    crashed: AtomicBool,
-}
-const _: () = assert!(core::mem::size_of::<Meta>() <= Frame::SIZE);
 
 /// This allocator splits its memory range into chunks.
 /// These chunks are reserved by CPUs to reduce sharing.
@@ -96,32 +31,105 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Frame::SIZE);
 /// These chunks are, due to the inner workins of the lower allocator,
 /// called *trees*.
 ///
-/// This allocator stores the level three entries (tree roots) in a
-/// packed array.
-/// For the reservation, the allocator simply scans the array for free entries,
-/// while prioritizing partially empty chunks to avoid fragmentation.
+/// This allocator stores the tree entries in a packed array.
+/// For reservations, the allocator simply scans the array for free entries,
+/// while prioritizing partially empty already fragmented chunks to avoid
+/// further fragmentation.
 ///
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
 #[derive(Default)]
 #[repr(align(64))]
-pub struct Array<const F: usize> {
+pub struct LLFree {
     /// Pointer to the metadata frame at the end of the allocators persistent memory range
     meta: Option<&'static Meta>,
     /// CPU local data (only shared between CPUs if the memory area is too small)
-    local: Box<[Align<Local<F>>]>,
+    local: Box<[Align<Local>]>,
     /// Metadata of the lower alloc
     lower: Lower,
     /// Manages the allocators trees
     trees: Trees<{ Lower::N }>,
 }
 
-unsafe impl<const F: usize> Send for Array<F> {}
-unsafe impl<const F: usize> Sync for Array<F> {}
+unsafe impl Send for LLFree {}
+unsafe impl Sync for LLFree {}
 
-impl<const F: usize> fmt::Debug for Array<F> {
+/// Last frees heuristic that reserves trees where a lot of frees happen
+/// to reduce false sharing on the tree counters.
+#[bitfield(u64)]
+#[derive(PartialEq, Eq)]
+struct LastFrees {
+    /// Tree index where the last free occurred
+    #[bits(48)]
+    tree_index: usize,
+    /// Number of consecutive frees that happened in the same `tree_index`
+    #[bits(16)]
+    count: usize,
+}
+impl Atomic for LastFrees {
+    type I = AtomicU64;
+}
+
+/// Core-local data
+#[derive(Default)]
+struct Local {
+    /// Local copy of the reserved tree entry
+    preferred: Atom<ReservedTree>,
+    /// Last frees heuristic
+    last_frees: Atom<LastFrees>,
+}
+
+impl Local {
+    /// Threshold for the number of frees after which a tree is reserved
+    const F: usize = 4;
+
+    /// Add a tree index to the history.
+    fn frees_push(&self, tree_index: usize) {
+        // If the update of this heuristic fails, ignore it
+        // Relaxed ordering is enough, as this is not shared between CPUs
+        let _ = self.last_frees.fetch_update(|v| {
+            if v.tree_index() == tree_index {
+                (v.count() < Self::F).then_some(v.with_count(v.count() + 1))
+            } else {
+                Some(LastFrees::new().with_tree_index(tree_index).with_count(1))
+            }
+        });
+    }
+    /// Checks if the previous `count` frees had the same tree index.
+    fn frees_in_tree(&self, tree_index: usize) -> bool {
+        let lf = self.last_frees.load();
+        lf.tree_index() == tree_index && lf.count() >= Self::F
+    }
+}
+
+impl fmt::Debug for Local {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{} {{", Self::name())?;
+        f.debug_struct("Local")
+            .field("reserved", &self.preferred.load())
+            .field("frees", &self.last_frees.load())
+            .finish()
+    }
+}
+
+/// Non-Volatile metadata that is used to recover the allocator at reboot
+#[repr(align(0x1000))]
+struct Meta {
+    /// A magic number used to check if the persistent memory contains the allocator state
+    magic: AtomicUsize,
+    /// Number of frames managed by the persistent allocator
+    frames: AtomicUsize,
+    /// Flag that stores if the system has crashed or was shutdown correctly
+    crashed: AtomicBool,
+}
+impl Meta {
+    /// Magic marking the meta frame.
+    const MAGIC: usize = 0x_dead_beef;
+}
+const _: () = assert!(core::mem::size_of::<Meta>() <= Frame::SIZE);
+
+impl fmt::Debug for LLFree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{} {{", self.name())?;
 
         writeln!(
             f,
@@ -148,10 +156,10 @@ impl<const F: usize> fmt::Debug for Array<F> {
     }
 }
 
-impl<const F: usize> Alloc for Array<F> {
+impl Alloc for LLFree {
     /// Return the name of the allocator.
     #[cold]
-    fn name() -> &'static str {
+    fn name(&self) -> &'static str {
         "LLFree"
     }
 
@@ -196,18 +204,14 @@ impl<const F: usize> Alloc for Array<F> {
         self.local = local.into();
 
         if init == Init::Recover {
-            match self.recover() {
-                // If the recovery fails, continue with initializing a new allocator instead
-                Err(Error::Initialization) => {}
-                r => return r,
-            }
+            self.recover()?;
+        } else {
+            self.trees.init(self.frames(), free_all);
         }
-
-        self.trees.init(self.frames(), free_all);
 
         if let Some(meta) = self.meta {
             meta.frames.store(self.frames(), Ordering::SeqCst);
-            meta.magic.store(MAGIC, Ordering::SeqCst);
+            meta.magic.store(Meta::MAGIC, Ordering::SeqCst);
             meta.crashed.store(true, Ordering::SeqCst);
         }
 
@@ -348,18 +352,17 @@ impl<const F: usize> Alloc for Array<F> {
     }
 
     fn for_each_huge_frame(&self, ctx: *mut c_void, f: fn(*mut c_void, PFN, usize)) {
-        self.lower
-            .for_each_huge_frame(|frame, c| f(ctx, frame, c))
+        self.lower.for_each_huge_frame(|frame, c| f(ctx, frame, c))
     }
 }
 
-impl<const F: usize> Array<F> {
+impl LLFree {
     /// Recover the allocator from NVM after reboot.
     /// If crashed then the level 1 frame tables are traversed and diverging counters are corrected.
     fn recover(&mut self) -> Result<()> {
         if let Some(meta) = self.meta {
             if meta.frames.load(Ordering::SeqCst) == self.frames()
-                && meta.magic.load(Ordering::SeqCst) == MAGIC
+                && meta.magic.load(Ordering::SeqCst) == Meta::MAGIC
             {
                 info!("recover p={}", self.frames());
                 // The active flag is set on boot and reset on a successful shutdown
@@ -646,7 +649,7 @@ impl<const F: usize> Array<F> {
     }
 }
 
-impl<const F: usize> Drop for Array<F> {
+impl Drop for LLFree {
     fn drop(&mut self) {
         if let Some(meta) = self.meta {
             meta.crashed.store(false, Ordering::SeqCst);
@@ -870,7 +873,7 @@ mod test {
     /// Testing the related frames heuristic for frees
     #[test]
     fn last_frees() {
-        let local = Local::<4>::default();
+        let local = Local::default();
         let frame1 = 43;
         let i1 = frame1 / (512 * 512);
         assert!(!local.frees_in_tree(i1));

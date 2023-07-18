@@ -11,12 +11,11 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use log::warn;
 
-use llfree::bitfield::PT_LEN;
-use llfree::frame::{pfn_range, Frame, PFN};
+use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
 use llfree::mmap::MMap;
 use llfree::thread;
-use llfree::upper::{Init, Upper};
 use llfree::util::{self, WyRand};
+use llfree::{Alloc, AllocExt, Init, LLFree};
 
 /// Benchmarking the (crashed) recovery.
 #[derive(Parser, Debug)]
@@ -45,7 +44,7 @@ struct Args {
     iter: usize,
 }
 
-type Allocator = Upper<3>;
+type Allocator = LLFree;
 
 fn main() {
     util::logging();

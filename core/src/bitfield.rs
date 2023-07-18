@@ -10,9 +10,6 @@ use log::error;
 use crate::atomic::{Atom, Atomic};
 use crate::{Error, Result};
 
-pub const PT_ORDER: usize = 9;
-pub const PT_LEN: usize = 1 << PT_ORDER;
-
 /// Bitfield replacing the level one table.
 pub struct Bitfield<const N: usize> {
     data: [Atom<u64>; N],
@@ -74,6 +71,7 @@ where
     }
 
     /// Return if the `i`-th bit is set
+    #[allow(unused)]
     pub fn get(&self, i: usize) -> bool {
         let di = i / Self::ENTRY_BITS;
         let bit = 1 << (i % Self::ENTRY_BITS);

@@ -4,6 +4,9 @@ use core::fmt;
 use core::mem::{align_of, size_of, transmute};
 use core::ops::Range;
 
+pub const PT_ORDER: usize = 9;
+pub const PT_LEN: usize = 1 << PT_ORDER;
+
 /// Page frame number that is convertible to pointers
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[repr(transparent)]

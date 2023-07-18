@@ -9,15 +9,15 @@ use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::Parser;
-use llfree::bitfield::PT_LEN;
-use llfree::frame::{pfn_range, Frame};
-use llfree::mmap::{self, MMap};
-use llfree::thread;
-use llfree::upper::{Init, Upper};
-use llfree::util::logging;
 use log::warn;
 
-type Allocator = Upper<3>;
+use llfree::frame::{pfn_range, Frame, PT_LEN};
+use llfree::mmap::{self, MMap};
+use llfree::thread;
+use llfree::util::logging;
+use llfree::{Alloc, Init, LLFree};
+
+type Allocator = LLFree;
 
 /// Measuring the allocation times and collect them into time buckets for a time distribution analysis.
 #[derive(Parser, Debug)]

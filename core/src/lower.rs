@@ -13,9 +13,8 @@ use log::{error, info, warn};
 use crate::atomic::Atom;
 use crate::entry::{AtomicArray, HugeEntry, HugePair};
 use crate::frame::{Frame, PFN};
-use crate::upper::{Init, CAS_RETRIES};
 use crate::util::{align_down, align_up, spin_wait, Align};
-use crate::{Error, Result};
+use crate::{Error, Init, Result, CAS_RETRIES};
 
 type Bitfield = crate::bitfield::Bitfield<8>;
 
@@ -267,6 +266,7 @@ impl Lower {
     }
 
     /// Debug function, returning the number of allocated frames and performing internal checks.
+    #[allow(unused)]
     pub fn allocated_frames(&self) -> usize {
         let mut frames = self.frames();
         for table in &*self.children {
@@ -526,13 +526,11 @@ mod test {
     use log::warn;
 
     use super::Bitfield;
-    use crate::bitfield::PT_LEN;
-    use crate::frame::Frame;
-    use crate::frame::PFN;
+    use crate::frame::{Frame, PFN, PT_LEN};
     use crate::lower::Lower;
     use crate::thread;
-    use crate::upper::Init;
     use crate::util::{logging, WyRand};
+    use crate::Init;
 
     type Allocator = Lower;
 

@@ -310,7 +310,7 @@ mod test {
     use core::sync::atomic::AtomicU64;
 
     use crate::atomic::Atom;
-    use crate::bitfield::PT_LEN;
+    use crate::frame::PT_LEN;
 
     #[test]
     fn pt() {

@@ -10,13 +10,11 @@ use std::sync::{Barrier, Mutex};
 use clap::Parser;
 use log::warn;
 
-use llfree::bitfield::PT_LEN;
-use llfree::frame::{pfn_range, Frame, PFN};
-use llfree::mmap;
-use llfree::mmap::MMap;
+use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
+use llfree::mmap::{self, MMap};
 use llfree::thread;
-use llfree::upper::*;
 use llfree::util::{self, WyRand};
+use llfree::{Alloc, AllocExt, Init, LLFree};
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
@@ -44,7 +42,7 @@ struct Args {
     stride: usize,
 }
 
-type Allocator = Upper<3>;
+type Allocator = LLFree;
 
 fn main() {
     let Args {

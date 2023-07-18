@@ -11,12 +11,11 @@ use std::time::Instant;
 use clap::{Parser, ValueEnum};
 use log::warn;
 
-use llfree::bitfield::PT_LEN;
-use llfree::frame::{pfn_range, Frame, PFN};
+use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
 use llfree::mmap::{self, MMap};
 use llfree::thread;
-use llfree::upper::*;
 use llfree::util::{self, WyRand};
+use llfree::{Alloc, Init, LLFree};
 
 /// Number of allocations per block
 const RAND_BLOCK_SIZE: usize = 8;
@@ -55,8 +54,6 @@ struct Args {
     stride: usize,
 }
 
-type Allocator = Upper<4>;
-
 fn main() {
     let Args {
         bench,
@@ -86,19 +83,28 @@ fn main() {
 
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
 
+    let mut allocs: [Box<dyn Alloc>; 1] = [Box::<LLFree>::default()];
+
     for x in x {
         let t = bench.threads(threads, x);
         if t > threads {
             continue;
         }
-        let name = Upper::name();
 
-        for i in 0..iterations {
-            let perf = bench.run(&mut mapping, order, threads, x);
-            writeln!(out, "{name},{x},{i},{memory},{perf}").unwrap();
+        for alloc in &mut allocs {
+            let name = alloc.name();
+            if !alloc_names.iter().any(|n| name == n.trim()) {
+                continue;
+            }
+
+            for i in 0..iterations {
+                let perf = bench.run(alloc.as_mut(), &mut mapping, order, threads, x);
+                writeln!(out, "{name},{x},{i},{memory},{perf}").unwrap();
+            }
         }
     }
     warn!("Ok");
+    drop(allocs); // drop first
 }
 
 #[allow(unused_variables)]
@@ -136,19 +142,20 @@ impl Benchmark {
 
     fn run(
         self,
+        alloc: &mut dyn Alloc,
         mapping: &mut [Frame],
         order: usize,
         threads: usize,
         x: usize,
     ) -> Perf {
-        warn!(">>> bench {self:?} x={x} o={order} {}\n", Allocator::name());
+        warn!(">>> bench {self:?} x={x} o={order} {}\n", alloc.name());
 
         match self {
-            Benchmark::Bulk => bulk(mapping, order, threads, x),
-            Benchmark::Repeat => repeat(mapping, order, threads, x),
-            Benchmark::Rand => rand(mapping, order, threads, x),
-            Benchmark::RandBlock => rand_block(mapping, order, threads, x),
-            Benchmark::Filling => filling(mapping, order, threads, x),
+            Benchmark::Bulk => bulk(alloc, mapping, order, threads, x),
+            Benchmark::Repeat => repeat(alloc, mapping, order, threads, x),
+            Benchmark::Rand => rand(alloc, mapping, order, threads, x),
+            Benchmark::RandBlock => rand_block(alloc, mapping, order, threads, x),
+            Benchmark::Filling => filling(alloc, mapping, order, threads, x),
         }
     }
 }
