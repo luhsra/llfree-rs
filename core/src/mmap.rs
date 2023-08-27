@@ -146,7 +146,7 @@ unsafe impl Allocator for MMap {
 }
 
 #[cfg(target_family = "unix")]
-pub fn m_async<T>(slice: &mut [T]) {
+pub fn m_async<T>(slice: &[T]) {
     use core::mem::size_of_val;
 
     unsafe {

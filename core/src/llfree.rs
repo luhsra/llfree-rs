@@ -3,8 +3,7 @@
 use core::ffi::c_void;
 use core::fmt;
 use core::hint::spin_loop;
-use core::mem::{align_of, size_of};
-use core::ops::{Index, Range};
+use core::ops::{Index, Range, RangeBounds};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::unreachable;
 
@@ -18,8 +17,8 @@ use crate::atomic::{Atom, Atomic};
 use crate::entry::{ReservedTree, Tree};
 use crate::frame::{Frame, PFNRange, PFN};
 use crate::lower::Lower;
-use crate::CAS_RETRIES;
 use crate::util::{align_down, Align};
+use crate::CAS_RETRIES;
 use crate::{Error, Result};
 
 use super::{Alloc, Init};
@@ -273,7 +272,7 @@ impl Alloc for LLFree {
         match self.trees[i].fetch_update(|v| {
             let mut v = v.inc(num_frames, max)?;
             if !v.reserved()
-                && v.free() > Trees::<{ Lower::N }>::almost_allocated()
+                && v.free() > Trees::<{ Lower::N }>::preferred().start
                 && local.frees_in_tree(i)
             {
                 // put-reserve optimization:
@@ -484,7 +483,7 @@ impl LLFree {
         }
 
         if let Ok(entry) = self.trees[i].fetch_update(|e| {
-            (e.reserved() && e.free() + old.free() > Trees::<{ Lower::N }>::almost_allocated())
+            (e.reserved() && e.free() + old.free() > Trees::<{ Lower::N }>::preferred().start)
                 .then_some(e.with_free(0))
         }) {
             debug_assert!(old.free() + entry.free() <= Lower::N);
@@ -595,11 +594,13 @@ impl LLFree {
         for core in 0..self.local.len() {
             self.drain(core)?;
         }
+
         // Steal drained trees
         let start = self.trees.entries.len() / self.local.len() * core;
+        let num_frames = 1 << order;
         let (reserved, frame) = self
             .trees
-            .reserve_any(start, order, |r| self.get_lower(r, order))?;
+            .reserve_far(start, num_frames.., |r| self.get_lower(r, order))?;
 
         let local = &self.local[core].preferred;
         match self.cas_reserved(local, reserved, false) {
@@ -680,7 +681,7 @@ impl<const LN: usize> fmt::Debug for Trees<LN> {
             let f = e.load().free();
             if f == LN {
                 free += 1;
-            } else if f > Self::almost_allocated() {
+            } else if f > Self::preferred().start {
                 partial += 1;
             }
         }
@@ -705,14 +706,8 @@ impl<const LN: usize> Trees<LN> {
         self.entries = entries.into();
     }
 
-    /// Almost no free frames left
-    const fn almost_allocated() -> usize {
-        1 << 10 // MAX_ORDER
-    }
-
-    /// Almost all frames are free
-    const fn almost_free() -> usize {
-        LN - (1 << 10) // MAX_ORDER
+    fn preferred() -> Range<usize> {
+        1 << 10..LN - (1 << 10)
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
@@ -731,70 +726,30 @@ impl<const LN: usize> Trees<LN> {
         }
     }
 
-    /// Find and reserve a free tree
-    fn reserve_free(
-        &self,
-        start: usize,
-        mut get_lower: impl FnMut(ReservedTree) -> Result<(ReservedTree, usize)>,
-    ) -> Result<(ReservedTree, usize)> {
-        // Just search linearly through the array
-        for i in 0..self.entries.len() {
-            let i = (i + start) % self.entries.len();
-            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::almost_free()..)) {
-                match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
-                    Err(Error::Memory) => {
-                        self[i]
-                            .fetch_update(|v| v.unreserve_add(entry.free(), LN))
-                            .map_err(|_| Error::Corruption)?;
-                    }
-                    r => return r,
-                }
-            }
-        }
-        Err(Error::Memory)
-    }
-
-    /// Find and reserve a partial tree in the vicinity
-    fn reserve_partial(
+    /// Search the the array for a partially or entirely free tree in the near vicinity.
+    ///
+    /// This locality increases the chance to find a recently
+    /// reserved entry that is already partially free.
+    fn reserve_near(
         &self,
         cores: usize,
         start: usize,
         mut get_lower: impl FnMut(ReservedTree) -> Result<(ReservedTree, usize)>,
     ) -> Result<(ReservedTree, usize)> {
-        const ENTRIES_PER_CACHELINE: usize = align_of::<Align>() / size_of::<Tree>();
-        // One quater of the per-CPU memory
-        let vicinity = ((self.entries.len() / cores) / 4).max(1) as isize;
+        // Alternate the alternating search
+        let down = (start % 2) as isize;
 
-        // Positive modulo and cacheline alignment
-        let start = align_down(start + self.entries.len(), ENTRIES_PER_CACHELINE) as isize;
+        // One half of the per-CPU memory
+        let near = ((self.entries.len() / cores) / 2).max(1);
 
-        // Search the the array for a partially or entirely free tree
-        // This speeds up the search drastically if many trees are free
-        for i in 1..vicinity {
+        // Align to the start of the near region
+        let start = align_down(start + self.entries.len(), near) as isize;
+
+        for i in 1..near as isize {
             // Alternating between before and after this entry
-            let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
+            let off = if i % 2 == down { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
-            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::almost_allocated()..)) {
-                match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
-                    Err(Error::Memory) => {
-                        info!("Fragmentation -> continue reservation");
-                        self[i]
-                            .fetch_update(|v| v.unreserve_add(entry.free(), LN))
-                            .map_err(|_| Error::Corruption)?;
-                    }
-                    r => return r,
-                }
-            }
-        }
-
-        // Search the rest of the array for a partially but not entirely free tree
-        for i in vicinity..=self.entries.len() as isize {
-            // Alternating between before and after this entry
-            let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
-            let i = (start + off) as usize % self.entries.len();
-            if let Ok(entry) =
-                self[i].fetch_update(|v| v.reserve(Self::almost_allocated()..Self::almost_free()))
-            {
+            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::preferred().start..)) {
                 match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
                     Err(Error::Memory) => {
                         info!("Fragmentation -> continue reservation");
@@ -809,21 +764,21 @@ impl<const LN: usize> Trees<LN> {
         Err(Error::Memory)
     }
 
-    /// Fallback to search for any suitable tree
-    fn reserve_any(
+    /// Searches the whole array and reserves an entry with `free` pages.
+    fn reserve_far(
         &self,
         start: usize,
-        order: usize,
+        free: impl RangeBounds<usize> + Clone,
         mut get_lower: impl FnMut(ReservedTree) -> Result<(ReservedTree, usize)>,
     ) -> Result<(ReservedTree, usize)> {
         // Just search linearly through the array
-        let num_frames = 1 << order;
-        for i in 0..self.entries.len() {
+        for i in 0..=self.entries.len() {
             let i = (i + start) % self.entries.len();
-            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(num_frames..)) {
+
+            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(free.clone())) {
                 match get_lower(ReservedTree::new_with(entry.free(), i * LN)) {
                     Err(Error::Memory) => {
-                        info!("Fragmentation -> continue reservation");
+                        // Fragmentation -> continue reservation
                         self[i]
                             .fetch_update(|v| v.unreserve_add(entry.free(), LN))
                             .map_err(|_| Error::Corruption)?;
@@ -832,7 +787,6 @@ impl<const LN: usize> Trees<LN> {
                 }
             }
         }
-        info!("no frames left");
         Err(Error::Memory)
     }
 
@@ -846,23 +800,23 @@ impl<const LN: usize> Trees<LN> {
         get_lower: impl FnMut(ReservedTree) -> Result<(ReservedTree, usize)> + Copy,
     ) -> Result<(ReservedTree, usize)> {
         if fragmented {
-            // try free trees first
-            match self.reserve_free(start, get_lower) {
-                Err(Error::Memory) => match self.reserve_partial(cores, start, get_lower) {
-                    Err(Error::Memory) => self.reserve_any(start, order, get_lower),
-                    r => r,
-                },
-                r => r,
+            // Prioritize free areas when fragmented
+            match self.reserve_far(start, Self::preferred().end.., get_lower) {
+                Err(Error::Memory) => {}
+                r => return r,
             }
         } else {
-            match self.reserve_partial(cores, start, get_lower) {
-                Err(Error::Memory) => match self.reserve_free(start, get_lower) {
-                    Err(Error::Memory) => self.reserve_any(start, order, get_lower),
-                    r => r,
-                },
-                r => r,
+            match self.reserve_near(cores, start, get_lower) {
+                Err(Error::Memory) => {}
+                r => return r,
+            }
+            match self.reserve_far(start, Self::preferred(), get_lower) {
+                Err(Error::Memory) => {}
+                r => return r,
             }
         }
+        let num_frames = 1 << order;
+        self.reserve_far(start, num_frames.., get_lower)
     }
 }
 

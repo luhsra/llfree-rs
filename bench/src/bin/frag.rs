@@ -24,7 +24,7 @@ struct Args {
     #[arg(short, long, default_value = "6")]
     threads: usize,
     /// Where to store the benchmark results in csv format.
-    #[arg(short, long, default_value = "results/bench.csv")]
+    #[arg(short, long, default_value = "results/frag.csv")]
     outfile: String,
     /// DAX file to be used for the allocator.
     #[arg(long)]

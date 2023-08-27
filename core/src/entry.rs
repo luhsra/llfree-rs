@@ -19,7 +19,7 @@ pub trait AtomicArray<T: Copy, const L: usize> {
 impl<T: Atomic, const L: usize> AtomicArray<T, L> for [Atom<T>; L] {
     fn atomic_fill(&self, e: T) {
         // cast to raw memory to let the compiler use vector instructions
-        #[allow(cast_ref_to_mut)]
+        #[allow(invalid_reference_casting)]
         let mem = unsafe { &mut *(self.as_ptr() as *mut [T; L]) };
         mem.fill(e);
         // memory ordering has to be enforced with a memory barrier

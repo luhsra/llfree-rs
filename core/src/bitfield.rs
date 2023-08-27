@@ -228,7 +228,7 @@ where
     pub fn fill(&self, v: bool) {
         let v = if v { u64::MAX } else { 0 };
         // cast to raw memory to let the compiler use vector instructions
-        #[allow(cast_ref_to_mut)]
+        #[allow(invalid_reference_casting)]
         let mem = unsafe { &mut *(self.data.as_ptr() as *mut [u64; N]) };
         mem.fill(v);
         // memory ordering has to be enforced with a memory barrier
