@@ -1,5 +1,6 @@
 //! Upper allocator implementation
 
+use core::ffi::c_void;
 use core::fmt;
 use core::hint::spin_loop;
 use core::mem::{align_of, size_of};
@@ -11,7 +12,6 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use bitfield_struct::bitfield;
-use libc::c_void;
 use log::{error, info, warn};
 
 use crate::atomic::{Atom, Atomic};
