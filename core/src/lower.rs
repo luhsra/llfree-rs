@@ -367,30 +367,28 @@ impl Lower {
         let first_bf_i = align_down(start / Bitfield::LEN, Self::HP);
         let start_bf_e = (start / Bitfield::ENTRY_BITS) % Bitfield::ENTRIES;
         let table = &self.children[start / Self::N];
+        let offset = (start / Bitfield::LEN) % Self::HP;
 
-        for _ in 0..CAS_RETRIES {
-            let off = (start / Bitfield::LEN) % Self::HP;
-            for j in 0..Self::HP {
-                let i = (j + off) % Self::HP;
+        for j in 0..Self::HP {
+            let i = (j + offset) % Self::HP;
 
-                if table[i].fetch_update(|v| v.dec(1 << order)).is_ok() {
-                    let bf_i = first_bf_i + i;
-                    // start with the last bitfield entry
-                    let bf_e = if j == 0 { start_bf_e } else { 0 };
+            if table[i].fetch_update(|v| v.dec(1 << order)).is_ok() {
+                let bf_i = first_bf_i + i;
+                // start with the previous bitfield entry
+                let bf_e = if j == 0 { start_bf_e } else { 0 };
 
-                    if let Ok(offset) = self.bitfields[bf_i].set_first_zeros(bf_e, order) {
-                        return Ok(bf_i * Bitfield::LEN + offset);
-                    } else {
-                        // Revert conter
-                        if let Err(_) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order))
-                        {
-                            error!("Undo failed");
-                            return Err(Error::Corruption);
-                        }
-                    }
+                if let Ok(offset) = self.bitfields[bf_i].set_first_zeros(bf_e, order) {
+                    return Ok(bf_i * Bitfield::LEN + offset);
+                }
+
+                // Revert conter
+                if let Err(_) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order)) {
+                    error!("Undo failed");
+                    return Err(Error::Corruption);
                 }
             }
         }
+
         info!("Nothing found o={order}");
         Err(Error::Memory)
     }
@@ -399,15 +397,14 @@ impl Lower {
     fn get_huge(&self, start: usize) -> Result<usize> {
         let table = &self.children[start / Self::N];
         let offset = (start / Bitfield::LEN) % Self::HP;
-        for _ in 0..CAS_RETRIES {
-            for i in 0..Self::HP {
-                let i = (offset + i) % Self::HP;
-                if let Ok(_) = table[i].fetch_update(|v| v.mark_huge(Bitfield::LEN)) {
-                    return Ok(align_down(start, Self::N) + i * Bitfield::LEN);
-                }
+
+        for i in 0..Self::HP {
+            let i = (offset + i) % Self::HP;
+            if let Ok(_) = table[i].fetch_update(|v| v.mark_huge(Bitfield::LEN)) {
+                return Ok(align_down(start, Self::N) + i * Bitfield::LEN);
             }
-            core::hint::spin_loop();
         }
+
         info!("Nothing found o=9");
         Err(Error::Memory)
     }
@@ -416,16 +413,14 @@ impl Lower {
     fn get_max(&self, start: usize) -> Result<usize> {
         let table_pair = self.table_pair(start);
         let offset = ((start / Bitfield::LEN) % Self::HP) / 2;
-        for _ in 0..CAS_RETRIES {
-            for i in 0..Self::HP / 2 {
-                let i = (offset + i) % (Self::HP / 2);
-                if let Ok(_) = table_pair[i].fetch_update(|v| v.map(|v| v.mark_huge(Bitfield::LEN)))
-                {
-                    return Ok(align_down(start, Self::N) + 2 * i * Bitfield::LEN);
-                }
+
+        for i in 0..Self::HP / 2 {
+            let i = (offset + i) % (Self::HP / 2);
+            if let Ok(_) = table_pair[i].fetch_update(|v| v.map(|v| v.mark_huge(Bitfield::LEN))) {
+                return Ok(align_down(start, Self::N) + 2 * i * Bitfield::LEN);
             }
-            core::hint::spin_loop();
         }
+
         info!("Nothing found o=10");
         Err(Error::Memory)
     }

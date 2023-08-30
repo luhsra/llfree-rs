@@ -28,13 +28,14 @@ pub mod thread;
 
 pub mod atomic;
 pub mod frame;
-pub use llfree::LLFree;
 pub mod util;
 
 mod bitfield;
 mod entry;
 mod llfree;
+pub use llfree::LLFree;
 mod lower;
+mod trees;
 
 use core::ffi::c_void;
 use core::fmt;

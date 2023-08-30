@@ -112,7 +112,7 @@ pub fn pin(core: usize) {
     });
 }
 
-/// Executed `f` for each element in `iter`.
+/// Executed `f` in parallel for each element in `iter`.
 pub fn parallel<I, T, F>(iter: I, f: F) -> Vec<T>
 where
     I: IntoIterator,

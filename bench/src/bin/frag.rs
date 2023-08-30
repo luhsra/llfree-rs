@@ -10,8 +10,7 @@ use std::sync::{Barrier, Mutex};
 use clap::Parser;
 use log::warn;
 
-use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
-use llfree::mmap::{self, MMap};
+use llfree::frame::{PFN, PT_LEN};
 use llfree::thread;
 use llfree::util::{self, WyRand};
 use llfree::{Alloc, AllocExt, Init, LLFree};
@@ -26,9 +25,6 @@ struct Args {
     /// Where to store the benchmark results in csv format.
     #[arg(short, long, default_value = "results/frag.csv")]
     outfile: String,
-    /// DAX file to be used for the allocator.
-    #[arg(long)]
-    dax: Option<String>,
     /// Specifies how many pages should be allocated: #pages = 2^order
     #[arg(short = 's', long, default_value_t = 0)]
     order: usize,
@@ -38,6 +34,10 @@ struct Args {
     /// Max amount of memory in GiB. Is by the max thread count.
     #[arg(short, long, default_value_t = 16)]
     memory: usize,
+    /// Percentage of free memory
+    #[arg(short, long, default_value_t = 50)]
+    free: usize,
+    /// Using only every n-th CPU
     #[arg(long, default_value_t = 1)]
     stride: usize,
 }
@@ -48,15 +48,16 @@ fn main() {
     let Args {
         threads,
         outfile,
-        dax,
         order,
         iterations,
         memory,
+        free,
         stride,
     } = Args::parse();
 
     util::logging();
 
+    assert!(free <= 90, "The maximum amount of free memory is 90%");
     assert!(order <= 6, "This benchmark is for small pages");
 
     // `thread::pin` uses this to select every nth cpu
@@ -66,8 +67,7 @@ fn main() {
 
     // Map memory for the allocator and initialize it
     let pages = memory * PT_LEN * PT_LEN;
-    let mapping = mapping(0x1000_0000_0000, pages, dax);
-    let alloc = Allocator::new(threads, pfn_range(&mapping), Init::Volatile, true).unwrap();
+    let alloc = Allocator::new(threads, PFN(0)..PFN(pages), Init::Volatile, true).unwrap();
 
     let out = Mutex::new({
         let mut out = File::create(outfile).unwrap();
@@ -80,7 +80,7 @@ fn main() {
     });
 
     // Operate on half of the avaliable memory
-    let allocs = (pages / 2) / (1 << order) / threads;
+    let allocs = (pages * free / 100) / (1 << order) / threads;
     warn!("allocs={allocs}");
     let barrier = Barrier::new(threads);
 
@@ -177,14 +177,4 @@ fn stats(out: &mut File, alloc: &Allocator, i: usize) -> io::Result<()> {
     }
     writeln!(out)?;
     Ok(())
-}
-
-#[allow(unused_variables)]
-pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame], MMap> {
-    #[cfg(target_os = "linux")]
-    if let Some(file) = dax {
-        warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
-        return mmap::file(begin, length, &file, true);
-    }
-    mmap::anon(begin, length, false, true)
 }
