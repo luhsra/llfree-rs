@@ -7,7 +7,7 @@ edition = "2021"
 llfree = { path = "../core", features = ["std", "log_warn"] }
 libc = "0.2"
 log = { version = "0.4", default-features = false }
-clap = { version = "4.3", default-features = false, features = ["std", "derive", "help"] }
+clap = { version = "4.4", default-features = false, features = ["std", "derive", "help"] }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 raw-cpuid = { version = "11.0" }

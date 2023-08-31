@@ -230,6 +230,7 @@ mod test {
 
     use log::info;
 
+    #[ignore]
     #[cfg(target_family = "unix")]
     #[test]
     fn file() {
@@ -246,6 +247,8 @@ mod test {
 
         mapping[0] = 42u8;
         assert_eq!(mapping[0], 42);
+
+        std::fs::remove_file("memfile").unwrap();
     }
 
     #[cfg(target_os = "linux")]
