@@ -1,5 +1,7 @@
 //! Generic atomics
 
+use log::info;
+
 use crate::util::Align;
 use core::cell::UnsafeCell;
 use core::fmt;
@@ -16,28 +18,40 @@ impl<T: Atomic> Atom<T> {
     pub fn new(v: T) -> Self {
         Self(T::I::new(v.into()))
     }
+    #[track_caller]
     pub fn load(&self) -> T {
+        info!("{} load", core::panic::Location::caller());
         self.0.load().into()
     }
+    #[track_caller]
     pub fn store(&self, v: T) {
+        info!("{} store", core::panic::Location::caller());
         self.0.store(v.into())
     }
+    #[track_caller]
     pub fn swap(&self, v: T) -> T {
+        info!("{} swap", core::panic::Location::caller());
         self.0.swap(v.into()).into()
     }
+    #[track_caller]
     pub fn compare_exchange(&self, current: T, new: T) -> Result<T, T> {
+        info!("{} cmpxchg", core::panic::Location::caller());
         match self.0.compare_exchange(current.into(), new.into()) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
     }
+    #[track_caller]
     pub fn compare_exchange_weak(&self, current: T, new: T) -> Result<T, T> {
+        info!("{} cmpxchgw", core::panic::Location::caller());
         match self.0.compare_exchange_weak(current.into(), new.into()) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
     }
+    #[track_caller]
     pub fn fetch_update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
+        info!("{} update", core::panic::Location::caller());
         match self.0.fetch_update(|v| f(v.into()).map(|v| v.into())) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),

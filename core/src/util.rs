@@ -50,16 +50,15 @@ impl<T> From<T> for Align<T> {
     }
 }
 
-
 #[cfg(feature = "std")]
 pub fn logging() {
+    use core::mem::transmute;
     use std::io::Write;
     use std::thread::ThreadId;
-    use core::mem::transmute;
 
     use crate::thread::pinned;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format(move |buf, record| {
             let color = match record.level() {
                 log::Level::Error => "\x1b[91m",
@@ -69,13 +68,19 @@ pub fn logging() {
                 log::Level::Trace => "\x1b[90m",
             };
 
+            let pin = pinned();
+            let pin = if pin > isize::MAX as usize {
+                -1
+            } else {
+                pin as isize
+            };
+
             writeln!(
                 buf,
-                "{}[{:5} {:02?}@{:02?} {}:{}] {}\x1b[0m",
+                "{}[{:5} {:02?}@{pin:02?} {}:{}] {}\x1b[0m",
                 color,
                 record.level(),
                 unsafe { transmute::<ThreadId, u64>(std::thread::current().id()) },
-                pinned(),
                 record.file().unwrap_or_default(),
                 record.line().unwrap_or_default(),
                 record.args()

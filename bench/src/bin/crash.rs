@@ -12,7 +12,7 @@ use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
 use llfree::mmap::{self, MMap};
 use llfree::thread;
 use llfree::util::{self, align_up, WyRand};
-use llfree::{Alloc, AllocExt, Init, LLFree};
+use llfree::{Alloc, Init, LLFree};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]

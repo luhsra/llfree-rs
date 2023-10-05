@@ -17,6 +17,9 @@ To compile and test the allocator, you have to [install rust](https://www.rust-l
 The `nightly` version `1.62.0` (or newer) is required for inline assembly and custom compiler toolchains.
 
 ```sh
+# Init dependencies
+git submodule update --init
+
 # Release build
 cargo build -r
 
@@ -29,29 +32,35 @@ cargo perf <benchmark> -- <args>
 cargo perf bench -- -h
 ```
 
-> Note: This project uses certian UNIX features directly (for memory mapping and thread pinning) and doesn't work on Windows without modifications.
+> Note: This project uses certain UNIX features directly (for memory mapping and thread pinning) and doesn't work on Windows without modifications.
 
 ## Project structure
 
+![LLFree Architecture](fig/llfree-arch.svg)
+
 The [core](core/) directory contains the main `llfree` crate and all the allocators.
-The persistent lower allocators can be found in [lower](core/src/lower/).
-Their interface is defined in [lower.rs](core/src/lower.rs).
-These lower allocators manage the level-one and level-two page tables that are optionally persistent on non-volatile memory.
-They allocate pages of 4K up to 4M in these subtrees.
+In general, LLFree is separated into a lower allocator, responsible for allocating pages of 4K up to 4M, and an upper allocator, designed to prevent memory sharing and fragmentation.
 
-- [`Cache`](core/src/lower/cache.rs): This allocator has a 512-bit-large bit field at the lowest level. It stores which 4K pages are allocated. The second level consists of tables with N 16-bit entries, one for each bit field. These entries contain a counter of free pages in the related bit field and a flag if the whole subtree is allocated as a 2M huge page.
-The number of entries N in the second-level tables can be defined at compile-time.
+The persistent lower allocator can be found in [lower](core/src/lower.rs).
+Internally, this allocator has 512-bit-large bit fields at the lowest level.
+They stores which 4K pages are allocated.
+The second level consists of 2M entries, one for each bit field. These entries contain a counter of free pages in the related bit field and a flag if the whole subtree is allocated as a 2M huge page.
+These 2M entries are further grouped into trees with 32 entries (this can be defined at compile-time).
 
-The [upper](core/src/upper/) directory contains the different upper allocator variants.
-The general interface is defined in [upper.rs](core/src/upper.rs), along with various unit and stress tests.
-Most of the upper allocators depend on the lower allocator for the actual allocations and only manage the higher-level subtrees.
-The upper allocators are completely volatile and have to be rebuilt on boot.
-The different implementations are listed down below:
+The [llfree](core/src/llfree.rs) module contains the upper allocator.
+Its interface is defined in [lib.rs](core/src/lib.rs), along with various unit and stress tests.
+The upper allocator depends on the lower allocator for the actual allocations and only manages the higher-level trees.
+Its purpose is to improve performance by preventing memory sharing and fragmentation.
+It is completely volatile and has to be rebuilt on boot.
 
-- [`Array`](core/src/upper/array.rs): It consists of a single array of tree entries, which is linearly searched for the appropriate subtrees.
-- [`ListLocal`](core/src/upper/list_local.rs), [`ListLocked`](core/src/upper/list_locked.rs), and [`ListCAS`](core/src/upper/list_cas.rs): These reference implementations are used to evaluate the performance of allocators.
+The allocator's data structures are defined in [core/src/entry.rs](core/src/entry.rs) and [core/src/trees.rs](core/src/trees.rs).
 
-The allocator's data structures are defined in [core/src/entry.rs](core/src/entry.rs) and [core/src/table.rs](core/src/table.rs).
+This project also includes the C reimplementation ([llfree-c](https://github.com/luhsra/llfree-c)) in [llc](core/src/llc.rs).
+The unit tests can be executed for the C by using the `--features llc` argument:
+
+```sh
+cargo test --features llc -- --test-threads 1
+```
 
 ## Benchmarks
 
@@ -60,7 +69,7 @@ The benchmarks can be found in [bench/src/bin](bench/src/bin) and the benchmark 
 These benchmarks can be executed with:
 
 ```bash
-cargo perf bench -- bulk -x1 -x2 -x4 -t4 -m8 -o results/bench.csv Array4C32
+cargo perf bench -- bulk -x1 -x2 -x4 -t4 -m8 -o results/bench.csv LLFree
 ```
 
 This runs the `bulk` benchmark for 1, 2, and 4 threads (`-t4` max 4 threads) on 24G DRAM and stores the result in `results/bench.csv`.

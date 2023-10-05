@@ -5,6 +5,7 @@ use core::{fmt, slice};
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
+use std::ops::Range;
 use std::sync::{atomic::Ordering, Barrier};
 use std::time::Instant;
 
@@ -15,10 +16,34 @@ use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
 use llfree::mmap::{self, MMap};
 use llfree::thread;
 use llfree::util::{self, WyRand};
-use llfree::{Alloc, Init, LLFree};
+use llfree::{Alloc, Init, LLFree, Result, LLC};
 
 /// Number of allocations per block
 const RAND_BLOCK_SIZE: usize = 8;
+
+/// Reduced, VTable-compatible alloc trait for dynamic dispatch
+trait DynAlloc: fmt::Debug + Send + Sync {
+    fn get(&self, core: usize, order: usize) -> Result<PFN>;
+    fn put(&self, core: usize, frame: PFN, order: usize) -> Result<()>;
+
+    fn frames(&self) -> usize;
+    fn allocated_frames(&self) -> usize;
+}
+
+impl<T: Alloc> DynAlloc for T {
+    fn get(&self, core: usize, order: usize) -> Result<PFN> {
+        T::get(self, core, order)
+    }
+    fn put(&self, core: usize, frame: PFN, order: usize) -> Result<()> {
+        T::put(self, core, frame, order)
+    }
+    fn frames(&self) -> usize {
+        T::frames(self)
+    }
+    fn allocated_frames(&self) -> usize {
+        T::allocated_frames(self)
+    }
+}
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
@@ -57,7 +82,7 @@ struct Args {
 fn main() {
     let Args {
         bench,
-        allocs: alloc_names,
+        allocs,
         x,
         threads,
         outfile,
@@ -83,22 +108,10 @@ fn main() {
 
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
 
-    let mut allocs: [Box<dyn Alloc>; 1] = [Box::<LLFree>::default()];
-
     for x in x {
-        let t = bench.threads(threads, x);
-        if t > threads {
-            continue;
-        }
-
-        for alloc in &mut allocs {
-            let name = alloc.name();
-            if !alloc_names.iter().any(|n| name == n.trim()) {
-                continue;
-            }
-
+        for name in &allocs {
             for i in 0..iterations {
-                let perf = bench.run(alloc.as_mut(), &mut mapping, order, threads, x);
+                let perf = bench.run(name, &mut mapping, order, threads, x);
                 writeln!(out, "{name},{x},{i},{memory},{perf}").unwrap();
             }
         }
@@ -117,6 +130,22 @@ pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame],
     mmap::anon(begin, length, false, false)
 }
 
+fn alloc(
+    name: &str,
+    cores: usize,
+    area: Range<PFN>,
+    init: Init,
+    free_all: bool,
+) -> Box<dyn DynAlloc> {
+    if <LLC as Alloc>::name() == name {
+        return Box::new(LLC::new(cores, area, init, free_all).unwrap());
+    }
+    if <LLFree as Alloc>::name() == name {
+        return Box::new(LLFree::new(cores, area, init, free_all).unwrap());
+    }
+    panic!("Unknown allocator");
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Benchmark {
     /// Allocate half the memory at once and free it afterwards
@@ -133,44 +162,30 @@ enum Benchmark {
 }
 
 impl Benchmark {
-    fn threads(self, threads: usize, x: usize) -> usize {
-        match self {
-            Benchmark::Filling => threads,
-            _ => x,
-        }
-    }
-
     fn run(
         self,
-        alloc: &mut dyn Alloc,
+        name: &str,
         mapping: &mut [Frame],
         order: usize,
         threads: usize,
         x: usize,
     ) -> Perf {
-        warn!(">>> bench {self:?} x={x} o={order} {}\n", alloc.name());
+        warn!(">>> bench {self:?} x={x} o={order} {name}\n");
+        let mut alloc = alloc(name, threads, pfn_range(mapping), Init::Overwrite, true);
 
         match self {
-            Benchmark::Bulk => bulk(alloc, mapping, order, threads, x),
-            Benchmark::Repeat => repeat(alloc, mapping, order, threads, x),
-            Benchmark::Rand => rand(alloc, mapping, order, threads, x),
-            Benchmark::RandBlock => rand_block(alloc, mapping, order, threads, x),
-            Benchmark::Filling => filling(alloc, mapping, order, threads, x),
+            Benchmark::Bulk => bulk(alloc.as_mut(), order, threads, x),
+            Benchmark::Repeat => repeat(alloc.as_mut(), order, threads, x),
+            Benchmark::Rand => rand(alloc.as_mut(), order, threads, x),
+            Benchmark::RandBlock => rand_block(alloc.as_mut(), order, threads, x),
+            Benchmark::Filling => filling(alloc.as_mut(), order, threads, x),
         }
     }
 }
 
-fn bulk(
-    alloc: &mut dyn Alloc,
-    mapping: &mut [Frame],
-    order: usize,
-    max_threads: usize,
-    threads: usize,
-) -> Perf {
+fn bulk(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
+    assert!(threads <= max_threads);
     let timer = Instant::now();
-    alloc
-        .init(threads, pfn_range(mapping), Init::Overwrite, true)
-        .unwrap();
     let init = timer.elapsed().as_millis();
     let allocs = alloc.frames() / max_threads / 2 / (1 << order);
 
@@ -222,17 +237,9 @@ fn bulk(
     perf
 }
 
-fn repeat(
-    alloc: &mut dyn Alloc,
-    mapping: &mut [Frame],
-    order: usize,
-    max_threads: usize,
-    threads: usize,
-) -> Perf {
+fn repeat(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
+    assert!(threads <= max_threads);
     let timer = Instant::now();
-    alloc
-        .init(threads, pfn_range(mapping), Init::Overwrite, true)
-        .unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.frames() / max_threads / 2 / (1 << order);
@@ -273,17 +280,9 @@ fn repeat(
     perf
 }
 
-fn rand(
-    alloc: &mut dyn Alloc,
-    mapping: &mut [Frame],
-    order: usize,
-    max_threads: usize,
-    threads: usize,
-) -> Perf {
+fn rand(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
+    assert!(threads <= max_threads);
     let timer = Instant::now();
-    alloc
-        .init(threads, pfn_range(mapping), Init::Overwrite, true)
-        .unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.frames() / max_threads / 2 / (1 << order);
@@ -348,17 +347,9 @@ fn rand(
 }
 
 /// reallocate multiple in close proximity at once
-fn rand_block(
-    alloc: &mut dyn Alloc,
-    mapping: &mut [Frame],
-    order: usize,
-    max_threads: usize,
-    threads: usize,
-) -> Perf {
+fn rand_block(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
+    assert!(threads <= max_threads);
     let timer = Instant::now();
-    alloc
-        .init(threads, pfn_range(mapping), Init::Overwrite, true)
-        .unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.frames() / max_threads / 2 / (1 << order);
@@ -420,23 +411,14 @@ fn rand_block(
     perf
 }
 
-fn filling(
-    alloc: &mut dyn Alloc,
-    mapping: &mut [Frame],
-    order: usize,
-    threads: usize,
-    x: usize,
-) -> Perf {
+fn filling(alloc: &mut dyn DynAlloc, order: usize, threads: usize, level: usize) -> Perf {
     let timer = Instant::now();
-    alloc
-        .init(threads, pfn_range(mapping), Init::Overwrite, true)
-        .unwrap();
     let init = timer.elapsed().as_millis();
 
     let allocs = alloc.frames() / threads / (1 << order);
 
     // Allocate to filling level
-    let fill = (allocs * x) / 100;
+    let fill = (allocs * level) / 100;
     let allocs = allocs / 100; // allocate 1%
     warn!("fill={fill} allocs={allocs}");
 

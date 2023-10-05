@@ -1,6 +1,5 @@
 //! Upper allocator implementation
 
-use core::ffi::c_void;
 use core::fmt;
 use core::hint::spin_loop;
 use core::ops::Range;
@@ -37,7 +36,6 @@ use super::{trees::Trees, Alloc, Init};
 ///
 /// This volatile shared metadata is rebuild on boot from
 /// the persistent metadata of the lower allocator.
-#[derive(Default)]
 #[repr(align(64))]
 pub struct LLFree {
     /// Pointer to the metadata frame at the end of the allocators persistent memory range
@@ -128,7 +126,7 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Frame::SIZE);
 
 impl fmt::Debug for LLFree {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{} {{", self.name())?;
+        writeln!(f, "{} {{", Self::name())?;
 
         writeln!(
             f,
@@ -158,19 +156,13 @@ impl fmt::Debug for LLFree {
 impl Alloc for LLFree {
     /// Return the name of the allocator.
     #[cold]
-    fn name(&self) -> &'static str {
+    fn name() -> &'static str {
         "LLFree"
     }
 
     /// Initialize the allocator.
     #[cold]
-    fn init(
-        &mut self,
-        mut cores: usize,
-        mut memory: Range<PFN>,
-        init: Init,
-        free_all: bool,
-    ) -> Result<()> {
+    fn new(mut cores: usize, mut memory: Range<PFN>, init: Init, free_all: bool) -> Result<Self> {
         info!("initializing c={cores} {memory:?} {}", memory.len());
 
         if memory.start.0 % (1 << Lower::MAX_ORDER) != 0 {
@@ -187,34 +179,66 @@ impl Alloc for LLFree {
             cores = memory.len().div_ceil(Lower::N);
         }
 
+        let mut meta: Option<&'static Meta> = None;
         if init != Init::Volatile {
             // Last frame is reserved for metadata
             let m = memory.start..PFN(memory.end.0 - 1);
-            self.meta = Some(unsafe { &*m.end.as_ptr().cast() });
+            meta = unsafe { m.end.as_ptr_mut().cast::<Meta>().as_ref() };
             memory = m;
         }
 
         // Create lower allocator
-        self.lower = Lower::new(cores, memory.start, memory.len(), init, free_all);
+        let lower = Lower::new(cores, memory.start, memory.len(), init, free_all);
 
         // Init per-cpu data
         let mut local = Vec::with_capacity(cores);
         local.resize_with(cores, Default::default);
-        self.local = local.into();
+        let local = local.into();
 
-        if init == Init::Recover {
-            self.recover()?;
+        let trees = if init == Init::Recover {
+            let meta = meta.unwrap();
+            if meta.frames.load(Ordering::SeqCst) == lower.frames()
+                && meta.magic.load(Ordering::SeqCst) == Meta::MAGIC
+            {
+                info!("recover p={}", lower.frames());
+                // The active flag is set on boot and reset on a successful shutdown
+                // If it is already set, the allocator has been crashed
+                // In this case, we have to initiate a deep recovery, correcting all the counters
+                let deep = meta.crashed.load(Ordering::SeqCst);
+                if deep {
+                    warn!("Try recover crashed allocator!");
+                }
+
+                let mut trees = Vec::with_capacity(lower.frames().div_ceil(Lower::N));
+                // Recover each tree one-by-one
+                for i in 0..lower.frames().div_ceil(Lower::N) {
+                    let frame = i * Lower::N;
+                    let frames = lower.recover(frame, deep)?;
+                    trees.push(Atom::new(Tree::new_with(frames, false)));
+                }
+                meta.crashed.store(true, Ordering::SeqCst);
+
+                trees.into()
+            } else {
+                error!("No metadata found");
+                return Err(Error::Initialization);
+            }
         } else {
-            self.trees.init(self.frames(), free_all);
-        }
+            Trees::new(lower.frames(), free_all)
+        };
 
-        if let Some(meta) = self.meta {
-            meta.frames.store(self.frames(), Ordering::SeqCst);
+        if let Some(meta) = meta {
+            meta.frames.store(lower.frames(), Ordering::SeqCst);
             meta.magic.store(Meta::MAGIC, Ordering::SeqCst);
             meta.crashed.store(true, Ordering::SeqCst);
         }
 
-        Ok(())
+        Ok(Self {
+            meta,
+            local,
+            lower,
+            trees,
+        })
     }
 
     /// Allocate a new frame of `order` on the given `core`.
@@ -273,8 +297,7 @@ impl Alloc for LLFree {
             let mut v = v.inc(num_frames, max)?;
             if !v.reserved() && v.free() > Trees::<{ Lower::N }>::MIN_FREE && local.frees_in_tree(i)
             {
-                // put-reserve optimization:
-                // Reserve the tree that was targeted by the recent frees
+                // Reserve the tree that was targeted by the last N frees
                 v = v.with_free(0).with_reserved(true);
                 reserved = true;
             }
@@ -348,49 +371,12 @@ impl Alloc for LLFree {
         counter
     }
 
-    fn for_each_huge_frame(&self, ctx: *mut c_void, f: fn(*mut c_void, PFN, usize)) {
-        self.lower.for_each_huge_frame(|frame, c| f(ctx, frame, c))
+    fn for_each_huge_frame<F: FnMut(PFN, usize)>(&self, f: F) {
+        self.lower.for_each_huge_frame(f)
     }
 }
 
 impl LLFree {
-    /// Recover the allocator from NVM after reboot.
-    /// If crashed then the level 1 frame tables are traversed and diverging counters are corrected.
-    fn recover(&mut self) -> Result<()> {
-        if let Some(meta) = self.meta {
-            if meta.frames.load(Ordering::SeqCst) == self.frames()
-                && meta.magic.load(Ordering::SeqCst) == Meta::MAGIC
-            {
-                info!("recover p={}", self.frames());
-                // The active flag is set on boot and reset on a successful shutdown
-                // If it is already set, the allocator has been crashed
-                // In this case, we have to initiate a deep recovery, correcting all the counters
-                let deep = meta.crashed.load(Ordering::SeqCst);
-                if deep {
-                    warn!("Try recover crashed allocator!");
-                }
-
-                let mut trees = Vec::with_capacity(self.frames().div_ceil(Lower::N));
-                // Recover each tree one-by-one
-                for i in 0..self.frames().div_ceil(Lower::N) {
-                    let frame = i * Lower::N;
-                    let frames = self.lower.recover(frame, deep)?;
-                    trees.push(Atom::new(Tree::new_with(frames, false)));
-                }
-                self.trees = trees.into();
-
-                meta.crashed.store(true, Ordering::SeqCst);
-                Ok(())
-            } else {
-                error!("No metadata found");
-                Err(Error::Initialization)
-            }
-        } else {
-            error!("Allocator not persistent");
-            Err(Error::Initialization)
-        }
-    }
-
     /// Convert an address to the frame index
     fn addr_to_frame(&self, addr: PFN, order: usize) -> Result<usize> {
         if order > Lower::MAX_ORDER {

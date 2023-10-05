@@ -48,7 +48,7 @@ impl<const LN: usize> Trees<LN> {
     pub const MAX_FREE: usize = LN - (1 << 10);
 
     /// Initialize the tree array
-    pub fn init(&mut self, frames: usize, free_all: bool) {
+    pub fn new(frames: usize, free_all: bool) -> Self {
         let len = frames.div_ceil(LN);
         let mut entries = Vec::with_capacity(len);
         if free_all {
@@ -59,7 +59,9 @@ impl<const LN: usize> Trees<LN> {
         } else {
             entries.resize_with(len, || Atom::new(Tree::new()));
         }
-        self.entries = entries.into();
+        Self {
+            entries: entries.into(),
+        }
     }
 
     pub fn len(&self) -> usize {

@@ -9,6 +9,7 @@
 #![feature(generic_const_exprs)]
 #![feature(inline_const)]
 #![feature(allocator_api)]
+#![feature(c_size_t)]
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
@@ -34,10 +35,15 @@ mod bitfield;
 mod entry;
 mod llfree;
 pub use llfree::LLFree;
+
+#[cfg(feature = "llc")]
+mod llc;
+#[cfg(feature = "llc")]
+pub use llc::LLC;
+
 mod lower;
 mod trees;
 
-use core::ffi::c_void;
 use core::fmt;
 use core::ops::Range;
 
@@ -65,16 +71,16 @@ pub type Result<T> = core::result::Result<T, Error>;
 pub const CAS_RETRIES: usize = 4;
 
 /// The general interface of the allocator implementations.
-pub trait Alloc: Sync + Send + fmt::Debug {
+pub trait Alloc: Sized + Sync + Send + fmt::Debug {
     /// Return the name of the allocator.
     #[cold]
-    fn name(&self) -> &'static str {
+    fn name() -> &'static str {
         "Unknown"
     }
 
     /// Initialize the allocator.
     #[cold]
-    fn init(&mut self, cores: usize, area: Range<PFN>, init: Init, free_all: bool) -> Result<()>;
+    fn new(cores: usize, area: Range<PFN>, init: Init, free_all: bool) -> Result<Self>;
 
     /// Allocate a new frame of `order` on the given `core`.
     fn get(&self, core: usize, order: usize) -> Result<PFN>;
@@ -101,9 +107,9 @@ pub trait Alloc: Sync + Send + fmt::Debug {
     fn free_huge_frames(&self) -> usize {
         0
     }
-    /// Execute f for each huge frame with the number of free frames
-    /// in this huge frame as parameter.
-    fn for_each_huge_frame(&self, _ctx: *mut c_void, _f: fn(*mut c_void, PFN, usize)) {}
+
+    /// Calls f for every huge page
+    fn for_each_huge_frame<F: FnMut(PFN, usize)>(&self, f: F);
 }
 
 /// Defines if the allocator should be allocated persistently
@@ -117,26 +123,6 @@ pub enum Init {
     /// Overwrite the persistent memory
     Overwrite,
 }
-
-/// Extending the dynamic [Alloc] interface
-pub trait AllocExt: Sized + Alloc + Default {
-    /// Create and initialize the allocator.
-    #[cold]
-    fn new(cores: usize, area: Range<PFN>, init: Init, free_all: bool) -> Result<Self> {
-        let mut a = Self::default();
-        a.init(cores, area, init, free_all)?;
-        Ok(a)
-    }
-    /// Calls f for every huge page
-    fn each_huge_frame<F: FnMut(PFN, usize)>(&self, mut f: F) {
-        self.for_each_huge_frame((&mut f) as *mut F as *mut c_void, |ctx, pfn, free| {
-            let f = unsafe { &mut *ctx.cast::<F>() };
-            f(pfn, free)
-        })
-    }
-}
-// Implement for all default initializable allocators
-impl<A: Sized + Alloc + Default> AllocExt for A {}
 
 #[cfg(all(test, feature = "std"))]
 mod test {
@@ -154,11 +140,42 @@ mod test {
     use crate::thread;
     use crate::util::{logging, WyRand};
     use crate::Error;
-    use crate::{Alloc, AllocExt, Init};
+    use crate::{Alloc, Init};
 
-    use super::LLFree;
+    use super::*;
 
+    #[cfg(feature = "llc")]
+    type Allocator = LLC;
+    #[cfg(not(feature = "llc"))]
     type Allocator = LLFree;
+
+    #[test]
+    fn minimal() {
+        logging();
+        // 8GiB
+        const MEM_SIZE: usize = 1 << 30;
+        let area = PFN(0)..PFN(MEM_SIZE / Frame::SIZE);
+
+        info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
+
+        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
+
+        assert_eq!(alloc.free_frames(), alloc.frames());
+
+        warn!("get >>>");
+        let frame1 = alloc.get(0, 0).unwrap();
+        warn!("get <<<");
+        warn!("get >>>");
+        let frame2 = alloc.get(0, 0).unwrap();
+        warn!("get <<<");
+
+        warn!("put >>>");
+        alloc.put(0, frame2, 0).unwrap();
+        warn!("put <<<");
+        warn!("put >>>");
+        alloc.put(0, frame1, 0).unwrap();
+        warn!("put <<<");
+    }
 
     #[test]
     fn simple() {
@@ -244,7 +261,7 @@ mod test {
         let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
 
         warn!("start alloc...");
-        const ALLOCS: usize = MEM_SIZE / Frame::SIZE / 4 * 3;
+        const ALLOCS: usize = MEM_SIZE / Frame::SIZE / 2;
         let mut frames = Vec::with_capacity(ALLOCS);
         for _ in 0..ALLOCS {
             frames.push(alloc.get(0, 0).unwrap());
@@ -460,7 +477,86 @@ mod test {
     }
 
     #[test]
-    #[ignore]
+    fn alloc_all() {
+        logging();
+
+        const PAGES: usize = 2 * PT_LEN * PT_LEN;
+
+        let area = PFN(0)..PFN(PAGES);
+
+        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
+
+        // Stress test
+        let mut frames = Vec::new();
+        let timer = Instant::now();
+
+        loop {
+            match alloc.get(0, 0) {
+                Ok(frame) => frames.push(frame),
+                Err(Error::Memory) => break,
+                Err(e) => panic!("{e:?}"),
+            }
+
+        }
+        warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
+        warn!("{alloc:?}");
+
+        assert_eq!(alloc.allocated_frames(), frames.len());
+        warn!("allocated frames: {}", frames.len());
+
+        // Check that the same frame was not allocated twice
+        frames.sort_unstable();
+        for &[a, b] in frames.array_windows() {
+            assert_ne!(a, b);
+            assert!(area.contains(&a) && area.contains(&b));
+        }
+    }
+
+    #[test]
+    fn parallel_alloc_all() {
+        logging();
+
+        const THREADS: usize = 4;
+        const PAGES: usize = 2 * THREADS * PT_LEN * PT_LEN;
+
+        let area = PFN(0)..PFN(PAGES);
+
+        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
+
+        // Stress test
+        let mut frames = vec![Vec::new(); THREADS];
+        let barrier = Barrier::new(THREADS);
+        let timer = Instant::now();
+
+        thread::parallel(frames.iter_mut().enumerate(), |(t, frames)| {
+            thread::pin(t);
+            barrier.wait();
+
+            loop {
+                match alloc.get(t, 0) {
+                    Ok(frame) => frames.push(frame),
+                    Err(Error::Memory) => break,
+                    Err(e) => panic!("{e:?}"),
+                }
+            }
+        });
+        warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
+        warn!("{alloc:?}");
+
+        let mut frames = frames.into_iter().flatten().collect::<Vec<_>>();
+
+        assert_eq!(alloc.allocated_frames(), frames.len());
+        warn!("allocated frames: {}", frames.len());
+
+        // Check that the same frame was not allocated twice
+        frames.sort_unstable();
+        for &[a, b] in frames.array_windows() {
+            assert_ne!(a, b);
+            assert!(area.contains(&a) && area.contains(&b));
+        }
+    }
+
+    #[test]
     fn less_mem() {
         logging();
 
@@ -747,8 +843,7 @@ mod test {
             std::mem::forget(alloc);
         }
 
-        let mut alloc = Allocator::default();
-        alloc.init(1, area, Init::Recover, true).unwrap();
+        let alloc = Allocator::new(1, area, Init::Recover, true).unwrap();
         assert_eq!(alloc.allocated_frames(), expected_frames);
     }
 

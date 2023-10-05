@@ -15,7 +15,7 @@ use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
 use llfree::mmap::MMap;
 use llfree::thread;
 use llfree::util::{self, WyRand};
-use llfree::{Alloc, AllocExt, Init, LLFree};
+use llfree::{Alloc, Init, LLFree};
 
 /// Benchmarking the (crashed) recovery.
 #[derive(Parser, Debug)]

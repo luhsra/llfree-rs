@@ -11,9 +11,9 @@ use clap::Parser;
 use log::warn;
 
 use llfree::frame::{PFN, PT_LEN};
-use llfree::thread;
+use llfree::{thread, LLFree};
 use llfree::util::{self, WyRand};
-use llfree::{Alloc, AllocExt, Init, LLFree};
+use llfree::*;
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
@@ -167,7 +167,7 @@ fn main() {
 /// count and output stats
 fn stats(out: &mut File, alloc: &Allocator, i: usize) -> io::Result<()> {
     let mut free_per_huge = Vec::with_capacity(alloc.frames() / 512);
-    alloc.each_huge_frame(|_pfn, free| {
+    alloc.for_each_huge_frame(|_pfn, free| {
         free_per_huge.push(free as u16);
     });
 

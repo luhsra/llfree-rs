@@ -78,10 +78,7 @@ fn main() {
     for _ in 0..iterations {
         let timer = Instant::now();
 
-        let mut alloc = Allocator::default();
-        alloc
-            .init(threads, pfn_range(&mapping), Init::Overwrite, true)
-            .unwrap();
+        let alloc = Allocator::new(threads, pfn_range(&mapping), Init::Overwrite, true).unwrap();
 
         warn!("init time {}ms", timer.elapsed().as_millis());
 
