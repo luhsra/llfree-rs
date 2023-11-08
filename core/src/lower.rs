@@ -470,7 +470,7 @@ impl Lower {
         let bitfield = &self.bitfields[frame / Bitfield::LEN];
 
         // Try filling the whole bitfield
-        if bitfield.fill_cas(true) {
+        if bitfield.toggle(0, Bitfield::ORDER, false).is_ok() {
             if table[i].compare_exchange(old, HugeEntry::new()).is_err() {
                 error!("Failed partial clear");
                 return Err(Error::Corruption);
@@ -531,14 +531,6 @@ mod test {
 
     type Allocator = Lower;
 
-    fn count(pt: &Bitfield) -> usize {
-        let mut frames = 0;
-        for i in 0..Bitfield::LEN {
-            frames += !pt.get(i) as usize;
-        }
-        frames
-    }
-
     #[test]
     fn alloc_normal() {
         logging();
@@ -555,7 +547,7 @@ mod test {
         });
 
         assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 3);
-        assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 3);
+        assert_eq!(lower.bitfields[0].count_zeros(), Bitfield::LEN - 3);
     }
 
     #[test]
@@ -572,7 +564,7 @@ mod test {
 
         let entry2 = lower.children[0][0].load();
         assert_eq!(entry2.free(), Bitfield::LEN - 2);
-        assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 2);
+        assert_eq!(lower.bitfields[0].count_zeros(), Bitfield::LEN - 2);
     }
 
     #[test]
@@ -594,7 +586,7 @@ mod test {
         let table = &lower.children[0];
         assert_eq!(table[0].load().free(), 0);
         assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
-        assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
+        assert_eq!(lower.bitfields[1].count_zeros(), Bitfield::LEN - 1);
     }
 
     #[test]
@@ -637,7 +629,7 @@ mod test {
 
         let table = &lower.children[0];
         assert_eq!(table[0].load().free(), 2);
-        assert_eq!(count(&lower.bitfields[0]), 2);
+        assert_eq!(lower.bitfields[0].count_zeros(), 2);
     }
 
     #[test]
@@ -665,13 +657,13 @@ mod test {
 
         let table = &lower.children[0];
         if table[0].load().free() == 1 {
-            assert_eq!(count(&lower.bitfields[0]), 1);
+            assert_eq!(lower.bitfields[0].count_zeros(), 1);
         } else {
             // Table entry skipped
             assert_eq!(table[0].load().free(), 2);
-            assert_eq!(count(&lower.bitfields[0]), 2);
+            assert_eq!(lower.bitfields[0].count_zeros(), 2);
             assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
-            assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
+            assert_eq!(lower.bitfields[1].count_zeros(), Bitfield::LEN - 1);
         }
     }
 
@@ -696,7 +688,7 @@ mod test {
             lower.children[0][0].load().free(),
             Bitfield::LEN - allocated
         );
-        assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - allocated);
+        assert_eq!(lower.bitfields[0].count_zeros(), Bitfield::LEN - allocated);
     }
 
     #[test]

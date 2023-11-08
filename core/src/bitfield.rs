@@ -2,7 +2,7 @@
 
 use core::mem::size_of;
 use core::ops::{Not, Range};
-use core::sync::atomic::{self, AtomicU64, Ordering::*};
+use core::sync::atomic::AtomicU64;
 use core::{fmt, mem};
 
 use log::error;
@@ -39,6 +39,7 @@ impl<const N: usize> fmt::Debug for Bitfield<N> {
     }
 }
 
+#[allow(unused)]
 impl<const N: usize> Bitfield<N> {
     pub const ENTRY_BITS: usize = 64;
     pub const ENTRIES: usize = N;
@@ -63,14 +64,6 @@ impl<const N: usize> Bitfield<N> {
                 }
             }
         }
-    }
-
-    /// Return if the `i`-th bit is set
-    #[allow(unused)]
-    pub fn get(&self, i: usize) -> bool {
-        let di = i / Self::ENTRY_BITS;
-        let bit = 1 << (i % Self::ENTRY_BITS);
-        self.data[di].load() & bit != 0
     }
 
     /// Return the  `i`-th entry
@@ -220,31 +213,11 @@ impl<const N: usize> Bitfield<N> {
     }
 
     /// Fill this bitset with `v` ignoring any previous data.
-    ///
-    /// This is faster than atomics but does not handle race conditions.
     pub fn fill(&self, v: bool) {
         let v = if v { u64::MAX } else { 0 };
-        // cast to raw memory to let the compiler use vector instructions
-        #[allow(invalid_reference_casting)]
-        let mem = unsafe { &mut *(self.data.as_ptr() as *mut [u64; N]) };
-        mem.fill(v);
-        // memory ordering has to be enforced with a memory barrier
-        atomic::fence(SeqCst);
-    }
-
-    /// Fills the bitset using atomic compare exchage, returning false on failure
-    ///
-    /// # Warning
-    /// If false is returned, the bitfield might be corrupted!
-    pub fn fill_cas(&self, v: bool) -> bool {
-        let v = if v { u64::MAX } else { 0 };
-
-        for e in &self.data {
-            if e.compare_exchange(!v, v).is_err() {
-                return false;
-            }
+        for row in &self.data {
+            row.store(v);
         }
-        true
     }
 
     /// Returns the number of zeros in this bitfield
