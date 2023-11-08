@@ -6,7 +6,6 @@
 #![feature(new_uninit)]
 #![feature(int_roundings)]
 #![feature(array_windows)]
-#![feature(generic_const_exprs)]
 #![feature(inline_const)]
 #![feature(allocator_api)]
 #![feature(c_size_t)]

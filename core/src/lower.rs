@@ -517,6 +517,8 @@ impl Drop for Lower {
 
 #[cfg(all(test, feature = "std"))]
 mod test {
+    use std::sync::Barrier;
+
     use alloc::vec::Vec;
     use log::warn;
 
@@ -806,8 +808,10 @@ mod test {
             );
             assert_eq!(lower.allocated_frames(), 0);
 
+            let barrier = Barrier::new(THREADS);
             thread::parallel(0..THREADS, |t| {
                 thread::pin(t);
+                barrier.wait();
 
                 let mut frames = [0; 4];
                 for p in &mut frames {
@@ -846,8 +850,10 @@ mod test {
                 *frame = lower.get(0, 0).unwrap();
             }
 
+            let barrier = Barrier::new(THREADS);
             thread::parallel(0..THREADS, |t| {
                 thread::pin(t);
+                barrier.wait();
 
                 if t < THREADS / 2 {
                     lower.put(frames[t], 0).unwrap();

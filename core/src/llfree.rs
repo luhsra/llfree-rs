@@ -255,7 +255,6 @@ impl Alloc for LLFree {
             match self.get_inner(core, order) {
                 Ok(frame) => return Ok(self.lower.begin().off(frame)),
                 Err(Error::Retry) => continue,
-                Err(Error::Memory) => return self.drain_and_steal(core, order),
                 Err(e) => return Err(e),
             }
         }
@@ -340,7 +339,7 @@ impl Alloc for LLFree {
     /// Unreserve cpu-local frames
     fn drain(&self, core: usize) -> Result<()> {
         let local = &self.local[core % self.local.len()];
-        match self.cas_reserved(&local.preferred, ReservedTree::default(), false) {
+        match self.swap_reserved(&local.preferred, ReservedTree::default(), false) {
             Err(Error::Retry) => Ok(()), // ignore cas errors
             r => r,
         }
@@ -419,9 +418,8 @@ impl LLFree {
         // Try allocating with the lower allocator
         match self.get_lower(old, order) {
             Ok((reserved, frame)) => {
-                // Success
                 if order < 6 && start != reserved.start() {
-                    // Save start index for lower allocations
+                    // Save start index for small allocations
                     let _ = local
                         .preferred
                         .compare_exchange(reserved.with_start(start), reserved);
@@ -547,11 +545,23 @@ impl LLFree {
             self.trees.len() / self.local.len() * core
         };
 
+        let drain_fn = || {
+            for core in 0..self.local.len() {
+                self.drain(core)?;
+            }
+            Ok(())
+        };
+
         // Reserved a new tree an allocate a frame in it
         let cores = self.local.len();
-        let (new, frame) = match self.trees.reserve(order, cores, start, fragmented, |r| {
-            self.get_lower(r, order)
-        }) {
+        let (new, frame) = match self.trees.reserve(
+            order,
+            cores,
+            start,
+            fragmented,
+            |r| self.get_lower(r, order),
+            drain_fn,
+        ) {
             Ok(entry) => entry,
             Err(e) => {
                 // Rollback: Clear reserve flag
@@ -562,32 +572,8 @@ impl LLFree {
             }
         };
 
-        match self.cas_reserved(local, new, true) {
+        match self.swap_reserved(local, new, true) {
             Ok(_) => Ok(frame),
-            Err(Error::Retry) => {
-                error!("unexpected reserve state");
-                Err(Error::Corruption)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Fallback if all trees are full
-    fn drain_and_steal(&self, core: usize, order: usize) -> Result<PFN> {
-        // Drain all
-        for core in 0..self.local.len() {
-            self.drain(core)?;
-        }
-
-        // Steal drained trees
-        let start = self.trees.len() / self.local.len() * core;
-        let (reserved, frame) = self
-            .trees
-            .reserve_far(start, (1 << order).., |r| self.get_lower(r, order))?;
-
-        let local = &self.local[core].preferred;
-        match self.cas_reserved(local, reserved, false) {
-            Ok(_) => Ok(self.lower.begin().off(frame)),
             Err(Error::Retry) => {
                 error!("unexpected reserve state");
                 Err(Error::Corruption)
@@ -599,7 +585,7 @@ impl LLFree {
     /// Reserve an entry for bulk frees
     fn reserve_for_put(&self, free: usize, local: &Atom<ReservedTree>, i: usize) -> Result<bool> {
         let entry = ReservedTree::new_with(free, i * Lower::N);
-        match self.cas_reserved(local, entry, false) {
+        match self.swap_reserved(local, entry, false) {
             Ok(_) => Ok(true),
             Err(Error::Retry) => {
                 warn!("rollback {i}");
@@ -617,7 +603,7 @@ impl LLFree {
 
     /// Swap the current reserved tree out replacing it with a new one.
     /// The old tree is unreserved.
-    fn cas_reserved(
+    fn swap_reserved(
         &self,
         local: &Atom<ReservedTree>,
         new: ReservedTree,

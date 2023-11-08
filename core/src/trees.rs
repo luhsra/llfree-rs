@@ -173,6 +173,7 @@ impl<const LN: usize> Trees<LN> {
         start: usize,
         fragmented: bool,
         get_lower: impl FnMut(ReservedTree) -> Result<(ReservedTree, usize)> + Copy,
+        drain: impl FnOnce() -> Result<()>,
     ) -> Result<(ReservedTree, usize)> {
         if fragmented {
             // search for a free tree
@@ -181,11 +182,19 @@ impl<const LN: usize> Trees<LN> {
                 r => return r,
             }
         } else {
+            // search for a partially filled tree
             match self.reserve_partial(cores, start, get_lower) {
                 Err(Error::Memory) => {}
                 r => return r,
             }
         }
+        // fallback to any tree
+        match self.reserve_far(start, (1 << order).., get_lower) {
+            Err(Error::Memory) => {}
+            r => return r,
+        }
+        // fallback to draining all reservations from other cores
+        drain()?;
         self.reserve_far(start, (1 << order).., get_lower)
     }
 }

@@ -40,12 +40,12 @@ impl Alloc for LLC {
                 free_all as _,
             )
         };
-        to_result(ret).map(|_| LLC { raw })
+        ret.ok().map(|_| LLC { raw })
     }
 
     fn get(&self, core: usize, order: usize) -> Result<PFN> {
         let ret = unsafe { llc_get(self.raw.as_ptr().cast(), core as _, order as _) };
-        Ok(PFN(to_result(ret)? as _))
+        Ok(PFN(ret.ok()? as _))
     }
 
     fn put(&self, core: usize, frame: PFN, order: usize) -> Result<()> {
@@ -57,12 +57,11 @@ impl Alloc for LLC {
                 order as _,
             )
         };
-        to_result(ret).map(|_| ())
+        ret.ok().map(|_| ())
     }
 
     fn is_free(&self, frame: PFN, order: usize) -> bool {
-        let ret = unsafe { llc_is_free(self.raw.as_ptr().cast(), frame.0 as _, order as _) };
-        ret != 0
+        unsafe { llc_is_free(self.raw.as_ptr().cast(), frame.0 as _, order as _) }
     }
 
     fn frames(&self) -> usize {
@@ -94,22 +93,6 @@ impl Drop for LLC {
     }
 }
 
-/// Converting return codes to errors
-fn to_result(code: i64) -> Result<u64> {
-    if code >= 0 {
-        Ok(code as _)
-    } else {
-        match code {
-            -1 => Err(Error::Memory),
-            -2 => Err(Error::Retry),
-            -3 => Err(Error::Address),
-            -4 => Err(Error::Initialization),
-            -5 => Err(Error::Corruption),
-            _ => unreachable!("invalid return code"),
-        }
-    }
-}
-
 impl fmt::Debug for LLC {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // wrapper function that is called by the c implementation
@@ -131,6 +114,26 @@ impl fmt::Debug for LLC {
     }
 }
 
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct result_t {
+    val: i64,
+}
+
+impl result_t {
+    fn ok(self) -> Result<u64> {
+        match self.val {
+            val if val >= 0 => Ok(val as _),
+            -1 => Err(Error::Memory),
+            -2 => Err(Error::Retry),
+            -3 => Err(Error::Address),
+            -4 => Err(Error::Initialization),
+            -5 => Err(Error::Corruption),
+            _ => unreachable!("invalid return code"),
+        }
+    }
+}
+
 #[link(name = "llc", kind = "static")]
 extern "C" {
     /// Initializes the allocator for the given memory region, returning 0 on success or a negative error code
@@ -141,19 +144,19 @@ extern "C" {
         len: u64,
         init: u8,
         free_all: u8,
-    ) -> i64;
+    ) -> result_t;
 
     /// Destructs the allocator
     fn llc_drop(this: *mut c_void);
 
     /// Allocates a frame and returns its address, or a negative error code
-    fn llc_get(this: *const c_void, core: u64, order: u64) -> i64;
+    fn llc_get(this: *const c_void, core: u64, order: u64) -> result_t;
 
     /// Frees a frame, returning 0 on success or a negative error code
-    fn llc_put(this: *const c_void, core: u64, frame: u64, order: u64) -> i64;
+    fn llc_put(this: *const c_void, core: u64, frame: u64, order: u64) -> result_t;
 
     /// Checks if a frame is allocated, returning 0 if not
-    fn llc_is_free(this: *const c_void, frame: u64, order: u64) -> u8;
+    fn llc_is_free(this: *const c_void, frame: u64, order: u64) -> bool;
 
     /// Returns the total number of frames the allocator can allocate
     fn llc_frames(this: *const c_void) -> u64;

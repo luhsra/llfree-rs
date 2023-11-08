@@ -39,12 +39,7 @@ impl<const N: usize> fmt::Debug for Bitfield<N> {
     }
 }
 
-impl<const N: usize> Bitfield<N>
-where
-    [(); N * size_of::<u64>() / size_of::<u8>()]:, // Validate generic const expressions
-    [(); N * size_of::<u64>() / size_of::<u16>()]:,
-    [(); N * size_of::<u64>() / size_of::<u32>()]:,
-{
+impl<const N: usize> Bitfield<N> {
     pub const ENTRY_BITS: usize = 64;
     pub const ENTRIES: usize = N;
     pub const LEN: usize = N * Self::ENTRY_BITS;
@@ -109,6 +104,7 @@ where
             3 => self.toggle_int::<u8>(i, expected),
             4 => self.toggle_int::<u16>(i, expected),
             5 => self.toggle_int::<u32>(i, expected),
+            6 => self.toggle_int::<u64>(i, expected),
             _ => {
                 // Update multiple entries
                 let num_entries = num_bits / Self::ENTRY_BITS;
@@ -134,16 +130,17 @@ where
     /// Toggle multiple bits with a single correctly sized compare exchange operation
     ///
     /// Note: This only seems to make a difference between a 64 bit fetch_update on Intel Optane
-    fn toggle_int<I: Atomic + Default + Not<Output = I>>(&self, i: usize, e: bool) -> Result<()>
-    where
-        [(); N * size_of::<u64>() / size_of::<I>()]:,
-    {
+    fn toggle_int<I: Atomic + Default + Not<Output = I>>(&self, i: usize, e: bool) -> Result<()> {
+        assert!(i < Self::LEN);
+        debug_assert!(size_of::<I>() <= Self::ENTRY_BITS / 8);
+
         let idx = i / (8 * size_of::<I>());
         let val = if e { !I::default() } else { I::default() };
-        // Cast to int type, keeping the same byte size
-        let data: &[Atom<I>; N * size_of::<u64>() / size_of::<I>()] =
-            unsafe { mem::transmute(&self.data) };
-        match data[idx].compare_exchange(val, !val) {
+        // Safety: Cast to smaller type atomic, keeping the same total bitfield size
+        let data: &[Atom<I>] = unsafe { mem::transmute(&self.data[..]) };
+        // Safety: I is guaranteed to be smaller than u64 and i is in bounds, so is idx
+        let atom: &Atom<I> = unsafe { data.get_unchecked(idx) };
+        match atom.compare_exchange(val, !val) {
             Ok(_) => Ok(()),
             Err(_) => Err(Error::Retry),
         }
