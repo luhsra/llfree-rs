@@ -5,6 +5,7 @@ use core::ops::Range;
 use core::ptr::addr_of_mut;
 
 use alloc::alloc::{alloc, dealloc, Layout};
+use log::info;
 
 use super::{Alloc, Init};
 use crate::frame::PFNRange;
@@ -31,26 +32,26 @@ impl Alloc for LLC {
         let mut raw = [0u8; size_of::<Self>()];
 
         let ret = unsafe {
-            llc_init(
+            llfree_init(
                 raw.as_mut_ptr().cast(),
                 cores as _,
                 area.start.0 as _,
                 area.len() as _,
                 init as usize as _,
-                free_all as _,
+                free_all,
             )
         };
         ret.ok().map(|_| LLC { raw })
     }
 
     fn get(&self, core: usize, order: usize) -> Result<PFN> {
-        let ret = unsafe { llc_get(self.raw.as_ptr().cast(), core as _, order as _) };
+        let ret = unsafe { llfree_get(self.raw.as_ptr().cast(), core as _, order as _) };
         Ok(PFN(ret.ok()? as _))
     }
 
     fn put(&self, core: usize, frame: PFN, order: usize) -> Result<()> {
         let ret = unsafe {
-            llc_put(
+            llfree_put(
                 self.raw.as_ptr().cast(),
                 core as _,
                 frame.0 as _,
@@ -61,15 +62,23 @@ impl Alloc for LLC {
     }
 
     fn is_free(&self, frame: PFN, order: usize) -> bool {
-        unsafe { llc_is_free(self.raw.as_ptr().cast(), frame.0 as _, order as _) }
+        unsafe { llfree_is_free(self.raw.as_ptr().cast(), frame.0 as _, order as _) }
+    }
+
+    fn drain(&self, core: usize) -> Result<()> {
+        unsafe {
+            llfree_drain(self.raw.as_ptr().cast(), core as _)
+                .ok()
+                .map(|_| ())
+        }
     }
 
     fn frames(&self) -> usize {
-        unsafe { llc_frames(self.raw.as_ptr().cast()) as _ }
+        unsafe { llfree_frames(self.raw.as_ptr().cast()) as _ }
     }
 
     fn free_frames(&self) -> usize {
-        unsafe { llc_free_frames(self.raw.as_ptr().cast()) as _ }
+        unsafe { llfree_free_frames(self.raw.as_ptr().cast()) as _ }
     }
 
     fn for_each_huge_frame<F: FnMut(PFN, usize)>(&self, mut f: F) {
@@ -78,7 +87,7 @@ impl Alloc for LLC {
             f(PFN(pfn as usize), free as usize)
         }
         unsafe {
-            llc_for_each_huge(
+            llfree_for_each_huge(
                 self.raw.as_ptr().cast(),
                 addr_of_mut!(f).cast(),
                 wrapper::<F>,
@@ -89,7 +98,7 @@ impl Alloc for LLC {
 
 impl Drop for LLC {
     fn drop(&mut self) {
-        unsafe { llc_drop(self.raw.as_mut_ptr().cast()) };
+        unsafe { llfree_drop(self.raw.as_mut_ptr().cast()) };
     }
 }
 
@@ -103,7 +112,7 @@ impl fmt::Debug for LLC {
         }
 
         unsafe {
-            llc_debug(
+            llfree_print_debug(
                 self.raw.as_ptr().cast(),
                 writer,
                 (f as *mut fmt::Formatter).cast(),
@@ -137,41 +146,44 @@ impl result_t {
 #[link(name = "llc", kind = "static")]
 extern "C" {
     /// Initializes the allocator for the given memory region, returning 0 on success or a negative error code
-    fn llc_init(
+    fn llfree_init(
         this: *mut c_void,
-        cores: u64,
-        start_pfn: u64,
-        len: u64,
+        cores: c_size_t,
+        offset: u64,
+        len: c_size_t,
         init: u8,
-        free_all: u8,
+        free_all: bool,
     ) -> result_t;
 
     /// Destructs the allocator
-    fn llc_drop(this: *mut c_void);
+    fn llfree_drop(this: *mut c_void);
 
     /// Allocates a frame and returns its address, or a negative error code
-    fn llc_get(this: *const c_void, core: u64, order: u64) -> result_t;
+    fn llfree_get(this: *const c_void, core: c_size_t, order: c_size_t) -> result_t;
 
     /// Frees a frame, returning 0 on success or a negative error code
-    fn llc_put(this: *const c_void, core: u64, frame: u64, order: u64) -> result_t;
+    fn llfree_put(this: *const c_void, core: c_size_t, frame: u64, order: c_size_t) -> result_t;
 
     /// Checks if a frame is allocated, returning 0 if not
-    fn llc_is_free(this: *const c_void, frame: u64, order: u64) -> bool;
+    fn llfree_is_free(this: *const c_void, frame: u64, order: c_size_t) -> bool;
+
+    /// Frees a frame, returning 0 on success or a negative error code
+    fn llfree_drain(this: *const c_void, core: c_size_t) -> result_t;
 
     /// Returns the total number of frames the allocator can allocate
-    fn llc_frames(this: *const c_void) -> u64;
+    fn llfree_frames(this: *const c_void) -> u64;
 
     /// Returns number of currently free frames
-    fn llc_free_frames(this: *const c_void) -> u64;
+    fn llfree_free_frames(this: *const c_void) -> u64;
 
     /// Prints the allocators state for debugging
-    fn llc_debug(
+    fn llfree_print_debug(
         this: *const c_void,
         writer: extern "C" fn(*mut c_void, *const c_char),
         arg: *mut c_void,
     );
 
-    fn llc_for_each_huge(
+    fn llfree_for_each_huge(
         this: *const c_void,
         context: *mut c_void,
         f: extern "C" fn(*mut c_void, u64, u64),
@@ -180,12 +192,14 @@ extern "C" {
 
 /// Allocate metadata function
 #[no_mangle]
-pub extern "C" fn llc_ext_alloc(align: c_size_t, size: c_size_t) -> *mut c_void {
+pub extern "C" fn llfree_ext_alloc(align: c_size_t, size: c_size_t) -> *mut c_void {
+    info!("alloc a={align} {size}");
     unsafe { alloc(Layout::from_size_align(size as _, align as _).unwrap()) as _ }
 }
 /// Free metadata function
 #[no_mangle]
-pub extern "C" fn llc_ext_free(align: c_size_t, size: c_size_t, addr: *mut c_void) {
+pub extern "C" fn llfree_ext_free(align: c_size_t, size: c_size_t, addr: *mut c_void) {
+    info!("free a={align} {size}");
     unsafe { dealloc(addr as _, Layout::from_size_align(size, align).unwrap()) }
 }
 

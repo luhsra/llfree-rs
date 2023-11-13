@@ -495,7 +495,6 @@ mod test {
                 Err(Error::Memory) => break,
                 Err(e) => panic!("{e:?}"),
             }
-
         }
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
         warn!("{alloc:?}");
