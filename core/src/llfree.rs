@@ -409,7 +409,7 @@ impl LLFree {
                 }
 
                 // The local tree is full -> reserve a new one
-                return self.reserve_or_wait(core, order, old, false);
+                return self.reserve_or_wait(core, order, old);
             }
         };
 
@@ -427,7 +427,7 @@ impl LLFree {
                 Ok(frame)
             }
             Err(Error::Memory) => {
-                // Failure (e.g. due to fragmentation)
+                // Failure due to fragmentation
                 // Reset counters, reserve new entry and retry allocation
                 warn!("alloc failed o={order} => retry");
                 // Increment global to prevent race condition with concurrent reservation
@@ -437,7 +437,7 @@ impl LLFree {
                     error!("Counter reset failed");
                     Err(Error::Corruption)
                 } else {
-                    self.reserve_or_wait(core, order, old, true)
+                    self.reserve_or_wait(core, order, old)
                 }
             }
             Err(e) => Err(e),
@@ -499,7 +499,6 @@ impl LLFree {
         core: usize,
         order: usize,
         old: ReservedTree,
-        fragmented: bool,
     ) -> Result<usize> {
         let local = &self.local[core].preferred;
 
@@ -507,7 +506,7 @@ impl LLFree {
         if !old.locked() {
             if let Ok(old) = local.fetch_update(|v| v.toggle_locked(true)) {
                 // Try reserve new tree
-                return self.reserve_and_get(core, order, old, fragmented);
+                return self.reserve_and_get(core, order, old);
             }
         }
 
@@ -533,7 +532,6 @@ impl LLFree {
         core: usize,
         order: usize,
         old: ReservedTree,
-        fragmented: bool,
     ) -> Result<usize> {
         let local = &self.local[core].preferred;
 
@@ -546,8 +544,8 @@ impl LLFree {
         };
 
         let drain_fn = || {
-            for core in 0..self.local.len() {
-                self.drain(core)?;
+            for off in 1..self.local.len() {
+                self.drain(core + off)?;
             }
             Ok(())
         };
@@ -558,7 +556,6 @@ impl LLFree {
             order,
             cores,
             start,
-            fragmented,
             |r| self.get_lower(r, order),
             drain_fn,
         ) {

@@ -9,9 +9,6 @@ bitfield-struct = "0.5"
 log = { version = "0.4", default-features = false }
 env_logger = { version = "0.10", default-features = false, optional = true }
 
-[build-dependencies]
-glob = "0.3"
-
 [features]
 default = ["std"]
 std = ["log/std", "libc", "env_logger"]
