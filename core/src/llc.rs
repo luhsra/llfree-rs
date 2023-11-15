@@ -194,7 +194,7 @@ mod test {
 
     #[test]
     fn test_debug() {
-        let alloc = LLC::new(1, PFN(0)..PFN(512), Init::Volatile, true).unwrap();
+        let alloc = LLC::new(1, PFN(0)..PFN(2048), Init::Volatile, true).unwrap();
         println!("{alloc:?}");
     }
 }
