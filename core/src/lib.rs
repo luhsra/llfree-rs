@@ -9,6 +9,7 @@
 #![feature(inline_const)]
 #![feature(allocator_api)]
 #![feature(c_size_t)]
+#![feature(let_chains)]
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
@@ -16,10 +17,6 @@
 #[cfg(feature = "std")]
 #[macro_use]
 extern crate std;
-
-#[allow(unused_imports)]
-#[macro_use]
-extern crate alloc;
 
 #[cfg(feature = "std")]
 pub mod mmap;
@@ -29,6 +26,7 @@ pub mod thread;
 pub mod atomic;
 pub mod frame;
 pub mod util;
+pub mod wrapper;
 
 mod bitfield;
 mod entry;
@@ -44,9 +42,6 @@ mod lower;
 mod trees;
 
 use core::fmt;
-use core::ops::Range;
-
-use frame::PFN;
 
 /// Allocation error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +54,6 @@ pub enum Error {
     Address = 3,
     /// Allocator not initialized or initialization failed
     Initialization = 4,
-    /// Corrupted allocator state
-    Corruption = 5,
 }
 
 /// Allocation result
@@ -70,23 +63,39 @@ pub type Result<T> = core::result::Result<T, Error>;
 pub const CAS_RETRIES: usize = 4;
 
 /// The general interface of the allocator implementations.
-pub trait Alloc: Sized + Sync + Send + fmt::Debug {
+pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
+    /// Maximum allocation size order.
+    const MAX_ORDER: usize;
+
     /// Return the name of the allocator.
     #[cold]
-    fn name() -> &'static str {
-        "Unknown"
-    }
+    fn name() -> &'static str;
 
     /// Initialize the allocator.
+    ///
+    /// The metadata is stored into the primary (optionally persistant) and secondary buffers.
     #[cold]
-    fn new(cores: usize, area: Range<PFN>, init: Init, free_all: bool) -> Result<Self>;
+    fn new(
+        cores: usize,
+        frames: usize,
+        init: Init,
+        primary: &'a mut [u8],
+        secondary: &'a mut [u8],
+    ) -> Result<Self>;
+
+    /// Returns the size of the metadata buffers required for initialization.
+    #[cold]
+    fn metadata_size(cores: usize, frames: usize) -> MetaSize;
+    /// Returns the metadata buffers.
+    #[cold]
+    fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]);
 
     /// Allocate a new frame of `order` on the given `core`.
-    fn get(&self, core: usize, order: usize) -> Result<PFN>;
+    fn get(&self, core: usize, order: usize) -> Result<usize>;
     /// Free the `frame` of `order` on the given `core`..
-    fn put(&self, core: usize, frame: PFN, order: usize) -> Result<()>;
+    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()>;
     /// Returns if `frame` is free. This might be racy!
-    fn is_free(&self, frame: PFN, order: usize) -> bool;
+    fn is_free(&self, frame: usize, order: usize) -> bool;
 
     /// Return the total number of frames the allocator manages.
     fn frames(&self) -> usize;
@@ -108,56 +117,102 @@ pub trait Alloc: Sized + Sync + Send + fmt::Debug {
     }
 
     /// Calls f for every huge page
-    fn for_each_huge_frame<F: FnMut(PFN, usize)>(&self, f: F);
+    fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, f: F);
+}
+
+/// Size of the required metadata
+pub struct MetaSize {
+    /// Size of the optionally persistent data.
+    pub primary: usize,
+    /// Size of the volatile data.
+    pub secondary: usize,
 }
 
 /// Defines if the allocator should be allocated persistently
 /// and if it in that case should try to recover from the persistent memory.
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Init {
-    /// Not persistent
-    Volatile,
-    /// Persistent and try recovery
-    Recover,
-    /// Overwrite the persistent memory
-    Overwrite,
+    /// Clear the allocator marking all frames as free
+    FreeAll,
+    /// Clear the allocator marking all frames as allocated
+    AllocAll,
+    /// Try recovering all frames from persistent memory
+    Recover(bool),
 }
 
 #[cfg(all(test, feature = "std"))]
 mod test {
+    use core::mem::ManuallyDrop;
+    use core::ops::Deref;
     use core::ptr::null_mut;
     use std::time::Instant;
 
-    use alloc::vec::Vec;
     use std::sync::Barrier;
+    use std::vec::Vec;
 
-    use log::{info, warn};
+    use log::warn;
 
-    use crate::frame::{pfn_range, Frame, PFNRange, PFN, PT_LEN};
+    use crate::frame::{Frame, PT_LEN};
     use crate::lower::Lower;
-    use crate::mmap::test_mapping;
     use crate::thread;
-    use crate::util::{logging, WyRand};
+    use crate::util::{aligned_buf, logging, WyRand};
+    use crate::wrapper::NvmAlloc;
     use crate::Error;
     use crate::{Alloc, Init};
 
     use super::*;
 
     #[cfg(feature = "llc")]
-    type Allocator = LLC;
+    type Allocator = TestAlloc<LLC>;
     #[cfg(not(feature = "llc"))]
-    type Allocator = LLFree;
+    type Allocator = TestAlloc<LLFree<'static>>;
+
+    pub struct TestAlloc<A: Alloc<'static>>(ManuallyDrop<A>);
+
+    impl<A: Alloc<'static>> TestAlloc<A> {
+        pub fn create(cores: usize, frames: usize, init: Init) -> Result<Self> {
+            let MetaSize { primary, secondary } = A::metadata_size(cores, frames);
+            let primary = aligned_buf(primary).leak();
+            let secondary = aligned_buf(secondary).leak();
+            Ok(Self(ManuallyDrop::new(A::new(
+                cores, frames, init, primary, secondary,
+            )?)))
+        }
+    }
+    impl<A: Alloc<'static>> Drop for TestAlloc<A> {
+        fn drop(&mut self) {
+            let (primary, secondary) = self.0.metadata();
+            unsafe {
+                // drop first
+                drop(ManuallyDrop::take(&mut self.0));
+                // free metadata buffers
+                Vec::from_raw_parts(primary.as_mut_ptr(), primary.len(), primary.len());
+                Vec::from_raw_parts(secondary.as_mut_ptr(), secondary.len(), secondary.len());
+            }
+        }
+    }
+    impl<A: Alloc<'static>> Deref for TestAlloc<A> {
+        type Target = A;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl<A: Alloc<'static>> fmt::Debug for TestAlloc<A> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            self.0.fmt(f)
+        }
+    }
 
     #[test]
     fn minimal() {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 1 << 30;
-        let area = PFN(0)..PFN(MEM_SIZE / Frame::SIZE);
+        let frames = MEM_SIZE / Frame::SIZE;
 
-        info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
-
-        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
+        warn!("init");
+        let alloc = Allocator::create(1, frames, Init::FreeAll).unwrap();
+        warn!("finit");
 
         assert_eq!(alloc.free_frames(), alloc.frames());
 
@@ -181,11 +236,9 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 1 << 30;
-        let area = PFN(0)..PFN(MEM_SIZE / Frame::SIZE);
+        const FRAMES: usize = MEM_SIZE / Frame::SIZE;
 
-        info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
-
-        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
 
         assert_eq!(alloc.free_frames(), alloc.frames());
 
@@ -215,7 +268,7 @@ mod test {
         // Check that the same frame was not allocated twice
         for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
-            assert!(area.contains(&a) && area.contains(&b));
+            assert!(a < FRAMES && b < FRAMES);
         }
 
         warn!("realloc...");
@@ -253,11 +306,9 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 4 << 30;
-        let area = PFN(0)..PFN(MEM_SIZE / Frame::SIZE);
+        const FRAMES: usize = MEM_SIZE / Frame::SIZE;
 
-        info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
-
-        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
 
         warn!("start alloc...");
         const ALLOCS: usize = MEM_SIZE / Frame::SIZE / 2;
@@ -273,7 +324,7 @@ mod test {
         frames.sort_unstable();
         for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
-            assert!(area.contains(&a) && area.contains(&b));
+            assert!(a < FRAMES && b < FRAMES);
         }
 
         warn!("reallocate rand...");
@@ -292,7 +343,7 @@ mod test {
         frames.sort_unstable();
         for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
-            assert!(area.contains(&a) && area.contains(&b));
+            assert!(a < FRAMES && b < FRAMES);
         }
 
         warn!("free...");
@@ -306,14 +357,12 @@ mod test {
     #[test]
     fn multirand() {
         const THREADS: usize = 4;
-        const MEM_SIZE: usize = (8 << 30) / Frame::SIZE;
-        const ALLOCS: usize = ((MEM_SIZE / THREADS) / 4) * 3;
+        const FRAMES: usize = (8 << 30) / Frame::SIZE;
+        const ALLOCS: usize = ((FRAMES / THREADS) / 4) * 3;
 
         logging();
-        let area = PFN(0)..PFN(MEM_SIZE);
-        info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
 
-        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
         let barrier = Barrier::new(THREADS);
         thread::parallel(0..THREADS, |t| {
@@ -332,7 +381,7 @@ mod test {
             frames.sort_unstable();
             for &[a, b] in frames.array_windows() {
                 assert_ne!(a, b);
-                assert!(area.contains(&a) && area.contains(&b));
+                assert!(a < FRAMES && b < FRAMES);
             }
 
             barrier.wait();
@@ -351,7 +400,7 @@ mod test {
             frames.sort_unstable();
             for &[a, b] in frames.array_windows() {
                 assert_ne!(a, b);
-                assert!(area.contains(&a) && area.contains(&b));
+                assert!(a < FRAMES && b < FRAMES);
             }
 
             warn!("free...");
@@ -369,11 +418,9 @@ mod test {
         logging();
         // 8GiB
         const MEM_SIZE: usize = 8 << 30;
-        let area = PFN(0)..PFN(MEM_SIZE / Frame::SIZE);
+        const FRAMES: usize = MEM_SIZE / Frame::SIZE;
 
-        info!("mmap {MEM_SIZE} bytes at {:?}", area.as_ptr_range());
-
-        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
 
         assert_eq!(alloc.allocated_frames(), 0);
 
@@ -388,7 +435,7 @@ mod test {
         warn!("start stress test");
 
         // Stress test
-        let mut frames = vec![PFN(0); PT_LEN * PT_LEN];
+        let mut frames = vec![0; PT_LEN * PT_LEN];
         for frame in &mut frames {
             *frame = alloc.get(0, 0).unwrap();
         }
@@ -402,7 +449,7 @@ mod test {
         // Check that the same frame was not allocated twice
         for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
-            assert!(area.contains(&a) && area.contains(&b));
+            assert!(a < FRAMES && b < FRAMES);
         }
 
         warn!("free some...");
@@ -440,14 +487,12 @@ mod test {
 
         const THREADS: usize = 4;
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
-        const PAGES: usize = 2 * THREADS * PT_LEN * PT_LEN;
+        const FRAMES: usize = 2 * THREADS * PT_LEN * PT_LEN;
 
-        let area = PFN(0)..PFN(PAGES);
-
-        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
         // Stress test
-        let mut frames = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![0; ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
@@ -471,7 +516,7 @@ mod test {
         frames.sort_unstable();
         for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
-            assert!(area.contains(&a) && area.contains(&b));
+            assert!(a < FRAMES && b < FRAMES);
         }
     }
 
@@ -479,11 +524,9 @@ mod test {
     fn alloc_all() {
         logging();
 
-        const PAGES: usize = 2 * PT_LEN * PT_LEN;
+        const FRAMES: usize = 2 * PT_LEN * PT_LEN;
 
-        let area = PFN(0)..PFN(PAGES);
-
-        let alloc = Allocator::new(1, area.clone(), Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
 
         // Stress test
         let mut frames = Vec::new();
@@ -506,7 +549,7 @@ mod test {
         frames.sort_unstable();
         for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
-            assert!(area.contains(&a) && area.contains(&b));
+            assert!(a < FRAMES && b < FRAMES);
         }
     }
 
@@ -515,11 +558,9 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const PAGES: usize = 2 * THREADS * PT_LEN * PT_LEN;
+        const FRAMES: usize = 2 * THREADS * PT_LEN * PT_LEN;
 
-        let area = PFN(0)..PFN(PAGES);
-
-        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
         // Stress test
         let mut frames = vec![Vec::new(); THREADS];
@@ -550,7 +591,7 @@ mod test {
         frames.sort_unstable();
         for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
-            assert!(area.contains(&a) && area.contains(&b));
+            assert!(a < FRAMES && b < FRAMES);
         }
     }
 
@@ -559,15 +600,13 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const PAGES: usize = 4096;
-        const ALLOC_PER_THREAD: usize = PAGES / THREADS - THREADS;
+        const FRAMES: usize = 4096;
+        const ALLOC_PER_THREAD: usize = FRAMES / THREADS - THREADS;
 
-        let area = PFN(0)..PFN(PAGES);
-
-        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
         // Stress test
-        let mut frames = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![0; ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
@@ -591,7 +630,7 @@ mod test {
         frames.sort_unstable();
         for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
-            assert!(area.contains(&a) && area.contains(&b));
+            assert!(a < FRAMES && b < FRAMES);
         }
 
         thread::parallel(
@@ -616,14 +655,12 @@ mod test {
         const THREADS: usize = 4;
         const ALLOC_PER_THREAD: usize = PT_LEN - 1;
         // additional space for the allocators metadata
-        const PAGES: usize = THREADS * (ALLOC_PER_THREAD + 2) * PT_LEN;
+        const FRAMES: usize = THREADS * (ALLOC_PER_THREAD + 2) * PT_LEN;
 
-        let area = PFN(0)..PFN(PAGES);
-
-        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
         // Stress test
-        let mut frames = vec![PFN(0); ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![0; ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
@@ -647,7 +684,7 @@ mod test {
         frames.sort_unstable();
         for &[a, b] in frames.array_windows() {
             assert_ne!(a, b);
-            assert!(area.contains(&a) && area.contains(&b));
+            assert!(a < FRAMES && b < FRAMES);
         }
     }
 
@@ -746,9 +783,9 @@ mod test {
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
         const MEM_SIZE: usize = 2 * THREADS * PT_LEN * PT_LEN * Frame::SIZE;
 
-        let area = PFN(0)..PFN(MEM_SIZE / Frame::SIZE);
+        let area = MEM_SIZE / Frame::SIZE;
 
-        let alloc = Allocator::new(THREADS, area, Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(THREADS, area, Init::FreeAll).unwrap();
         let barrier = Barrier::new(THREADS);
 
         // Stress test
@@ -756,7 +793,7 @@ mod test {
             thread::pin(t);
             barrier.wait();
 
-            let mut frames = vec![PFN(0); ALLOC_PER_THREAD];
+            let mut frames = vec![0; ALLOC_PER_THREAD];
 
             for frame in &mut frames {
                 *frame = alloc.get(t, 0).unwrap();
@@ -779,14 +816,13 @@ mod test {
         logging();
         const THREADS: usize = 2;
         const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 10) / 2;
+        const FRAMES: usize = 4 * PT_LEN * PT_LEN;
 
-        let area = PFN(0)..PFN(4 * PT_LEN * PT_LEN);
-
-        let alloc = Allocator::new(THREADS, area, Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
         // Alloc on first thread
         thread::pin(0);
-        let mut frames = vec![PFN(0); ALLOC_PER_THREAD];
+        let mut frames = vec![0; ALLOC_PER_THREAD];
         for frame in &mut frames {
             *frame = alloc.get(0, 0).unwrap();
         }
@@ -802,7 +838,7 @@ mod test {
                 }
             });
 
-            let mut frames = vec![PFN(0); ALLOC_PER_THREAD];
+            let mut frames = vec![0; ALLOC_PER_THREAD];
 
             barrier.wait();
 
@@ -818,17 +854,24 @@ mod test {
 
     #[test]
     fn recover() {
+        #[cfg(feature = "llc")]
+        type Allocator<'a> = NvmAlloc<'a, LLC>;
+        #[cfg(not(feature = "llc"))]
+        type Allocator<'a> = NvmAlloc<'a, LLFree<'a>>;
+
         logging();
 
-        let mapping = test_mapping(0x1000_0000_0000, 8 << 18);
-        let area = pfn_range(&mapping);
-        warn!("{area:?}");
+        const FRAMES: usize = 8 << 18;
+
         thread::pin(0);
 
         let expected_frames = (PT_LEN + 2) * (1 + (1 << 9));
 
+        let mut zone = mmap::anon(0x1000_0000_0000, FRAMES, false, false);
+        let secondary = aligned_buf(Allocator::metadata_size(1, FRAMES)).leak();
+
         {
-            let alloc = Allocator::new(1, area.clone(), Init::Overwrite, true).unwrap();
+            let alloc = Allocator::new(1, &mut zone, false, secondary).unwrap();
 
             for _ in 0..PT_LEN + 2 {
                 alloc.get(0, 0).unwrap();
@@ -841,7 +884,8 @@ mod test {
             std::mem::forget(alloc);
         }
 
-        let alloc = Allocator::new(1, area, Init::Recover, true).unwrap();
+        let secondary = aligned_buf(secondary.len()).leak();
+        let alloc = Allocator::new(1, &mut zone, true, secondary).unwrap();
         assert_eq!(alloc.allocated_frames(), expected_frames);
     }
 
@@ -849,11 +893,11 @@ mod test {
     fn different_orders() {
         const MAX_ORDER: usize = Lower::MAX_ORDER;
         const THREADS: usize = 4;
+        const FRAMES: usize = Lower::N * (THREADS * 2 + 1);
 
         logging();
 
-        let area = PFN(0)..PFN(Lower::N * (THREADS * 2 + 1));
-        let alloc = Allocator::new(THREADS, area, Init::Volatile, true).unwrap();
+        let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
         let barrier = Barrier::new(THREADS);
 
@@ -864,7 +908,7 @@ mod test {
             let mut frames = Vec::new();
             for order in 0..=MAX_ORDER {
                 for _ in 0..1 << (MAX_ORDER - order) {
-                    frames.push((order, PFN(0)));
+                    frames.push((order, 0));
                     num_frames += 1 << order;
                 }
             }
@@ -878,7 +922,7 @@ mod test {
                     Ok(frame) => frame,
                     Err(e) => panic!("{e:?} o={order} {alloc:?}"),
                 };
-                assert!(frame.0 % (1 << *order) == 0, "{frame} {:x}", 1 << *order);
+                assert!(*frame % (1 << *order) == 0, "{frame} {:x}", 1 << *order);
             }
 
             let mut rng = WyRand::new(t as _);
@@ -900,34 +944,32 @@ mod test {
         logging();
 
         const THREADS: usize = 2;
-        const PAGES: usize = 8 << 18;
+        const FRAMES: usize = 8 << 18;
 
-        let area = PFN(0)..PFN(PAGES);
+        let alloc = Allocator::create(THREADS, FRAMES, Init::AllocAll).unwrap();
+        assert_eq!(alloc.frames(), FRAMES);
+        assert_eq!(alloc.allocated_frames(), FRAMES);
 
-        let alloc = Allocator::new(THREADS, area.clone(), Init::Volatile, false).unwrap();
-        assert_eq!(alloc.frames(), PAGES);
-        assert_eq!(alloc.allocated_frames(), PAGES);
-
-        for frame in area.as_range().step_by(1 << Lower::HUGE_ORDER).map(PFN) {
+        for frame in (0..FRAMES).step_by(1 << Lower::HUGE_ORDER) {
             alloc.put(0, frame, Lower::HUGE_ORDER).unwrap();
         }
         assert_eq!(alloc.allocated_frames(), 0);
 
         thread::parallel(0..THREADS, |core| {
             thread::pin(core);
-            for _ in 0..(PAGES / THREADS) / (1 << Lower::HUGE_ORDER) {
+            for _ in 0..(FRAMES / THREADS) / (1 << Lower::HUGE_ORDER) {
                 alloc.get(core, Lower::HUGE_ORDER).unwrap();
             }
         });
-        assert_eq!(alloc.allocated_frames(), PAGES);
+        assert_eq!(alloc.allocated_frames(), FRAMES);
     }
 
     #[test]
     fn fragmentation_retry() {
         logging();
 
-        let area = PFN(0)..PFN(Lower::N * 2);
-        let alloc = Allocator::new(1, area, Init::Volatile, true).unwrap();
+        const FRAMES: usize = Lower::N * 2;
+        let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
 
         // Alloc a whole subtree
         let mut frames = Vec::with_capacity(Lower::N / 2);
@@ -950,8 +992,8 @@ mod test {
 
     #[test]
     fn drain() {
-        let area = PFN(0)..PFN(Lower::N * 2);
-        let alloc = Allocator::new(2, area, Init::Volatile, true).unwrap();
+        const FRAMES: usize = Lower::N * 2;
+        let alloc = Allocator::create(2, FRAMES, Init::FreeAll).unwrap();
         // should not change anything
         alloc.drain(0).unwrap();
         alloc.drain(1).unwrap();

@@ -1,16 +1,11 @@
 use core::ffi::{c_char, c_size_t, c_void, CStr};
-use core::fmt;
 use core::mem::{align_of, size_of};
-use core::ops::Range;
 use core::ptr::addr_of_mut;
-
-use alloc::alloc::{alloc, dealloc, Layout};
-use log::info;
+use core::{fmt, slice};
 
 use super::{Alloc, Init};
-use crate::frame::PFNRange;
 use crate::util::Align;
-use crate::{Error, Result, PFN};
+use crate::{Error, Result};
 
 /// C implementation of LLFree
 ///
@@ -23,46 +18,76 @@ pub struct LLC {
 unsafe impl Send for LLC {}
 unsafe impl Sync for LLC {}
 
-impl Alloc for LLC {
+impl<'a> Alloc<'a> for LLC {
+    const MAX_ORDER: usize = 10;
+
     fn name() -> &'static str {
         "LLC"
     }
 
-    fn new(cores: usize, area: Range<PFN>, init: Init, free_all: bool) -> Result<Self> {
+    fn metadata_size(cores: usize, frames: usize) -> crate::MetaSize {
+        let m = unsafe { llfree_metadata_size(cores as _, frames as _) };
+        crate::MetaSize {
+            primary: m.primary as _,
+            secondary: m.secondary as _,
+        }
+    }
+
+    fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
+        let cores = unsafe { llfree_cores(self.raw.as_ptr().cast()) };
+        let ms = Self::metadata_size(cores, self.frames());
+        let m = unsafe { llfree_metadata(self.raw.as_mut_ptr().cast()) };
+        let primary = unsafe { slice::from_raw_parts_mut(m.primary.cast(), ms.primary) };
+        let secondary = unsafe { slice::from_raw_parts_mut(m.secondary.cast(), ms.secondary) };
+        (primary, secondary)
+    }
+
+    fn new(
+        cores: usize,
+        frames: usize,
+        init: Init,
+        primary: &'a mut [u8],
+        secondary: &'a mut [u8],
+    ) -> Result<Self> {
         let mut raw = [0u8; size_of::<Self>()];
+
+        let init = match init {
+            Init::FreeAll => 0,
+            Init::AllocAll => 1,
+            Init::Recover(false) => 2,
+            Init::Recover(true) => 3,
+        };
+
+        let m = Self::metadata_size(cores, frames);
+        assert!(primary.len() >= m.primary);
+        assert!(secondary.len() >= m.secondary);
 
         let ret = unsafe {
             llfree_init(
                 raw.as_mut_ptr().cast(),
                 cores as _,
-                area.start.0 as _,
-                area.len() as _,
-                init as usize as _,
-                free_all,
+                frames,
+                init,
+                primary.as_mut_ptr(),
+                secondary.as_mut_ptr(),
             )
         };
         ret.ok().map(|_| LLC { raw })
     }
 
-    fn get(&self, core: usize, order: usize) -> Result<PFN> {
+    fn get(&self, core: usize, order: usize) -> Result<usize> {
         let ret = unsafe { llfree_get(self.raw.as_ptr().cast(), core as _, order as _) };
-        Ok(PFN(ret.ok()? as _))
+        Ok(ret.ok()? as _)
     }
 
-    fn put(&self, core: usize, frame: PFN, order: usize) -> Result<()> {
-        let ret = unsafe {
-            llfree_put(
-                self.raw.as_ptr().cast(),
-                core as _,
-                frame.0 as _,
-                order as _,
-            )
-        };
+    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
+        let ret =
+            unsafe { llfree_put(self.raw.as_ptr().cast(), core as _, frame as _, order as _) };
         ret.ok().map(|_| ())
     }
 
-    fn is_free(&self, frame: PFN, order: usize) -> bool {
-        unsafe { llfree_is_free(self.raw.as_ptr().cast(), frame.0 as _, order as _) }
+    fn is_free(&self, frame: usize, order: usize) -> bool {
+        unsafe { llfree_is_free(self.raw.as_ptr().cast(), frame as _, order as _) }
     }
 
     fn drain(&self, core: usize) -> Result<()> {
@@ -81,10 +106,10 @@ impl Alloc for LLC {
         unsafe { llfree_free_frames(self.raw.as_ptr().cast()) as _ }
     }
 
-    fn for_each_huge_frame<F: FnMut(PFN, usize)>(&self, mut f: F) {
-        extern "C" fn wrapper<F: FnMut(PFN, usize)>(context: *mut c_void, pfn: u64, free: u64) {
+    fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, mut f: F) {
+        extern "C" fn wrapper<F: FnMut(usize, usize)>(context: *mut c_void, pfn: u64, free: u64) {
             let f: &mut F = unsafe { &mut *context.cast() };
-            f(PFN(pfn as usize), free as usize)
+            f(pfn as usize, free as usize)
         }
         unsafe {
             llfree_for_each_huge(
@@ -93,12 +118,6 @@ impl Alloc for LLC {
                 wrapper::<F>,
             )
         }
-    }
-}
-
-impl Drop for LLC {
-    fn drop(&mut self) {
-        unsafe { llfree_drop(self.raw.as_mut_ptr().cast()) };
     }
 }
 
@@ -137,10 +156,21 @@ impl result_t {
             -2 => Err(Error::Retry),
             -3 => Err(Error::Address),
             -4 => Err(Error::Initialization),
-            -5 => Err(Error::Corruption),
             _ => unreachable!("invalid return code"),
         }
     }
+}
+
+#[repr(C)]
+struct MetaSize {
+    primary: c_size_t,
+    secondary: c_size_t,
+}
+
+#[repr(C)]
+struct Meta {
+    primary: *mut c_void,
+    secondary: *mut c_void,
 }
 
 #[link(name = "llc", kind = "static")]
@@ -149,14 +179,17 @@ extern "C" {
     fn llfree_init(
         this: *mut c_void,
         cores: c_size_t,
-        offset: u64,
-        len: c_size_t,
+        frames: c_size_t,
         init: u8,
-        free_all: bool,
+        primary: *mut u8,
+        secondary: *mut u8,
     ) -> result_t;
 
-    /// Destructs the allocator
-    fn llfree_drop(this: *mut c_void);
+    /// Returns the size of the metadata buffers required for initialization
+    fn llfree_metadata_size(cores: c_size_t, frames: c_size_t) -> MetaSize;
+
+    /// Returns the metadata
+    fn llfree_metadata(this: *mut c_void) -> Meta;
 
     /// Allocates a frame and returns its address, or a negative error code
     fn llfree_get(this: *const c_void, core: c_size_t, order: c_size_t) -> result_t;
@@ -170,11 +203,14 @@ extern "C" {
     /// Frees a frame, returning 0 on success or a negative error code
     fn llfree_drain(this: *const c_void, core: c_size_t) -> result_t;
 
+    /// Returns the number of cores this allocator was initialized with
+    fn llfree_cores(this: *const c_void) -> c_size_t;
+
     /// Returns the total number of frames the allocator can allocate
-    fn llfree_frames(this: *const c_void) -> u64;
+    fn llfree_frames(this: *const c_void) -> c_size_t;
 
     /// Returns number of currently free frames
-    fn llfree_free_frames(this: *const c_void) -> u64;
+    fn llfree_free_frames(this: *const c_void) -> c_size_t;
 
     /// Prints the allocators state for debugging
     fn llfree_print_debug(
@@ -190,28 +226,16 @@ extern "C" {
     );
 }
 
-/// Allocate metadata function
-#[no_mangle]
-pub extern "C" fn llfree_ext_alloc(align: c_size_t, size: c_size_t) -> *mut c_void {
-    info!("alloc a={align} {size}");
-    unsafe { alloc(Layout::from_size_align(size as _, align as _).unwrap()) as _ }
-}
-/// Free metadata function
-#[no_mangle]
-pub extern "C" fn llfree_ext_free(align: c_size_t, size: c_size_t, addr: *mut c_void) {
-    info!("free a={align} {size}");
-    unsafe { dealloc(addr as _, Layout::from_size_align(size, align).unwrap()) }
-}
-
 #[cfg(test)]
 mod test {
-    use crate::{frame::PFN, Alloc, Init};
+    use crate::Init;
 
+    use super::super::test::TestAlloc;
     use super::LLC;
 
     #[test]
     fn test_debug() {
-        let alloc = LLC::new(1, PFN(0)..PFN(1024), Init::Volatile, true).unwrap();
+        let alloc = TestAlloc::<LLC>::create(1, 1024, Init::FreeAll).unwrap();
         println!("{alloc:?}");
     }
 }

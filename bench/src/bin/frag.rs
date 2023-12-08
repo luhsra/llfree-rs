@@ -10,10 +10,10 @@ use std::sync::{Barrier, Mutex};
 use clap::Parser;
 use log::warn;
 
-use llfree::frame::{PFN, PT_LEN};
-use llfree::{thread, LLFree};
-use llfree::util::{self, WyRand};
+use llfree::frame::PT_LEN;
+use llfree::util::{self, aligned_buf, WyRand};
 use llfree::*;
+use llfree::{thread, LLFree};
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
@@ -42,7 +42,7 @@ struct Args {
     stride: usize,
 }
 
-type Allocator = LLFree;
+type Allocator<'a> = LLFree<'a>;
 
 fn main() {
     let Args {
@@ -67,7 +67,11 @@ fn main() {
 
     // Map memory for the allocator and initialize it
     let pages = memory * PT_LEN * PT_LEN;
-    let alloc = Allocator::new(threads, PFN(0)..PFN(pages), Init::Volatile, true).unwrap();
+    let ms = Allocator::metadata_size(threads, pages);
+    let mut primary = aligned_buf(ms.primary);
+    let mut secondary = aligned_buf(ms.secondary);
+    let alloc =
+        Allocator::new(threads, pages, Init::FreeAll, &mut primary, &mut secondary).unwrap();
 
     let out = Mutex::new({
         let mut out = File::create(outfile).unwrap();
@@ -86,7 +90,7 @@ fn main() {
 
     let all_pages = {
         let mut v = Vec::with_capacity(threads);
-        v.resize_with(threads, || Mutex::new(Vec::<PFN>::new()));
+        v.resize_with(threads, || Mutex::new(Vec::<usize>::new()));
         v
     };
 

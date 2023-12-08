@@ -2,6 +2,7 @@
 #![feature(allocator_api)]
 #![feature(new_uninit)]
 
+use core::slice;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
@@ -11,13 +12,13 @@ use std::time::Instant;
 use clap::Parser;
 use log::warn;
 
-use llfree::frame::{pfn_range, Frame, PT_LEN};
+use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::{self, MMap};
 use llfree::thread;
-use llfree::util::logging;
+use llfree::util::{aligned_buf, logging};
 use llfree::{Alloc, Init, LLFree};
 
-type Allocator = LLFree;
+type Allocator<'a> = LLFree<'a>;
 
 /// Measuring the allocation times and collect them into time buckets for a time distribution analysis.
 #[derive(Parser, Debug)]
@@ -58,16 +59,7 @@ fn main() {
     assert!(threads >= 1);
     assert!(threads <= std::thread::available_parallelism().unwrap().get());
 
-    let mut mapping = mapping(0x1000_0000_0000, PT_LEN * PT_LEN * threads, dax);
-
-    // Populate mapping
-    warn!("populate {} pages", mapping.len());
-    let chunk_size = mapping.len().div_ceil(4);
-    thread::parallel(mapping.chunks_mut(chunk_size), |chunk| {
-        for page in chunk {
-            *page.cast_mut::<usize>() = 1;
-        }
-    });
+    let frames = PT_LEN * PT_LEN * threads;
 
     assert!(start < end);
     let mut get_buckets = vec![0usize; buckets];
@@ -75,15 +67,21 @@ fn main() {
     let bucket_size = (end - start) / buckets;
     assert!(bucket_size > 0);
 
+    let ms = Allocator::metadata_size(threads, frames);
+    let mut primary = mapping(0x1000_0000_0000, ms.primary.div_ceil(Frame::SIZE), dax);
+    let primary = unsafe { slice::from_raw_parts_mut(primary.as_mut_ptr().cast(), ms.primary) };
+    let mut secondary = aligned_buf(ms.secondary);
+
     for _ in 0..iterations {
         let timer = Instant::now();
 
-        let alloc = Allocator::new(threads, pfn_range(&mapping), Init::Overwrite, true).unwrap();
+        let alloc =
+            Allocator::new(threads, frames, Init::FreeAll, primary, &mut secondary).unwrap();
 
         warn!("init time {}ms", timer.elapsed().as_millis());
 
         // Allocate half the memory
-        let allocs = (mapping.len() / threads) / (2 * (1 << order));
+        let allocs = (frames / threads) / (2 * (1 << order));
         assert!(allocs % PT_LEN == 0);
         warn!("\n\n>>> bench t={threads} o={order:?} {allocs}\n");
 

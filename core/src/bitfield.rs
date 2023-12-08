@@ -5,8 +5,6 @@ use core::ops::{Not, Range};
 use core::sync::atomic::AtomicU64;
 use core::{fmt, mem};
 
-use log::error;
-
 use crate::atomic::{Atom, Atomic};
 use crate::{Error, Result};
 
@@ -107,10 +105,9 @@ impl<const N: usize> Bitfield<N> {
                     if let Err(_) = self.data[i].compare_exchange(expected, !expected) {
                         // Undo changes
                         for j in (di..i).rev() {
-                            if let Err(_) = self.data[j].compare_exchange(!expected, expected) {
-                                error!("Failed undo toggle");
-                                return Err(Error::Corruption);
-                            }
+                            self.data[j]
+                                .compare_exchange(!expected, expected)
+                                .expect("Failed undo toggle");
                         }
                         return Err(Error::Address);
                     }
@@ -198,10 +195,9 @@ impl<const N: usize> Bitfield<N> {
                     if let Err(_) = entry.compare_exchange(0, u64::MAX) {
                         // Undo previous updates
                         for k in (0..j).rev() {
-                            if let Err(_) = chunk[k].compare_exchange(u64::MAX, 0) {
-                                error!("Failed undo search");
-                                return Err(Error::Corruption);
-                            }
+                            chunk[k]
+                                .compare_exchange(u64::MAX, 0)
+                                .expect("Failed undo search");
                         }
                         break;
                     }

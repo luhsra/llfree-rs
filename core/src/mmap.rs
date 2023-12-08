@@ -1,6 +1,6 @@
 //! Barebones linux mmap wrapper
 
-use alloc::boxed::Box;
+use std::boxed::Box;
 use core::alloc::{AllocError, Allocator, Layout};
 use core::ptr::NonNull;
 use std::fs::File;

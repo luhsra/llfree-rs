@@ -1,80 +1,9 @@
 //! Page frame utilities
 
-use core::fmt;
 use core::mem::{align_of, size_of, transmute};
-use core::ops::Range;
 
 pub const PT_ORDER: usize = 9;
 pub const PT_LEN: usize = 1 << PT_ORDER;
-
-/// Page frame number that is convertible to pointers
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
-#[repr(transparent)]
-pub struct PFN(pub usize);
-
-impl PFN {
-    pub fn from_ptr(ptr: *const Frame) -> Self {
-        Self(ptr as usize / Frame::SIZE)
-    }
-    pub fn as_ptr(self) -> *const Frame {
-        (self.0 * Frame::SIZE) as _
-    }
-    pub fn as_ptr_mut(self) -> *mut Frame {
-        (self.0 * Frame::SIZE) as _
-    }
-    pub fn off(self, offset: usize) -> Self {
-        Self(self.0 + offset)
-    }
-}
-
-impl From<usize> for PFN {
-    fn from(value: usize) -> Self {
-        Self(value)
-    }
-}
-impl From<PFN> for usize {
-    fn from(value: PFN) -> Self {
-        value.0
-    }
-}
-
-impl fmt::Display for PFN {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x{:x}", self.0)
-    }
-}
-impl fmt::Debug for PFN {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
-
-/// This wrapper exists as its unfortunately impossible to implement iterator for custom range types
-pub trait PFNRange: Sized {
-    fn len(&self) -> usize;
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    fn as_range(&self) -> Range<usize>;
-    fn as_ptr_range(&self) -> Range<*const Frame> {
-        let Range { start, end } = self.as_range();
-        (start * Frame::SIZE) as _..(end * Frame::SIZE) as _
-    }
-}
-
-pub fn pfn_range(slice: &[Frame]) -> Range<PFN> {
-    let Range { start, end } = slice.as_ptr_range();
-    PFN::from_ptr(start)..PFN::from_ptr(end)
-}
-
-impl PFNRange for Range<PFN> {
-    fn len(&self) -> usize {
-        self.end.0.saturating_sub(self.start.0)
-    }
-    fn as_range(&self) -> Range<usize> {
-        self.start.into()..self.end.into()
-    }
-}
 
 /// Correctly sized and aligned page frame.
 #[derive(Clone)]

@@ -1,6 +1,5 @@
 //! Packed entries for the allocators data structures
 
-use core::fmt;
 use core::mem::{align_of, size_of};
 use core::ops::RangeBounds;
 use core::sync::atomic::{self, AtomicU16, AtomicU32, AtomicU64, Ordering::Release};
@@ -28,56 +27,43 @@ impl<T: Atomic, const L: usize> AtomicArray<T, L> for [Atom<T>; L] {
 }
 
 /// Level 3 entry
-#[bitfield(u64, debug = false)]
-#[derive(PartialEq, Eq)]
-pub struct ReservedTree {
-    /// Number of free 4K frames.
-    #[bits(16)]
-    pub free: usize,
-    /// If this subtree is locked by a CPU.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Preferred {
+    /// If this subtree locked for a reservation.
     pub locked: bool,
-    /// Start pfn / 64 within this reserved tree.
-    #[bits(47, default = Self::START_RAW_MAX)]
-    start_raw: usize,
+    /// The local tree copy.
+    pub tree: Option<LocalTree>,
 }
-impl Atomic for ReservedTree {
+
+/// Local tree copy
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct LocalTree {
+    pub frame: usize,
+    pub free: usize,
+}
+impl Atomic for Preferred {
     type I = AtomicU64;
 }
-impl ReservedTree {
-    const START_RAW_MAX: usize = (1 << Self::START_RAW_BITS) - 1;
 
-    /// Creates a new entry.
-    pub fn new_with(free: usize, start: usize) -> Self {
-        Self::new().with_free(free).with_start(start)
-    }
-    /// If this entry has a valid start pfn.
-    pub fn has_start(self) -> bool {
-        self.start_raw() < Self::START_RAW_MAX
-    }
-    /// Start page frame number.
-    #[inline(always)]
-    pub fn start(self) -> usize {
-        self.start_raw() * 64
-    }
-    #[inline(always)]
-    pub fn with_start(self, start: usize) -> Self {
-        let raw = start / 64;
-        debug_assert!(raw < (1 << Self::START_RAW_BITS));
-        self.with_start_raw(raw)
-    }
-    #[inline(always)]
-    pub fn set_start(&mut self, start: usize) {
-        *self = self.with_start(start);
+impl Preferred {
+    pub fn tree(start: usize, free: usize, locked: bool) -> Self {
+        Self {
+            locked,
+            tree: Some(LocalTree { frame: start, free }),
+        }
     }
 
     /// Decrements the free frames counter.
     pub fn dec(self, num_frames: usize) -> Option<Self> {
-        if self.has_start() && self.free() >= num_frames {
-            Some(self.with_free(self.free() - num_frames))
+        if let Some(LocalTree { frame: start, free }) = self.tree
+            && free >= num_frames
+        {
+            Some(Preferred::tree(start, free - num_frames, self.locked))
         } else {
             None
         }
     }
+
     /// Increments the free frames counter.
     pub fn inc<F: FnOnce(usize) -> bool>(
         self,
@@ -85,29 +71,58 @@ impl ReservedTree {
         max: usize,
         check_start: F,
     ) -> Option<Self> {
-        if !check_start(self.start()) {
-            return None;
-        }
-        let frames = self.free() + num_frames;
-        if frames <= max {
-            Some(self.with_free(frames))
+        if let Some(LocalTree { frame: start, free }) = self.tree {
+            if !check_start(start) {
+                return None;
+            }
+            let frames = free + num_frames;
+            assert!(frames <= max, "inc failed {self:?}");
+            Some(Preferred::tree(start, frames, self.locked))
         } else {
             None
         }
     }
-    /// Updates the reserve flag to `new` if `old != new`.
-    pub fn toggle_locked(self, new: bool) -> Option<Self> {
-        (self.locked() != new).then_some(self.with_locked(new))
-    }
 }
 
-impl fmt::Debug for ReservedTree {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReservedTree")
-            .field("free", &self.free())
-            .field("locked", &self.locked())
-            .field("start", &self.start())
-            .finish()
+#[bitfield(u64)]
+struct PTreeBits {
+    #[bits(16)]
+    free: usize,
+    locked: bool,
+    reserved: bool,
+    #[bits(46)]
+    start: usize,
+}
+impl From<u64> for Preferred {
+    fn from(value: u64) -> Self {
+        let bits = PTreeBits::from(value);
+        if bits.reserved() {
+            Self {
+                locked: bits.locked(),
+                tree: Some(LocalTree {
+                    frame: bits.start() * 64,
+                    free: bits.free(),
+                }),
+            }
+        } else {
+            Self {
+                locked: bits.locked(),
+                tree: None,
+            }
+        }
+    }
+}
+impl From<Preferred> for u64 {
+    fn from(value: Preferred) -> Self {
+        match value.tree {
+            Some(LocalTree { free, frame: start }) => PTreeBits::new()
+                .with_reserved(true)
+                .with_locked(value.locked)
+                .with_free(free)
+                .with_start(start / 64)
+                .into(),
+            None => PTreeBits::new().with_locked(value.locked).into(),
+        }
     }
 }
 

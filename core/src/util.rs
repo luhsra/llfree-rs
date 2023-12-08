@@ -44,11 +44,6 @@ impl<T: fmt::Debug> fmt::Debug for Align<T> {
         fmt::Debug::fmt(&self.0, f)
     }
 }
-impl<T> From<T> for Align<T> {
-    fn from(t: T) -> Self {
-        Align(t)
-    }
-}
 
 #[cfg(feature = "std")]
 pub fn logging() {
@@ -156,6 +151,18 @@ where
     } else {
         None
     }
+}
+
+#[cfg(feature = "std")]
+pub fn aligned_buf(size: usize) -> std::vec::Vec<u8> {
+    const ALIGN: usize = align_of::<Align>();
+    let primary = vec![Align([0u8; ALIGN]); size.div_ceil(ALIGN)];
+    let (ptr, len, cap) = {
+        let mut me = core::mem::ManuallyDrop::new(primary);
+        (me.as_mut_ptr(), me.len(), me.capacity())
+    };
+    debug_assert!(len == cap);
+    unsafe { std::vec::Vec::from_raw_parts(ptr.cast(), len * ALIGN, cap * ALIGN) }
 }
 
 #[cfg(all(test, feature = "std"))]
