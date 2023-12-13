@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-llfree = { path = "../core", features = ["std", "log_warn", "llc"] }
+llfree = { path = "../core", features = ["std", "log_warn"] }
 libc = "0.2"
 log = { version = "0.4", default-features = false }
 clap = { version = "4.4", default-features = false, features = ["std", "derive", "help"] }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 raw-cpuid = { version = "11.0" }
+
+[features]
+llc = ["llfree/llc"]
 
 # binaries
 

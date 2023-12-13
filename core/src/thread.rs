@@ -2,7 +2,6 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use alloc::vec::Vec;
 
 /// Changes the order in which cores are selected for pinning.
 ///
@@ -113,7 +112,8 @@ pub fn pin(core: usize) {
 }
 
 /// Executed `f` in parallel for each element in `iter`.
-pub fn parallel<I, T, F>(iter: I, f: F) -> Vec<T>
+#[cfg(feature = "std")]
+pub fn parallel<I, T, F>(iter: I, f: F) -> std::vec::Vec<T>
 where
     I: IntoIterator,
     I::Item: Send,
@@ -127,7 +127,7 @@ where
                 let f = f.clone();
                 scope.spawn(move || f(t))
             })
-            .collect::<Vec<_>>();
+            .collect::<std::vec::Vec<_>>();
         handles.into_iter().map(|t| t.join().unwrap()).collect()
     })
 }

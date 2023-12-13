@@ -2,10 +2,8 @@
 
 use core::mem::size_of;
 use core::ops::{Not, Range};
-use core::sync::atomic::{self, AtomicU64, Ordering::*};
+use core::sync::atomic::AtomicU64;
 use core::{fmt, mem};
-
-use log::error;
 
 use crate::atomic::{Atom, Atomic};
 use crate::{Error, Result};
@@ -39,12 +37,8 @@ impl<const N: usize> fmt::Debug for Bitfield<N> {
     }
 }
 
-impl<const N: usize> Bitfield<N>
-where
-    [(); N * size_of::<u64>() / size_of::<u8>()]:, // Validate generic const expressions
-    [(); N * size_of::<u64>() / size_of::<u16>()]:,
-    [(); N * size_of::<u64>() / size_of::<u32>()]:,
-{
+#[allow(unused)]
+impl<const N: usize> Bitfield<N> {
     pub const ENTRY_BITS: usize = 64;
     pub const ENTRIES: usize = N;
     pub const LEN: usize = N * Self::ENTRY_BITS;
@@ -68,14 +62,6 @@ where
                 }
             }
         }
-    }
-
-    /// Return if the `i`-th bit is set
-    #[allow(unused)]
-    pub fn get(&self, i: usize) -> bool {
-        let di = i / Self::ENTRY_BITS;
-        let bit = 1 << (i % Self::ENTRY_BITS);
-        self.data[di].load() & bit != 0
     }
 
     /// Return the  `i`-th entry
@@ -109,6 +95,7 @@ where
             3 => self.toggle_int::<u8>(i, expected),
             4 => self.toggle_int::<u16>(i, expected),
             5 => self.toggle_int::<u32>(i, expected),
+            6 => self.toggle_int::<u64>(i, expected),
             _ => {
                 // Update multiple entries
                 let num_entries = num_bits / Self::ENTRY_BITS;
@@ -118,10 +105,9 @@ where
                     if let Err(_) = self.data[i].compare_exchange(expected, !expected) {
                         // Undo changes
                         for j in (di..i).rev() {
-                            if let Err(_) = self.data[j].compare_exchange(!expected, expected) {
-                                error!("Failed undo toggle");
-                                return Err(Error::Corruption);
-                            }
+                            self.data[j]
+                                .compare_exchange(!expected, expected)
+                                .expect("Failed undo toggle");
                         }
                         return Err(Error::Address);
                     }
@@ -134,16 +120,17 @@ where
     /// Toggle multiple bits with a single correctly sized compare exchange operation
     ///
     /// Note: This only seems to make a difference between a 64 bit fetch_update on Intel Optane
-    fn toggle_int<I: Atomic + Default + Not<Output = I>>(&self, i: usize, e: bool) -> Result<()>
-    where
-        [(); N * size_of::<u64>() / size_of::<I>()]:,
-    {
+    fn toggle_int<I: Atomic + Default + Not<Output = I>>(&self, i: usize, e: bool) -> Result<()> {
+        assert!(i < Self::LEN);
+        debug_assert!(size_of::<I>() <= Self::ENTRY_BITS / 8);
+
         let idx = i / (8 * size_of::<I>());
         let val = if e { !I::default() } else { I::default() };
-        // Cast to int type, keeping the same byte size
-        let data: &[Atom<I>; N * size_of::<u64>() / size_of::<I>()] =
-            unsafe { mem::transmute(&self.data) };
-        match data[idx].compare_exchange(val, !val) {
+        // Safety: Cast to smaller type atomic, keeping the same total bitfield size
+        let data: &[Atom<I>] = unsafe { mem::transmute(&self.data[..]) };
+        // Safety: I is guaranteed to be smaller than u64 and i is in bounds, so is idx
+        let atom: &Atom<I> = unsafe { data.get_unchecked(idx) };
+        match atom.compare_exchange(val, !val) {
             Ok(_) => Ok(()),
             Err(_) => Err(Error::Retry),
         }
@@ -208,10 +195,9 @@ where
                     if let Err(_) = entry.compare_exchange(0, u64::MAX) {
                         // Undo previous updates
                         for k in (0..j).rev() {
-                            if let Err(_) = chunk[k].compare_exchange(u64::MAX, 0) {
-                                error!("Failed undo search");
-                                return Err(Error::Corruption);
-                            }
+                            chunk[k]
+                                .compare_exchange(u64::MAX, 0)
+                                .expect("Failed undo search");
                         }
                         break;
                     }
@@ -223,31 +209,11 @@ where
     }
 
     /// Fill this bitset with `v` ignoring any previous data.
-    ///
-    /// This is faster than atomics but does not handle race conditions.
     pub fn fill(&self, v: bool) {
         let v = if v { u64::MAX } else { 0 };
-        // cast to raw memory to let the compiler use vector instructions
-        #[allow(invalid_reference_casting)]
-        let mem = unsafe { &mut *(self.data.as_ptr() as *mut [u64; N]) };
-        mem.fill(v);
-        // memory ordering has to be enforced with a memory barrier
-        atomic::fence(SeqCst);
-    }
-
-    /// Fills the bitset using atomic compare exchage, returning false on failure
-    ///
-    /// # Warning
-    /// If false is returned, the bitfield might be corrupted!
-    pub fn fill_cas(&self, v: bool) -> bool {
-        let v = if v { u64::MAX } else { 0 };
-
-        for e in &self.data {
-            if e.compare_exchange(!v, v).is_err() {
-                return false;
-            }
+        for row in &self.data {
+            row.store(v);
         }
-        true
     }
 
     /// Returns the number of zeros in this bitfield

@@ -1,18 +1,12 @@
 //! Lower allocator implementations
 
-use core::fmt::Write;
-use core::mem::size_of;
-use core::ops::Range;
-
-use alloc::boxed::Box;
-use alloc::slice;
-use alloc::string::String;
+use core::mem::{align_of, size_of};
+use core::slice;
 
 use log::{error, info, warn};
 
 use crate::atomic::Atom;
 use crate::entry::{AtomicArray, HugeEntry, HugePair};
-use crate::frame::{Frame, PFN};
 use crate::util::{align_down, align_up, spin_wait, Align};
 use crate::{Error, Init, Result, CAS_RETRIES};
 
@@ -39,20 +33,18 @@ type Bitfield = crate::bitfield::Bitfield<8>;
 /// RAM: [ Frames ], Bitfields and Tables are allocated elswhere
 /// ```
 #[derive(Default, Debug)]
-pub struct Lower {
-    begin: PFN,
+pub struct Lower<'a> {
     len: usize,
-    bitfields: Box<[Align<Bitfield>]>,
-    children: Box<[Align<[Atom<HugeEntry>; Self::HP]>]>,
-    persistent: bool,
+    bitfields: &'a [Align<Bitfield>],
+    children: &'a [Align<[Atom<HugeEntry>; Lower::HP]>],
 }
 
-unsafe impl Send for Lower {}
-unsafe impl Sync for Lower {}
+unsafe impl Send for Lower<'_> {}
+unsafe impl Sync for Lower<'_> {}
 
 const _: () = assert!(Lower::HP < (1 << (u16::BITS as usize - Lower::HUGE_ORDER)));
 
-impl Lower {
+impl<'a> Lower<'a> {
     /// Number of huge pages managed by a chunk
     pub const HP: usize = 32;
     /// Pages per chunk. Every alloc only searches in a chunk of this size.
@@ -61,138 +53,108 @@ impl Lower {
     pub const HUGE_ORDER: usize = Bitfield::ORDER;
     pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
 
+    pub fn metadata_size(frames: usize) -> usize {
+        let bitfields = frames.div_ceil(Bitfield::LEN);
+        let bitfields_size = bitfields * size_of::<Bitfield>();
+        let bitfields_size = align_up(bitfields_size, size_of::<[HugeEntry; Lower::HP]>());
+
+        let tables = frames.div_ceil(Self::N);
+        let tables_size = tables * size_of::<[HugeEntry; Lower::HP]>();
+        bitfields_size + tables_size
+    }
+
     /// Create a new lower allocator.
-    pub fn new(_cores: usize, begin: PFN, len: usize, init: Init, free_all: bool) -> Self {
-        debug_assert!(Self::HP < (1 << (u16::BITS as usize - Self::HUGE_ORDER)));
+    pub fn new(frames: usize, init: Init, primary: &'a mut [u8]) -> Result<Self> {
+        let bitfields_num = frames.div_ceil(Bitfield::LEN);
+        let bitfields_size = bitfields_num * size_of::<Bitfield>();
+        let bitfields_size = align_up(bitfields_size, size_of::<[HugeEntry; Lower::HP]>());
 
-        // FIXME: Lifetime hack!
-        let memory = unsafe { slice::from_raw_parts_mut(begin.as_ptr_mut(), len) };
+        let tables_num = frames.div_ceil(Self::N);
+        let tables_size = tables_num * size_of::<[HugeEntry; Lower::HP]>();
 
-        let num_bitfields = len.div_ceil(Bitfield::LEN);
-        let num_tables = len.div_ceil(Self::N);
-        let alloc = if init != Init::Volatile {
-            // Reserve memory within the managed NVM for the l1 and l2 tables
-            // These tables are stored at the end of the NVM
-            let size_bitfields = num_bitfields * size_of::<Bitfield>();
-            let size_bitfields = align_up(size_bitfields, size_of::<[HugeEntry; Self::HP]>()); // correct alignment
-            let size_tables = num_bitfields * size_of::<[HugeEntry; Self::HP]>();
-            // Num of frames occupied by the tables
-            let metadata_frames = (size_bitfields + size_tables).div_ceil(Frame::SIZE);
-
-            debug_assert!(metadata_frames < len);
-            let len = len - metadata_frames;
-            let (_, metadata) = memory.split_at_mut(len);
-
-            let metadata: *mut u8 = metadata.as_mut_ptr().cast();
-
-            // Start of the l1 table array
-            let bitfields =
-                unsafe { Box::from_raw(slice::from_raw_parts_mut(metadata.cast(), num_bitfields)) };
-
-            let mut offset = num_bitfields * size_of::<Bitfield>();
-            offset = align_up(offset, size_of::<[HugeEntry; Self::HP]>()); // correct alignment
-
-            // Start of the l2 table array
-            let children = unsafe {
-                Box::from_raw(slice::from_raw_parts_mut(
-                    metadata.add(offset).cast(),
-                    num_tables,
-                ))
-            };
-
-            Self {
-                begin,
-                len,
-                bitfields,
-                children,
-                persistent: init != Init::Volatile,
-            }
-        } else {
-            // Allocate l1 and l2 tables in volatile memory
-            Self {
-                begin,
-                len,
-                bitfields: unsafe { Box::new_uninit_slice(num_bitfields).assume_init() },
-                children: unsafe { Box::new_uninit_slice(num_tables).assume_init() },
-                persistent: init != Init::Volatile,
-            }
-        };
-        // Skip for manual recovery using `Self::recover`
-        if init != Init::Recover {
-            if free_all {
-                alloc.free_all();
-            } else {
-                alloc.reserve_all();
-            }
+        if primary.len() < bitfields_size + tables_size
+            || primary.as_ptr() as usize % align_of::<Align>() != 0
+        {
+            error!("primary metadata");
+            return Err(Error::Initialization);
         }
-        alloc
+        let (bitfields, children) = primary.split_at_mut(bitfields_size);
+
+        // Start of the l1 table array
+        let bitfields =
+            unsafe { slice::from_raw_parts_mut(bitfields.as_mut_ptr().cast(), bitfields_num) };
+
+        // Start of the l2 table array
+        let children =
+            unsafe { slice::from_raw_parts_mut(children.as_mut_ptr().cast(), tables_num) };
+
+        let alloc = Self {
+            len: frames,
+            bitfields,
+            children,
+        };
+
+        match init {
+            Init::FreeAll => alloc.free_all(),
+            Init::AllocAll => alloc.reserve_all(),
+            Init::Recover(false) => {} // skip, assuming everything is valid
+            Init::Recover(true) => alloc.recover(),
+        }
+        Ok(alloc)
     }
 
     pub fn frames(&self) -> usize {
         self.len
     }
 
-    pub fn begin(&self) -> PFN {
-        self.begin
-    }
-
-    pub fn memory(&self) -> Range<PFN> {
-        self.begin()..PFN(self.begin().0 + self.frames())
+    pub fn metadata(&mut self) -> &'a mut [u8] {
+        let len = Self::metadata_size(self.frames());
+        unsafe { slice::from_raw_parts_mut(self.bitfields.as_ptr().cast_mut().cast(), len) }
     }
 
     /// Recovers the data structures for the [LowerAlloc::N] sized chunk at `start`.
-    /// `deep` indicates that the allocator has crashed and the
-    /// recovery might have to be more extensive.
-    /// Returns the number of recovered frames.
-    pub fn recover(&self, start: usize, deep: bool) -> Result<usize> {
-        let mut frames = 0;
+    /// This corrects any data corrupted by a crash.
+    pub fn recover(&self) {
+        for (i, table) in self.children.iter().enumerate() {
+            for (j, a_entry) in table.iter().enumerate() {
+                let start = i * Self::N + j * Bitfield::LEN;
+                let entry = a_entry.load();
 
-        let table = &self.children[start / Self::N];
-        for (i, a_entry) in table.iter().enumerate() {
-            let start = align_down(start, Self::N) + i * Bitfield::LEN;
-            let i = start / Bitfield::LEN;
-
-            if start > self.frames() {
-                a_entry.store(HugeEntry::new());
-                continue;
-            }
-
-            let entry = a_entry.load();
-            let free = entry.free();
-            if deep {
-                // Deep recovery updates the counter
                 if entry.huge() {
                     // Check that underlying bitfield is empty
-                    let p = self.bitfields[i].count_zeros();
+                    let p = self.bitfields[start / Bitfield::LEN].count_zeros();
                     if p != Bitfield::LEN {
                         warn!("Invalid L2 start=0x{start:x} i{i}: h != {p}");
-                        self.bitfields[i].fill(false);
+                        self.bitfields[start / Bitfield::LEN].fill(false);
                     }
-                } else if free == Bitfield::LEN {
-                    // Skip entirely free entries
-                    // This is possible because the counter is decremented first
-                    // for allocations and afterwards for frees
-                    frames += Bitfield::LEN;
                 } else {
-                    // Check if partially filled bitfield has the same free count
-                    let p = self.bitfields[i].count_zeros();
-                    if free != p {
-                        warn!("Invalid L2 start=0x{start:x} i{i}: {free} != {p}");
-                        a_entry.store(HugeEntry::new_free(p));
+                    // Check the bitfield has the same number of zero bits
+                    let zeros = self.bitfields[start / Bitfield::LEN].count_zeros();
+                    if entry.free() != zeros {
+                        warn!(
+                            "Invalid L2 start=0x{start:x} i{i}: {} != {zeros}",
+                            entry.free()
+                        );
+                        a_entry.store(HugeEntry::new_free(zeros));
                     }
-                    frames += p;
                 }
-            } else {
-                frames += free;
             }
         }
+    }
 
-        Ok(frames)
+    pub fn free_in_tree(&self, start: usize) -> usize {
+        assert!(start < self.frames());
+        let mut free = 0;
+        for entry in self.children[start / Self::N].iter() {
+            free += entry.load().free();
+        }
+        free
     }
 
     /// Try allocating a new `frame` in the [LowerAlloc::N] sized chunk at `start`.
     pub fn get(&self, start: usize, order: usize) -> Result<usize> {
         debug_assert!(order <= Self::MAX_ORDER);
+        debug_assert!(start < self.frames());
 
         match order {
             Self::MAX_ORDER => self.get_max(start),
@@ -278,18 +240,16 @@ impl Lower {
     }
 
     /// Debug function returning number of free frames in each order 9 chunk
-    pub fn for_each_huge_frame<F: FnMut(PFN, usize)>(&self, mut f: F) {
+    pub fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, mut f: F) {
         for (ti, table) in self.children.iter().enumerate() {
             for (ci, child) in table.iter().enumerate() {
-                f(self.begin().off(ti * Self::HP + ci), child.load().free())
+                f(ti * Self::HP + ci, child.load().free())
             }
         }
     }
-}
 
-impl Lower {
     /// Returns the table with pair entries that can be updated at once.
-    fn table_pair(&self, frame: usize) -> &[Atom<HugePair>; Self::HP / 2] {
+    fn table_pair(&self, frame: usize) -> &[Atom<HugePair>; Lower::HP / 2] {
         let table = &self.children[frame / Self::N];
         unsafe { &*table.as_ptr().cast() }
     }
@@ -382,10 +342,9 @@ impl Lower {
                 }
 
                 // Revert conter
-                if let Err(_) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order)) {
-                    error!("Undo failed");
-                    return Err(Error::Corruption);
-                }
+                table[i]
+                    .fetch_update(|v| v.inc(Bitfield::LEN, 1 << order))
+                    .expect("undo failed");
             }
         }
 
@@ -438,8 +397,7 @@ impl Lower {
         let table = &self.children[frame / Self::N];
         let i = (frame / Bitfield::LEN) % Self::HP;
         if let Err(entry) = table[i].fetch_update(|v| v.inc(Bitfield::LEN, 1 << order)) {
-            error!("Inc failed i{i} p={frame} {entry:?}");
-            return Err(Error::Corruption);
+            panic!("Inc failed i{i} p={frame} {entry:?}");
         }
 
         Ok(())
@@ -470,24 +428,25 @@ impl Lower {
         let bitfield = &self.bitfields[frame / Bitfield::LEN];
 
         // Try filling the whole bitfield
-        if bitfield.fill_cas(true) {
-            if table[i].compare_exchange(old, HugeEntry::new()).is_err() {
-                error!("Failed partial clear");
-                return Err(Error::Corruption);
-            }
+        if bitfield.toggle(0, Bitfield::ORDER, false).is_ok() {
+            table[i]
+                .compare_exchange(old, HugeEntry::new())
+                .expect("Failed partial clear");
         }
         // Wait for parallel partial_put_huge to finish
         else if !spin_wait(CAS_RETRIES, || !table[i].load().huge()) {
-            error!("Exceeding retries");
-            return Err(Error::Corruption);
+            panic!("Exceeding retries");
         }
 
         self.put_small(frame, order)
     }
 
+    #[cfg(feature = "std")]
     #[allow(dead_code)]
     pub fn dump(&self, start: usize) {
-        let mut out = String::new();
+        use std::fmt::Write;
+
+        let mut out = std::string::String::new();
         writeln!(out, "Dumping pt {}", start / Self::N).unwrap();
         let table = &self.children[start / Self::N];
         for (i, entry) in table.iter().enumerate() {
@@ -500,49 +459,61 @@ impl Lower {
             let indent = 4;
             let bitfield = &self.bitfields[start / Bitfield::LEN];
             writeln!(out, "{:indent$}l2 i={i}: {entry:?}\t{bitfield:?}", "").unwrap();
+            if !entry.huge() {
+                assert_eq!(bitfield.count_zeros(), entry.free());
+            }
         }
         warn!("{out}");
     }
 }
 
-impl Drop for Lower {
-    fn drop(&mut self) {
-        if self.persistent {
-            // The chunks are part of the allocators managed memory
-            Box::leak(core::mem::take(&mut self.bitfields));
-            Box::leak(core::mem::take(&mut self.children));
-        }
-    }
-}
-
 #[cfg(all(test, feature = "std"))]
 mod test {
-    use alloc::vec::Vec;
+    use core::mem::ManuallyDrop;
+    use core::ops::Deref;
+    use std::sync::Barrier;
+    use std::vec::Vec;
+
+    use crate::Result;
     use log::warn;
 
     use super::Bitfield;
-    use crate::frame::{Frame, PFN, PT_LEN};
+    use crate::frame::PT_LEN;
     use crate::lower::Lower;
     use crate::thread;
-    use crate::util::{logging, WyRand};
+    use crate::util::{aligned_buf, logging, WyRand};
     use crate::Init;
 
-    type Allocator = Lower;
+    struct LowerTest(ManuallyDrop<Lower<'static>>);
 
-    fn count(pt: &Bitfield) -> usize {
-        let mut frames = 0;
-        for i in 0..Bitfield::LEN {
-            frames += !pt.get(i) as usize;
+    impl LowerTest {
+        fn create(frames: usize, init: Init) -> Result<Self> {
+            let primary = aligned_buf(Lower::metadata_size(frames)).leak();
+            Ok(Self(ManuallyDrop::new(Lower::new(frames, init, primary)?)))
         }
-        frames
+    }
+    impl Deref for LowerTest {
+        type Target = Lower<'static>;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl Drop for LowerTest {
+        fn drop(&mut self) {
+            let meta = self.0.metadata();
+            unsafe {
+                drop(ManuallyDrop::take(&mut self.0));
+                Vec::from_raw_parts(meta.as_mut_ptr(), meta.len(), meta.len());
+            }
+        }
     }
 
     #[test]
     fn alloc_normal() {
         logging();
 
-        const FRAMES: usize = 4 * Allocator::N;
-        let lower = Allocator::new(2, PFN(0), FRAMES, Init::Volatile, true);
+        const FRAMES: usize = 4 * Lower::N;
+        let lower = LowerTest::create(FRAMES, Init::FreeAll).unwrap();
         lower.get(0, 0).unwrap();
 
         thread::parallel(0..2, |t| {
@@ -553,14 +524,14 @@ mod test {
         });
 
         assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 3);
-        assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 3);
+        assert_eq!(lower.bitfields[0].count_zeros(), Bitfield::LEN - 3);
     }
 
     #[test]
     fn alloc_first() {
         logging();
 
-        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
@@ -570,14 +541,14 @@ mod test {
 
         let entry2 = lower.children[0][0].load();
         assert_eq!(entry2.free(), Bitfield::LEN - 2);
-        assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - 2);
+        assert_eq!(lower.bitfields[0].count_zeros(), Bitfield::LEN - 2);
     }
 
     #[test]
     fn alloc_last() {
         logging();
 
-        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
         for _ in 0..Bitfield::LEN - 1 {
             lower.get(0, 0).unwrap();
@@ -592,7 +563,7 @@ mod test {
         let table = &lower.children[0];
         assert_eq!(table[0].load().free(), 0);
         assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
-        assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
+        assert_eq!(lower.bitfields[1].count_zeros(), Bitfield::LEN - 1);
     }
 
     #[test]
@@ -601,7 +572,7 @@ mod test {
 
         let mut frames = [0; 2];
 
-        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
         frames[0] = lower.get(0, 0).unwrap();
         frames[1] = lower.get(0, 0).unwrap();
@@ -621,7 +592,7 @@ mod test {
 
         let mut frames = [0; Bitfield::LEN];
 
-        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
         for frame in &mut frames {
             *frame = lower.get(0, 0).unwrap();
@@ -635,7 +606,7 @@ mod test {
 
         let table = &lower.children[0];
         assert_eq!(table[0].load().free(), 2);
-        assert_eq!(count(&lower.bitfields[0]), 2);
+        assert_eq!(lower.bitfields[0].count_zeros(), 2);
     }
 
     #[test]
@@ -644,7 +615,7 @@ mod test {
 
         let mut frames = [0; Bitfield::LEN];
 
-        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
         for frame in &mut frames[..Bitfield::LEN - 1] {
             *frame = lower.get(0, 0).unwrap();
@@ -663,13 +634,13 @@ mod test {
 
         let table = &lower.children[0];
         if table[0].load().free() == 1 {
-            assert_eq!(count(&lower.bitfields[0]), 1);
+            assert_eq!(lower.bitfields[0].count_zeros(), 1);
         } else {
             // Table entry skipped
             assert_eq!(table[0].load().free(), 2);
-            assert_eq!(count(&lower.bitfields[0]), 2);
+            assert_eq!(lower.bitfields[0].count_zeros(), 2);
             assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
-            assert_eq!(count(&lower.bitfields[1]), Bitfield::LEN - 1);
+            assert_eq!(lower.bitfields[1].count_zeros(), Bitfield::LEN - 1);
         }
     }
 
@@ -677,8 +648,8 @@ mod test {
     fn alloc_normal_large() {
         logging();
 
-        const FRAMES: usize = 4 * Allocator::N;
-        let lower = Allocator::new(2, PFN(0), FRAMES, Init::Volatile, true);
+        const FRAMES: usize = 4 * Lower::N;
+        let lower = LowerTest::create(FRAMES, Init::FreeAll).unwrap();
         lower.get(0, 0).unwrap();
 
         thread::parallel(0..2, |t| {
@@ -694,7 +665,7 @@ mod test {
             lower.children[0][0].load().free(),
             Bitfield::LEN - allocated
         );
-        assert_eq!(count(&lower.bitfields[0]), Bitfield::LEN - allocated);
+        assert_eq!(lower.bitfields[0].count_zeros(), Bitfield::LEN - allocated);
     }
 
     #[test]
@@ -703,7 +674,7 @@ mod test {
 
         let mut frames = [0; 2];
 
-        let lower = Allocator::new(2, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
         frames[0] = lower.get(0, 1).unwrap();
         frames[1] = lower.get(0, 2).unwrap();
@@ -723,10 +694,10 @@ mod test {
     fn different_orders() {
         logging();
 
-        const MAX_ORDER: usize = Allocator::MAX_ORDER;
+        const MAX_ORDER: usize = Lower::MAX_ORDER;
 
         thread::pin(0);
-        let lower = Allocator::new(1, PFN(0), 4 * Allocator::N, Init::Volatile, true);
+        let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
         assert_eq!(lower.allocated_frames(), 0);
 
@@ -760,13 +731,13 @@ mod test {
     fn init_reserved() {
         logging();
 
-        const MAX_ORDER: usize = Allocator::MAX_ORDER;
+        const MAX_ORDER: usize = Lower::MAX_ORDER;
 
-        let num_max_frames = (Allocator::N - 1) / (1 << MAX_ORDER);
+        let num_max_frames = (Lower::N - 1) / (1 << MAX_ORDER);
 
-        let lower = Allocator::new(1, PFN(0), Allocator::N - 1, Init::Volatile, false);
+        let lower = LowerTest::create(Lower::N - 1, Init::AllocAll).unwrap();
 
-        assert_eq!(lower.allocated_frames(), Allocator::N - 1);
+        assert_eq!(lower.allocated_frames(), Lower::N - 1);
 
         for i in 0..num_max_frames {
             lower.put(i * (1 << MAX_ORDER), MAX_ORDER).unwrap();
@@ -779,13 +750,13 @@ mod test {
     fn partial_put_huge() {
         logging();
 
-        let lower = Allocator::new(1, PFN(0), Allocator::N - 1, Init::Volatile, false);
+        let lower = LowerTest::create(Lower::N - 1, Init::AllocAll).unwrap();
 
-        assert_eq!(lower.allocated_frames(), Allocator::N - 1);
+        assert_eq!(lower.allocated_frames(), Lower::N - 1);
 
         lower.put(0, 0).unwrap();
 
-        assert_eq!(lower.allocated_frames(), Allocator::N - 2);
+        assert_eq!(lower.allocated_frames(), Lower::N - 2);
     }
 
     #[test]
@@ -794,20 +765,16 @@ mod test {
         logging();
 
         const THREADS: usize = 6;
-        let buffer = vec![Frame::new(); 2 * THREADS * PT_LEN * PT_LEN];
+        const FRAMES: usize = 2 * THREADS * PT_LEN * PT_LEN;
 
         for _ in 0..8 {
-            let lower = Allocator::new(
-                THREADS,
-                PFN::from_ptr(buffer.as_ptr()),
-                buffer.len(),
-                Init::Overwrite,
-                true,
-            );
+            let lower = LowerTest::create(FRAMES, Init::FreeAll).unwrap();
             assert_eq!(lower.allocated_frames(), 0);
 
+            let barrier = Barrier::new(THREADS);
             thread::parallel(0..THREADS, |t| {
                 thread::pin(t);
+                barrier.wait();
 
                 let mut frames = [0; 4];
                 for p in &mut frames {
@@ -829,25 +796,21 @@ mod test {
         logging();
 
         const THREADS: usize = 6;
+        const FRAMES: usize = 2 * THREADS * PT_LEN * PT_LEN;
         let mut frames = [0; PT_LEN];
-        let buffer = vec![Frame::new(); 2 * THREADS * PT_LEN * PT_LEN];
 
         for _ in 0..8 {
-            let lower = Allocator::new(
-                THREADS,
-                PFN::from_ptr(buffer.as_ptr()),
-                buffer.len(),
-                Init::Overwrite,
-                true,
-            );
+            let lower = LowerTest::create(FRAMES, Init::FreeAll).unwrap();
             assert_eq!(lower.allocated_frames(), 0);
 
             for frame in &mut frames[..PT_LEN - 3] {
                 *frame = lower.get(0, 0).unwrap();
             }
 
+            let barrier = Barrier::new(THREADS);
             thread::parallel(0..THREADS, |t| {
                 thread::pin(t);
+                barrier.wait();
 
                 if t < THREADS / 2 {
                     lower.put(frames[t], 0).unwrap();

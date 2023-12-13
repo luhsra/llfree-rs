@@ -11,11 +11,12 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use log::warn;
 
-use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
+use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::MMap;
 use llfree::thread;
-use llfree::util::{self, WyRand};
-use llfree::{Alloc, Init, LLFree};
+use llfree::util::{self, aligned_buf, WyRand};
+use llfree::LLFree;
+use llfree::wrapper::NvmAlloc;
 
 /// Benchmarking the (crashed) recovery.
 #[derive(Parser, Debug)]
@@ -44,7 +45,7 @@ struct Args {
     iter: usize,
 }
 
-type Allocator = LLFree;
+type Allocator<'a> = NvmAlloc<'a, LLFree<'a>>;
 
 fn main() {
     util::logging();
@@ -103,35 +104,30 @@ fn main() {
 }
 
 fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
-    let mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
-    let alloc = Allocator::new(threads, pfn_range(&mapping), Init::Overwrite, false).unwrap();
+    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
+    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len())).leak();
+    let alloc = Allocator::new(threads, &mut mapping, false, volatile).unwrap();
     warn!("Prepare alloc");
-    thread::parallel(
-        mapping[..alloc.frames()]
-            .chunks(alloc.frames().div_ceil(threads))
-            .enumerate(),
-        |(t, chunk)| {
-            let mut rng = WyRand::new(t as u64);
-            let mut pages = chunk.iter().map(|p| PFN::from_ptr(p)).collect::<Vec<_>>();
-            rng.shuffle(&mut pages);
 
-            let frees = chunk.len() / 2;
+    thread::parallel(0..threads, |t| {
+        let mut rng = WyRand::new(t as u64);
 
-            for page in &pages[..frees] {
-                alloc.put(t, *page, 0).unwrap()
+        let allocs = alloc.frames() / threads / 2;
+
+        let mut pages = Vec::with_capacity(allocs);
+        for _ in 0..allocs {
+            pages.push(alloc.get(t, 0).unwrap());
+        }
+
+        if crash {
+            loop {
+                let i = rng.range(0..pages.len() as _) as usize;
+                alloc.put(t, pages[i], 0).unwrap();
+                black_box(pages[i]);
+                pages[i] = alloc.get(t, 0).unwrap();
             }
-
-            let alloc_pages = &mut pages[frees..];
-            if crash {
-                loop {
-                    let i = rng.range(0..alloc_pages.len() as _) as usize;
-                    alloc.put(t, alloc_pages[i], 0).unwrap();
-                    black_box(alloc_pages[i]);
-                    alloc_pages[i] = alloc.get(t, 0).unwrap();
-                }
-            }
-        },
-    );
+        }
+    });
     assert!(!crash);
     let num_allocated = alloc.allocated_frames();
     warn!("Allocated: {num_allocated}");
@@ -139,11 +135,12 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 }
 
 fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
-    let mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
+    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
+    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len())).leak();
 
     warn!("Recover alloc");
     let timer = Instant::now();
-    let alloc = Allocator::new(threads, pfn_range(&mapping), Init::Recover, false).unwrap();
+    let alloc = Allocator::new(threads, &mut mapping, true, volatile).unwrap();
     let time = timer.elapsed().as_nanos();
 
     let num_alloc = alloc.allocated_frames();

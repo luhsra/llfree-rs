@@ -10,6 +10,12 @@ The two main design goals are multicore scalability and crash consistency.
 - Modified Linux: https://github.com/luhsra/llfree-linux
 - Benchmark Module: https://github.com/luhsra/linux-alloc-bench
 
+## Publication
+
+**LLFree: Scalable and Optionally-Persistent Page-Frame Allocation**<br>
+Lars Wrenger, Florian Rommel, Alexander Halbuer, Christian Dietrich, Daniel Lohmann<br>
+In: 2023 USENIX Annual Technical Conference (USENIX '23); USENIX Association
+
 ## Usage
 
 To compile and test the allocator, you have to [install rust](https://www.rust-lang.org/learn/get-started).
@@ -25,11 +31,6 @@ cargo build -r
 
 # Running unit-tests
 cargo test -- --test-threads 1
-
-# Running a benchmark (see down below for more infos on benchmarking)
-cargo perf <benchmark> -- <args>
-# For example print help for the `bench` benchmark
-cargo perf bench -- -h
 ```
 
 > Note: This project uses certain UNIX features directly (for memory mapping and thread pinning) and doesn't work on Windows without modifications.
@@ -59,6 +60,9 @@ This project also includes the C reimplementation ([llfree-c](https://github.com
 The unit tests can be executed for the C by using the `--features llc` argument:
 
 ```sh
+# fetch the C implementation
+git submodules update --init
+# build & test the C implementation
 cargo test --features llc -- --test-threads 1
 ```
 

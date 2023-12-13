@@ -5,43 +5,45 @@ use core::{fmt, slice};
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
-use std::ops::Range;
 use std::sync::{atomic::Ordering, Barrier};
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
+use llfree::wrapper::NvmAlloc;
 use log::warn;
 
-use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
+use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::{self, MMap};
 use llfree::thread;
-use llfree::util::{self, WyRand};
-use llfree::{Alloc, Init, LLFree, Result, LLC};
+use llfree::util::{self, aligned_buf, WyRand};
+#[cfg(feature = "llc")]
+use llfree::LLC;
+use llfree::{Alloc, LLFree, Result};
 
 /// Number of allocations per block
 const RAND_BLOCK_SIZE: usize = 8;
 
 /// Reduced, VTable-compatible alloc trait for dynamic dispatch
 trait DynAlloc: fmt::Debug + Send + Sync {
-    fn get(&self, core: usize, order: usize) -> Result<PFN>;
-    fn put(&self, core: usize, frame: PFN, order: usize) -> Result<()>;
+    fn get(&self, core: usize, order: usize) -> Result<usize>;
+    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()>;
 
     fn frames(&self) -> usize;
     fn allocated_frames(&self) -> usize;
 }
 
-impl<T: Alloc> DynAlloc for T {
-    fn get(&self, core: usize, order: usize) -> Result<PFN> {
-        T::get(self, core, order)
+impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
+    fn get(&self, core: usize, order: usize) -> Result<usize> {
+        self.get(core, order)
     }
-    fn put(&self, core: usize, frame: PFN, order: usize) -> Result<()> {
-        T::put(self, core, frame, order)
+    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
+        self.put(core, frame, order)
     }
     fn frames(&self) -> usize {
-        T::frames(self)
+        self.frames()
     }
     fn allocated_frames(&self) -> usize {
-        T::allocated_frames(self)
+        self.allocated_frames()
     }
 }
 
@@ -130,18 +132,15 @@ pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame],
     mmap::anon(begin, length, false, false)
 }
 
-fn alloc(
-    name: &str,
-    cores: usize,
-    area: Range<PFN>,
-    init: Init,
-    free_all: bool,
-) -> Box<dyn DynAlloc> {
+fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAlloc + 'a> {
+    #[cfg(feature = "llc")]
     if <LLC as Alloc>::name() == name {
-        return Box::new(LLC::new(cores, area, init, free_all).unwrap());
+        let volatile = aligned_buf(NvmAlloc::<LLC>::metadata_size(cores, zone.len())).leak();
+        return Box::new(NvmAlloc::<LLC>::new(cores, zone, false, volatile).unwrap());
     }
     if <LLFree as Alloc>::name() == name {
-        return Box::new(LLFree::new(cores, area, init, free_all).unwrap());
+        let volatile = aligned_buf(NvmAlloc::<LLFree>::metadata_size(cores, zone.len())).leak();
+        return Box::new(NvmAlloc::<LLFree>::new(cores, zone, false, volatile).unwrap());
     }
     panic!("Unknown allocator");
 }
@@ -162,16 +161,16 @@ enum Benchmark {
 }
 
 impl Benchmark {
-    fn run(
+    fn run<'a>(
         self,
         name: &str,
-        mapping: &mut [Frame],
+        mapping: &'a mut [Frame],
         order: usize,
         threads: usize,
         x: usize,
     ) -> Perf {
         warn!(">>> bench {self:?} x={x} o={order} {name}\n");
-        let mut alloc = alloc(name, threads, pfn_range(mapping), Init::Overwrite, true);
+        let mut alloc = alloc(name, threads, mapping);
 
         match self {
             Benchmark::Bulk => bulk(alloc.as_mut(), order, threads, x),
@@ -288,7 +287,7 @@ fn rand(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usi
     let allocs = alloc.frames() / max_threads / 2 / (1 << order);
     let barrier = Barrier::new(threads);
 
-    let mut all_pages = vec![PFN(0); allocs * threads];
+    let mut all_pages = vec![0; allocs * threads];
     let all_pages_ptr = all_pages.as_mut_ptr() as usize;
 
     let chunks = all_pages.chunks_mut(allocs).enumerate();
@@ -355,7 +354,7 @@ fn rand_block(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, thread
     let allocs = alloc.frames() / max_threads / 2 / (1 << order);
     let barrier = Barrier::new(threads);
 
-    let mut all_pages = vec![PFN(0); allocs * threads];
+    let mut all_pages = vec![0; allocs * threads];
     let all_pages_ptr = all_pages.as_mut_ptr() as usize;
 
     let chunks = all_pages.chunks_mut(allocs).enumerate();

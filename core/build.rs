@@ -29,13 +29,8 @@ fn main() {
 
         // Re-run the build script if any C source files change
         println!("cargo:rerun-if-changed={c_project_dir}/Makefile");
-        println!("cargo:rerun-if-changed={outdir}/libllc.a");
-
-        for entry in glob::glob(&format!("{c_project_dir}/*.[hc]")).unwrap() {
-            match entry {
-                Ok(path) => println!("cargo:rerun-if-changed={}", path.display()),
-                Err(e) => println!("Warning: glob error for C source files: {e:?}"),
-            }
-        }
+        println!("cargo:rerun-if-changed={c_project_dir}/src");
+        println!("cargo:rerun-if-changed={c_project_dir}/include");
+        println!("cargo:rerun-if-changed={c_project_dir}/std");
     }
 }

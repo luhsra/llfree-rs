@@ -6,13 +6,14 @@ use std::sync::Barrier;
 use std::time::Duration;
 
 use clap::Parser;
+use llfree::wrapper::NvmAlloc;
 use log::{error, warn};
 
-use llfree::frame::{pfn_range, Frame, PFN, PT_LEN};
+use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::{self, MMap};
 use llfree::thread;
-use llfree::util::{self, align_up, WyRand};
-use llfree::{Alloc, Init, LLFree};
+use llfree::util::{self, align_up, aligned_buf, WyRand};
+use llfree::LLFree;
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]
@@ -30,7 +31,7 @@ struct Args {
     memory: usize,
 }
 
-type Allocator = LLFree;
+type Allocator<'a> = NvmAlloc<'a, LLFree<'a>>;
 
 fn main() {
     let Args {
@@ -62,7 +63,7 @@ fn main() {
     let pid = unsafe { libc::fork() };
     match pid.cmp(&0) {
         Equal => execute(allocs, threads, order, &mut mapping, &mut out_mapping),
-        Greater => monitor(allocs, threads, order, pid, &mapping, &out_mapping),
+        Greater => monitor(allocs, threads, order, pid, &mut mapping, &out_mapping),
         Less => {
             unsafe { libc::perror(b"fork failed\0".as_ptr().cast()) };
             panic!();
@@ -81,13 +82,9 @@ fn execute(
     // Align to prevent false-sharing
     let out_size = align_up(allocs + 2, Frame::SIZE);
 
-    // Warmup
-    for page in mapping.iter_mut() {
-        *page.cast_mut::<usize>() = 1;
-    }
-
-    let alloc = Allocator::new(threads, pfn_range(mapping), Init::Overwrite, true).unwrap();
-    warn!("initialized");
+    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len())).leak();
+    let alloc = Allocator::new(threads, mapping, false, volatile).unwrap();
+    warn!("initialized {}", alloc.frames());
 
     let barrier = Barrier::new(threads);
     thread::parallel(out_mapping.chunks_mut(out_size).enumerate(), |(t, out)| {
@@ -103,7 +100,7 @@ fn execute(
 
         for (i, page) in data.iter_mut().enumerate() {
             *idx = i as _;
-            *page = alloc.get(t, order).unwrap().0;
+            *page = alloc.get(t, order).unwrap();
         }
 
         warn!("repeat");
@@ -114,8 +111,8 @@ fn execute(
             let i = rng.range(0..allocs as u64) as usize;
             *idx = i as _;
 
-            alloc.put(t, PFN(data[i]), order).unwrap();
-            data[i] = alloc.get(t, order).unwrap().0;
+            alloc.put(t, data[i], order).unwrap();
+            data[i] = alloc.get(t, order).unwrap();
         }
     });
 }
@@ -126,7 +123,7 @@ fn monitor(
     threads: usize,
     order: usize,
     child: i32,
-    mapping: &[Frame],
+    mapping: &mut [Frame],
     out_mapping: &[usize],
 ) {
     let out_size = align_up(allocs + 2, Frame::SIZE);
@@ -172,7 +169,9 @@ fn monitor(
     warn!("check");
 
     // Recover allocator
-    let alloc = Allocator::new(threads, pfn_range(mapping), Init::Recover, true).unwrap();
+    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len())).leak();
+    let alloc = Allocator::new(threads, mapping, true, volatile).unwrap();
+    warn!("recovered {}", alloc.frames());
 
     let expected = allocs * threads - threads;
     let actual = alloc.allocated_frames();
@@ -196,7 +195,7 @@ fn monitor(
 
         for (i, addr) in data[0..allocs].iter().enumerate() {
             if i != *idx {
-                alloc.put(t, PFN(*addr), order).unwrap();
+                alloc.put(t, *addr, order).unwrap();
             }
         }
     }
