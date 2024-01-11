@@ -128,8 +128,9 @@ impl From<Preferred> for u64 {
 
 #[bitfield(u16)]
 #[derive(PartialEq, Eq)]
+// Changes for 16K: None, as we handle 265MiB Trees, wich are 2^14 16KiB BF, so counter stays the same, only the number of children changes from 32 to 8.
 pub struct Tree {
-    /// Number of free 4K frames.
+    /// Number of free 4K/16K base frames.
     #[bits(15)]
     pub free: usize,
     /// If this subtree is reserved by a CPU.
@@ -177,6 +178,7 @@ impl Tree {
     }
 }
 
+// TODO: Check if Huge Entries still work the same in 16K
 /// Manages huge frame, that can be allocated as base frames.
 #[bitfield(u16)]
 #[derive(PartialEq, Eq)]

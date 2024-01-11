@@ -671,7 +671,7 @@ mod test {
                 barrier.wait();
 
                 for frame in frames {
-                    *frame = alloc.get(t, 9).unwrap();
+                    *frame = alloc.get(t, Lower::HUGE_ORDER).unwrap();
                 }
             },
         );

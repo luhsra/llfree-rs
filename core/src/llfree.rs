@@ -50,6 +50,12 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
     /// Return the name of the allocator.
     #[cold]
+    #[cfg(feature="16K")]
+    fn name() -> &'static str {
+        "LLFree16K"
+    }
+
+    #[cfg(not(feature="16K"))]
     fn name() -> &'static str {
         "LLFree"
     }

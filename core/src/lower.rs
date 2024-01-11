@@ -10,6 +10,10 @@ use crate::entry::{AtomicArray, HugeEntry, HugePair};
 use crate::util::{align_down, align_up, spin_wait, Align};
 use crate::{Error, Init, Result, CAS_RETRIES};
 
+#[cfg(feature="16K")]
+type Bitfield = crate::bitfield::Bitfield<32>; // 16K base frames need 2048 bit bitfields -> 32x64bit
+
+#[cfg(not(feature="16K"))]
 type Bitfield = crate::bitfield::Bitfield<8>;
 
 /// Lower-level frame allocator.
@@ -46,13 +50,17 @@ const _: () = assert!(Lower::HP < (1 << (u16::BITS as usize - Lower::HUGE_ORDER)
 
 impl<'a> Lower<'a> {
     /// Number of huge pages managed by a chunk
+    #[cfg(feature="16K")]
+    pub const HP: usize = 8; // translates to 256MiB of memory managed by a chunk (or 2^14 Base Frames)
+    #[cfg(not(feature="16K"))]
     pub const HP: usize = 32;
     /// Pages per chunk. Every alloc only searches in a chunk of this size.
-    pub const N: usize = Self::HP * Bitfield::LEN;
+    pub const N: usize = Self::HP * Bitfield::LEN; //LEN for 16K is 2048
     /// The maximal allowed order of this allocator
-    pub const HUGE_ORDER: usize = Bitfield::ORDER;
+    pub const HUGE_ORDER: usize = Bitfield::ORDER; //order for 16K is 11
     pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
 
+    //Metadata does not need to be adapted for 16K
     pub fn metadata_size(frames: usize) -> usize {
         let bitfields = frames.div_ceil(Bitfield::LEN);
         let bitfields_size = bitfields * size_of::<Bitfield>();
