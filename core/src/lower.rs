@@ -59,7 +59,7 @@ impl<'a> Lower<'a> {
         let bitfields_size = align_up(bitfields_size, size_of::<[HugeEntry; Lower::HP]>());
 
         let tables = frames.div_ceil(Self::N);
-        let tables_size = tables * size_of::<[HugeEntry; Lower::HP]>();
+        let tables_size = tables * align_up(size_of::<[HugeEntry; Lower::HP]>(), align_of::<Align>());
         bitfields_size + tables_size
     }
 
@@ -142,6 +142,7 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Return the number of free frames in the tree at `start`.
     pub fn free_in_tree(&self, start: usize) -> usize {
         assert!(start < self.frames());
         let mut free = 0;
