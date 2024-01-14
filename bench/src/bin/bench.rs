@@ -161,10 +161,10 @@ enum Benchmark {
 }
 
 impl Benchmark {
-    fn run<'a>(
+    fn run(
         self,
         name: &str,
-        mapping: &'a mut [Frame],
+        mapping: &mut [Frame],
         order: usize,
         threads: usize,
         x: usize,

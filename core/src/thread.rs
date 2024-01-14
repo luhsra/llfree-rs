@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 pub static STRIDE: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
-    static PINNED: AtomicUsize = AtomicUsize::new(usize::MAX);
+    static PINNED: AtomicUsize = const { AtomicUsize::new(usize::MAX) };
 }
 
 /// Returns the number of virtual cores.

@@ -57,16 +57,17 @@ impl MMap {
 #[cfg(target_family = "unix")]
 unsafe impl Allocator for MMap {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        // Enforce alignment
         let begin = if layout.align() != 0 {
             self.begin.next_multiple_of(layout.align())
         } else {
             self.begin
         };
-
+        // Nothing to allocate
         if layout.size() == 0 {
             return Ok(unsafe { std::slice::from_raw_parts(begin as _, 0) }.into());
         }
-
+        // Now ask the os for the memory
         let addr = if let Some((file, _dax)) = &self.file {
             let fd = file.as_raw_fd();
 
@@ -115,6 +116,7 @@ unsafe impl Allocator for MMap {
         };
 
         if addr != libc::MAP_FAILED {
+            // This non-null slice is somewhat cursed
             Ok(unsafe { std::slice::from_raw_parts(addr.cast(), layout.size()) }.into())
         } else {
             unsafe { libc::perror(b"mmap failed\0".as_ptr().cast()) };

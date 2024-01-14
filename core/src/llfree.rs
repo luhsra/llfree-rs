@@ -1,7 +1,7 @@
 //! Upper allocator implementation
 
 use core::hint::spin_loop;
-use core::mem::{align_of, size_of};
+use core::mem::align_of;
 use core::sync::atomic::AtomicU64;
 use core::unreachable;
 use core::{fmt, slice};
@@ -12,7 +12,7 @@ use log::{error, info, warn};
 use crate::atomic::{Atom, Atomic};
 use crate::entry::{LocalTree, Preferred};
 use crate::lower::Lower;
-use crate::util::{align_up, Align};
+use crate::util::{size_of_slice, Align};
 use crate::{Error, Result};
 use crate::{MetaSize, CAS_RETRIES};
 
@@ -45,6 +45,24 @@ pub struct LLFree<'a> {
 unsafe impl Send for LLFree<'_> {}
 unsafe impl Sync for LLFree<'_> {}
 
+/// Size of the dynamic metadata
+struct Metadata {
+    local_size: usize,
+    tree_size: usize,
+}
+
+impl Metadata {
+    fn new(cores: usize, frames: usize) -> Self {
+        let cores = cores.clamp(1, frames.div_ceil(Lower::N));
+        let local_size = size_of_slice::<Align<Local>>(cores);
+        let tree_size = Trees::<{ Lower::N }>::metadata_size(frames);
+        Self {
+            local_size,
+            tree_size,
+        }
+    }
+}
+
 impl<'a> Alloc<'a> for LLFree<'a> {
     const MAX_ORDER: usize = Lower::MAX_ORDER;
 
@@ -69,24 +87,23 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             secondary.as_ptr_range()
         );
 
-        let local_size = cores * size_of::<Align<Local>>();
-        let trees_size = Trees::<{ Lower::N }>::metadata_size(frames);
-        if secondary.as_ptr() as usize % align_of::<Align>() != 0
-            || secondary.len() < local_size + trees_size
-        {
-            error!("secondary metadata");
-            return Err(Error::Memory);
-        }
-
         if frames < Lower::N * cores {
             warn!("memory {} < {}", frames, Lower::N * cores);
             cores = frames.div_ceil(Lower::N);
         }
 
+        let m = Metadata::new(cores, frames);
+        if !secondary.as_ptr().is_aligned_to(align_of::<Align>())
+            || secondary.len() < m.local_size + m.tree_size
+        {
+            error!("secondary metadata");
+            return Err(Error::Memory);
+        }
+
         // Create lower allocator
         let lower = Lower::new(frames, init, primary)?;
 
-        let (local, trees) = secondary.split_at_mut(local_size);
+        let (local, trees) = secondary.split_at_mut(m.local_size);
 
         // Init per-cpu data
         let local = unsafe { slice::from_raw_parts_mut(local.as_mut_ptr().cast(), cores) };
@@ -103,14 +120,10 @@ impl<'a> Alloc<'a> for LLFree<'a> {
     }
 
     fn metadata_size(cores: usize, frames: usize) -> MetaSize {
-        let local = cores * size_of::<Align<Local>>();
-        let trees = align_up(
-            Trees::<{ Lower::N }>::metadata_size(frames),
-            align_of::<Align>(),
-        );
+        let m = Metadata::new(cores, frames);
         MetaSize {
             primary: Lower::metadata_size(frames),
-            secondary: local + trees,
+            secondary: m.local_size + m.tree_size,
         }
     }
 

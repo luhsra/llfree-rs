@@ -10,6 +10,7 @@
 #![feature(allocator_api)]
 #![feature(c_size_t)]
 #![feature(let_chains)]
+#![feature(pointer_is_aligned)]
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]

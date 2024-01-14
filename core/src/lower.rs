@@ -1,13 +1,13 @@
 //! Lower allocator implementations
 
-use core::mem::{align_of, size_of};
+use core::mem::align_of;
 use core::slice;
 
 use log::{error, info, warn};
 
 use crate::atomic::Atom;
 use crate::entry::{AtomicArray, HugeEntry, HugePair};
-use crate::util::{align_down, align_up, spin_wait, Align};
+use crate::util::{align_down, size_of_slice, spin_wait, Align};
 use crate::{Error, Init, Result, CAS_RETRIES};
 
 type Bitfield = crate::bitfield::Bitfield<8>;
@@ -44,6 +44,28 @@ unsafe impl Sync for Lower<'_> {}
 
 const _: () = assert!(Lower::HP < (1 << (u16::BITS as usize - Lower::HUGE_ORDER)));
 
+/// Size of the dynamic metadata
+struct Metadata {
+    bitfield_len: usize,
+    bitfield_size: usize,
+    table_len: usize,
+    table_size: usize,
+}
+
+impl Metadata {
+    fn new(frames: usize) -> Self {
+        let bitfield_len = frames.div_ceil(Bitfield::LEN);
+        let table_len = frames.div_ceil(Lower::N);
+        Self {
+            bitfield_len,
+            // This also respects the cache line alignment
+            bitfield_size: size_of_slice::<Bitfield>(bitfield_len),
+            table_len,
+            table_size: size_of_slice::<Align<[HugeEntry; Lower::HP]>>(table_len),
+        }
+    }
+}
+
 impl<'a> Lower<'a> {
     /// Number of huge pages managed by a chunk
     pub const HP: usize = 32;
@@ -54,39 +76,29 @@ impl<'a> Lower<'a> {
     pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
 
     pub fn metadata_size(frames: usize) -> usize {
-        let bitfields = frames.div_ceil(Bitfield::LEN);
-        let bitfields_size = bitfields * size_of::<Bitfield>();
-        let bitfields_size = align_up(bitfields_size, size_of::<[HugeEntry; Lower::HP]>());
-
-        let tables = frames.div_ceil(Self::N);
-        let tables_size = tables * align_up(size_of::<[HugeEntry; Lower::HP]>(), align_of::<Align>());
-        bitfields_size + tables_size
+        let m = Metadata::new(frames);
+        m.bitfield_size + m.table_size
     }
 
     /// Create a new lower allocator.
     pub fn new(frames: usize, init: Init, primary: &'a mut [u8]) -> Result<Self> {
-        let bitfields_num = frames.div_ceil(Bitfield::LEN);
-        let bitfields_size = bitfields_num * size_of::<Bitfield>();
-        let bitfields_size = align_up(bitfields_size, size_of::<[HugeEntry; Lower::HP]>());
+        let m = Metadata::new(frames);
 
-        let tables_num = frames.div_ceil(Self::N);
-        let tables_size = tables_num * size_of::<[HugeEntry; Lower::HP]>();
-
-        if primary.len() < bitfields_size + tables_size
+        if primary.len() < m.bitfield_size + m.table_size
             || primary.as_ptr() as usize % align_of::<Align>() != 0
         {
             error!("primary metadata");
             return Err(Error::Initialization);
         }
-        let (bitfields, children) = primary.split_at_mut(bitfields_size);
+        let (bitfields, children) = primary.split_at_mut(m.bitfield_size);
 
         // Start of the l1 table array
         let bitfields =
-            unsafe { slice::from_raw_parts_mut(bitfields.as_mut_ptr().cast(), bitfields_num) };
+            unsafe { slice::from_raw_parts_mut(bitfields.as_mut_ptr().cast(), m.bitfield_len) };
 
         // Start of the l2 table array
         let children =
-            unsafe { slice::from_raw_parts_mut(children.as_mut_ptr().cast(), tables_num) };
+            unsafe { slice::from_raw_parts_mut(children.as_mut_ptr().cast(), m.table_len) };
 
         let alloc = Self {
             len: frames,
@@ -232,7 +244,7 @@ impl<'a> Lower<'a> {
     #[allow(unused)]
     pub fn allocated_frames(&self) -> usize {
         let mut frames = self.frames();
-        for table in &*self.children {
+        for table in self.children {
             for entry in table.iter() {
                 frames -= entry.load().free();
             }
