@@ -274,7 +274,7 @@ mod test {
         warn!("realloc...");
 
         // Free some
-        const FREE_NUM: usize = PT_LEN * PT_LEN - 10;
+        const FREE_NUM: usize = FRAMES / 3;
         for frame in &frames[..FREE_NUM] {
             alloc.put(0, *frame, 0).unwrap();
         }
