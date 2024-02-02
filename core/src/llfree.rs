@@ -91,7 +91,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
         // Create lower allocator
         let lower = Lower::new(frames, init, primary)?;
-
+        //info!("Lower Allocater: {lower:#?}");
         let (local, trees) = secondary.split_at_mut(local_size);
 
         // Init per-cpu data
@@ -296,6 +296,7 @@ impl LLFree<'_> {
                 // Failure due to fragmentation
                 // Reset counters, reserve new entry and retry allocation
                 warn!("alloc failed o={order} => retry");
+                info!("Allocator State: {:?}", &self);
                 // Increment global to prevent race condition with concurrent reservation
                 self.trees[tree.frame / Lower::N]
                     .fetch_update(|v| v.inc(1 << order, Lower::N))

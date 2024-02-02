@@ -57,8 +57,14 @@ impl<'a> Lower<'a> {
     /// Pages per chunk. Every alloc only searches in a chunk of this size.
     pub const N: usize = Self::HP * Bitfield::LEN; //LEN for 16K is 2048
     /// The maximal allowed order of this allocator
+    #[cfg(not(feature="16K"))]
     pub const HUGE_ORDER: usize = Bitfield::ORDER; //order for 16K is 11
+    #[cfg(not(feature="16K"))]
     pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
+    #[cfg(feature="16K")]
+    pub const HUGE_ORDER: usize = Bitfield::ORDER; //Bitfield::ORDER for 16K is 11 
+    #[cfg(feature="16K")]
+    pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1; //MAX_ORDER for 16K is 11, as 2^11*2^14B (16KiB) = 2^25B -> 32 MiB
 
     //Metadata does not need to be adapted for 16K
     pub fn metadata_size(frames: usize) -> usize {
@@ -67,7 +73,7 @@ impl<'a> Lower<'a> {
         let bitfields_size = align_up(bitfields_size, size_of::<[HugeEntry; Lower::HP]>());
 
         let tables = frames.div_ceil(Self::N);
-        let tables_size = tables * size_of::<[HugeEntry; Lower::HP]>();
+        let tables_size = tables * align_up(size_of::<[HugeEntry; Lower::HP]>(), align_of::<Align>());
         bitfields_size + tables_size
     }
 
@@ -91,10 +97,12 @@ impl<'a> Lower<'a> {
         // Start of the l1 table array
         let bitfields =
             unsafe { slice::from_raw_parts_mut(bitfields.as_mut_ptr().cast(), bitfields_num) };
+        //info!("{:?}", bitfields.as_ptr_range());
 
         // Start of the l2 table array
         let children =
             unsafe { slice::from_raw_parts_mut(children.as_mut_ptr().cast(), tables_num) };
+        //info!("{:?}", children.as_ptr_range());
 
         let alloc = Self {
             len: frames,
@@ -155,7 +163,9 @@ impl<'a> Lower<'a> {
         let mut free = 0;
         for entry in self.children[start / Self::N].iter() {
             free += entry.load().free();
+            //info!("{:?}", entry.load());
         }
+        //info!("number of free frames in tree: {free}");
         free
     }
 
@@ -328,7 +338,7 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Allocate frames up to order 8
+    /// Allocate frames up to order 8 (or up to order 10 for 16K)
     fn get_small(&self, start: usize, order: usize) -> Result<usize> {
         debug_assert!(order < Bitfield::ORDER);
 
@@ -357,6 +367,7 @@ impl<'a> Lower<'a> {
         }
 
         info!("Nothing found o={order}");
+        //info!("Lower State: {:?}", &self.children);
         Err(Error::Memory)
     }
 
@@ -702,7 +713,7 @@ mod test {
     fn different_orders() {
         logging();
 
-        const MAX_ORDER: usize = Lower::MAX_ORDER;
+        const MAX_ORDER: usize = Lower::MAX_ORDER -1;
 
         thread::pin(0);
         let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();

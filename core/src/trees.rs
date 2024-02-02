@@ -29,12 +29,15 @@ impl<'a, const LN: usize> fmt::Debug for Trees<'a, LN> {
         let mut free = 0;
         let mut partial = 0;
         for e in &*self.entries {
-            let f = e.load().free();
-            if f == LN {
-                free += 1;
-            } else if f > Self::MIN_FREE {
-                partial += 1;
-            }
+            let f = e.load();
+            if !f.reserved() {
+                if f.free() == LN {
+                    free += 1;
+                } else if f.free() > Self::MIN_FREE {
+                    partial += 1;
+                }
+            } 
+            
         }
         write!(f, "(total: {max}, free: {free}, partial: {partial})")?;
         Ok(())

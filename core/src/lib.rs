@@ -150,7 +150,7 @@ mod test {
     use std::sync::Barrier;
     use std::vec::Vec;
 
-    use log::warn;
+    use log::{warn, info};
 
     use crate::frame::{Frame, PT_LEN};
     use crate::lower::Lower;
@@ -435,7 +435,8 @@ mod test {
         warn!("start stress test");
 
         // Stress test
-        let mut frames = vec![0; PT_LEN * PT_LEN];
+        //TODO: try and really allocate ALL pages
+        let mut frames = vec![0; FRAMES/2]; // 0 to #frames that are accessible (- prev n this trest allocated pages)
         for frame in &mut frames {
             *frame = alloc.get(0, 0).unwrap();
         }
@@ -524,7 +525,8 @@ mod test {
     fn alloc_all() {
         logging();
 
-        const FRAMES: usize = 2 * PT_LEN * PT_LEN;
+        //create 2 GiB memory
+        const FRAMES: usize = (2 * (1 << 30)) / Frame::SIZE;
 
         let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
 
@@ -893,24 +895,24 @@ mod test {
     fn different_orders() {
         const MAX_ORDER: usize = Lower::MAX_ORDER;
         const THREADS: usize = 4;
-        const FRAMES: usize = Lower::N * (THREADS * 2 + 1);
+        const FRAMES: usize = Lower::N * (THREADS * MAX_ORDER / 2); // 6 GiB for 16K
 
         logging();
 
         let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
-
+        info!("Created Allocator \n {:?}", alloc);
         let barrier = Barrier::new(THREADS);
 
         thread::parallel(0..THREADS, |t| {
             thread::pin(t);
             let mut rng = WyRand::new(42 + t as u64);
             let mut num_frames = 0;
-            let mut frames = Vec::new();
+            let mut frames = Vec::new();    
             for order in 0..=MAX_ORDER {
                 for _ in 0..1 << (MAX_ORDER - order) {
                     frames.push((order, 0));
                     num_frames += 1 << order;
-                }
+                }   
             }
             rng.shuffle(&mut frames);
 
@@ -920,9 +922,12 @@ mod test {
             for (order, frame) in &mut frames {
                 *frame = match alloc.get(t, *order) {
                     Ok(frame) => frame,
-                    Err(e) => panic!("{e:?} o={order} {alloc:?}"),
+                    Err(e) => panic!("{e:?} o={order} {alloc:?} on core {t}"),
                 };
                 assert!(*frame % (1 << *order) == 0, "{frame} {:x}", 1 << *order);
+                if *order > 8 {
+                    //info!("allocated order {order}, {alloc:?} on core {t}");
+                }
             }
 
             let mut rng = WyRand::new(t as _);

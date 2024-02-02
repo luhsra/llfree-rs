@@ -42,7 +42,7 @@ impl<const N: usize> Bitfield<N> {
     pub const ENTRY_BITS: usize = 64;
     pub const ENTRIES: usize = N;
     pub const LEN: usize = N * Self::ENTRY_BITS;
-    pub const ORDER: usize = Self::LEN.ilog2() as _;
+    pub const ORDER: usize = Self::LEN.ilog2() as _; 
 
     /// Overwrite the `range` of bits with `v`
     pub fn set(&self, range: Range<usize>, v: bool) {

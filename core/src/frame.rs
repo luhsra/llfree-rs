@@ -9,7 +9,11 @@ pub const PT_LEN: usize = 1 << Lower::HUGE_ORDER;//PT_ORDER;
 
 /// Correctly sized and aligned page frame.
 #[derive(Clone)]
-#[repr(align(0x4000))] // for 16K needs to be 0x4000, for 4K needs to be 0x1000 TODO: make compiletime
+// for 16K needs to be 0x4000, for 4K needs to be 0x1000 
+#[cfg_attr(feature="16K", repr(align(0x4000)))]
+#[cfg_attr(not(feature="16K"), repr(align(0x1000)))]
+//#[repr(align(0x4000))] 
+
 pub struct Frame {
     _data: [u8; Self::SIZE],
 }

@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use llfree::wrapper::NvmAlloc;
-use log::warn;
+use log::{info, warn};
 
 use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::{self, MMap};
@@ -108,8 +108,9 @@ fn main() {
 
     warn!("Allocating order {order}");
 
-    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
-
+    let frames = (memory * (1 << 30)) / Frame::SIZE;
+    //let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
+    let mut mapping = mapping(0x1000_0000_0000, frames, dax);
     for x in x {
         for name in &allocs {
             for i in 0..iterations {
@@ -129,6 +130,7 @@ pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame],
         warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
         return mmap::file(begin, length, &file, true);
     }
+    info!("Mapping {length} frames ({} bytes).", length * Frame::SIZE);
     mmap::anon(begin, length, false, false)
 }
 
