@@ -1,8 +1,8 @@
 //! Barebones linux mmap wrapper
 
-use std::boxed::Box;
 use core::alloc::{AllocError, Allocator, Layout};
 use core::ptr::NonNull;
+use std::boxed::Box;
 use std::fs::File;
 use std::os::unix::prelude::AsRawFd;
 
@@ -227,10 +227,10 @@ pub fn test_mapping(begin: usize, length: usize) -> Box<[Frame], MMap> {
 mod test {
     use std::thread;
 
+    use log::info;
+
     use crate::frame::Frame;
     use crate::util::logging;
-
-    use log::info;
 
     #[ignore]
     #[cfg(target_family = "unix")]

@@ -79,11 +79,10 @@ impl<'a, const LN: usize> Trees<'a, LN> {
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: usize, free: usize, frames: usize) -> Result<()> {
+    pub fn unreserve(&self, i: usize, free: usize, frames: usize) {
         let max = (frames - i * LN).min(LN);
-        match self[i].fetch_update(|v| v.unreserve_add(free, max)) {
-            Ok(_) => Ok(()),
-            Err(t) => panic!("Unreserve failed i{i} {t:?} + {free}"),
+        if let Err(t) = self[i].fetch_update(|v| v.unreserve_add(free, max)) {
+            panic!("Unreserve failed i{i} {t:?} + {free}")
         }
     }
 

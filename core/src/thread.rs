@@ -2,7 +2,6 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-
 /// Changes the order in which cores are selected for pinning.
 ///
 /// The `core` argument of [pin] is multiplied with stride to get the actual core:

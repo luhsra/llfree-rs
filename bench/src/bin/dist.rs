@@ -10,13 +10,11 @@ use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::Parser;
-use log::warn;
-
 use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::{self, MMap};
-use llfree::thread;
 use llfree::util::{aligned_buf, logging};
-use llfree::{Alloc, Init, LLFree};
+use llfree::{thread, Alloc, Init, LLFree};
+use log::warn;
 
 type Allocator<'a> = LLFree<'a>;
 

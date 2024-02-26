@@ -1,4 +1,5 @@
-use std::{env, process::Command};
+use std::env;
+use std::process::Command;
 
 fn main() {
     if env::var("CARGO_FEATURE_LLC").is_ok() {

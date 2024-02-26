@@ -3,17 +3,16 @@
 #![feature(new_uninit)]
 
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
+use std::ops::DerefMut;
 use std::sync::atomic::Ordering;
 use std::sync::{Barrier, Mutex};
 
 use clap::Parser;
-use log::warn;
-
 use llfree::frame::PT_LEN;
-use llfree::util::{self, aligned_buf, WyRand};
+use llfree::util::{aligned_buf, WyRand};
 use llfree::*;
-use llfree::{thread, LLFree};
+use log::warn;
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
@@ -42,6 +41,9 @@ struct Args {
     stride: usize,
 }
 
+#[cfg(feature = "llc")]
+type Allocator = LLC;
+#[cfg(not(feature = "llc"))]
 type Allocator<'a> = LLFree<'a>;
 
 fn main() {
@@ -73,15 +75,7 @@ fn main() {
     let alloc =
         Allocator::new(threads, pages, Init::FreeAll, &mut primary, &mut secondary).unwrap();
 
-    let out = Mutex::new({
-        let mut out = File::create(outfile).unwrap();
-        write!(out, "i,num_pages,allocs").unwrap();
-        for i in 0..alloc.frames().div_ceil(PT_LEN) {
-            write!(out, ",{i}").unwrap();
-        }
-        writeln!(out).unwrap();
-        out
-    });
+    let out = Mutex::new(BufWriter::new(File::create(outfile).unwrap()));
 
     // Operate on half of the avaliable memory
     let allocs = (pages * free / 100) / (1 << order) / threads;
@@ -143,7 +137,8 @@ fn main() {
 
         if barrier.wait().is_leader() {
             warn!("stats 0");
-            stats(&mut out.lock().unwrap(), &alloc, 0).unwrap();
+            let mut out = out.lock().unwrap();
+            stats(out.deref_mut(), &alloc).unwrap();
         }
         barrier.wait();
 
@@ -159,7 +154,8 @@ fn main() {
             };
             if barrier.wait().is_leader() {
                 warn!("stats {i}");
-                stats(&mut out.lock().unwrap(), &alloc, i).unwrap();
+                let mut out = out.lock().unwrap();
+                stats(out.deref_mut(), &alloc).unwrap();
             }
             barrier.wait();
         }
@@ -169,15 +165,12 @@ fn main() {
 }
 
 /// count and output stats
-fn stats(out: &mut File, alloc: &Allocator, i: usize) -> io::Result<()> {
-    let mut free_per_huge = Vec::with_capacity(alloc.frames() / 512);
-    alloc.for_each_huge_frame(|_pfn, free| {
-        free_per_huge.push(free as u16);
-    });
-
-    write!(out, "{i},{},{}", alloc.frames(), alloc.allocated_frames(),)?;
-    for free in free_per_huge {
-        write!(out, ",{free}")?;
+fn stats(out: &mut impl Write, alloc: &Allocator) -> io::Result<()> {
+    for huge in 0..alloc.frames().div_ceil(1 << Allocator::HUGE_ORDER) {
+        let free = alloc.free_at(huge << Allocator::HUGE_ORDER, Allocator::HUGE_ORDER);
+        let level = if free == 0 { 0 } else { free / 64 + 1 };
+        assert!(level <= 9);
+        write!(out, "{level}")?;
     }
     writeln!(out)?;
     Ok(())

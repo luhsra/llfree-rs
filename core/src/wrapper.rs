@@ -1,6 +1,7 @@
 use core::marker::PhantomData;
 use core::mem::size_of_val;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering::*};
+use core::sync::atomic::Ordering::*;
+use core::sync::atomic::{AtomicBool, AtomicUsize};
 use core::{fmt, slice};
 
 use log::error;

@@ -61,12 +61,14 @@ pub enum Error {
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// Number of retries if an atomic operation fails.
-pub const CAS_RETRIES: usize = 4;
+pub const CAS_RETRIES: usize = 8;
 
 /// The general interface of the allocator implementations.
 pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// Maximum allocation size order.
     const MAX_ORDER: usize;
+    /// Maximum allocation size order.
+    const HUGE_ORDER: usize;
 
     /// Return the name of the allocator.
     #[cold]
@@ -117,8 +119,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
         0
     }
 
-    /// Calls f for every huge page
-    fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, f: F);
+    fn free_at(&self, frame: usize, order: usize) -> usize;
 }
 
 /// Size of the required metadata
@@ -146,22 +147,17 @@ mod test {
     use core::mem::ManuallyDrop;
     use core::ops::Deref;
     use core::ptr::null_mut;
-    use std::time::Instant;
-
     use std::sync::Barrier;
+    use std::time::Instant;
     use std::vec::Vec;
 
-    use log::warn;
-
-    use crate::frame::{Frame, PT_LEN};
-    use crate::lower::Lower;
-    use crate::thread;
-    use crate::util::{aligned_buf, logging, WyRand};
-    use crate::wrapper::NvmAlloc;
-    use crate::Error;
-    use crate::{Alloc, Init};
+    use log::{error, warn};
 
     use super::*;
+    use crate::frame::{Frame, PT_LEN};
+    use crate::lower::Lower;
+    use crate::util::{aligned_buf, logging, WyRand};
+    use crate::wrapper::NvmAlloc;
 
     #[cfg(feature = "llc")]
     type Allocator = TestAlloc<LLC>;
@@ -200,7 +196,7 @@ mod test {
     }
     impl<A: Alloc<'static>> fmt::Debug for TestAlloc<A> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            self.0.fmt(f)
+            A::fmt(&self, f)
         }
     }
 
@@ -617,8 +613,13 @@ mod test {
                 thread::pin(t);
                 barrier.wait();
 
-                for frame in frames {
-                    *frame = alloc.get(t, 0).unwrap();
+                for (i, frame) in frames.iter_mut().enumerate() {
+                    if let Ok(f) = alloc.get(t, 0) {
+                        *frame = f;
+                    } else {
+                        error!("OOM: {i}: {alloc:?}");
+                        panic!()
+                    }
                 }
             },
         );

@@ -2,7 +2,8 @@
 
 use core::mem::{align_of, size_of};
 use core::ops::RangeBounds;
-use core::sync::atomic::{self, AtomicU16, AtomicU32, AtomicU64, Ordering::Release};
+use core::sync::atomic::Ordering::Release;
+use core::sync::atomic::{self, AtomicU16, AtomicU32, AtomicU64};
 
 use bitfield_struct::bitfield;
 
@@ -53,31 +54,59 @@ impl Preferred {
         }
     }
 
-    /// Decrements the free frames counter.
-    pub fn dec(self, num_frames: usize) -> Option<Self> {
-        if let Some(LocalTree { frame: start, free }) = self.tree
-            && free >= num_frames
+    /// Decrement or lock the tree if decrement fails
+    pub fn dec_or_lock(self, num_frames: usize) -> Option<Self> {
+        if let Some(t) = self.tree
+            && t.free >= num_frames
         {
-            Some(Preferred::tree(start, free - num_frames, self.locked))
+            Some(Preferred::tree(t.frame, t.free - num_frames, self.locked))
+        } else {
+            Some(Preferred {
+                locked: true,
+                ..self
+            })
+        }
+    }
+
+    pub fn unlock(self) -> Option<Self> {
+        self.locked.then_some(Self {
+            locked: false,
+            ..self
+        })
+    }
+
+    /// Increments the free frames counter.
+    pub fn inc(
+        self,
+        num_frames: usize,
+        max: usize,
+        check_start: impl FnOnce(usize) -> bool,
+    ) -> Option<Self> {
+        if let Some(LocalTree { frame: start, free }) = self.tree
+            && check_start(start)
+        {
+            let frames = free + num_frames;
+            assert!(frames <= max, "inc failed {self:?}");
+            Some(Preferred::tree(start, frames, self.locked))
         } else {
             None
         }
     }
 
-    /// Increments the free frames counter.
-    pub fn inc<F: FnOnce(usize) -> bool>(
+    /// Increment the free counter and unlock.
+    pub fn inc_unlock(
         self,
         num_frames: usize,
         max: usize,
-        check_start: F,
+        check_start: impl FnOnce(usize) -> bool,
     ) -> Option<Self> {
-        if let Some(LocalTree { frame: start, free }) = self.tree {
-            if !check_start(start) {
-                return None;
-            }
+        if let Some(LocalTree { frame: start, free }) = self.tree
+            && self.locked
+            && check_start(start)
+        {
             let frames = free + num_frames;
             assert!(frames <= max, "inc failed {self:?}");
-            Some(Preferred::tree(start, frames, self.locked))
+            Some(Preferred::tree(start, frames, false))
         } else {
             None
         }
@@ -171,6 +200,14 @@ impl Tree {
         let frames = self.free() + add;
         if self.reserved() && frames <= max {
             Some(self.with_free(frames).with_reserved(false))
+        } else {
+            None
+        }
+    }
+    /// Set the free counter to zero if it is large enough for synchronization
+    pub fn sync_steal(self, free: usize, min: usize) -> Option<Self> {
+        if self.reserved() && self.free() + free > min {
+            Some(self.with_free(0))
         } else {
             None
         }
@@ -325,6 +362,7 @@ mod test {
     use core::sync::atomic::AtomicU64;
 
     use crate::atomic::Atom;
+    use crate::entry::Preferred;
     use crate::frame::PT_LEN;
 
     #[test]
@@ -333,5 +371,10 @@ mod test {
         pt[0].compare_exchange(0, 42).unwrap();
         pt[0].fetch_update(|v| Some(v + 1)).unwrap();
         assert_eq!(pt[0].load(), 43);
+    }
+
+    #[test]
+    fn preferred() {
+        println!("{:#?}", Preferred::from(200354));
     }
 }

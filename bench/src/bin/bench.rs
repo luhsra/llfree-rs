@@ -5,20 +5,19 @@ use core::{fmt, slice};
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
-use std::sync::{atomic::Ordering, Barrier};
+use std::sync::atomic::Ordering;
+use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
-use llfree::wrapper::NvmAlloc;
-use log::warn;
-
 use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::{self, MMap};
-use llfree::thread;
 use llfree::util::{self, aligned_buf, WyRand};
+use llfree::wrapper::NvmAlloc;
 #[cfg(feature = "llc")]
 use llfree::LLC;
-use llfree::{Alloc, LLFree, Result};
+use llfree::{thread, Alloc, LLFree, Result};
+use log::warn;
 
 /// Number of allocations per block
 const RAND_BLOCK_SIZE: usize = 8;

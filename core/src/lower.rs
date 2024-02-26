@@ -261,6 +261,18 @@ impl<'a> Lower<'a> {
         }
     }
 
+    pub fn free_at(&self, frame: usize, order: usize) -> usize {
+        match order {
+            0 => self.is_free(frame, 0) as _,
+            Self::HUGE_ORDER => {
+                let i = (frame / Bitfield::LEN) % Self::HP;
+                let child = self.children[frame / Self::N][i].load();
+                child.free()
+            }
+            _ => 0,
+        }
+    }
+
     /// Returns the table with pair entries that can be updated at once.
     fn table_pair(&self, frame: usize) -> &[Atom<HugePair>; Lower::HP / 2] {
         let table = &self.children[frame / Self::N];
@@ -487,15 +499,13 @@ mod test {
     use std::sync::Barrier;
     use std::vec::Vec;
 
-    use crate::Result;
     use log::warn;
 
     use super::Bitfield;
     use crate::frame::PT_LEN;
     use crate::lower::Lower;
-    use crate::thread;
     use crate::util::{aligned_buf, logging, WyRand};
-    use crate::Init;
+    use crate::{thread, Init, Result};
 
     struct LowerTest(ManuallyDrop<Lower<'static>>);
 

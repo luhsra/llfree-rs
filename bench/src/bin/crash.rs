@@ -6,14 +6,12 @@ use std::sync::Barrier;
 use std::time::Duration;
 
 use clap::Parser;
-use llfree::wrapper::NvmAlloc;
-use log::{error, warn};
-
 use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::{self, MMap};
-use llfree::thread;
 use llfree::util::{self, align_up, aligned_buf, WyRand};
-use llfree::LLFree;
+use llfree::wrapper::NvmAlloc;
+use llfree::{thread, LLFree};
+use log::{error, warn};
 
 /// Crash testing an allocator.
 #[derive(Parser, Debug)]

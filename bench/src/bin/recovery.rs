@@ -9,14 +9,12 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use log::warn;
-
 use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::MMap;
-use llfree::thread;
 use llfree::util::{self, aligned_buf, WyRand};
-use llfree::LLFree;
 use llfree::wrapper::NvmAlloc;
+use llfree::{thread, LLFree};
+use log::warn;
 
 /// Benchmarking the (crashed) recovery.
 #[derive(Parser, Debug)]

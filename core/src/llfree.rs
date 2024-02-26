@@ -1,22 +1,19 @@
 //! Upper allocator implementation
 
-use core::hint::spin_loop;
 use core::mem::align_of;
 use core::sync::atomic::AtomicU64;
-use core::unreachable;
 use core::{fmt, slice};
 
 use bitfield_struct::bitfield;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
+use super::trees::Trees;
+use super::{Alloc, Init};
 use crate::atomic::{Atom, Atomic};
 use crate::entry::{LocalTree, Preferred};
 use crate::lower::Lower;
-use crate::util::{size_of_slice, Align};
-use crate::{Error, Result};
-use crate::{MetaSize, CAS_RETRIES};
-
-use super::{trees::Trees, Alloc, Init};
+use crate::util::{size_of_slice, spin_wait, Align};
+use crate::{Error, MetaSize, Result, CAS_RETRIES};
 
 /// This allocator splits its memory range into chunks.
 /// These chunks are reserved by CPUs to reduce sharing.
@@ -65,6 +62,7 @@ impl Metadata {
 
 impl<'a> Alloc<'a> for LLFree<'a> {
     const MAX_ORDER: usize = Lower::MAX_ORDER;
+    const HUGE_ORDER: usize = Lower::HUGE_ORDER;
 
     /// Return the name of the allocator.
     #[cold]
@@ -253,8 +251,27 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         counter
     }
 
-    fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, f: F) {
-        self.lower.for_each_huge_frame(f)
+    fn free_at(&self, frame: usize, order: usize) -> usize {
+        if order == Lower::N {
+            let tree = self.trees[frame / Lower::N].load();
+            if tree.reserved() {
+                for local in self.local {
+                    let local = local.preferred.load();
+                    if let Some(tree) = local.tree
+                        && tree.frame / Lower::N == frame / Lower::N
+                    {
+                        return tree.free;
+                    }
+                }
+                0
+            } else {
+                tree.free()
+            }
+        } else if order <= Self::MAX_ORDER {
+            self.lower.free_at(frame, order)
+        } else {
+            0
+        }
     }
 }
 
@@ -264,53 +281,63 @@ impl LLFree<'_> {
         // Select local data (which can be shared between cores if we do not have enough memory)
         let local = &self.local[core];
 
-        // Update the upper counters first
-        let tree = match local.preferred.fetch_update(|v| v.dec(1 << order)) {
-            Ok(Preferred {
-                tree: Some(tree), ..
-            }) => tree,
-            Ok(_) => unreachable!("Unexpected preferred"),
-            Err(old) => {
-                // If the local counter is large enough we do not have to reserve a new tree
-                // Just update the local counter and reuse the current tree
-                if let Some(tree) = old.tree {
-                    if self.try_sync_with_global(&local.preferred, tree)? {
-                        // Success -> Retry allocation
-                        return Err(Error::Retry);
+        // Try decrementing the local counter
+        let old = local
+            .preferred
+            .fetch_update(|v| v.dec_or_lock(1 << order))
+            .unwrap();
+
+        // If decrement succeeded
+        if let Some(tree) = old.tree
+            && tree.free >= (1 << order)
+        {
+            // Try allocating with the lower allocator
+            match self.get_lower(tree, order) {
+                Ok(LocalTree { frame, free }) => {
+                    if order < 6 && tree.frame / 64 != frame / 64 {
+                        // Save start index for small allocations
+                        if let Err(_) = local.preferred.compare_exchange(
+                            Preferred::tree(tree.frame, free, false),
+                            Preferred::tree(frame, free, false),
+                        ) {
+                            debug!("start update failed");
+                        }
                     }
+                    Ok(frame)
                 }
+                Err(Error::Memory) => {
+                    // Failure due to fragmentation
+                    // Reset counters, reserve new entry and retry allocation
+                    warn!("alloc failed o={order} => retry");
+                    // Increment global to prevent race condition with concurrent reservation
+                    self.trees[tree.frame / Lower::N]
+                        .fetch_update(|v| v.inc(1 << order, Lower::N))
+                        .expect("Undo failed");
 
-                // The local tree is full -> reserve a new one
-                return self.reserve_or_wait(core, order);
-            }
-        };
-
-        // Try allocating with the lower allocator
-        match self.get_lower(tree, order) {
-            Ok(LocalTree { frame, free }) => {
-                if order < 6 && tree.frame / 64 != frame / 64 {
-                    // Save start index for small allocations
-                    if let Err(_) = local.preferred.compare_exchange(
-                        Preferred::tree(tree.frame, free, false),
-                        Preferred::tree(frame, free, false),
-                    ) {
-                        info!("start update failed");
-                    }
+                    self.reserve_or_wait(core, order, old)
                 }
-                Ok(frame)
+                Err(e) => Err(e),
             }
-            Err(Error::Memory) => {
-                // Failure due to fragmentation
-                // Reset counters, reserve new entry and retry allocation
-                warn!("alloc failed o={order} => retry");
-                // Increment global to prevent race condition with concurrent reservation
-                self.trees[tree.frame / Lower::N]
-                    .fetch_update(|v| v.inc(1 << order, Lower::N))
-                    .expect("Undo failed");
+        } else if old.locked {
+            // Old tree is already locked
+            // Wait for concurrent reservation to end
+            if !spin_wait(CAS_RETRIES, || !local.preferred.load().locked) {
+                warn!("Timeout reservation wait");
+            }
+            Err(Error::Retry)
+        } else {
+            // Local tree is now locked by us
 
-                self.reserve_or_wait(core, order)
+            // Try sync with global counter
+            if let Some(tree) = old.tree {
+                if self.try_sync_with_global(&local.preferred, tree) {
+                    // Success -> Retry allocation
+                    return Err(Error::Retry);
+                }
             }
-            Err(e) => Err(e),
+
+            // The local tree is full -> reserve a new one
+            self.reserve_and_get(core, order, old)
         }
     }
 
@@ -326,70 +353,38 @@ impl LLFree<'_> {
     /// Frees from other CPUs update the global entry -> sync free counters.
     ///
     /// Returns if the global counter was large enough
-    fn try_sync_with_global(&self, local: &Atom<Preferred>, tree: LocalTree) -> Result<bool> {
+    fn try_sync_with_global(&self, local: &Atom<Preferred>, tree: LocalTree) -> bool {
         let i = tree.frame / Lower::N;
-        if i >= self.trees.len() {
-            return Ok(false);
-        }
-
-        if let Ok(entry) = self.trees[i].fetch_update(|e| {
-            (e.reserved() && e.free() + tree.free > Trees::<{ Lower::N }>::MIN_FREE)
-                .then_some(e.with_free(0))
-        }) {
+        let min = Trees::<{ Lower::N }>::MIN_FREE;
+        if let Ok(entry) = self.trees[i].fetch_update(|e| e.sync_steal(tree.free, min)) {
             debug_assert!(tree.free + entry.free() <= Lower::N);
-
-            if let Ok(_) =
-                local.fetch_update(|v| v.inc(entry.free(), Lower::N, |s| s / Lower::N == i))
-            {
-                // Sync successfull -> retry allocation
-                return Ok(true);
-            } else {
-                // undo global change
-                self.trees[i]
-                    .fetch_update(|e| Some(e.with_free(e.free() + entry.free())))
-                    .expect("Undo failed");
-            }
+            local
+                .fetch_update(|v| v.inc_unlock(entry.free(), Lower::N, |s| s / Lower::N == i))
+                .expect("Sync failed");
+            true
+        } else {
+            false
         }
-
-        Ok(false)
     }
 
     /// Try to reserve a new tree or wait for concurrent reservations to finish.
-    /// We directly try to allocate in the tree and continues the search if it is fragmented.
-    ///
-    /// If `fragmented`, prioritize less fragmented trees
-    fn reserve_or_wait(&self, core: usize, order: usize) -> Result<usize> {
+    fn reserve_or_wait(&self, core: usize, order: usize, old: Preferred) -> Result<usize> {
         let preferred = &self.local[core].preferred;
 
         // Set the reserved flag, locking the reservation
-        if let Ok(old) =
-            preferred.fetch_update(|v| (!v.locked).then_some(Preferred { locked: true, ..v }))
-        {
-            // Try reserve new tree
-            return self.reserve_and_get(core, order, old);
+        if !old.locked {
+            if let Ok(old) =
+                preferred.fetch_update(|v| (!v.locked).then_some(Preferred { locked: true, ..v }))
+            {
+                // Try reserve new tree
+                return self.reserve_and_get(core, order, old);
+            }
         }
 
         // Wait for concurrent reservation to end
-        for _ in 0..CAS_RETRIES {
-            let old = preferred.load();
-            if !old.locked {
-                let Ok(old) = preferred.fetch_update(|v| v.dec(1 << order)) else {
-                    error!("Decrement failed {old:?}");
-                    return Err(Error::Retry);
-                };
-
-                // Try allocation on new tree
-                let Some(LocalTree { frame: start, .. }) = old.tree else {
-                    unreachable!("invalid preferred");
-                };
-                return match self.lower.get(start, order) {
-                    Err(Error::Memory) => Err(Error::Retry),
-                    r => r,
-                };
-            }
-            spin_loop()
+        if !spin_wait(CAS_RETRIES, || !preferred.load().locked) {
+            warn!("Timeout reservation wait");
         }
-        warn!("Timeout reservation wait");
         Err(Error::Retry)
     }
 
@@ -421,20 +416,18 @@ impl LLFree<'_> {
             {
                 Ok(entry) => entry,
                 Err(e) => {
+                    warn!("Reserve failed");
                     // Rollback: Clear reserve flag
                     local
-                        .fetch_update(|v| v.locked.then_some(Preferred { locked: false, ..v }))
+                        .fetch_update(|v| v.unlock())
                         .expect("unexpected unlock");
                     return Err(e);
                 }
             };
 
-        match self.swap_reserved(local, Preferred::tree(frame, free, false), true) {
-            Ok(_) => Ok(frame),
-            Err(Error::Retry) => panic!("unexpected unlock"),
-
-            Err(e) => Err(e),
-        }
+        self.swap_reserved(local, Preferred::tree(frame, free, false), true)
+            .expect("unexpected unlock");
+        Ok(frame)
     }
 
     /// Reserve an entry for bulk frees
@@ -470,8 +463,7 @@ impl LLFree<'_> {
             .map_err(|_| Error::Retry)?;
 
         if let Some(LocalTree { frame: start, free }) = old.tree {
-            self.trees
-                .unreserve(start / Lower::N, free, self.frames())?;
+            self.trees.unreserve(start / Lower::N, free, self.frames());
         }
         Ok(())
     }
