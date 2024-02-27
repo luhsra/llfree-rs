@@ -109,12 +109,18 @@ impl WyRand {
     }
     pub fn range(&mut self, range: Range<u64>) -> u64 {
         let mut val = self.gen();
-        val %= range.end - range.start;
-        val + range.start
+        if range.start < range.end {
+            val %= range.end - range.start;
+            val + range.start
+        } else {
+            0
+        }
     }
     pub fn shuffle<T>(&mut self, target: &mut [T]) {
-        for i in 0..target.len() - 1 {
-            target.swap(i, self.range(i as u64..target.len() as u64) as usize);
+        if target.len() > 0 {
+            for i in 0..target.len() - 1 {
+                target.swap(i, self.range(i as u64..target.len() as u64) as usize);
+            }
         }
     }
 }

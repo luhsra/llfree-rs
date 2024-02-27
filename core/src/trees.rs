@@ -64,7 +64,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
 
         for (i, e) in entries.iter_mut().enumerate() {
             let frames = free_in_tree(i * LN);
-            *e = Atom::new(Tree::new_with(frames, false));
+            *e = Atom::new(Tree::with(frames, false));
         }
 
         Self { entries }

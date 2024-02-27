@@ -55,24 +55,20 @@ impl Preferred {
     }
 
     /// Decrement or lock the tree if decrement fails
-    pub fn dec_or_lock(self, num_frames: usize) -> Option<Self> {
+    pub fn dec_or_lock(self, num_frames: usize, locked: &mut bool) -> Option<Self> {
         if let Some(t) = self.tree
             && t.free >= num_frames
         {
             Some(Preferred::tree(t.frame, t.free - num_frames, self.locked))
-        } else {
+        } else if !self.locked {
+            *locked = true;
             Some(Preferred {
                 locked: true,
                 ..self
             })
+        } else {
+            None
         }
-    }
-
-    pub fn unlock(self) -> Option<Self> {
-        self.locked.then_some(Self {
-            locked: false,
-            ..self
-        })
     }
 
     /// Increments the free frames counter.
@@ -86,7 +82,7 @@ impl Preferred {
             && check_start(start)
         {
             let frames = free + num_frames;
-            assert!(frames <= max, "inc failed {self:?}");
+            assert!(frames <= max);
             Some(Preferred::tree(start, frames, self.locked))
         } else {
             None
@@ -94,22 +90,12 @@ impl Preferred {
     }
 
     /// Increment the free counter and unlock.
-    pub fn inc_unlock(
-        self,
-        num_frames: usize,
-        max: usize,
-        check_start: impl FnOnce(usize) -> bool,
-    ) -> Option<Self> {
-        if let Some(LocalTree { frame: start, free }) = self.tree
-            && self.locked
-            && check_start(start)
-        {
-            let frames = free + num_frames;
-            assert!(frames <= max, "inc failed {self:?}");
-            Some(Preferred::tree(start, frames, false))
-        } else {
-            None
-        }
+    pub fn inc_unlock(self, num_frames: usize, max: usize) -> Option<Self> {
+        assert!(self.locked);
+        let LocalTree { frame: start, free } = self.tree.unwrap();
+        let frames = free + num_frames;
+        assert!(frames <= max);
+        Some(Preferred::tree(start, frames, false))
     }
 }
 
@@ -168,13 +154,8 @@ impl Atomic for Tree {
     type I = AtomicU16;
 }
 impl Tree {
-    pub fn empty(span: usize) -> Self {
-        debug_assert!(span < (1 << 15));
-        Self::new().with_free(span)
-    }
     /// Creates a new entry.
-    pub fn new_with(frames: usize, reserved: bool) -> Self {
-        debug_assert!(frames < (1 << 15));
+    pub fn with(frames: usize, reserved: bool) -> Self {
         Self::new().with_free(frames).with_reserved(reserved)
     }
     /// Increments the free frames counter.
@@ -186,7 +167,7 @@ impl Tree {
     /// Reserves this entry if its frame count is in `range`.
     pub fn reserve<R: RangeBounds<usize>>(self, free: R) -> Option<Self> {
         if !self.reserved() && free.contains(&self.free()) {
-            Some(self.with_reserved(true).with_free(0))
+            Some(Self::with(0, true))
         } else {
             None
         }
@@ -196,7 +177,7 @@ impl Tree {
     pub fn unreserve_add(self, add: usize, max: usize) -> Option<Self> {
         let frames = self.free() + add;
         if self.reserved() && frames <= max {
-            Some(self.with_free(frames).with_reserved(false))
+            Some(Self::with(frames, false))
         } else {
             None
         }
