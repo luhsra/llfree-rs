@@ -214,6 +214,10 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         self.lower.frames()
     }
 
+    fn cores(&self) -> usize {
+        self.local.len()
+    }
+
     fn allocated_frames(&self) -> usize {
         self.frames() - self.free_frames()
     }

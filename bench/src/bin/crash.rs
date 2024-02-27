@@ -10,7 +10,7 @@ use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::{self, MMap};
 use llfree::util::{self, align_up, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
-use llfree::{thread, LLFree};
+use llfree::{thread, Alloc, LLFree};
 use log::{error, warn};
 
 /// Crash testing an allocator.
@@ -80,8 +80,8 @@ fn execute(
     // Align to prevent false-sharing
     let out_size = align_up(allocs + 2, Frame::SIZE);
 
-    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len())).leak();
-    let alloc = Allocator::new(threads, mapping, false, volatile).unwrap();
+    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len()).secondary).leak();
+    let alloc = Allocator::create(threads, mapping, false, volatile).unwrap();
     warn!("initialized {}", alloc.frames());
 
     let barrier = Barrier::new(threads);
@@ -167,8 +167,8 @@ fn monitor(
     warn!("check");
 
     // Recover allocator
-    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len())).leak();
-    let alloc = Allocator::new(threads, mapping, true, volatile).unwrap();
+    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len()).secondary).leak();
+    let alloc = Allocator::create(threads, mapping, true, volatile).unwrap();
     warn!("recovered {}", alloc.frames());
 
     let expected = allocs * threads - threads;

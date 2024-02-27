@@ -3,7 +3,7 @@
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
 
 #![no_std]
-#![feature(new_uninit)]
+#![cfg_attr(feature = "std", feature(new_uninit))]
 #![feature(int_roundings)]
 #![feature(array_windows)]
 #![feature(inline_const)]
@@ -97,21 +97,12 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     fn get(&self, core: usize, order: usize) -> Result<usize>;
     /// Free the `frame` of `order` on the given `core`..
     fn put(&self, core: usize, frame: usize, order: usize) -> Result<()>;
-    /// Returns if `frame` is free. This might be racy!
-    fn is_free(&self, frame: usize, order: usize) -> bool;
 
     /// Return the total number of frames the allocator manages.
     fn frames(&self) -> usize;
+    /// Return the core count the allocator was initialized with.
+    fn cores(&self) -> usize;
 
-    /// Unreserve cpu-local frames
-    fn drain(&self, _core: usize) -> Result<()> {
-        Ok(())
-    }
-
-    /// Return the number of allocated frames.
-    fn allocated_frames(&self) -> usize {
-        self.frames() - self.free_frames()
-    }
     /// Return the number of free frames.
     fn free_frames(&self) -> usize;
     /// Return the number of free huge frames or 0 if the allocator cannot allocate huge frames.
@@ -119,7 +110,19 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
         0
     }
 
+    /// Returns if `frame` is free. This might be racy!
+    fn is_free(&self, frame: usize, order: usize) -> bool;
+    /// Free frames in the given chunk. Only TREE_ORDER and HUGE_ORDER are supported.
     fn free_at(&self, frame: usize, order: usize) -> usize;
+
+    /// Return the number of allocated frames.
+    fn allocated_frames(&self) -> usize {
+        self.frames() - self.free_frames()
+    }
+    /// Unreserve cpu-local frames
+    fn drain(&self, _core: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Size of the required metadata
@@ -870,10 +873,10 @@ mod test {
         let expected_frames = (PT_LEN + 2) * (1 + (1 << 9));
 
         let mut zone = mmap::anon(0x1000_0000_0000, FRAMES, false, false);
-        let secondary = aligned_buf(Allocator::metadata_size(1, FRAMES)).leak();
+        let secondary = aligned_buf(Allocator::metadata_size(1, FRAMES).secondary).leak();
 
         {
-            let alloc = Allocator::new(1, &mut zone, false, secondary).unwrap();
+            let alloc = Allocator::create(1, &mut zone, false, secondary).unwrap();
 
             for _ in 0..PT_LEN + 2 {
                 alloc.get(0, 0).unwrap();
@@ -887,7 +890,7 @@ mod test {
         }
 
         let secondary = aligned_buf(secondary.len()).leak();
-        let alloc = Allocator::new(1, &mut zone, true, secondary).unwrap();
+        let alloc = Allocator::create(1, &mut zone, true, secondary).unwrap();
         assert_eq!(alloc.allocated_frames(), expected_frames);
     }
 

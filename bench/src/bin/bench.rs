@@ -22,30 +22,6 @@ use log::warn;
 /// Number of allocations per block
 const RAND_BLOCK_SIZE: usize = 8;
 
-/// Reduced, VTable-compatible alloc trait for dynamic dispatch
-trait DynAlloc: fmt::Debug + Send + Sync {
-    fn get(&self, core: usize, order: usize) -> Result<usize>;
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()>;
-
-    fn frames(&self) -> usize;
-    fn allocated_frames(&self) -> usize;
-}
-
-impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
-    fn get(&self, core: usize, order: usize) -> Result<usize> {
-        self.get(core, order)
-    }
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
-        self.put(core, frame, order)
-    }
-    fn frames(&self) -> usize {
-        self.frames()
-    }
-    fn allocated_frames(&self) -> usize {
-        self.allocated_frames()
-    }
-}
-
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
@@ -131,15 +107,41 @@ pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame],
     mmap::anon(begin, length, false, false)
 }
 
+/// Reduced, VTable-compatible alloc trait for dynamic dispatch
+trait DynAlloc: fmt::Debug + Send + Sync {
+    fn get(&self, core: usize, order: usize) -> Result<usize>;
+    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()>;
+
+    fn frames(&self) -> usize;
+    fn allocated_frames(&self) -> usize;
+}
+
+impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
+    fn get(&self, core: usize, order: usize) -> Result<usize> {
+        Alloc::get(self, core, order)
+    }
+    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
+        Alloc::put(self, core, frame, order)
+    }
+    fn frames(&self) -> usize {
+        Alloc::frames(self)
+    }
+    fn allocated_frames(&self) -> usize {
+        Alloc::allocated_frames(self)
+    }
+}
+
 fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAlloc + 'a> {
     #[cfg(feature = "llc")]
-    if <LLC as Alloc>::name() == name {
-        let volatile = aligned_buf(NvmAlloc::<LLC>::metadata_size(cores, zone.len())).leak();
-        return Box::new(NvmAlloc::<LLC>::new(cores, zone, false, volatile).unwrap());
+    if LLC::name() == name {
+        let volatile =
+            aligned_buf(NvmAlloc::<LLC>::metadata_size(cores, zone.len()).secondary).leak();
+        return Box::new(NvmAlloc::<LLC>::create(cores, zone, false, volatile).unwrap());
     }
-    if <LLFree as Alloc>::name() == name {
-        let volatile = aligned_buf(NvmAlloc::<LLFree>::metadata_size(cores, zone.len())).leak();
-        return Box::new(NvmAlloc::<LLFree>::new(cores, zone, false, volatile).unwrap());
+    if LLFree::name() == name {
+        let volatile =
+            aligned_buf(NvmAlloc::<LLFree>::metadata_size(cores, zone.len()).secondary).leak();
+        return Box::new(NvmAlloc::<LLFree>::create(cores, zone, false, volatile).unwrap());
     }
     panic!("Unknown allocator");
 }

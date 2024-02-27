@@ -16,54 +16,87 @@ pub struct ZoneAlloc<'a, A: Alloc<'a>> {
     _p: PhantomData<&'a ()>,
 }
 
-impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
-    pub fn metadata_size(cores: usize, frames: usize) -> MetaSize {
-        A::metadata_size(cores, frames)
-    }
+impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
+    const MAX_ORDER: usize = A::MAX_ORDER;
+    const HUGE_ORDER: usize = A::HUGE_ORDER;
 
-    pub fn new(
+    fn name() -> &'static str {
+        A::name()
+    }
+    fn new(
         cores: usize,
-        zone: &'a mut [Frame],
-        free_all: bool,
+        frames: usize,
+        init: Init,
         primary: &'a mut [u8],
         secondary: &'a mut [u8],
     ) -> Result<Self> {
-        if zone.as_ptr() as usize % (Frame::SIZE << A::MAX_ORDER) != 0 {
-            error!("zone alignment");
-            return Err(Error::Initialization);
-        }
-
-        let init = if free_all {
-            Init::FreeAll
-        } else {
-            Init::AllocAll
-        };
-        let alloc = A::new(cores, zone.len(), init, primary, secondary)?;
         Ok(Self {
-            alloc,
-            offset: zone.as_ptr() as usize / Frame::SIZE,
+            alloc: A::new(cores, frames, init, primary, secondary)?,
+            offset: 0,
             _p: PhantomData,
         })
     }
 
-    pub fn get(&self, core: usize, order: usize) -> Result<usize> {
+    fn metadata_size(cores: usize, frames: usize) -> MetaSize {
+        A::metadata_size(cores, frames)
+    }
+    fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
+        self.alloc.metadata()
+    }
+    fn get(&self, core: usize, order: usize) -> Result<usize> {
         Ok(self.alloc.get(core, order)? + self.offset)
     }
-    pub fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
-        self.alloc.put(
-            core,
-            frame.checked_sub(self.offset).ok_or(Error::Address)?,
-            order,
-        )
+    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
+        let frame = frame.checked_sub(self.offset).ok_or(Error::Address)?;
+        self.alloc.put(core, frame, order)
     }
-    pub fn free_frames(&self) -> usize {
-        self.alloc.free_frames()
-    }
-    pub fn frames(&self) -> usize {
+    fn frames(&self) -> usize {
         self.alloc.frames()
     }
-    pub fn allocated_frames(&self) -> usize {
-        self.alloc.allocated_frames()
+    fn cores(&self) -> usize {
+        self.alloc.cores()
+    }
+    fn free_frames(&self) -> usize {
+        self.alloc.free_frames()
+    }
+    fn free_huge_frames(&self) -> usize {
+        self.alloc.free_huge_frames()
+    }
+    fn is_free(&self, frame: usize, order: usize) -> bool {
+        let Some(frame) = frame.checked_sub(self.offset) else {
+            return false;
+        };
+        self.alloc.is_free(frame, order)
+    }
+    fn free_at(&self, frame: usize, order: usize) -> usize {
+        let Some(frame) = frame.checked_sub(self.offset) else {
+            return 0;
+        };
+        self.alloc.free_at(frame, order)
+    }
+    fn drain(&self, core: usize) -> Result<()> {
+        self.alloc.drain(core)
+    }
+}
+
+impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
+    pub fn create(
+        cores: usize,
+        offset: usize,
+        frames: usize,
+        init: Init,
+        primary: &'a mut [u8],
+        secondary: &'a mut [u8],
+    ) -> Result<Self> {
+        if offset % (1 << A::MAX_ORDER) != 0 {
+            error!("zone alignment");
+            return Err(Error::Initialization);
+        }
+        Ok(Self {
+            alloc: A::new(cores, frames, init, primary, secondary)?,
+            offset,
+            _p: PhantomData,
+        })
     }
 }
 impl<'a, A: Alloc<'a>> fmt::Debug for ZoneAlloc<'a, A> {
@@ -95,11 +128,7 @@ pub struct NvmAlloc<'a, A: Alloc<'a>> {
 }
 
 impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
-    pub fn metadata_size(cores: usize, frames: usize) -> usize {
-        A::metadata_size(cores, frames).secondary
-    }
-
-    pub fn new(
+    pub fn create(
         cores: usize,
         zone: &'a mut [Frame],
         recover: bool,
@@ -134,30 +163,69 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
         let (zone, p) = zone.split_at_mut(zone.len() - m.primary.div_ceil(Frame::SIZE));
         let primary = unsafe { slice::from_raw_parts_mut(p.as_mut_ptr().cast(), m.primary) };
 
-        let alloc = ZoneAlloc {
-            alloc: A::new(cores, zone.len(), init, primary, volatile)?,
-            offset: zone.as_ptr() as usize / Frame::SIZE,
-            _p: PhantomData,
-        };
+        let alloc = ZoneAlloc::create(
+            cores,
+            zone.as_ptr() as usize / Frame::SIZE,
+            zone.len(),
+            init,
+            primary,
+            volatile,
+        )?;
         Ok(Self { alloc, meta })
     }
+}
 
-    pub fn get(&self, core: usize, order: usize) -> Result<usize> {
+impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
+    const MAX_ORDER: usize = A::MAX_ORDER;
+    const HUGE_ORDER: usize = A::HUGE_ORDER;
+
+    fn name() -> &'static str {
+        A::name()
+    }
+    fn new(
+        _cores: usize,
+        _frames: usize,
+        _init: Init,
+        _primary: &'a mut [u8],
+        _secondary: &'a mut [u8],
+    ) -> Result<Self> {
+        unimplemented!()
+    }
+    fn metadata_size(cores: usize, frames: usize) -> MetaSize {
+        A::metadata_size(cores, frames)
+    }
+    fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
+        self.alloc.metadata()
+    }
+    fn get(&self, core: usize, order: usize) -> Result<usize> {
         self.alloc.get(core, order)
     }
-    pub fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
+    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
         self.alloc.put(core, frame, order)
     }
-    pub fn free_frames(&self) -> usize {
-        self.alloc.free_frames()
-    }
-    pub fn frames(&self) -> usize {
+    fn frames(&self) -> usize {
         self.alloc.frames()
     }
-    pub fn allocated_frames(&self) -> usize {
-        self.alloc.allocated_frames()
+    fn cores(&self) -> usize {
+        self.alloc.cores()
+    }
+    fn free_frames(&self) -> usize {
+        self.alloc.free_frames()
+    }
+    fn free_huge_frames(&self) -> usize {
+        self.alloc.free_huge_frames()
+    }
+    fn is_free(&self, frame: usize, order: usize) -> bool {
+        self.alloc.is_free(frame, order)
+    }
+    fn free_at(&self, frame: usize, order: usize) -> usize {
+        self.alloc.free_at(frame, order)
+    }
+    fn drain(&self, core: usize) -> Result<()> {
+        self.alloc.drain(core)
     }
 }
+
 impl<'a, A: Alloc<'a>> fmt::Debug for NvmAlloc<'a, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.alloc.fmt(f)

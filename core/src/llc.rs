@@ -14,7 +14,7 @@ pub struct LLC {
     raw: [u8; 2 * align_of::<Align>()],
 }
 
-/// Type of the internal allocator
+/// Opaque type of the internal allocator
 #[allow(non_camel_case_types)]
 type llfree_t = c_void;
 
@@ -104,6 +104,10 @@ impl<'a> Alloc<'a> for LLC {
 
     fn frames(&self) -> usize {
         unsafe { llfree_frames(self.raw.as_ptr().cast()) as _ }
+    }
+
+    fn cores(&self) -> usize {
+        unsafe { llfree_cores(self.raw.as_ptr().cast()) as _ }
     }
 
     fn free_frames(&self) -> usize {

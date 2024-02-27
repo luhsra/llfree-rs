@@ -13,7 +13,7 @@ use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::MMap;
 use llfree::util::{self, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
-use llfree::{thread, LLFree};
+use llfree::{thread, Alloc, LLFree};
 use log::warn;
 
 /// Benchmarking the (crashed) recovery.
@@ -103,8 +103,8 @@ fn main() {
 
 fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
-    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len())).leak();
-    let alloc = Allocator::new(threads, &mut mapping, false, volatile).unwrap();
+    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len()).secondary).leak();
+    let alloc = Allocator::create(threads, &mut mapping, false, volatile).unwrap();
     warn!("Prepare alloc");
 
     thread::parallel(0..threads, |t| {
@@ -134,11 +134,11 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 
 fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
     let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
-    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len())).leak();
+    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len()).secondary).leak();
 
     warn!("Recover alloc");
     let timer = Instant::now();
-    let alloc = Allocator::new(threads, &mut mapping, true, volatile).unwrap();
+    let alloc = Allocator::create(threads, &mut mapping, true, volatile).unwrap();
     let time = timer.elapsed().as_nanos();
 
     let num_alloc = alloc.allocated_frames();
