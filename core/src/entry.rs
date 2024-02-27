@@ -178,13 +178,10 @@ impl Tree {
         Self::new().with_free(frames).with_reserved(reserved)
     }
     /// Increments the free frames counter.
-    pub fn inc(self, num_frames: usize, max: usize) -> Option<Self> {
+    pub fn inc(self, num_frames: usize, max: usize) -> Self {
         let frames = self.free() + num_frames;
-        if frames <= max {
-            Some(self.with_free(frames))
-        } else {
-            None
-        }
+        assert!(frames <= max);
+        self.with_free(frames)
     }
     /// Reserves this entry if its frame count is in `range`.
     pub fn reserve<R: RangeBounds<usize>>(self, free: R) -> Option<Self> {

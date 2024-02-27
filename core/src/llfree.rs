@@ -167,38 +167,49 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         let local = &self.local[core % self.local.len()];
         let max = (self.frames() - i * Lower::N).min(Lower::N);
 
+        // Update the put-reserve heuristic
+        let may_reserve = local.frees_push(i);
+
         // Try update own tree first
         let num_frames = 1 << order;
         if let Ok(_) = local
             .preferred
             .fetch_update(|v| v.inc(num_frames, max, |s| s / Lower::N == i))
         {
-            // Save the modified tree id for the push-reserve heuristic
-            local.frees_push(i);
             return Ok(());
-        };
+        }
 
         let mut reserved = false;
         // Tree not owned by us -> update global
-        match self.trees[i].fetch_update(|v| {
-            let mut v = v.inc(num_frames, max)?;
-            if !v.reserved() && v.free() > Trees::<{ Lower::N }>::MIN_FREE && local.frees_in_tree(i)
-            {
-                // Reserve the tree that was targeted by the last N frees
-                v = v.with_free(0).with_reserved(true);
-                reserved = true;
-            }
-            Some(v)
-        }) {
-            Ok(tree) => {
-                // Update preferred tree if reserved
-                let free = tree.free() + num_frames;
-                if !reserved || !self.reserve_for_put(free, &local.preferred, i)? {
-                    local.frees_push(i);
+        let min = Trees::<{ Lower::N }>::MIN_FREE;
+        // Increment or reserve the tree
+        let tree = self.trees[i]
+            .fetch_update(|v| {
+                let mut v = v.inc(num_frames, max);
+                if may_reserve && !v.reserved() && v.free() > min {
+                    // Reserve the tree that was targeted by the last N frees
+                    v = v.with_free(0).with_reserved(true);
+                    reserved = true;
                 }
-                Ok(())
+                Some(v)
+            })
+            .unwrap();
+
+        if reserved {
+            // Change preferred tree if to speedup future frees
+            let free = tree.free() + num_frames;
+            let entry = Preferred::tree(i * Lower::N, free, false);
+            if !self.swap_reserved(&local.preferred, entry, false) {
+                // Rollback reservation
+                self.trees[i]
+                    .fetch_update(|v| v.unreserve_add(free, max))
+                    .expect("rollback failed");
             }
-            Err(tree) => panic!("inc failed i{i}: {tree:?} o={order}"),
+            Ok(())
+        } else {
+            // Update free statistic
+            local.frees_push(i);
+            Ok(())
         }
     }
 
@@ -224,10 +235,9 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
     fn drain(&self, core: usize) -> Result<()> {
         let local = &self.local[core % self.local.len()];
-        match self.swap_reserved(&local.preferred, Preferred::default(), false) {
-            Err(Error::Retry) => Ok(()), // ignore cas errors
-            r => r,
-        }
+        // ignore cas errors
+        self.swap_reserved(&local.preferred, Preferred::default(), false);
+        Ok(())
     }
 
     fn free_frames(&self) -> usize {
@@ -315,8 +325,8 @@ impl LLFree<'_> {
                     warn!("alloc failed o={order} => retry");
                     // Increment global to prevent race condition with concurrent reservation
                     self.trees[tree.frame / Lower::N]
-                        .fetch_update(|v| v.inc(1 << order, Lower::N))
-                        .expect("Undo failed");
+                        .fetch_update(|v| Some(v.inc(1 << order, Lower::N)))
+                        .unwrap();
 
                     self.reserve_or_wait(core, order, old)
                 }
@@ -334,7 +344,7 @@ impl LLFree<'_> {
 
             // Try sync with global counter
             if let Some(tree) = old.tree {
-                if self.try_sync_with_global(&local.preferred, tree) {
+                if self.sync_with_global(&local.preferred, tree) {
                     // Success -> Retry allocation
                     return Err(Error::Retry);
                 }
@@ -357,7 +367,7 @@ impl LLFree<'_> {
     /// Frees from other CPUs update the global entry -> sync free counters.
     ///
     /// Returns if the global counter was large enough
-    fn try_sync_with_global(&self, local: &Atom<Preferred>, tree: LocalTree) -> bool {
+    fn sync_with_global(&self, local: &Atom<Preferred>, tree: LocalTree) -> bool {
         let i = tree.frame / Lower::N;
         let min = Trees::<{ Lower::N }>::MIN_FREE;
         if let Ok(entry) = self.trees[i].fetch_update(|e| e.sync_steal(tree.free, min)) {
@@ -379,6 +389,8 @@ impl LLFree<'_> {
         if !old.locked {
             if let Ok(old) =
                 preferred.fetch_update(|v| (!v.locked).then_some(Preferred { locked: true, ..v }))
+                // not already locked
+                && !old.locked
             {
                 // Try reserve new tree
                 return self.reserve_and_get(core, order, old);
@@ -420,7 +432,7 @@ impl LLFree<'_> {
             {
                 Ok(entry) => entry,
                 Err(e) => {
-                    warn!("Reserve failed");
+                    warn!("Reserve failed {e:?}");
                     // Rollback: Clear reserve flag
                     local
                         .fetch_update(|v| v.unlock())
@@ -429,47 +441,24 @@ impl LLFree<'_> {
                 }
             };
 
-        self.swap_reserved(local, Preferred::tree(frame, free, false), true)
-            .expect("unexpected unlock");
+        assert!(self.swap_reserved(local, Preferred::tree(frame, free, false), true));
         Ok(frame)
-    }
-
-    /// Reserve an entry for bulk frees
-    fn reserve_for_put(&self, free: usize, local: &Atom<Preferred>, i: usize) -> Result<bool> {
-        let entry = Preferred::tree(i * Lower::N, free, false);
-        match self.swap_reserved(local, entry, false) {
-            Ok(_) => Ok(true),
-            Err(Error::Retry) => {
-                warn!("rollback {i}");
-                // Rollback reservation
-                let max = (self.frames() - i * Lower::N).min(Lower::N);
-                self.trees[i]
-                    .fetch_update(|v| v.unreserve_add(free, max))
-                    .expect("put - reservation rollback failed");
-                Ok(false)
-            }
-            Err(e) => Err(e),
-        }
     }
 
     /// Swap the current reserved tree out replacing it with a new one.
     /// The old tree is unreserved.
-    fn swap_reserved(
-        &self,
-        local: &Atom<Preferred>,
-        new: Preferred,
-        expect_locked: bool,
-    ) -> Result<()> {
-        debug_assert!(!new.locked);
+    /// Returns false if the swap failed.
+    fn swap_reserved(&self, local: &Atom<Preferred>, new: Preferred, expect_locked: bool) -> bool {
+        assert!(!new.locked);
 
-        let old = local
-            .fetch_update(|v| (v.locked == expect_locked).then_some(new))
-            .map_err(|_| Error::Retry)?;
-
-        if let Some(LocalTree { frame: start, free }) = old.tree {
-            self.trees.unreserve(start / Lower::N, free, self.frames());
+        if let Ok(old) = local.fetch_update(|v| (v.locked == expect_locked).then_some(new)) {
+            if let Some(LocalTree { frame: start, free }) = old.tree {
+                self.trees.unreserve(start / Lower::N, free);
+            }
+            true
+        } else {
+            false
         }
-        Ok(())
     }
 }
 
@@ -510,22 +499,17 @@ impl Local {
     /// Threshold for the number of frees after which a tree is reserved
     const F: usize = 4;
 
-    /// Add a tree index to the history.
-    fn frees_push(&self, tree_index: usize) {
-        // If the update of this heuristic fails, ignore it
-        // Relaxed ordering is enough, as this is not shared between CPUs
-        let _ = self.last_frees.fetch_update(|v| {
+    /// Add a tree index to the history, returing if there are enough frees
+    fn frees_push(&self, tree_index: usize) -> bool {
+        let res = self.last_frees.fetch_update(|v| {
             if v.tree_index() == tree_index {
+                // fails if there are already enough frees
                 (v.count() < Self::F).then_some(v.with_count(v.count() + 1))
             } else {
                 Some(LastFrees::new().with_tree_index(tree_index).with_count(1))
             }
         });
-    }
-    /// Checks if the previous `count` frees had the same tree index.
-    fn frees_in_tree(&self, tree_index: usize) -> bool {
-        let lf = self.last_frees.load();
-        lf.tree_index() == tree_index && lf.count() >= Self::F
+        res.is_err() // no update -> enough frees
     }
 }
 
@@ -564,18 +548,17 @@ mod test {
         let local = Local::default();
         let frame1 = 43;
         let i1 = frame1 / (512 * 512);
-        assert!(!local.frees_in_tree(i1));
-        local.frees_push(i1);
-        local.frees_push(i1);
-        local.frees_push(i1);
-        assert!(!local.frees_in_tree(i1));
-        local.frees_push(i1);
-        assert!(local.frees_in_tree(i1));
+        assert!(!local.frees_push(i1));
+        assert!(!local.frees_push(i1));
+        assert!(!local.frees_push(i1));
+        assert!(!local.frees_push(i1));
+        assert!(local.frees_push(i1));
+        assert!(local.frees_push(i1));
         let frame2 = 512 * 512 + 43;
         let i2 = frame2 / (512 * 512);
         assert_ne!(i1, i2);
-        local.frees_push(i2);
-        assert!(!local.frees_in_tree(i1));
-        assert!(!local.frees_in_tree(i2));
+        assert!(!local.frees_push(i2));
+        assert!(!local.frees_push(i2));
+        assert!(!local.frees_push(i1));
     }
 }

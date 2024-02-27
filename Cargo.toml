@@ -6,6 +6,7 @@ resolver = "2"
 lto = "thin"
 opt-level = 3
 panic = "abort"
+debug = 2
 
 [profile.dev]
 panic = "abort"

@@ -2,7 +2,7 @@ use core::mem::{align_of, size_of};
 use core::ops::{Index, RangeBounds};
 use core::{fmt, slice};
 
-use log::info;
+use log::{error, info};
 
 use crate::atomic::Atom;
 use crate::entry::{LocalTree, Tree};
@@ -79,10 +79,10 @@ impl<'a, const LN: usize> Trees<'a, LN> {
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: usize, free: usize, frames: usize) {
-        let max = (frames - i * LN).min(LN);
-        if let Err(t) = self[i].fetch_update(|v| v.unreserve_add(free, max)) {
-            panic!("Unreserve failed i{i} {t:?} + {free}")
+    pub fn unreserve(&self, i: usize, free: usize) {
+        if let Err(t) = self[i].fetch_update(|v| v.unreserve_add(free, LN)) {
+            error!("Unreserve failed i{i} {t:?} + {free}");
+            panic!()
         }
     }
 
