@@ -72,18 +72,19 @@ fn main() {
     let start = Instant::now();
     let running = AtomicBool::new(true);
 
+    warn!("start");
+
     thread::parallel(0..threads, |t| {
         thread::pin(t);
         let mut rng = WyRand::new(t as u64 + 100);
 
         let mut pages = Vec::new();
-        {
-            barrier.wait();
 
-            while let Ok(page) = alloc.get(t, order) {
-                pages.push(page);
-            }
-        };
+        barrier.wait();
+
+        while let Ok(page) = alloc.get(t, order) {
+            pages.push(page);
+        }
 
         while running.load(Ordering::Relaxed) {
             let target = rng.range(0..2 * pages_per_thread as u64) as usize;

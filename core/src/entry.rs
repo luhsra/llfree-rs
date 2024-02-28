@@ -27,117 +27,15 @@ impl<T: Atomic, const L: usize> AtomicArray<T, L> for [Atom<T>; L] {
     }
 }
 
-/// Level 3 entry
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Preferred {
-    /// If this subtree locked for a reservation.
-    pub locked: bool,
-    /// The local tree copy.
-    pub tree: Option<LocalTree>,
-}
-
 /// Local tree copy
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct LocalTree {
     pub frame: usize,
-    pub free: usize,
+    pub free: u16,
 }
-impl Atomic for Preferred {
-    type I = AtomicU64;
-}
-
-impl Preferred {
-    pub fn tree(start: usize, free: usize, locked: bool) -> Self {
-        Self {
-            locked,
-            tree: Some(LocalTree { frame: start, free }),
-        }
-    }
-
-    /// Decrement or lock the tree if decrement fails
-    pub fn dec_or_lock(self, num_frames: usize, locked: &mut bool) -> Option<Self> {
-        if let Some(t) = self.tree
-            && t.free >= num_frames
-        {
-            Some(Preferred::tree(t.frame, t.free - num_frames, self.locked))
-        } else if !self.locked {
-            *locked = true;
-            Some(Preferred {
-                locked: true,
-                ..self
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Increments the free frames counter.
-    pub fn inc(
-        self,
-        num_frames: usize,
-        max: usize,
-        check_start: impl FnOnce(usize) -> bool,
-    ) -> Option<Self> {
-        if let Some(LocalTree { frame: start, free }) = self.tree
-            && check_start(start)
-        {
-            let frames = free + num_frames;
-            assert!(frames <= max);
-            Some(Preferred::tree(start, frames, self.locked))
-        } else {
-            None
-        }
-    }
-
-    /// Increment the free counter and unlock.
-    pub fn inc_unlock(self, num_frames: usize, max: usize) -> Option<Self> {
-        assert!(self.locked);
-        let LocalTree { frame: start, free } = self.tree.unwrap();
-        let frames = free + num_frames;
-        assert!(frames <= max);
-        Some(Preferred::tree(start, frames, false))
-    }
-}
-
-#[bitfield(u64)]
-struct PTreeBits {
-    #[bits(16)]
-    free: usize,
-    locked: bool,
-    reserved: bool,
-    #[bits(46)]
-    start: usize,
-}
-impl From<u64> for Preferred {
-    fn from(value: u64) -> Self {
-        let bits = PTreeBits::from(value);
-        if bits.reserved() {
-            Self {
-                locked: bits.locked(),
-                tree: Some(LocalTree {
-                    frame: bits.start() * 64,
-                    free: bits.free(),
-                }),
-            }
-        } else {
-            Self {
-                locked: bits.locked(),
-                tree: None,
-            }
-        }
-    }
-}
-impl From<Preferred> for u64 {
-    fn from(value: Preferred) -> Self {
-        match value.tree {
-            Some(LocalTree { free, frame: start }) => PTreeBits::new()
-                .with_reserved(true)
-                .with_locked(value.locked)
-                .with_free(free)
-                .with_start(start / 64)
-                .into(),
-            None => PTreeBits::new().with_locked(value.locked).into(),
-        }
+impl LocalTree {
+    pub fn new(frame: usize, free: u16) -> Self {
+        Self { frame, free }
     }
 }
 
@@ -175,16 +73,17 @@ impl Tree {
     /// Add the frames from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
     pub fn unreserve_add(self, add: usize, max: usize) -> Option<Self> {
-        let frames = self.free() + add;
-        if self.reserved() && frames <= max {
+        if self.reserved() {
+            let frames = self.free() + add;
+            assert!(frames <= max);
             Some(Self::with(frames, false))
         } else {
             None
         }
     }
     /// Set the free counter to zero if it is large enough for synchronization
-    pub fn sync_steal(self, free: usize, min: usize) -> Option<Self> {
-        if self.reserved() && self.free() + free > min {
+    pub fn sync_steal(self, min: usize) -> Option<Self> {
+        if self.reserved() && self.free() > min {
             Some(self.with_free(0))
         } else {
             None
@@ -340,7 +239,6 @@ mod test {
     use core::sync::atomic::AtomicU64;
 
     use crate::atomic::Atom;
-    use crate::entry::Preferred;
     use crate::frame::PT_LEN;
 
     #[test]
@@ -349,10 +247,5 @@ mod test {
         pt[0].compare_exchange(0, 42).unwrap();
         pt[0].fetch_update(|v| Some(v + 1)).unwrap();
         assert_eq!(pt[0].load(), 43);
-    }
-
-    #[test]
-    fn preferred() {
-        println!("{:#?}", Preferred::from(200354));
     }
 }

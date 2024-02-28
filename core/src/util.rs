@@ -55,6 +55,7 @@ impl<T: fmt::Debug> fmt::Debug for Align<T> {
 #[cfg(feature = "std")]
 pub fn logging() {
     use core::mem::transmute;
+    use std::boxed::Box;
     use std::io::Write;
     use std::thread::ThreadId;
 
@@ -70,12 +71,7 @@ pub fn logging() {
                 log::Level::Trace => "\x1b[90m",
             };
 
-            let pin = pinned();
-            let pin = if pin > isize::MAX as usize {
-                -1
-            } else {
-                pin as isize
-            };
+            let pin = pinned().map_or(-1, |p| p as isize);
 
             writeln!(
                 buf,
@@ -89,6 +85,14 @@ pub fn logging() {
             )
         })
         .try_init();
+
+    std::panic::set_hook(Box::new(panic_handler));
+}
+
+#[cfg(feature = "std")]
+fn panic_handler(info: &std::panic::PanicInfo) {
+    use std::backtrace::Backtrace;
+    log::error!("{info}\n{}", Backtrace::capture());
 }
 
 /// Simple bare bones random number generator based on wyhash.
@@ -117,7 +121,7 @@ impl WyRand {
         }
     }
     pub fn shuffle<T>(&mut self, target: &mut [T]) {
-        if target.len() > 0 {
+        if !target.is_empty() {
             for i in 0..target.len() - 1 {
                 target.swap(i, self.range(i as u64..target.len() as u64) as usize);
             }

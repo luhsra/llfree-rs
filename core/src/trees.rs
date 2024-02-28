@@ -1,8 +1,6 @@
 use core::mem::{align_of, size_of};
-use core::ops::{Index, RangeBounds};
+use core::ops::RangeBounds;
 use core::{fmt, slice};
-
-use log::{error, info};
 
 use crate::atomic::Atom;
 use crate::entry::{LocalTree, Tree};
@@ -13,14 +11,6 @@ use crate::{Error, Result};
 pub struct Trees<'a, const LN: usize> {
     /// Array of level 3 entries, which are the roots of the trees
     entries: &'a [Atom<Tree>],
-}
-
-impl<'a, const LN: usize> Index<usize> for Trees<'a, LN> {
-    type Output = Atom<Tree>;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.entries[index]
-    }
 }
 
 impl<'a, const LN: usize> fmt::Debug for Trees<'a, LN> {
@@ -74,16 +64,51 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         self.entries.len()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Atom<Tree>> {
-        self.entries.iter()
+    pub fn get(&self, i: usize) -> Tree {
+        self.entries[i].load()
+    }
+
+    /// Return the total sum of the tree counters
+    pub fn total_free(&self) -> usize {
+        self.entries.iter().map(|e| e.load().free()).sum()
+    }
+
+    pub fn sync(&self, i: usize, min: usize) -> Option<usize> {
+        match self.entries[i].fetch_update(|e| e.sync_steal(min)) {
+            Ok(e) => Some(e.free()),
+            Err(_) => None,
+        }
+    }
+
+    /// Increment or reserve the tree
+    pub fn inc_or_reserve(&self, i: usize, num_frames: usize, may_reserve: bool) -> Option<usize> {
+        let mut reserved = false;
+        let tree = self.entries[i]
+            .fetch_update(|v| {
+                let v = v.inc(num_frames, LN);
+                if may_reserve && !v.reserved() && v.free() > Self::MIN_FREE {
+                    // Reserve the tree that was targeted by the last N frees
+                    reserved = true;
+                    Some(v.with_free(0).with_reserved(true))
+                } else {
+                    reserved = false; // <- This one is very important if CAS fails!
+                    Some(v)
+                }
+            })
+            .unwrap();
+
+        if reserved {
+            Some(tree.free())
+        } else {
+            None
+        }
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
     pub fn unreserve(&self, i: usize, free: usize) {
-        if let Err(t) = self[i].fetch_update(|v| v.unreserve_add(free, LN)) {
-            error!("Unreserve failed i{i} {t:?} + {free}");
-            panic!()
-        }
+        self.entries[i]
+            .fetch_update(|v| v.unreserve_add(free, LN))
+            .expect("Unreserve failed");
     }
 
     /// Find and reserve a free tree
@@ -91,22 +116,16 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         &self,
         start: usize,
         free: impl RangeBounds<usize> + Clone,
-        mut get_lower: impl FnMut(LocalTree) -> Result<LocalTree>,
+        mut get_lower: impl FnMut(usize) -> Result<usize>,
     ) -> Result<LocalTree> {
         // Just search linearly through the array
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
-            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(free.clone())) {
-                match get_lower(LocalTree {
-                    frame: i * LN,
-                    free: entry.free(),
-                }) {
-                    Err(Error::Memory) => {
-                        self[i]
-                            .fetch_update(|v| v.unreserve_add(entry.free(), LN))
-                            .expect("Rollback failed");
-                    }
-                    r => return r,
+            if let Ok(entry) = self.entries[i].fetch_update(|v| v.reserve(free.clone())) {
+                match get_lower(i * LN) {
+                    Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
+                    Err(Error::Memory) => self.unreserve(i, entry.free()),
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -118,7 +137,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         &self,
         cores: usize,
         start: usize,
-        mut get_lower: impl FnMut(LocalTree) -> Result<LocalTree>,
+        mut get_lower: impl FnMut(usize) -> Result<usize>,
     ) -> Result<LocalTree> {
         // One quater of the per-CPU memory
         let near = ((self.entries.len() / cores) / 4).max(1) as isize;
@@ -133,18 +152,12 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             // Alternating between before and after this entry
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
-            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::MIN_FREE..)) {
-                match get_lower(LocalTree {
-                    frame: i * LN,
-                    free: entry.free(),
-                }) {
-                    Err(Error::Memory) => {
-                        info!("Fragmentation -> continue reservation");
-                        self[i]
-                            .fetch_update(|v| v.unreserve_add(entry.free(), LN))
-                            .expect("Rollback failed");
-                    }
-                    r => return r,
+            if let Ok(entry) = self.entries[i].fetch_update(|v| v.reserve(Self::MIN_FREE..)) {
+                assert!(!entry.reserved());
+                match get_lower(i * LN) {
+                    Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
+                    Err(Error::Memory) => self.unreserve(i, entry.free()),
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -154,18 +167,14 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             // Alternating between before and after this entry
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
-            if let Ok(entry) = self[i].fetch_update(|v| v.reserve(Self::MIN_FREE..Self::MAX_FREE)) {
-                match get_lower(LocalTree {
-                    frame: i * LN,
-                    free: entry.free(),
-                }) {
-                    Err(Error::Memory) => {
-                        info!("Fragmentation -> continue reservation");
-                        self[i]
-                            .fetch_update(|v| v.unreserve_add(entry.free(), LN))
-                            .expect("Rollback failed");
-                    }
-                    r => return r,
+            if let Ok(entry) =
+                self.entries[i].fetch_update(|v| v.reserve(Self::MIN_FREE..Self::MAX_FREE))
+            {
+                assert!(!entry.reserved());
+                match get_lower(i * LN) {
+                    Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
+                    Err(Error::Memory) => self.unreserve(i, entry.free()),
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -178,7 +187,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         order: usize,
         cores: usize,
         start: usize,
-        get_lower: impl FnMut(LocalTree) -> Result<LocalTree> + Copy,
+        get_lower: impl FnMut(usize) -> Result<usize> + Copy,
         drain: impl FnOnce() -> Result<()>,
     ) -> Result<LocalTree> {
         // search for a partially filled tree
