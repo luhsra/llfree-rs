@@ -190,6 +190,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
                     reserved = true;
                     Some(v.with_free(0).with_reserved(true))
                 } else {
+                    reserved = false; // <- This is very important if CAS fails!
                     Some(v)
                 }
             })
