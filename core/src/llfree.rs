@@ -138,6 +138,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
         // Retry allocation up to n times if it fails due to a concurrent update
         for _ in 0..CAS_RETRIES {
+            //info!("Retrying allocation {i} for order o={order}. local Allocator State: {:?}", self.local);
             match self.get_inner(core, order) {
                 Ok(frame) => return Ok(frame),
                 Err(Error::Retry) => continue,
@@ -477,7 +478,7 @@ impl fmt::Debug for LLFree<'_> {
 
         writeln!(f, "    frames: {}", self.lower.frames())?;
 
-        writeln!(f, "    trees: {:?} ({} frames)", self.trees, Lower::N)?;
+        writeln!(f, "    trees: {:?} ({} framesize)", self.trees, Lower::N)?;
         let free_frames = self.free_frames();
         let free_huge_frames = self.free_huge_frames();
         writeln!(

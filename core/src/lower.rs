@@ -66,7 +66,7 @@ impl<'a> Lower<'a> {
     #[cfg(feature="16K")]
     pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1; //MAX_ORDER for 16K is 11, as 2^11*2^14B (16KiB) = 2^25B -> 32 MiB
 
-    //Metadata does not need to be adapted for 16K
+    //Metadata does not need to be adapted for 16K -> or DOES it? -> TODO: Align_up prüfen
     pub fn metadata_size(frames: usize) -> usize {
         let bitfields = frames.div_ceil(Bitfield::LEN);
         let bitfields_size = bitfields * size_of::<Bitfield>();
