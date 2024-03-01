@@ -1,13 +1,13 @@
 //! Lower allocator implementations
 
-use core::mem::{align_of, size_of};
+use core::mem::align_of;
 use core::slice;
 
 use log::{error, info, warn};
 
 use crate::atomic::Atom;
 use crate::entry::{AtomicArray, HugeEntry, HugePair};
-use crate::util::{align_down, align_up, spin_wait, Align};
+use crate::util::{align_down, size_of_slice, spin_wait, Align};
 use crate::{Error, Init, Result, CAS_RETRIES};
 
 #[cfg(feature="16K")]
@@ -48,6 +48,28 @@ unsafe impl Sync for Lower<'_> {}
 
 const _: () = assert!(Lower::HP < (1 << (u16::BITS as usize - Lower::HUGE_ORDER)));
 
+/// Size of the dynamic metadata
+struct Metadata {
+    bitfield_len: usize,
+    bitfield_size: usize,
+    table_len: usize,
+    table_size: usize,
+}
+
+impl Metadata {
+    fn new(frames: usize) -> Self {
+        let bitfield_len = frames.div_ceil(Bitfield::LEN);
+        let table_len = frames.div_ceil(Lower::N);
+        Self {
+            bitfield_len,
+            // This also respects the cache line alignment
+            bitfield_size: size_of_slice::<Bitfield>(bitfield_len),
+            table_len,
+            table_size: size_of_slice::<Align<[HugeEntry; Lower::HP]>>(table_len),
+        }
+    }
+}
+
 impl<'a> Lower<'a> {
     /// Number of huge pages managed by a chunk
     #[cfg(feature="16K")]
@@ -68,31 +90,21 @@ impl<'a> Lower<'a> {
 
     //Metadata does not need to be adapted for 16K -> or DOES it? -> TODO: Align_up prüfen
     pub fn metadata_size(frames: usize) -> usize {
-        let bitfields = frames.div_ceil(Bitfield::LEN);
-        let bitfields_size = bitfields * size_of::<Bitfield>();
-        let bitfields_size = align_up(bitfields_size, size_of::<[HugeEntry; Lower::HP]>());
-
-        let tables = frames.div_ceil(Self::N);
-        let tables_size = tables * align_up(size_of::<[HugeEntry; Lower::HP]>(), align_of::<Align>());
-        bitfields_size + tables_size
+        let m = Metadata::new(frames);
+        m.bitfield_size + m.table_size
     }
 
     /// Create a new lower allocator.
     pub fn new(frames: usize, init: Init, primary: &'a mut [u8]) -> Result<Self> {
-        let bitfields_num = frames.div_ceil(Bitfield::LEN);
-        let bitfields_size = bitfields_num * size_of::<Bitfield>();
-        let bitfields_size = align_up(bitfields_size, size_of::<[HugeEntry; Lower::HP]>());
+        let m = Metadata::new(frames);
 
-        let tables_num = frames.div_ceil(Self::N);
-        let tables_size = tables_num * size_of::<[HugeEntry; Lower::HP]>();
-
-        if primary.len() < bitfields_size + tables_size
+        if primary.len() < m.bitfield_size + m.table_size
             || primary.as_ptr() as usize % align_of::<Align>() != 0
         {
             error!("primary metadata");
             return Err(Error::Initialization);
         }
-        let (bitfields, children) = primary.split_at_mut(bitfields_size);
+        let (bitfields, children) = primary.split_at_mut(m.bitfield_size);
 
         // Start of the l1 table array
         let bitfields =
@@ -158,6 +170,7 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Return the number of free frames in the tree at `start`.
     pub fn free_in_tree(&self, start: usize) -> usize {
         assert!(start < self.frames());
         let mut free = 0;
@@ -249,7 +262,7 @@ impl<'a> Lower<'a> {
     #[allow(unused)]
     pub fn allocated_frames(&self) -> usize {
         let mut frames = self.frames();
-        for table in &*self.children {
+        for table in self.children {
             for entry in table.iter() {
                 frames -= entry.load().free();
             }
@@ -263,6 +276,18 @@ impl<'a> Lower<'a> {
             for (ci, child) in table.iter().enumerate() {
                 f(ti * Self::HP + ci, child.load().free())
             }
+        }
+    }
+
+    pub fn free_at(&self, frame: usize, order: usize) -> usize {
+        match order {
+            0 => self.is_free(frame, 0) as _,
+            Self::HUGE_ORDER => {
+                let i = (frame / Bitfield::LEN) % Self::HP;
+                let child = self.children[frame / Self::N][i].load();
+                child.free()
+            }
+            _ => 0,
         }
     }
 
@@ -493,15 +518,13 @@ mod test {
     use std::sync::Barrier;
     use std::vec::Vec;
 
-    use crate::Result;
     use log::warn;
 
     use super::Bitfield;
     use crate::frame::PT_LEN;
     use crate::lower::Lower;
-    use crate::thread;
     use crate::util::{aligned_buf, logging, WyRand};
-    use crate::Init;
+    use crate::{thread, Init, Result};
 
     struct LowerTest(ManuallyDrop<Lower<'static>>);
 

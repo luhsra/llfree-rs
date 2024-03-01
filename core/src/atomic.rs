@@ -1,12 +1,14 @@
 //! Generic atomics
 
-use log::debug;
-
-use crate::util::Align;
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{Ordering::*, *};
+use core::sync::atomic::Ordering::*;
+use core::sync::atomic::*;
+
+use log::debug;
+
+use crate::util::Align;
 
 /// Atomic value
 ///
@@ -18,22 +20,22 @@ impl<T: Atomic> Atom<T> {
     pub fn new(v: T) -> Self {
         Self(T::I::new(v.into()))
     }
-    #[track_caller]
+    #[cfg_attr(feature = "log_debug", track_caller)]
     pub fn load(&self) -> T {
         debug!("{} load", core::panic::Location::caller());
         self.0.load().into()
     }
-    #[track_caller]
+    #[cfg_attr(feature = "log_debug", track_caller)]
     pub fn store(&self, v: T) {
         debug!("{} store", core::panic::Location::caller());
         self.0.store(v.into())
     }
-    #[track_caller]
+    #[cfg_attr(feature = "log_debug", track_caller)]
     pub fn swap(&self, v: T) -> T {
         debug!("{} swap", core::panic::Location::caller());
         self.0.swap(v.into()).into()
     }
-    #[track_caller]
+    #[cfg_attr(feature = "log_debug", track_caller)]
     pub fn compare_exchange(&self, current: T, new: T) -> Result<T, T> {
         debug!("{} cmpxchg", core::panic::Location::caller());
         match self.0.compare_exchange(current.into(), new.into()) {
@@ -41,7 +43,7 @@ impl<T: Atomic> Atom<T> {
             Err(v) => Err(v.into()),
         }
     }
-    #[track_caller]
+    #[cfg_attr(feature = "log_debug", track_caller)]
     pub fn compare_exchange_weak(&self, current: T, new: T) -> Result<T, T> {
         debug!("{} cmpxchgw", core::panic::Location::caller());
         match self.0.compare_exchange_weak(current.into(), new.into()) {
@@ -49,7 +51,7 @@ impl<T: Atomic> Atom<T> {
             Err(v) => Err(v.into()),
         }
     }
-    #[track_caller]
+    #[cfg_attr(feature = "log_debug", track_caller)]
     pub fn fetch_update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
         debug!("{} update", core::panic::Location::caller());
         match self.0.fetch_update(|v| f(v.into()).map(|v| v.into())) {

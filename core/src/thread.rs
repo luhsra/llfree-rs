@@ -2,7 +2,6 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-
 /// Changes the order in which cores are selected for pinning.
 ///
 /// The `core` argument of [pin] is multiplied with stride to get the actual core:
@@ -11,7 +10,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 pub static STRIDE: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
-    static PINNED: AtomicUsize = AtomicUsize::new(usize::MAX);
+    static PINNED: AtomicUsize = const { AtomicUsize::new(usize::MAX) };
 }
 
 /// Returns the number of virtual cores.

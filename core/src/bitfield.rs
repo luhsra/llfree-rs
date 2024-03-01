@@ -1,9 +1,9 @@
 //! Atomic bitfield
 
+use core::fmt;
 use core::mem::size_of;
 use core::ops::{Not, Range};
 use core::sync::atomic::AtomicU64;
-use core::{fmt, mem};
 
 use crate::atomic::{Atom, Atomic};
 use crate::{Error, Result};
@@ -126,10 +126,10 @@ impl<const N: usize> Bitfield<N> {
 
         let idx = i / (8 * size_of::<I>());
         let val = if e { !I::default() } else { I::default() };
-        // Safety: Cast to smaller type atomic, keeping the same total bitfield size
-        let data: &[Atom<I>] = unsafe { mem::transmute(&self.data[..]) };
         // Safety: I is guaranteed to be smaller than u64 and i is in bounds, so is idx
-        let atom: &Atom<I> = unsafe { data.get_unchecked(idx) };
+        debug_assert!(idx * size_of::<I>() <= size_of::<Self>());
+        // Safety: Cast to smaller type atomic, keeping the same total bitfield size
+        let atom = unsafe { &*self.data.as_ptr().cast::<Atom<I>>().add(idx) };
         match atom.compare_exchange(val, !val) {
             Ok(_) => Ok(()),
             Err(_) => Err(Error::Retry),

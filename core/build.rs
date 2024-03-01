@@ -1,15 +1,16 @@
-use std::{env, process::Command};
+use std::env;
+use std::process::Command;
 
 fn main() {
     if env::var("CARGO_FEATURE_LLC").is_ok() {
         let root = env::var("CARGO_MANIFEST_DIR").unwrap();
         let c_project_dir = format!("{root}/../llc");
         let outdir = env::var("OUT_DIR").unwrap();
-        let is_debug = env::var("PROFILE").unwrap() == "debug";
+        // let is_debug = env::var("PROFILE").unwrap() == "debug";
 
         // Build the C project
         let output = Command::new("make")
-            .arg(format!("DEBUG={}", is_debug as usize))
+            // .arg(format!("DEBUG={}", is_debug as usize))
             .arg(format!("BUILDDIR={outdir}"))
             .arg("-C")
             .arg(&c_project_dir)

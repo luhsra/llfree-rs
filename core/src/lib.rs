@@ -3,13 +3,14 @@
 //! This project contains multiple allocator designs for NVM and benchmarks comparing them.
 
 #![no_std]
-#![feature(new_uninit)]
+#![cfg_attr(feature = "std", feature(new_uninit))]
 #![feature(int_roundings)]
 #![feature(array_windows)]
 #![feature(inline_const)]
 #![feature(allocator_api)]
 #![feature(c_size_t)]
 #![feature(let_chains)]
+#![feature(pointer_is_aligned)]
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
@@ -60,12 +61,14 @@ pub enum Error {
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// Number of retries if an atomic operation fails.
-pub const CAS_RETRIES: usize = 4;
+pub const CAS_RETRIES: usize = 8;
 
 /// The general interface of the allocator implementations.
 pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// Maximum allocation size order.
     const MAX_ORDER: usize;
+    /// Maximum allocation size order.
+    const HUGE_ORDER: usize;
 
     /// Return the name of the allocator.
     #[cold]
@@ -94,21 +97,12 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     fn get(&self, core: usize, order: usize) -> Result<usize>;
     /// Free the `frame` of `order` on the given `core`..
     fn put(&self, core: usize, frame: usize, order: usize) -> Result<()>;
-    /// Returns if `frame` is free. This might be racy!
-    fn is_free(&self, frame: usize, order: usize) -> bool;
 
     /// Return the total number of frames the allocator manages.
     fn frames(&self) -> usize;
+    /// Return the core count the allocator was initialized with.
+    fn cores(&self) -> usize;
 
-    /// Unreserve cpu-local frames
-    fn drain(&self, _core: usize) -> Result<()> {
-        Ok(())
-    }
-
-    /// Return the number of allocated frames.
-    fn allocated_frames(&self) -> usize {
-        self.frames() - self.free_frames()
-    }
     /// Return the number of free frames.
     fn free_frames(&self) -> usize;
     /// Return the number of free huge frames or 0 if the allocator cannot allocate huge frames.
@@ -116,8 +110,19 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
         0
     }
 
-    /// Calls f for every huge page
-    fn for_each_huge_frame<F: FnMut(usize, usize)>(&self, f: F);
+    /// Returns if `frame` is free. This might be racy!
+    fn is_free(&self, frame: usize, order: usize) -> bool;
+    /// Free frames in the given chunk. Only TREE_ORDER and HUGE_ORDER are supported.
+    fn free_at(&self, frame: usize, order: usize) -> usize;
+
+    /// Return the number of allocated frames.
+    fn allocated_frames(&self) -> usize {
+        self.frames() - self.free_frames()
+    }
+    /// Unreserve cpu-local frames
+    fn drain(&self, _core: usize) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Size of the required metadata
@@ -145,22 +150,17 @@ mod test {
     use core::mem::ManuallyDrop;
     use core::ops::Deref;
     use core::ptr::null_mut;
-    use std::time::Instant;
-
     use std::sync::Barrier;
+    use std::time::Instant;
     use std::vec::Vec;
 
-    use log::{warn, info};
-
-    use crate::frame::{Frame, PT_LEN};
-    use crate::lower::Lower;
-    use crate::thread;
-    use crate::util::{aligned_buf, logging, WyRand};
-    use crate::wrapper::NvmAlloc;
-    use crate::Error;
-    use crate::{Alloc, Init};
+    use log::{error, warn};
 
     use super::*;
+    use crate::frame::{Frame, PT_LEN};
+    use crate::lower::Lower;
+    use crate::util::{aligned_buf, logging, WyRand};
+    use crate::wrapper::NvmAlloc;
 
     #[cfg(feature = "llc")]
     type Allocator = TestAlloc<LLC>;
@@ -199,7 +199,7 @@ mod test {
     }
     impl<A: Alloc<'static>> fmt::Debug for TestAlloc<A> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            self.0.fmt(f)
+            A::fmt(&self, f)
         }
     }
 
@@ -618,8 +618,13 @@ mod test {
                 thread::pin(t);
                 barrier.wait();
 
-                for frame in frames {
-                    *frame = alloc.get(t, 0).unwrap();
+                for (i, frame) in frames.iter_mut().enumerate() {
+                    if let Ok(f) = alloc.get(t, 0) {
+                        *frame = f;
+                    } else {
+                        error!("OOM: {i}: {alloc:?}");
+                        panic!()
+                    }
                 }
             },
         );
@@ -870,10 +875,10 @@ mod test {
         let expected_frames = (PT_LEN + 2) * (1 + (1 << 9));
 
         let mut zone = mmap::anon(0x1000_0000_0000, FRAMES, false, false);
-        let secondary = aligned_buf(Allocator::metadata_size(1, FRAMES)).leak();
+        let secondary = aligned_buf(Allocator::metadata_size(1, FRAMES).secondary).leak();
 
         {
-            let alloc = Allocator::new(1, &mut zone, false, secondary).unwrap();
+            let alloc = Allocator::create(1, &mut zone, false, secondary).unwrap();
 
             for _ in 0..PT_LEN + 2 {
                 alloc.get(0, 0).unwrap();
@@ -887,7 +892,7 @@ mod test {
         }
 
         let secondary = aligned_buf(secondary.len()).leak();
-        let alloc = Allocator::new(1, &mut zone, true, secondary).unwrap();
+        let alloc = Allocator::create(1, &mut zone, true, secondary).unwrap();
         assert_eq!(alloc.allocated_frames(), expected_frames);
     }
 

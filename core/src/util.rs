@@ -1,7 +1,7 @@
 //! General utility functions
 
 use core::fmt;
-use core::mem::align_of;
+use core::mem::{align_of, size_of};
 use core::ops::{Add, Deref, DerefMut, Div, Range};
 
 /// Align v up to next `align` (power of two!)
@@ -18,6 +18,13 @@ pub const fn align_down(v: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     let mask = align - 1;
     v & !mask
+}
+
+/// Calculate the size of a slice of T, respecting any alignment constraints
+///
+/// Note: This might not be correct for all types, but it is for the ones we use.
+pub const fn size_of_slice<T>(len: usize) -> usize {
+    len * size_of::<T>().next_multiple_of(align_of::<T>())
 }
 
 /// Cache alignment for T
@@ -102,12 +109,18 @@ impl WyRand {
     }
     pub fn range(&mut self, range: Range<u64>) -> u64 {
         let mut val = self.gen();
-        val %= range.end - range.start;
-        val + range.start
+        if range.start < range.end {
+            val %= range.end - range.start;
+            val + range.start
+        } else {
+            0
+        }
     }
     pub fn shuffle<T>(&mut self, target: &mut [T]) {
-        for i in 0..target.len() - 1 {
-            target.swap(i, self.range(i as u64..target.len() as u64) as usize);
+        if target.len() > 0 {
+            for i in 0..target.len() - 1 {
+                target.swap(i, self.range(i as u64..target.len() as u64) as usize);
+            }
         }
     }
 }
@@ -142,9 +155,8 @@ where
             mean = mean + x;
             count += 1;
         }
-        let count = match T::try_from(count) {
-            Ok(c) => c,
-            Err(_) => unreachable!("overflow"),
+        let Ok(count) = T::try_from(count) else {
+            unreachable!("overflow")
         };
 
         Some((min, mean / count, max))

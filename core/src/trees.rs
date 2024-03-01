@@ -2,11 +2,11 @@ use core::mem::{align_of, size_of};
 use core::ops::{Index, RangeBounds};
 use core::{fmt, slice};
 
-use log::info;
+use log::{error, info};
 
 use crate::atomic::Atom;
 use crate::entry::{LocalTree, Tree};
-use crate::util::{align_down, Align};
+use crate::util::{align_down, size_of_slice, Align};
 use crate::{Error, Result};
 
 #[derive(Default)]
@@ -28,16 +28,13 @@ impl<'a, const LN: usize> fmt::Debug for Trees<'a, LN> {
         let max = self.entries.len();
         let mut free = 0;
         let mut partial = 0;
-        for e in &*self.entries {
-            let f = e.load();
-            if !f.reserved() {
-                if f.free() == LN {
-                    free += 1;
-                } else if f.free() > Self::MIN_FREE {
-                    partial += 1;
-                }
-            } 
-            
+        for e in self.entries {
+            let f = e.load().free();
+            if f == LN {
+                free += 1;
+            } else if f > Self::MIN_FREE {
+                partial += 1;
+            }
         }
         write!(f, "(total: {max}, free: {free}, partial: {partial})")?;
         Ok(())
@@ -49,7 +46,8 @@ impl<'a, const LN: usize> Trees<'a, LN> {
     pub const MAX_FREE: usize = LN - (1 << 10);
 
     pub fn metadata_size(frames: usize) -> usize {
-        frames.div_ceil(LN) * size_of::<Atom<Tree>>()
+        // Event thought the elements are not cache aligned, the whole array should be
+        size_of_slice::<Atom<Tree>>(frames.div_ceil(LN)).next_multiple_of(align_of::<Align>())
     }
 
     /// Initialize the tree array
@@ -66,7 +64,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
 
         for (i, e) in entries.iter_mut().enumerate() {
             let frames = free_in_tree(i * LN);
-            *e = Atom::new(Tree::new_with(frames, false));
+            *e = Atom::new(Tree::with(frames, false));
         }
 
         Self { entries }
@@ -81,11 +79,10 @@ impl<'a, const LN: usize> Trees<'a, LN> {
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: usize, free: usize, frames: usize) -> Result<()> {
-        let max = (frames - i * LN).min(LN);
-        match self[i].fetch_update(|v| v.unreserve_add(free, max)) {
-            Ok(_) => Ok(()),
-            Err(t) => panic!("Unreserve failed i{i} {t:?} + {free}"),
+    pub fn unreserve(&self, i: usize, free: usize) {
+        if let Err(t) = self[i].fetch_update(|v| v.unreserve_add(free, LN)) {
+            error!("Unreserve failed i{i} {t:?} + {free}");
+            panic!()
         }
     }
 

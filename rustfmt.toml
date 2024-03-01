@@ -1,0 +1,3 @@
+# unfortunately these are unstable since 2021...
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
