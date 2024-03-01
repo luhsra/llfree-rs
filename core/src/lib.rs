@@ -905,7 +905,7 @@ mod test {
         logging();
 
         let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
-        info!("Created Allocator \n {:?}", alloc);
+        warn!("Created Allocator \n {:?}", alloc);
         let barrier = Barrier::new(THREADS);
 
         thread::parallel(0..THREADS, |t| {

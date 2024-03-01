@@ -105,7 +105,7 @@ pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame],
         warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
         return mmap::file(begin, length, &file, true);
     }
-    info!("Mapping {length} frames ({} bytes).", length * Frame::SIZE);
+    warn!("Mapping {length} frames ({} bytes).", length * Frame::SIZE);
     mmap::anon(begin, length, false, false)
 }
 

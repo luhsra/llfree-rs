@@ -108,12 +108,12 @@ impl<'a> Lower<'a> {
 
         // Start of the l1 table array
         let bitfields =
-            unsafe { slice::from_raw_parts_mut(bitfields.as_mut_ptr().cast(), bitfields_num) };
+            unsafe { slice::from_raw_parts_mut(bitfields.as_mut_ptr().cast(), m.bitfield_len) };
         //info!("{:?}", bitfields.as_ptr_range());
 
         // Start of the l2 table array
         let children =
-            unsafe { slice::from_raw_parts_mut(children.as_mut_ptr().cast(), tables_num) };
+            unsafe { slice::from_raw_parts_mut(children.as_mut_ptr().cast(), m.table_len) };
         //info!("{:?}", children.as_ptr_range());
 
         let alloc = Self {
