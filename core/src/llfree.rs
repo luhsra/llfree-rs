@@ -343,7 +343,7 @@ impl LLFree<'_> {
         let cores = self.local.len();
         match self
             .trees
-            .reserve(order, cores, start, |t| self.lower.get(t, order), drain_fn)
+            .reserve(order, cores, start, |c| self.lower.get(c, order), drain_fn)
         {
             Ok(mut new) => {
                 new.free -= 1 << order;

@@ -32,8 +32,8 @@ impl<'a, const LN: usize> fmt::Debug for Trees<'a, LN> {
 }
 
 impl<'a, const LN: usize> Trees<'a, LN> {
-    pub const MIN_FREE: usize = 1 << 10;
-    pub const MAX_FREE: usize = LN - (1 << 10);
+    pub const MIN_FREE: usize = LN / 16;
+    pub const MAX_FREE: usize = LN - (LN / 32);
 
     pub fn metadata_size(frames: usize) -> usize {
         // Event thought the elements are not cache aligned, the whole array should be
@@ -137,8 +137,11 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         &self,
         cores: usize,
         start: usize,
+        order: usize,
         mut get_lower: impl FnMut(usize) -> Result<usize>,
     ) -> Result<LocalTree> {
+        let min_free = Self::MIN_FREE.max(1 << order);
+
         // One quater of the per-CPU memory
         let near = ((self.entries.len() / cores) / 4).max(1) as isize;
 
@@ -152,7 +155,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             // Alternating between before and after this entry
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
-            if let Ok(entry) = self.entries[i].fetch_update(|v| v.reserve(Self::MIN_FREE..)) {
+            if let Ok(entry) = self.entries[i].fetch_update(|v| v.reserve(min_free..)) {
                 assert!(!entry.reserved());
                 match get_lower(i * LN) {
                     Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
@@ -168,7 +171,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
             if let Ok(entry) =
-                self.entries[i].fetch_update(|v| v.reserve(Self::MIN_FREE..Self::MAX_FREE))
+                self.entries[i].fetch_update(|v| v.reserve(min_free..Self::MAX_FREE))
             {
                 assert!(!entry.reserved());
                 match get_lower(i * LN) {
@@ -191,7 +194,12 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         drain: impl FnOnce() -> Result<()>,
     ) -> Result<LocalTree> {
         // search for a partially filled tree
-        match self.reserve_partial(cores, start, get_lower) {
+        match self.reserve_partial(cores, start, order, get_lower) {
+            Err(Error::Memory) => {}
+            r => return r,
+        }
+        // fallback to not almost free trees
+        match self.reserve_far(start, (1 << order)..Self::MAX_FREE, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
@@ -200,7 +208,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             Err(Error::Memory) => {}
             r => return r,
         }
-        // fallback to draining all reservations from other cores
+        // drain all reservations from other cores
         drain()?;
         self.reserve_far(start, (1 << order).., get_lower)
     }

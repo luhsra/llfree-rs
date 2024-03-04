@@ -1,9 +1,13 @@
 #![feature(int_roundings)]
 #![feature(allocator_api)]
 #![feature(new_uninit)]
+#![feature(let_chains)]
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Barrier;
+use std::sync::{Barrier, Mutex};
 use std::time::Instant;
 
 use clap::Parser;
@@ -31,6 +35,9 @@ struct Args {
     /// Using only every n-th CPU
     #[arg(long, default_value_t = 2)]
     stride: usize,
+    /// Monitor and output fragmentation
+    #[arg(long)]
+    frag: Option<PathBuf>,
 }
 
 #[cfg(feature = "llc")]
@@ -45,6 +52,7 @@ fn main() {
         time,
         memory,
         stride,
+        frag,
     } = Args::parse();
 
     util::logging();
@@ -72,9 +80,11 @@ fn main() {
     let start = Instant::now();
     let running = AtomicBool::new(true);
 
+    let frag = frag.map(|path| Mutex::new(BufWriter::new(File::create(path).unwrap())));
+
     warn!("start");
 
-    thread::parallel(0..threads, |t| {
+    let allocated = thread::parallel(0..threads, |t| {
         thread::pin(t);
         let mut rng = WyRand::new(t as u64 + 100);
 
@@ -82,13 +92,16 @@ fn main() {
 
         barrier.wait();
 
+        let mut frag_sec = 0;
+
         while let Ok(page) = alloc.get(t, order) {
             pages.push(page);
         }
 
         while running.load(Ordering::Relaxed) {
-            let target = rng.range(0..2 * pages_per_thread as u64) as usize;
+            let target = rng.range(0..pages_per_thread as u64) as usize;
 
+            rng.shuffle(&mut pages);
             while target != pages.len() {
                 if target < pages.len() {
                     let page = pages.pop().unwrap();
@@ -101,14 +114,33 @@ fn main() {
                     }
                 }
             }
-            rng.shuffle(&mut pages);
 
-            if t == 0 && start.elapsed().as_secs() > time as u64 {
-                running.store(false, Ordering::Relaxed);
-                break;
+            if t == 0 {
+                let elapsed = start.elapsed();
+                if let Some(Ok(mut frag)) = frag.as_ref().map(Mutex::lock)
+                    && elapsed.as_secs() > frag_sec
+                {
+                    for i in 0..alloc.frames().div_ceil(1 << Allocator::HUGE_ORDER) {
+                        let free = alloc.free_at(i << Allocator::HUGE_ORDER, Allocator::HUGE_ORDER);
+                        let level = if free == 0 { 0 } else { 1 + free / 64 };
+                        write!(frag, "{level:?}").unwrap();
+                    }
+                    writeln!(frag).unwrap();
+                    frag_sec += 1;
+                }
+
+                if elapsed.as_secs() > time as u64 {
+                    running.store(false, Ordering::Relaxed);
+                    break;
+                }
             }
         }
+
+        warn!("thread {t}: {}", pages.len());
+        pages.len()
     });
+
+    assert_eq!(allocated.into_iter().sum::<usize>(), alloc.allocated_frames());
 
     warn!("{alloc:?}");
 }
