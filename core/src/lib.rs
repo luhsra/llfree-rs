@@ -436,7 +436,7 @@ mod test {
 
         // Stress test
         //TODO: try and really allocate ALL pages
-        let mut frames = vec![0; FRAMES/2]; // 0 to #frames that are accessible (- prev n this trest allocated pages)
+        let mut frames = vec![0; FRAMES / 2]; // 0 to #frames that are accessible (- prev n this trest allocated pages)
         for frame in &mut frames {
             *frame = alloc.get(0, 0).unwrap();
         }
@@ -900,7 +900,7 @@ mod test {
     fn different_orders() {
         const MAX_ORDER: usize = Lower::MAX_ORDER;
         const THREADS: usize = 4;
-        const FRAMES: usize = Lower::N * (THREADS * MAX_ORDER / 2); // 6 GiB for 16K
+        const FRAMES: usize = (1 << MAX_ORDER) * (MAX_ORDER + 2) * THREADS; // 6 GiB for 16K
 
         logging();
 
@@ -912,12 +912,12 @@ mod test {
             thread::pin(t);
             let mut rng = WyRand::new(42 + t as u64);
             let mut num_frames = 0;
-            let mut frames = Vec::new();    
+            let mut frames = Vec::new();
             for order in 0..=MAX_ORDER {
                 for _ in 0..1 << (MAX_ORDER - order) {
                     frames.push((order, 0));
                     num_frames += 1 << order;
-                }   
+                }
             }
             rng.shuffle(&mut frames);
 

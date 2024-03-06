@@ -66,12 +66,12 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
     /// Return the name of the allocator.
     #[cold]
-    #[cfg(feature="16K")]
+    #[cfg(feature = "16K")]
     fn name() -> &'static str {
         "LLFree16K"
     }
 
-    #[cfg(not(feature="16K"))]
+    #[cfg(not(feature = "16K"))]
     fn name() -> &'static str {
         "LLFree"
     }
@@ -351,11 +351,12 @@ impl LLFree<'_> {
 
             // Try sync with global counter
             if let Some(tree) = preferred.tree {
-                if self.sync_with_global(&local.preferred, tree) {
+                if self.sync_with_global(&local.preferred, tree, order) {
                     warn!("sync success");
                     // Success -> Retry allocation
                     return Err(Error::Retry);
                 }
+                //warn!("sync failed");
             }
 
             // The local tree is full -> reserve a new one
@@ -383,9 +384,9 @@ impl LLFree<'_> {
     /// Frees from other CPUs update the global entry -> sync free counters.
     ///
     /// Returns if the global counter was large enough
-    fn sync_with_global(&self, local: &Atom<Preferred>, tree: LocalTree) -> bool {
+    fn sync_with_global(&self, local: &Atom<Preferred>, tree: LocalTree, order: usize) -> bool {
         let i = tree.frame / Lower::N;
-        let min = Trees::<{ Lower::N }>::MIN_FREE;
+        let min = 1 << order;
         if let Ok(entry) = self.trees[i].fetch_update(|e| e.sync_steal(tree.free, min)) {
             debug_assert!(tree.free + entry.free() <= Lower::N);
             local

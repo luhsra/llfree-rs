@@ -10,10 +10,10 @@ use crate::entry::{AtomicArray, HugeEntry, HugePair};
 use crate::util::{align_down, size_of_slice, spin_wait, Align};
 use crate::{Error, Init, Result, CAS_RETRIES};
 
-#[cfg(feature="16K")]
+#[cfg(feature = "16K")]
 type Bitfield = crate::bitfield::Bitfield<32>; // 16K base frames need 2048 bit bitfields -> 32x64bit
 
-#[cfg(not(feature="16K"))]
+#[cfg(not(feature = "16K"))]
 type Bitfield = crate::bitfield::Bitfield<8>;
 
 /// Lower-level frame allocator.
@@ -72,20 +72,20 @@ impl Metadata {
 
 impl<'a> Lower<'a> {
     /// Number of huge pages managed by a chunk
-    #[cfg(feature="16K")]
+    #[cfg(feature = "16K")]
     pub const HP: usize = 8; // translates to 256MiB of memory managed by a chunk (or 2^14 Base Frames)
-    #[cfg(not(feature="16K"))]
+    #[cfg(not(feature = "16K"))]
     pub const HP: usize = 32;
     /// Pages per chunk. Every alloc only searches in a chunk of this size.
     pub const N: usize = Self::HP * Bitfield::LEN; //LEN for 16K is 2048
     /// The maximal allowed order of this allocator
-    #[cfg(not(feature="16K"))]
+    #[cfg(not(feature = "16K"))]
     pub const HUGE_ORDER: usize = Bitfield::ORDER; //order for 16K is 11
-    #[cfg(not(feature="16K"))]
+    #[cfg(not(feature = "16K"))]
     pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
-    #[cfg(feature="16K")]
-    pub const HUGE_ORDER: usize = Bitfield::ORDER; //Bitfield::ORDER for 16K is 11 
-    #[cfg(feature="16K")]
+    #[cfg(feature = "16K")]
+    pub const HUGE_ORDER: usize = Bitfield::ORDER; //Bitfield::ORDER for 16K is 11
+    #[cfg(feature = "16K")]
     pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1; //MAX_ORDER for 16K is 11, as 2^11*2^14B (16KiB) = 2^25B -> 32 MiB
 
     //Metadata does not need to be adapted for 16K -> or DOES it? -> TODO: Align_up prüfen
@@ -524,7 +524,7 @@ mod test {
     use crate::frame::PT_LEN;
     use crate::lower::Lower;
     use crate::util::{aligned_buf, logging, WyRand};
-    use crate::{thread, Init, Result};
+    use crate::{thread, Error, Init, Result};
 
     struct LowerTest(ManuallyDrop<Lower<'static>>);
 
@@ -736,10 +736,11 @@ mod test {
     fn different_orders() {
         logging();
 
-        const MAX_ORDER: usize = Lower::MAX_ORDER -1;
+        const MAX_ORDER: usize = Lower::MAX_ORDER;
+        const FRAMES: usize = (1 << MAX_ORDER) * (MAX_ORDER + 2);
 
         thread::pin(0);
-        let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
+        let lower = LowerTest::create(FRAMES, Init::FreeAll).unwrap();
 
         assert_eq!(lower.allocated_frames(), 0);
 
@@ -755,9 +756,18 @@ mod test {
         }
         rng.shuffle(&mut frames);
         warn!("allocate {num_frames} frames up to order {MAX_ORDER}");
-
+        assert!(FRAMES >= num_frames);
         for (order, frame) in &mut frames {
-            *frame = lower.get(0, *order).unwrap();
+            for i in 0..lower.frames().div_ceil(Lower::N) {
+                match lower.get(i * Lower::N, *order) {
+                    Ok(f) => {
+                        *frame = f;
+                        break;
+                    }
+                    Err(Error::Memory) => continue,
+                    Err(e) => panic!("Error: {e:?}"),
+                }
+            }
         }
 
         assert_eq!(lower.allocated_frames(), num_frames);
