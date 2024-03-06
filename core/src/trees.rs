@@ -115,15 +115,17 @@ impl<'a, const LN: usize> Trees<'a, LN> {
     pub fn reserve_far(
         &self,
         start: usize,
+        order: usize,
         free: impl RangeBounds<usize> + Clone,
-        mut get_lower: impl FnMut(usize) -> Result<usize>,
+        mut get_lower: impl FnMut(usize, usize) -> Result<usize>,
     ) -> Result<LocalTree> {
         // Just search linearly through the array
         for i in 0..self.entries.len() {
             let i = (i + start) % self.entries.len();
             if let Ok(entry) = self.entries[i].fetch_update(|v| v.reserve(free.clone())) {
-                match get_lower(i * LN) {
-                    Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
+                let free = entry.free() as u16;
+                match get_lower(i * LN, order) {
+                    Ok(frame) => return Ok(LocalTree::new(frame, free)),
                     Err(Error::Memory) => self.unreserve(i, entry.free()),
                     Err(e) => return Err(e),
                 }
@@ -138,7 +140,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         cores: usize,
         start: usize,
         order: usize,
-        mut get_lower: impl FnMut(usize) -> Result<usize>,
+        mut get_lower: impl FnMut(usize, usize) -> Result<usize>,
     ) -> Result<LocalTree> {
         let min_free = Self::MIN_FREE.max(1 << order);
 
@@ -157,8 +159,9 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             let i = (start + off) as usize % self.entries.len();
             if let Ok(entry) = self.entries[i].fetch_update(|v| v.reserve(min_free..)) {
                 assert!(!entry.reserved());
-                match get_lower(i * LN) {
-                    Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
+                let free = entry.free() as u16;
+                match get_lower(i * LN, order) {
+                    Ok(frame) => return Ok(LocalTree::new(frame, free)),
                     Err(Error::Memory) => self.unreserve(i, entry.free()),
                     Err(e) => return Err(e),
                 }
@@ -171,11 +174,12 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
             if let Ok(entry) =
-                self.entries[i].fetch_update(|v| v.reserve(min_free..Self::MAX_FREE))
+                self.entries[i].fetch_update(|v| v.reserve(min_free..=Self::MAX_FREE))
             {
                 assert!(!entry.reserved());
-                match get_lower(i * LN) {
-                    Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
+                let free = entry.free() as u16;
+                match get_lower(i * LN, order) {
+                    Ok(frame) => return Ok(LocalTree::new(frame, free)),
                     Err(Error::Memory) => self.unreserve(i, entry.free()),
                     Err(e) => return Err(e),
                 }
@@ -187,29 +191,29 @@ impl<'a, const LN: usize> Trees<'a, LN> {
     /// Reserves a new tree, prioritizing partially filled trees.
     pub fn reserve(
         &self,
-        order: usize,
         cores: usize,
         start: usize,
-        get_lower: impl FnMut(usize) -> Result<usize> + Copy,
-        drain: impl FnOnce() -> Result<()>,
+        order: usize,
+        get_lower: impl FnMut(usize, usize) -> Result<usize> + Copy,
+        steal: impl FnOnce(usize) -> Result<LocalTree>,
     ) -> Result<LocalTree> {
         // search for a partially filled tree
         match self.reserve_partial(cores, start, order, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
+        let min_free = 1 << order;
         // fallback to not almost free trees
-        match self.reserve_far(start, (1 << order)..Self::MAX_FREE, get_lower) {
+        match self.reserve_far(start, order, min_free..=Self::MAX_FREE, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // fallback to any tree
-        match self.reserve_far(start, (1 << order).., get_lower) {
+        match self.reserve_far(start, order, min_free.., get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
-        // drain all reservations from other cores
-        drain()?;
-        self.reserve_far(start, (1 << order).., get_lower)
+        // steal from another core
+        steal(order)
     }
 }

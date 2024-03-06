@@ -898,7 +898,7 @@ mod test {
     fn different_orders() {
         const MAX_ORDER: usize = Lower::MAX_ORDER;
         const THREADS: usize = 4;
-        const FRAMES: usize = Lower::N * (THREADS * 2 + 1);
+        const FRAMES: usize = ((MAX_ORDER + 1) << MAX_ORDER) * (THREADS * 2 + 1);
 
         logging();
 

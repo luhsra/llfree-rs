@@ -265,6 +265,23 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 }
 
 impl LLFree<'_> {
+    /// Steal a tree from another core
+    fn steal_tree(&self, core: usize, order: usize) -> Result<LocalTree> {
+        for i in 1..self.local.len() {
+            let target_core = (core + i) % self.local.len();
+            if let Some(mut target) = self.local[target_core].try_lock()
+                && let Some(tree) = target.preferred
+                && tree.free >= (1 << order)
+                && let Ok(frame) = self.lower.get(tree.frame, order)
+            {
+                assert!(frame / Lower::N == tree.frame / Lower::N);
+                target.preferred = None;
+                return Ok(LocalTree::new(frame, tree.free));
+            }
+        }
+        Err(Error::Memory)
+    }
+
     /// Try to allocate a frame with the given order
     fn get_inner(&self, core: usize, order: usize) -> Result<usize> {
         let mut local = self.local[core].lock();
@@ -332,29 +349,21 @@ impl LLFree<'_> {
             self.trees.len() / self.local.len() * core
         };
 
-        let drain_fn = || {
-            for off in 1..self.local.len() {
-                self.drain(core + off)?;
-            }
-            Ok(())
-        };
-
         // Reserved a new tree an allocate a frame in it
         let cores = self.local.len();
-        match self
-            .trees
-            .reserve(order, cores, start, |c| self.lower.get(c, order), drain_fn)
-        {
+        match self.trees.reserve(
+            cores,
+            start,
+            order,
+            |s, o| self.lower.get(s, o),
+            |o| self.steal_tree(core, o),
+        ) {
             Ok(mut new) => {
                 new.free -= 1 << order;
                 self.swap_reserved(preferred, Some(new));
                 Ok(new.frame)
             }
-            Err(e) => {
-                // Rollback: Clear reserve flag
-                self.swap_reserved(preferred, None);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 

@@ -63,7 +63,7 @@ impl Tree {
         self.with_free(frames)
     }
     /// Reserves this entry if its frame count is in `range`.
-    pub fn reserve<R: RangeBounds<usize>>(self, free: R) -> Option<Self> {
+    pub fn reserve(self, free: impl RangeBounds<usize>) -> Option<Self> {
         if !self.reserved() && free.contains(&self.free()) {
             Some(Self::with(0, true))
         } else {

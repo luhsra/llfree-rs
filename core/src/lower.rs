@@ -505,7 +505,7 @@ mod test {
     use crate::frame::PT_LEN;
     use crate::lower::Lower;
     use crate::util::{aligned_buf, logging, WyRand};
-    use crate::{thread, Init, Result};
+    use crate::{thread, Error, Init, Result};
 
     struct LowerTest(ManuallyDrop<Lower<'static>>);
 
@@ -718,9 +718,9 @@ mod test {
         logging();
 
         const MAX_ORDER: usize = Lower::MAX_ORDER;
+        const FRAMES: usize = (MAX_ORDER + 1) << MAX_ORDER;
 
-        thread::pin(0);
-        let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
+        let lower = LowerTest::create(FRAMES, Init::FreeAll).unwrap();
 
         assert_eq!(lower.allocated_frames(), 0);
 
@@ -735,10 +735,24 @@ mod test {
             }
         }
         rng.shuffle(&mut frames);
-        warn!("allocate {num_frames} frames up to order {MAX_ORDER}");
+        assert!(lower.frames() >= num_frames);
+        warn!(
+            "allocate {num_frames}/{} frames up to order {MAX_ORDER}",
+            lower.frames()
+        );
 
         for (order, frame) in &mut frames {
-            *frame = lower.get(0, *order).unwrap();
+            for i in 0..lower.frames().div_ceil(Lower::N) {
+                // fall back to other chunks
+                match lower.get(i * Lower::N, *order) {
+                    Ok(f) => {
+                        *frame = f;
+                        break;
+                    }
+                    Err(Error::Memory) => {}
+                    Err(e) => panic!("{e:?}"),
+                }
+            }
         }
 
         assert_eq!(lower.allocated_frames(), num_frames);
