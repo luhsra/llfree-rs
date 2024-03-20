@@ -120,7 +120,6 @@ fn main() {
         });
 
         assert_eq!(alloc.allocated_frames(), 0);
-        drop(alloc);
 
         for (get_b, put_b) in t_buckets {
             for i in 0..buckets {

@@ -88,7 +88,7 @@ fn main() {
         thread::pin(t);
         let mut rng = WyRand::new(t as u64 + 100);
 
-        let mut pages = Vec::new();
+        let mut pages = Vec::with_capacity(pages_per_thread);
 
         barrier.wait();
 
@@ -99,6 +99,7 @@ fn main() {
         }
 
         while running.load(Ordering::Relaxed) {
+            // Random target filling level
             let target = rng.range(0..pages_per_thread as u64) as usize;
 
             rng.shuffle(&mut pages);
@@ -115,6 +116,7 @@ fn main() {
                 }
             }
 
+            // Output fragmentation heatmap
             if t == 0 {
                 let elapsed = start.elapsed();
                 if let Some(Ok(mut frag)) = frag.as_ref().map(Mutex::lock)

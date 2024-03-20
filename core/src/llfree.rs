@@ -381,22 +381,15 @@ impl LLFree<'_> {
 impl fmt::Debug for LLFree<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} {{", Self::name())?;
-
-        writeln!(f, "    frames: {}", self.lower.frames())?;
-
-        writeln!(f, "    trees: {:?} ({} frames)", self.trees, Lower::N)?;
-        let free_frames = self.free_frames();
-        let free_huge_frames = self.free_huge_frames();
-        writeln!(
-            f,
-            "    free frames: {free_frames} ({free_huge_frames} huge, {} trees)",
-            free_frames.div_ceil(Lower::N)
-        )?;
-
+        let huge = self.frames() / (1 << Lower::HUGE_ORDER);
+        writeln!(f, "    managed: {} frames ({huge} huge)", self.frames())?;
+        let free = self.free_frames();
+        let free_huge = self.free_huge_frames();
+        writeln!(f, "    free: {free} frames ({free_huge} huge)")?;
+        writeln!(f, "    trees: {:?} (N={})", self.trees, Lower::N)?;
         for (t, local) in self.local.iter().enumerate() {
             writeln!(f, "    L{t:>2}: {:?}", local.lock().preferred)?;
         }
-
         write!(f, "}}")?;
         Ok(())
     }

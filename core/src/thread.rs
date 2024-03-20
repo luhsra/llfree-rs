@@ -53,9 +53,8 @@ pub fn pin(core: usize) {
 
 /// Pins the current thread to the given virtual core
 #[cfg(target_os = "macos")]
+#[allow(non_camel_case_types)]
 pub fn pin(core: usize) {
-    #![allow(non_camel_case_types)]
-
     use std::mem::size_of;
     use std::os::raw::{c_int, c_uint};
 
