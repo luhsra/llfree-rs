@@ -1,8 +1,8 @@
-//! # Persistent non-volatile memory allocator
-//!
-//! This project contains multiple allocator designs for NVM and benchmarks comparing them.
-
+// Include readme as documentation
+#![doc = include_str!("../../README.md")]
+// Disable standard library
 #![no_std]
+// Unstable (but useful) features
 #![cfg_attr(feature = "std", feature(new_uninit))]
 #![feature(int_roundings)]
 #![feature(array_windows)]
