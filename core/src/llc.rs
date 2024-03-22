@@ -113,6 +113,9 @@ impl<'a> Alloc<'a> for LLC {
     fn free_frames(&self) -> usize {
         unsafe { llfree_free_frames(self.raw.as_ptr().cast()) as _ }
     }
+    fn free_huge_frames(&self) -> usize {
+        unsafe { llfree_free_huge(self.raw.as_ptr().cast()) as _ }
+    }
 
     fn free_at(&self, frame: usize, order: usize) -> usize {
         unsafe { llfree_free_at(self.raw.as_ptr().cast(), frame as _, order) }
@@ -209,6 +212,9 @@ extern "C" {
 
     /// Returns number of currently free frames
     fn llfree_free_frames(this: *const llfree_t) -> c_size_t;
+
+    /// Returns number of currently free huge frames
+    fn llfree_free_huge(this: *const llfree_t) -> c_size_t;
 
     /// Prints the allocators state for debugging
     fn llfree_print_debug(

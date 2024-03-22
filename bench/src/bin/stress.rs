@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Barrier, Mutex};
+use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::Parser;
@@ -73,61 +73,42 @@ fn main() {
         Allocator::new(threads, pages, Init::FreeAll, &mut primary, &mut secondary).unwrap();
 
     // Operate on half of the avaliable memory
-    let barrier = Barrier::new(threads);
+    let barrier = Barrier::new(threads + 1);
 
     let pages_per_thread = pages / threads;
 
     let start = Instant::now();
     let running = AtomicBool::new(true);
 
-    let frag = frag.map(|path| Mutex::new(BufWriter::new(File::create(path).unwrap())));
-
     warn!("start");
 
-    let allocated = thread::parallel(0..threads, |t| {
-        thread::pin(t);
-        let mut rng = WyRand::new(t as u64 + 100);
+    let (allocated, score) = std::thread::scope(|s| {
+        let monitor = s.spawn(|| {
+            thread::pin(threads);
+            let mut frag = frag.map(|path| BufWriter::new(File::create(path).unwrap()));
 
-        let mut pages = Vec::with_capacity(pages_per_thread);
+            barrier.wait();
 
-        barrier.wait();
-
-        let mut frag_sec = 0;
-
-        while let Ok(page) = alloc.get(t, order) {
-            pages.push(page);
-        }
-
-        while running.load(Ordering::Relaxed) {
-            // Random target filling level
-            let target = rng.range(0..pages_per_thread as u64) as usize;
-
-            rng.shuffle(&mut pages);
-            while target != pages.len() {
-                if target < pages.len() {
-                    let page = pages.pop().unwrap();
-                    alloc.put(t, page, order).unwrap();
-                } else {
-                    match alloc.get(t, order) {
-                        Ok(page) => pages.push(page),
-                        Err(Error::Memory) => break,
-                        Err(e) => panic!("{e:?}"),
-                    }
-                }
-            }
-
-            // Output fragmentation heatmap
-            if t == 0 {
+            let mut frag_sec = 0;
+            let mut score = 0.0;
+            while running.load(Ordering::Relaxed) {
                 let elapsed = start.elapsed();
-                if let Some(Ok(mut frag)) = frag.as_ref().map(Mutex::lock)
-                    && elapsed.as_secs() > frag_sec
-                {
-                    for i in 0..alloc.frames().div_ceil(1 << Allocator::HUGE_ORDER) {
-                        let free = alloc.free_at(i << Allocator::HUGE_ORDER, Allocator::HUGE_ORDER);
-                        let level = if free == 0 { 0 } else { 1 + free / 64 };
-                        write!(frag, "{level:?}").unwrap();
+                if elapsed.as_secs() > frag_sec {
+                    if let Some(frag) = frag.as_mut() {
+                        for i in 0..alloc.frames().div_ceil(1 << Allocator::HUGE_ORDER) {
+                            let free =
+                                alloc.free_at(i << Allocator::HUGE_ORDER, Allocator::HUGE_ORDER);
+                            let level = if free == 0 { 0 } else { 1 + free / 64 };
+                            write!(frag, "{level:?}").unwrap();
+                        }
+                        writeln!(frag).unwrap();
                     }
-                    writeln!(frag).unwrap();
+
+                    let huge = alloc.free_huge_frames();
+                    let optimal = alloc.free_frames() >> Allocator::HUGE_ORDER;
+                    let fraction = 100.0 * huge as f32 / optimal as f32;
+                    warn!("free-huge {huge}/{optimal} = {fraction:.1}");
+                    score += fraction;
                     frag_sec += 1;
                 }
 
@@ -136,13 +117,52 @@ fn main() {
                     break;
                 }
             }
-        }
+            score / frag_sec as f32
+        });
 
-        warn!("thread {t}: {}", pages.len());
-        pages.len()
+        let allocated = thread::parallel(0..threads, |t| {
+            thread::pin(t);
+            let mut rng = WyRand::new(t as u64 + 100);
+            let mut pages = Vec::with_capacity(pages_per_thread);
+
+            barrier.wait();
+
+            while let Ok(page) = alloc.get(t, order) {
+                pages.push(page);
+            }
+
+            while running.load(Ordering::Relaxed) {
+                // Random target filling level
+                let target = rng.range(0..pages_per_thread as u64) as usize;
+
+                rng.shuffle(&mut pages);
+                while target != pages.len() {
+                    if target < pages.len() {
+                        let page = pages.pop().unwrap();
+                        alloc.put(t, page, order).unwrap();
+                    } else {
+                        match alloc.get(t, order) {
+                            Ok(page) => pages.push(page),
+                            Err(Error::Memory) => break,
+                            Err(e) => panic!("{e:?}"),
+                        }
+                    }
+                }
+            }
+
+            warn!("thread {t}: {}", pages.len());
+            pages.len()
+        });
+
+        let score = monitor.join().unwrap();
+        (allocated, score)
     });
 
-    assert_eq!(allocated.into_iter().sum::<usize>(), alloc.allocated_frames());
+    assert_eq!(
+        allocated.into_iter().sum::<usize>(),
+        alloc.allocated_frames()
+    );
 
     warn!("{alloc:?}");
+    warn!("score = {score:.1}")
 }
