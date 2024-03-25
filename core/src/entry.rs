@@ -43,40 +43,50 @@ impl LocalTree {
 #[derive(PartialEq, Eq)]
 pub struct Tree {
     /// Number of free 4K frames.
-    #[bits(15)]
+    #[bits(14)]
     pub free: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
+    /// Are the frames movable?
+    #[bits(1, default = true)]
+    pub movable: bool,
 }
 impl Atomic for Tree {
     type I = AtomicU16;
 }
 impl Tree {
     /// Creates a new entry.
-    pub fn with(frames: usize, reserved: bool) -> Self {
-        Self::new().with_free(frames).with_reserved(reserved)
+    pub fn with(frames: usize, reserved: bool, movable: bool) -> Self {
+        Self::new()
+            .with_free(frames)
+            .with_reserved(reserved)
+            .with_movable(movable)
     }
     /// Increments the free frames counter.
     pub fn inc(self, num_frames: usize, max: usize) -> Self {
         let frames = self.free() + num_frames;
         assert!(frames <= max);
         self.with_free(frames)
+            .with_movable(self.movable() || frames == max)
     }
     /// Reserves this entry if its frame count is in `range`.
-    pub fn reserve(self, free: impl RangeBounds<usize>) -> Option<Self> {
-        if !self.reserved() && free.contains(&self.free()) {
-            Some(Self::with(0, true))
+    pub fn reserve(self, free: impl RangeBounds<usize>, max: usize, movable: bool) -> Option<Self> {
+        if !self.reserved()
+            && free.contains(&self.free())
+            && (movable == self.movable() || self.free() == max)
+        {
+            Some(Self::with(0, true, movable))
         } else {
             None
         }
     }
     /// Add the frames from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
-    pub fn unreserve_add(self, add: usize, max: usize) -> Option<Self> {
+    pub fn unreserve_add(self, add: usize, max: usize, movable: bool) -> Option<Self> {
         if self.reserved() {
             let frames = self.free() + add;
             assert!(frames <= max);
-            Some(Self::with(frames, false))
+            Some(Self::with(frames, false, movable || frames == max))
         } else {
             None
         }

@@ -10,7 +10,7 @@ use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::{self, MMap};
 use llfree::util::{self, align_up, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
-use llfree::{thread, Alloc, LLFree};
+use llfree::{thread, Alloc, Flags, LLFree};
 use log::{error, warn};
 
 /// Crash testing an allocator.
@@ -98,7 +98,7 @@ fn execute(
 
         for (i, page) in data.iter_mut().enumerate() {
             *idx = i as _;
-            *page = alloc.get(t, order).unwrap();
+            *page = alloc.get(t, order, Flags::new()).unwrap();
         }
 
         warn!("repeat");
@@ -110,7 +110,7 @@ fn execute(
             *idx = i as _;
 
             alloc.put(t, data[i], order).unwrap();
-            data[i] = alloc.get(t, order).unwrap();
+            data[i] = alloc.get(t, order, Flags::new()).unwrap();
         }
     });
 }

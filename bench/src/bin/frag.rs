@@ -97,7 +97,7 @@ fn main() {
             let mut pages = all_pages[t].lock().unwrap();
             barrier.wait();
 
-            while let Ok(page) = alloc.get(t, order) {
+            while let Ok(page) = alloc.get(t, order, Flags::new()) {
                 pages.push(page);
             }
         };
@@ -149,7 +149,7 @@ fn main() {
                 for _ in 0..allocs / 10 {
                     let i = rng.range(0..pages.len() as u64) as usize;
                     alloc.put(t, pages[i], order).unwrap();
-                    pages[i] = alloc.get(t, order).unwrap();
+                    pages[i] = alloc.get(t, order, Flags::new()).unwrap();
                 }
             };
             if barrier.wait().is_leader() {

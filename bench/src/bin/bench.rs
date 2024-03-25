@@ -16,7 +16,7 @@ use llfree::util::{self, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
 #[cfg(feature = "llc")]
 use llfree::LLC;
-use llfree::{thread, Alloc, LLFree, Result};
+use llfree::{thread, Alloc, Flags, LLFree, Result};
 use log::warn;
 
 /// Number of allocations per block
@@ -118,7 +118,7 @@ trait DynAlloc: fmt::Debug + Send + Sync {
 
 impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
     fn get(&self, core: usize, order: usize) -> Result<usize> {
-        Alloc::get(self, core, order)
+        Alloc::get(self, core, order, Flags::new())
     }
     fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
         Alloc::put(self, core, frame, order)

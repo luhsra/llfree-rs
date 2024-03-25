@@ -4,7 +4,7 @@ use core::{fmt, slice};
 
 use super::{Alloc, Init};
 use crate::util::Align;
-use crate::{Error, Result};
+use crate::{Error, Flags, Result};
 
 /// C implementation of LLFree
 ///
@@ -79,7 +79,7 @@ impl<'a> Alloc<'a> for LLC {
         ret.ok().map(|_| LLC { raw })
     }
 
-    fn get(&self, core: usize, order: usize) -> Result<usize> {
+    fn get(&self, core: usize, order: usize, flags: Flags) -> Result<usize> {
         let ret = unsafe { llfree_get(self.raw.as_ptr().cast(), core as _, order as _) };
         Ok(ret.ok()? as _)
     }

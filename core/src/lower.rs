@@ -68,7 +68,7 @@ impl Metadata {
 
 impl<'a> Lower<'a> {
     /// Number of huge pages managed by a chunk
-    pub const HP: usize = 32;
+    pub const HP: usize = 16;
     /// Pages per chunk. Every alloc only searches in a chunk of this size.
     pub const N: usize = Self::HP * Bitfield::LEN;
     /// The maximal allowed order of this allocator

@@ -7,7 +7,7 @@ use core::{fmt, slice};
 use log::error;
 
 use crate::frame::Frame;
-use crate::{Alloc, Error, Init, MetaSize, Result};
+use crate::{Alloc, Error, Flags, Init, MetaSize, Result};
 
 /// Zone allocator, managing a range of memory at a given page frame offset.
 pub struct ZoneAlloc<'a, A: Alloc<'a>> {
@@ -43,8 +43,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
         self.alloc.metadata()
     }
-    fn get(&self, core: usize, order: usize) -> Result<usize> {
-        Ok(self.alloc.get(core, order)? + self.offset)
+    fn get(&self, core: usize, order: usize, flags: Flags) -> Result<usize> {
+        Ok(self.alloc.get(core, order, flags)? + self.offset)
     }
     fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
         let frame = frame.checked_sub(self.offset).ok_or(Error::Address)?;
@@ -197,8 +197,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
         self.alloc.metadata()
     }
-    fn get(&self, core: usize, order: usize) -> Result<usize> {
-        self.alloc.get(core, order)
+    fn get(&self, core: usize, order: usize, flags: Flags) -> Result<usize> {
+        self.alloc.get(core, order, flags)
     }
     fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
         self.alloc.put(core, frame, order)

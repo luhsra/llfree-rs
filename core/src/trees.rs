@@ -53,7 +53,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
 
         for (i, e) in entries.iter_mut().enumerate() {
             let frames = free_in_tree(i * LN);
-            *e = Atom::new(Tree::with(frames, false));
+            *e = Atom::new(Tree::with(frames, false, true));
         }
 
         Self { entries }
@@ -80,7 +80,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
     }
 
     /// Increment or reserve the tree
-    pub fn inc_or_reserve(&self, i: usize, num_frames: usize, may_reserve: bool) -> Option<usize> {
+    pub fn inc_or_reserve(&self, i: usize, num_frames: usize, may_reserve: bool) -> Option<Tree> {
         let mut reserved = false;
         let tree = self.entries[i]
             .fetch_update(|v| {
@@ -97,16 +97,16 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             .unwrap();
 
         if reserved {
-            Some(tree.free())
+            Some(tree)
         } else {
             None
         }
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: usize, free: usize) {
+    pub fn unreserve(&self, i: usize, free: usize, movable: bool) {
         self.entries[i]
-            .fetch_update(|v| v.unreserve_add(free, LN))
+            .fetch_update(|v| v.unreserve_add(free, LN, movable))
             .expect("Unreserve failed");
     }
 
@@ -118,6 +118,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         offset: usize,
         len: usize,
         free: RangeInclusive<usize>,
+        movable: bool,
         mut get_lower: impl FnMut(usize, usize) -> Result<usize>,
     ) -> Result<LocalTree> {
         // There has to be enough space for the current allocation
@@ -128,10 +129,10 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             // Alternating between before and after this entry
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
-            if let Ok(entry) = self.entries[i].fetch_update(|v| v.reserve(free.clone())) {
+            if let Ok(entry) = self.entries[i].fetch_update(|v| v.reserve(free.clone(), LN, movable)) {
                 match get_lower(i * LN, order) {
                     Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
-                    Err(Error::Memory) => self.unreserve(i, entry.free()),
+                    Err(Error::Memory) => self.unreserve(i, entry.free(), movable),
                     Err(e) => return Err(e),
                 }
             }
@@ -145,35 +146,36 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         cores: usize,
         start: usize,
         order: usize,
+        movable: bool,
         get_lower: impl FnMut(usize, usize) -> Result<usize> + Copy,
         steal: impl FnOnce(usize) -> Result<LocalTree>,
     ) -> Result<LocalTree> {
         const CACHELINE: usize = align_of::<Align>() / size_of::<Tree>();
         let start = align_down(start, CACHELINE);
 
-        let half = (4 << order).max(LN / 32)..=LN / 2;
-        let partial = (2 << order).max(LN / 128)..=LN - LN / 32;
+        let half = (4 << order).max(LN / 16)..=LN / 2;
+        let partial = (2 << order).max(LN / 64)..=LN - LN / 16;
 
         // Search near trees
-        let near = (self.len() / cores / 4).clamp(CACHELINE / 4, CACHELINE * 2);
+        let near = (self.len() / cores / 2).clamp(CACHELINE / 2, CACHELINE * 4);
 
         // Over half filled trees
-        match self.reserve_matching(start, order, 1, near, half.clone(), get_lower) {
+        match self.reserve_matching(start, order, 1, near, half.clone(), movable, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Partially filled trees
-        match self.reserve_matching(start, order, 1, near, partial.clone(), get_lower) {
+        match self.reserve_matching(start, order, 1, near, partial.clone(), movable, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Not free trees
-        match self.reserve_matching(start, order, 1, near, 0..=LN - 4, get_lower) {
+        match self.reserve_matching(start, order, 1, near, 0..=LN - 4, movable, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Any tree
-        match self.reserve_matching(start, order, 1, near, 0..=LN, get_lower) {
+        match self.reserve_matching(start, order, 1, near, 0..=LN, movable, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
@@ -181,23 +183,23 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         // Search globally
 
         // Over half filled trees
-        match self.reserve_matching(start, order, near, self.len(), half, get_lower) {
+        match self.reserve_matching(start, order, near, self.len(), half, movable, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Partially filled trees
-        match self.reserve_matching(start, order, near, self.len(), partial, get_lower) {
+        match self.reserve_matching(start, order, near, self.len(), partial, movable, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Not free trees
-        match self.reserve_matching(start, order, near, self.len(), 0..=LN - 4, get_lower) {
+        match self.reserve_matching(start, order, near, self.len(), 0..=LN - 4, movable, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
 
         // Any tree
-        match self.reserve_matching(start, order, 0, self.len(), 0..=LN, get_lower) {
+        match self.reserve_matching(start, order, 0, self.len(), 0..=LN, movable, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }

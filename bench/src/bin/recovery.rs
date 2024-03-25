@@ -13,7 +13,7 @@ use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::MMap;
 use llfree::util::{self, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
-use llfree::{thread, Alloc, LLFree};
+use llfree::{thread, Alloc, Flags, LLFree};
 use log::warn;
 
 /// Benchmarking the (crashed) recovery.
@@ -114,7 +114,7 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 
         let mut pages = Vec::with_capacity(allocs);
         for _ in 0..allocs {
-            pages.push(alloc.get(t, 0).unwrap());
+            pages.push(alloc.get(t, 0, Flags::new()).unwrap());
         }
 
         if crash {
@@ -122,7 +122,7 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
                 let i = rng.range(0..pages.len() as _) as usize;
                 alloc.put(t, pages[i], 0).unwrap();
                 black_box(pages[i]);
-                pages[i] = alloc.get(t, 0).unwrap();
+                pages[i] = alloc.get(t, 0, Flags::new()).unwrap();
             }
         }
     });

@@ -13,7 +13,7 @@ use clap::Parser;
 use llfree::frame::{Frame, PT_LEN};
 use llfree::mmap::{self, MMap};
 use llfree::util::{aligned_buf, logging};
-use llfree::{thread, Alloc, Init, LLFree};
+use llfree::{thread, Alloc, Flags, Init, LLFree};
 use log::warn;
 
 type Allocator<'a> = LLFree<'a>;
@@ -96,7 +96,7 @@ fn main() {
 
             for _ in 0..allocs {
                 let timer = Instant::now();
-                let page = alloc.get(t, order).unwrap();
+                let page = alloc.get(t, order, Flags::new()).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
 
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
