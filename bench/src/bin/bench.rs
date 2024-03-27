@@ -118,10 +118,10 @@ trait DynAlloc: fmt::Debug + Send + Sync {
 
 impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
     fn get(&self, core: usize, order: usize) -> Result<usize> {
-        Alloc::get(self, core, order, Flags::new())
+        Alloc::get(self, core, Flags::o(order))
     }
     fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
-        Alloc::put(self, core, frame, order)
+        Alloc::put(self, core, frame, Flags::o(order))
     }
     fn frames(&self) -> usize {
         Alloc::frames(self)

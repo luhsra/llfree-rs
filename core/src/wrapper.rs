@@ -43,12 +43,12 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
         self.alloc.metadata()
     }
-    fn get(&self, core: usize, order: usize, flags: Flags) -> Result<usize> {
-        Ok(self.alloc.get(core, order, flags)? + self.offset)
+    fn get(&self, core: usize, flags: Flags) -> Result<usize> {
+        Ok(self.alloc.get(core, flags)? + self.offset)
     }
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
+    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
         let frame = frame.checked_sub(self.offset).ok_or(Error::Address)?;
-        self.alloc.put(core, frame, order)
+        self.alloc.put(core, frame, flags)
     }
     fn frames(&self) -> usize {
         self.alloc.frames()
@@ -197,11 +197,11 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
         self.alloc.metadata()
     }
-    fn get(&self, core: usize, order: usize, flags: Flags) -> Result<usize> {
-        self.alloc.get(core, order, flags)
+    fn get(&self, core: usize, flags: Flags) -> Result<usize> {
+        self.alloc.get(core, flags)
     }
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
-        self.alloc.put(core, frame, order)
+    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
+        self.alloc.put(core, frame, flags)
     }
     fn frames(&self) -> usize {
         self.alloc.frames()

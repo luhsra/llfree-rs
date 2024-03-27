@@ -8,7 +8,7 @@ use log::{error, info, warn};
 use crate::atomic::Atom;
 use crate::entry::{AtomicArray, HugeEntry, HugePair};
 use crate::util::{align_down, size_of_slice, spin_wait, Align};
-use crate::{Error, Init, Result, CAS_RETRIES};
+use crate::{Error, Flags, Init, Result, CAS_RETRIES};
 
 type Bitfield = crate::bitfield::Bitfield<8>;
 
@@ -68,7 +68,7 @@ impl Metadata {
 
 impl<'a> Lower<'a> {
     /// Number of huge pages managed by a chunk
-    pub const HP: usize = 16;
+    pub const HP: usize = 8;
     /// Pages per chunk. Every alloc only searches in a chunk of this size.
     pub const N: usize = Self::HP * Bitfield::LEN;
     /// The maximal allowed order of this allocator
@@ -165,32 +165,32 @@ impl<'a> Lower<'a> {
     }
 
     /// Try allocating a new `frame` in the [LowerAlloc::N] sized chunk at `start`.
-    pub fn get(&self, start: usize, order: usize) -> Result<usize> {
-        debug_assert!(order <= Self::MAX_ORDER);
+    pub fn get(&self, start: usize, flags: Flags) -> Result<usize> {
+        debug_assert!(flags.order() <= Self::MAX_ORDER);
         debug_assert!(start < self.frames());
 
-        match order {
+        match flags.order() {
             Self::MAX_ORDER => self.get_max(start),
             Self::HUGE_ORDER => self.get_huge(start),
-            _ => self.get_small(start, order),
+            _ => self.get_small(start, flags.order()),
         }
     }
 
     /// Free single frame
-    pub fn put(&self, frame: usize, order: usize) -> Result<()> {
-        debug_assert!(order <= Self::MAX_ORDER);
+    pub fn put(&self, frame: usize, flags: Flags) -> Result<()> {
+        debug_assert!(flags.order() <= Self::MAX_ORDER);
         debug_assert!(frame < self.frames());
 
-        if order == Self::MAX_ORDER {
+        if flags.order() == Self::MAX_ORDER {
             self.put_max(frame)
-        } else if order == Self::HUGE_ORDER {
+        } else if flags.order() == Self::HUGE_ORDER {
             let i = (frame / Bitfield::LEN) % Self::HP;
             let table = &self.children[frame / Self::N];
 
             if let Err(old) =
                 table[i].compare_exchange(HugeEntry::new_huge(), HugeEntry::new_free(Bitfield::LEN))
             {
-                error!("Addr p={frame:x} o={order} {old:?}");
+                error!("Addr p={frame:x} o={} {old:?}", flags.order());
                 Err(Error::Address)
             } else {
                 Ok(())
@@ -201,11 +201,11 @@ impl<'a> Lower<'a> {
 
             let old = table[i].load();
             if old.huge() {
-                self.partial_put_huge(old, frame, order)
-            } else if old.free() <= Bitfield::LEN - (1 << order) {
-                self.put_small(frame, order)
+                self.partial_put_huge(old, frame, flags.order())
+            } else if old.free() <= Bitfield::LEN - (1 << flags.order()) {
+                self.put_small(frame, flags.order())
             } else {
-                error!("Addr p={frame:x} o={order} {old:?}");
+                error!("Addr p={frame:x} o={} {old:?}", flags.order());
                 Err(Error::Address)
             }
         }
@@ -505,7 +505,7 @@ mod test {
     use crate::frame::PT_LEN;
     use crate::lower::Lower;
     use crate::util::{aligned_buf, logging, WyRand};
-    use crate::{thread, Error, Init, Result};
+    use crate::{thread, Error, Flags, Init, Result};
 
     struct LowerTest(ManuallyDrop<Lower<'static>>);
 
@@ -537,12 +537,12 @@ mod test {
 
         const FRAMES: usize = 4 * Lower::N;
         let lower = LowerTest::create(FRAMES, Init::FreeAll).unwrap();
-        lower.get(0, 0).unwrap();
+        lower.get(0, Flags::o(0)).unwrap();
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            let frame = lower.get(0, 0).unwrap();
+            let frame = lower.get(0, Flags::o(0)).unwrap();
             assert!(frame < FRAMES);
         });
 
@@ -559,7 +559,7 @@ mod test {
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.get(0, 0).unwrap();
+            lower.get(0, Flags::o(0)).unwrap();
         });
 
         let entry2 = lower.children[0][0].load();
@@ -574,13 +574,13 @@ mod test {
         let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
         for _ in 0..Bitfield::LEN - 1 {
-            lower.get(0, 0).unwrap();
+            lower.get(0, Flags::o(0)).unwrap();
         }
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.get(0, 0).unwrap();
+            lower.get(0, Flags::o(0)).unwrap();
         });
 
         let table = &lower.children[0];
@@ -597,13 +597,13 @@ mod test {
 
         let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
-        frames[0] = lower.get(0, 0).unwrap();
-        frames[1] = lower.get(0, 0).unwrap();
+        frames[0] = lower.get(0, Flags::o(0)).unwrap();
+        frames[1] = lower.get(0, Flags::o(0)).unwrap();
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.put(frames[t as usize], 0).unwrap();
+            lower.put(frames[t as usize], Flags::o(0)).unwrap();
         });
 
         assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
@@ -618,13 +618,13 @@ mod test {
         let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
         for frame in &mut frames {
-            *frame = lower.get(0, 0).unwrap();
+            *frame = lower.get(0, Flags::o(0)).unwrap();
         }
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.put(frames[t as usize], 0).unwrap();
+            lower.put(frames[t as usize], Flags::o(0)).unwrap();
         });
 
         let table = &lower.children[0];
@@ -641,18 +641,18 @@ mod test {
         let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
         for frame in &mut frames[..Bitfield::LEN - 1] {
-            *frame = lower.get(0, 0).unwrap();
+            *frame = lower.get(0, Flags::o(0)).unwrap();
         }
 
         std::thread::scope(|s| {
             s.spawn(|| {
                 thread::pin(0);
 
-                lower.get(0, 0).unwrap();
+                lower.get(0, Flags::o(0)).unwrap();
             });
             thread::pin(1);
 
-            lower.put(frames[0], 0).unwrap();
+            lower.put(frames[0], Flags::o(0)).unwrap();
         });
 
         let table = &lower.children[0];
@@ -673,13 +673,13 @@ mod test {
 
         const FRAMES: usize = 4 * Lower::N;
         let lower = LowerTest::create(FRAMES, Init::FreeAll).unwrap();
-        lower.get(0, 0).unwrap();
+        lower.get(0, Flags::o(0)).unwrap();
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
             let order = t + 1; // order 1 and 2
-            let frame = lower.get(0, order).unwrap();
+            let frame = lower.get(0, Flags::o(order)).unwrap();
             assert!(frame < FRAMES);
         });
 
@@ -699,15 +699,15 @@ mod test {
 
         let lower = LowerTest::create(4 * Lower::N, Init::FreeAll).unwrap();
 
-        frames[0] = lower.get(0, 1).unwrap();
-        frames[1] = lower.get(0, 2).unwrap();
+        frames[0] = lower.get(0, Flags::o(1)).unwrap();
+        frames[1] = lower.get(0, Flags::o(2)).unwrap();
 
         assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 2 - 4);
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.put(frames[t as usize], t + 1).unwrap();
+            lower.put(frames[t as usize], Flags::o(t + 1)).unwrap();
         });
 
         assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
@@ -744,7 +744,7 @@ mod test {
         for (order, frame) in &mut frames {
             for i in 0..lower.frames().div_ceil(Lower::N) {
                 // fall back to other chunks
-                match lower.get(i * Lower::N, *order) {
+                match lower.get(i * Lower::N, Flags::o(*order)) {
                     Ok(f) => {
                         *frame = f;
                         break;
@@ -758,7 +758,7 @@ mod test {
         assert_eq!(lower.allocated_frames(), num_frames);
 
         for (order, frame) in &frames {
-            lower.put(*frame, *order).unwrap();
+            lower.put(*frame, Flags::o(*order)).unwrap();
         }
 
         assert_eq!(lower.allocated_frames(), 0);
@@ -777,7 +777,9 @@ mod test {
         assert_eq!(lower.allocated_frames(), Lower::N - 1);
 
         for i in 0..num_max_frames {
-            lower.put(i * (1 << MAX_ORDER), MAX_ORDER).unwrap();
+            lower
+                .put(i * (1 << MAX_ORDER), Flags::o(MAX_ORDER))
+                .unwrap();
         }
 
         assert_eq!(lower.allocated_frames(), (1 << MAX_ORDER) - 1);
@@ -791,7 +793,7 @@ mod test {
 
         assert_eq!(lower.allocated_frames(), Lower::N - 1);
 
-        lower.put(0, 0).unwrap();
+        lower.put(0, Flags::o(0)).unwrap();
 
         assert_eq!(lower.allocated_frames(), Lower::N - 2);
     }
@@ -815,11 +817,11 @@ mod test {
 
                 let mut frames = [0; 4];
                 for p in &mut frames {
-                    *p = lower.get(0, 0).unwrap();
+                    *p = lower.get(0, Flags::o(0)).unwrap();
                 }
                 frames.reverse();
                 for p in frames {
-                    lower.put(p, 0).unwrap();
+                    lower.put(p, Flags::o(0)).unwrap();
                 }
             });
 
@@ -841,7 +843,7 @@ mod test {
             assert_eq!(lower.allocated_frames(), 0);
 
             for frame in &mut frames[..PT_LEN - 3] {
-                *frame = lower.get(0, 0).unwrap();
+                *frame = lower.get(0, Flags::o(0)).unwrap();
             }
 
             let barrier = Barrier::new(THREADS);
@@ -850,9 +852,9 @@ mod test {
                 barrier.wait();
 
                 if t < THREADS / 2 {
-                    lower.put(frames[t], 0).unwrap();
+                    lower.put(frames[t], Flags::o(0)).unwrap();
                 } else {
-                    lower.get(0, 0).unwrap();
+                    lower.get(0, Flags::o(0)).unwrap();
                 }
             });
 

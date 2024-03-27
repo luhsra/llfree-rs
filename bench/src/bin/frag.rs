@@ -97,7 +97,7 @@ fn main() {
             let mut pages = all_pages[t].lock().unwrap();
             barrier.wait();
 
-            while let Ok(page) = alloc.get(t, order, Flags::new()) {
+            while let Ok(page) = alloc.get(t, Flags::o(order)) {
                 pages.push(page);
             }
         };
@@ -131,7 +131,7 @@ fn main() {
             barrier.wait();
 
             for _ in 0..allocs {
-                alloc.put(t, pages.pop().unwrap(), order).unwrap();
+                alloc.put(t, pages.pop().unwrap(), Flags::o(order)).unwrap();
             }
         };
 
@@ -148,8 +148,8 @@ fn main() {
                 // realloc 10% of the remaining pages
                 for _ in 0..allocs / 10 {
                     let i = rng.range(0..pages.len() as u64) as usize;
-                    alloc.put(t, pages[i], order).unwrap();
-                    pages[i] = alloc.get(t, order, Flags::new()).unwrap();
+                    alloc.put(t, pages[i], Flags::o(order)).unwrap();
+                    pages[i] = alloc.get(t, Flags::o(order)).unwrap();
                 }
             };
             if barrier.wait().is_leader() {

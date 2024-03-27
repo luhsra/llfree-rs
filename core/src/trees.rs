@@ -5,7 +5,7 @@ use core::{fmt, slice};
 use crate::atomic::Atom;
 use crate::entry::{LocalTree, Tree};
 use crate::util::{align_down, size_of_slice, Align};
-use crate::{Error, Result};
+use crate::{Error, Flags, Result};
 
 #[derive(Default)]
 pub struct Trees<'a, const LN: usize> {
@@ -53,7 +53,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
 
         for (i, e) in entries.iter_mut().enumerate() {
             let frames = free_in_tree(i * LN);
-            *e = Atom::new(Tree::with(frames, false, true));
+            *e = Atom::new(Tree::with(frames, false, false));
         }
 
         Self { entries }
@@ -110,29 +110,100 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             .expect("Unreserve failed");
     }
 
+    pub fn reserve_best(
+        &self,
+        cores: usize,
+        start: usize,
+        flags: Flags,
+        mut get_lower: impl FnMut(usize, Flags) -> Result<usize>,
+    ) -> Result<LocalTree> {
+        const CACHELINE: usize = align_of::<Align>() / size_of::<Tree>();
+        let near = (self.len() / cores / 4).clamp(CACHELINE / 2, CACHELINE * 4);
+
+        let mut best = [None, None];
+
+        fn better(a: Tree, b: Option<LocalTree>, order: usize) -> bool {
+            let min_pages = 4.max(2 << order);
+            if a.free() < min_pages {
+                return false;
+            }
+            match b {
+                Some(b) => a.free() < b.free as usize,
+                None => true,
+            }
+        }
+
+        let mut total_free = 0;
+        let start = (start + self.entries.len()) as isize;
+        for j in 1..=align_down(self.len() - 1, near) as isize {
+            // Alternating between before and after this entry
+            let off = if j % 2 == 0 { j / 2 } else { -j.div_ceil(2) };
+            let i = (start + off) as usize % self.entries.len();
+
+            let tree = self.entries[i].load();
+            total_free += tree.free();
+
+            if better(tree, best[0], flags.order()) {
+                best[1] = best[0];
+                best[0] = Some(LocalTree::new(i * LN, tree.free() as _));
+            } else if better(tree, best[1], flags.order()) {
+                best[1] = Some(LocalTree::new(i * LN, tree.free() as _));
+            }
+
+            if !(j as usize % near == 0) {
+                continue;
+            }
+
+            // Try allocate best trees
+            let average_free = total_free / j as usize;
+            let max_free = average_free; // + LN / (self.len() / (j + 1) as usize);
+            for tree in &best {
+                if let Some(tree) = tree
+                    && tree.free <= max_free as u16
+                {
+                    let i = tree.frame / LN;
+                    if let Ok(entry) = self.entries[i].fetch_update(|v| {
+                        v.reserve(1 << flags.order()..max_free, LN, flags.movable())
+                    }) {
+                        match get_lower(i * LN, flags) {
+                            Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
+                            Err(Error::Memory) => self.unreserve(i, entry.free(), flags.movable()),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+            }
+            // Allocation failed, reset best
+            best = [None, None];
+        }
+
+        Err(Error::Memory)
+    }
+
     /// Find and reserve a free tree
     pub fn reserve_matching(
         &self,
         start: usize,
-        order: usize,
+        flags: Flags,
         offset: usize,
         len: usize,
         free: RangeInclusive<usize>,
-        movable: bool,
-        mut get_lower: impl FnMut(usize, usize) -> Result<usize>,
+        mut get_lower: impl FnMut(usize, Flags) -> Result<usize>,
     ) -> Result<LocalTree> {
         // There has to be enough space for the current allocation
-        let free = (1 << order).max(*free.start())..=*free.end();
+        let free = (1 << flags.order()).max(*free.start())..=*free.end();
 
         let start = (start + self.entries.len()) as isize;
         for i in offset as isize..len as isize {
             // Alternating between before and after this entry
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
-            if let Ok(entry) = self.entries[i].fetch_update(|v| v.reserve(free.clone(), LN, movable)) {
-                match get_lower(i * LN, order) {
+            if let Ok(entry) =
+                self.entries[i].fetch_update(|v| v.reserve(free.clone(), LN, flags.movable()))
+            {
+                match get_lower(i * LN, flags) {
                     Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
-                    Err(Error::Memory) => self.unreserve(i, entry.free(), movable),
+                    Err(Error::Memory) => self.unreserve(i, entry.free(), flags.movable()),
                     Err(e) => return Err(e),
                 }
             }
@@ -145,65 +216,39 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         &self,
         cores: usize,
         start: usize,
-        order: usize,
-        movable: bool,
-        get_lower: impl FnMut(usize, usize) -> Result<usize> + Copy,
-        steal: impl FnOnce(usize) -> Result<LocalTree>,
+        flags: Flags,
+        get_lower: impl FnMut(usize, Flags) -> Result<usize> + Copy,
+        steal: impl FnOnce(Flags) -> Result<LocalTree>,
     ) -> Result<LocalTree> {
         const CACHELINE: usize = align_of::<Align>() / size_of::<Tree>();
         let start = align_down(start, CACHELINE);
 
-        let half = (4 << order).max(LN / 16)..=LN / 2;
-        let partial = (2 << order).max(LN / 64)..=LN - LN / 16;
-
         // Search near trees
-        let near = (self.len() / cores / 2).clamp(CACHELINE / 2, CACHELINE * 4);
+        let near = (self.len() / cores / 4).clamp(CACHELINE / 4, CACHELINE * 2);
 
         // Over half filled trees
-        match self.reserve_matching(start, order, 1, near, half.clone(), movable, get_lower) {
+        let half = (4 << flags.order()).max(LN / 16)..=LN / 2;
+        match self.reserve_matching(start, flags, 1, near, half, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Partially filled trees
-        match self.reserve_matching(start, order, 1, near, partial.clone(), movable, get_lower) {
+        let partial = (2 << flags.order()).max(LN / 64)..=LN - LN / 16;
+        match self.reserve_matching(start, flags, 1, 2 * near, partial, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Not free trees
-        match self.reserve_matching(start, order, 1, near, 0..=LN - 4, movable, get_lower) {
+        match self.reserve_matching(start, flags, 1, 4 * near, 0..=LN - 4, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Any tree
-        match self.reserve_matching(start, order, 1, near, 0..=LN, movable, get_lower) {
-            Err(Error::Memory) => {}
-            r => return r,
-        }
-
-        // Search globally
-
-        // Over half filled trees
-        match self.reserve_matching(start, order, near, self.len(), half, movable, get_lower) {
-            Err(Error::Memory) => {}
-            r => return r,
-        }
-        // Partially filled trees
-        match self.reserve_matching(start, order, near, self.len(), partial, movable, get_lower) {
-            Err(Error::Memory) => {}
-            r => return r,
-        }
-        // Not free trees
-        match self.reserve_matching(start, order, near, self.len(), 0..=LN - 4, movable, get_lower) {
-            Err(Error::Memory) => {}
-            r => return r,
-        }
-
-        // Any tree
-        match self.reserve_matching(start, order, 0, self.len(), 0..=LN, movable, get_lower) {
+        match self.reserve_matching(start, flags, 0, self.len(), 0..=LN, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // steal from another core
-        steal(order)
+        steal(flags)
     }
 }

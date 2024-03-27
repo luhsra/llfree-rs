@@ -96,7 +96,7 @@ fn main() {
 
             for _ in 0..allocs {
                 let timer = Instant::now();
-                let page = alloc.get(t, order, Flags::new()).unwrap();
+                let page = alloc.get(t, Flags::o(order)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
 
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
@@ -108,7 +108,7 @@ fn main() {
 
             for page in pages {
                 let timer = Instant::now();
-                alloc.put(t, page, order).unwrap();
+                alloc.put(t, page, Flags::o(order)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
 

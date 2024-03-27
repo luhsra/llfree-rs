@@ -4,20 +4,16 @@ use core::fmt;
 use core::mem::{align_of, size_of};
 use core::ops::{Add, Deref, DerefMut, Div, Range};
 
-/// Align v up to next `align` (power of two!)
+/// Align v up to next `align`
 #[inline(always)]
 pub const fn align_up(v: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    let mask = align - 1;
-    (v + mask) & !mask
+    v.next_multiple_of(align)
 }
 
-/// Align v up to previous `align` (power of two!)
+/// Align v down to previous `align` (power of two!)
 #[inline(always)]
 pub const fn align_down(v: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    let mask = align - 1;
-    v & !mask
+    (v / align) * align
 }
 
 /// Calculate the size of a slice of T, respecting any alignment constraints

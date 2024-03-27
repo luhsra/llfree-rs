@@ -114,15 +114,15 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 
         let mut pages = Vec::with_capacity(allocs);
         for _ in 0..allocs {
-            pages.push(alloc.get(t, 0, Flags::new()).unwrap());
+            pages.push(alloc.get(t, Flags::o(0)).unwrap());
         }
 
         if crash {
             loop {
                 let i = rng.range(0..pages.len() as _) as usize;
-                alloc.put(t, pages[i], 0).unwrap();
+                alloc.put(t, pages[i], Flags::o(0)).unwrap();
                 black_box(pages[i]);
-                pages[i] = alloc.get(t, 0, Flags::new()).unwrap();
+                pages[i] = alloc.get(t, Flags::o(0)).unwrap();
             }
         }
     });

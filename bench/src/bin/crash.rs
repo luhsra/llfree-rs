@@ -98,7 +98,7 @@ fn execute(
 
         for (i, page) in data.iter_mut().enumerate() {
             *idx = i as _;
-            *page = alloc.get(t, order, Flags::new()).unwrap();
+            *page = alloc.get(t, Flags::o(order)).unwrap();
         }
 
         warn!("repeat");
@@ -109,8 +109,8 @@ fn execute(
             let i = rng.range(0..allocs as u64) as usize;
             *idx = i as _;
 
-            alloc.put(t, data[i], order).unwrap();
-            data[i] = alloc.get(t, order, Flags::new()).unwrap();
+            alloc.put(t, data[i], Flags::o(order)).unwrap();
+            data[i] = alloc.get(t, Flags::o(order)).unwrap();
         }
     });
 }
@@ -193,7 +193,7 @@ fn monitor(
 
         for (i, addr) in data[0..allocs].iter().enumerate() {
             if i != *idx {
-                alloc.put(t, *addr, order).unwrap();
+                alloc.put(t, *addr, Flags::o(order)).unwrap();
             }
         }
     }
