@@ -10,13 +10,13 @@ use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
-use llfree::frame::{Frame, PT_LEN};
+use llfree::frame::Frame;
 use llfree::mmap::{self, MMap};
 use llfree::util::{self, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
 #[cfg(feature = "llc")]
 use llfree::LLC;
-use llfree::{thread, Alloc, Flags, LLFree, Result};
+use llfree::{thread, Alloc, Flags, LLFree, Result, MAX_ORDER};
 use log::warn;
 
 /// Number of allocations per block
@@ -83,10 +83,11 @@ fn main() {
 
     warn!("Allocating orders {order:?}");
 
-    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
+    let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
 
     for x in x {
         for o in order.iter().copied() {
+            assert!(o <= MAX_ORDER);
             for name in &allocs {
                 for i in 0..iterations {
                     let perf = bench.run(name, &mut mapping, o, threads, x);

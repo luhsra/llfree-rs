@@ -22,9 +22,6 @@ unsafe impl Send for LLC {}
 unsafe impl Sync for LLC {}
 
 impl<'a> Alloc<'a> for LLC {
-    const MAX_ORDER: usize = 10;
-    const HUGE_ORDER: usize = 9;
-
     fn name() -> &'static str {
         "LLC"
     }
@@ -119,7 +116,7 @@ impl<'a> Alloc<'a> for LLC {
     fn free_frames(&self) -> usize {
         unsafe { llfree_free_frames(self.raw.as_ptr().cast()) as _ }
     }
-    fn free_huge_frames(&self) -> usize {
+    fn free_huge(&self) -> usize {
         unsafe { llfree_free_huge(self.raw.as_ptr().cast()) as _ }
     }
 

@@ -5,22 +5,22 @@ use core::{fmt, slice};
 use crate::atomic::Atom;
 use crate::entry::{LocalTree, Tree};
 use crate::util::{align_down, size_of_slice, Align};
-use crate::{Error, Flags, Result};
+use crate::{Error, Flags, Result, HUGE_FRAMES, TREE_FRAMES};
 
 #[derive(Default)]
-pub struct Trees<'a, const LN: usize> {
+pub struct Trees<'a> {
     /// Array of level 3 entries, which are the roots of the trees
-    entries: &'a [Atom<Tree>],
+    pub entries: &'a [Atom<Tree>],
 }
 
-impl<'a, const LN: usize> fmt::Debug for Trees<'a, LN> {
+impl<'a> fmt::Debug for Trees<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let max = self.entries.len();
         let mut free = 0;
         let mut partial = 0;
         for e in self.entries {
             let f = e.load().free();
-            if f == LN {
+            if f == TREE_FRAMES {
                 free += 1;
             } else if f > Self::MIN_FREE {
                 partial += 1;
@@ -31,29 +31,30 @@ impl<'a, const LN: usize> fmt::Debug for Trees<'a, LN> {
     }
 }
 
-impl<'a, const LN: usize> Trees<'a, LN> {
-    pub const MIN_FREE: usize = LN / 16;
+impl<'a> Trees<'a> {
+    pub const MIN_FREE: usize = TREE_FRAMES / 16;
 
     pub fn metadata_size(frames: usize) -> usize {
         // Event thought the elements are not cache aligned, the whole array should be
-        size_of_slice::<Atom<Tree>>(frames.div_ceil(LN)).next_multiple_of(align_of::<Align>())
+        size_of_slice::<Atom<Tree>>(frames.div_ceil(TREE_FRAMES))
+            .next_multiple_of(align_of::<Align>())
     }
 
     /// Initialize the tree array
-    pub fn new<F: Fn(usize) -> usize>(
+    pub fn new<F: Fn(usize) -> (usize, usize)>(
         frames: usize,
         buffer: &'a mut [u8],
         free_in_tree: F,
     ) -> Self {
         assert!(buffer.len() >= Self::metadata_size(frames));
 
-        let len = frames.div_ceil(LN);
+        let len = frames.div_ceil(TREE_FRAMES);
         let entries: &mut [Atom<Tree>] =
             unsafe { slice::from_raw_parts_mut(buffer.as_mut_ptr().cast(), len) };
 
         for (i, e) in entries.iter_mut().enumerate() {
-            let frames = free_in_tree(i * LN);
-            *e = Atom::new(Tree::with(frames, false, false));
+            let (frames, huge) = free_in_tree(i * TREE_FRAMES);
+            *e = Atom::new(Tree::with(frames, huge, false, false));
         }
 
         Self { entries }
@@ -67,28 +68,44 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         self.entries[i].load()
     }
 
+    /// Return the number of entirely free trees
+    pub fn free(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.load().free() == TREE_FRAMES)
+            .count()
+    }
     /// Return the total sum of the tree counters
-    pub fn total_free(&self) -> usize {
+    pub fn free_frames(&self) -> usize {
         self.entries.iter().map(|e| e.load().free()).sum()
     }
-
-    pub fn sync(&self, i: usize, min: usize) -> Option<usize> {
-        match self.entries[i].fetch_update(|e| e.sync_steal(min)) {
-            Ok(e) => Some(e.free()),
-            Err(_) => None,
-        }
+    /// Return the total sum of the huge counters
+    pub fn free_huge(&self) -> usize {
+        self.entries.iter().map(|e| e.load().huge()).sum()
+    }
+    /// Sync with the global tree, stealing its counters
+    pub fn sync(&self, i: usize, min: usize, min_huge: usize) -> Option<Tree> {
+        self.entries[i]
+            .fetch_update(|e| e.sync_steal(min, min_huge))
+            .ok()
     }
 
     /// Increment or reserve the tree
-    pub fn inc_or_reserve(&self, i: usize, num_frames: usize, may_reserve: bool) -> Option<Tree> {
+    pub fn inc_or_reserve(
+        &self,
+        i: usize,
+        free: usize,
+        huge: usize,
+        may_reserve: bool,
+    ) -> Option<Tree> {
         let mut reserved = false;
         let tree = self.entries[i]
             .fetch_update(|v| {
-                let v = v.inc(num_frames, LN);
+                let v = v.inc(free, huge);
                 if may_reserve && !v.reserved() && v.free() > Self::MIN_FREE {
                     // Reserve the tree that was targeted by the last N frees
                     reserved = true;
-                    Some(v.with_free(0).with_reserved(true))
+                    Some(v.with_free(0).with_huge(0).with_reserved(true))
                 } else {
                     reserved = false; // <- This one is very important if CAS fails!
                     Some(v)
@@ -104,80 +121,10 @@ impl<'a, const LN: usize> Trees<'a, LN> {
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: usize, free: usize, movable: bool) {
+    pub fn unreserve(&self, i: usize, free: usize, huge: usize, movable: bool) {
         self.entries[i]
-            .fetch_update(|v| v.unreserve_add(free, LN, movable))
+            .fetch_update(|v| v.unreserve_add(free, huge, movable))
             .expect("Unreserve failed");
-    }
-
-    pub fn reserve_best(
-        &self,
-        cores: usize,
-        start: usize,
-        flags: Flags,
-        mut get_lower: impl FnMut(usize, Flags) -> Result<usize>,
-    ) -> Result<LocalTree> {
-        const CACHELINE: usize = align_of::<Align>() / size_of::<Tree>();
-        let near = (self.len() / cores / 4).clamp(CACHELINE / 2, CACHELINE * 4);
-
-        let mut best = [None, None];
-
-        fn better(a: Tree, b: Option<LocalTree>, order: usize) -> bool {
-            let min_pages = 4.max(2 << order);
-            if a.free() < min_pages {
-                return false;
-            }
-            match b {
-                Some(b) => a.free() < b.free as usize,
-                None => true,
-            }
-        }
-
-        let mut total_free = 0;
-        let start = (start + self.entries.len()) as isize;
-        for j in 1..=align_down(self.len() - 1, near) as isize {
-            // Alternating between before and after this entry
-            let off = if j % 2 == 0 { j / 2 } else { -j.div_ceil(2) };
-            let i = (start + off) as usize % self.entries.len();
-
-            let tree = self.entries[i].load();
-            total_free += tree.free();
-
-            if better(tree, best[0], flags.order()) {
-                best[1] = best[0];
-                best[0] = Some(LocalTree::new(i * LN, tree.free() as _));
-            } else if better(tree, best[1], flags.order()) {
-                best[1] = Some(LocalTree::new(i * LN, tree.free() as _));
-            }
-
-            if !(j as usize % near == 0) {
-                continue;
-            }
-
-            // Try allocate best trees
-            let average_free = total_free / j as usize;
-            let max_free = average_free; // + LN / (self.len() / (j + 1) as usize);
-            for tree in &best {
-                if let Some(tree) = tree
-                    && tree.free <= max_free as u16
-                {
-                    let i = tree.frame / LN;
-                    if let Ok(entry) = self.entries[i].fetch_update(|v| {
-                        v.reserve(1 << flags.order()..max_free, LN, flags.movable())
-                    }) {
-                        match get_lower(i * LN, flags) {
-                            Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
-                            Err(Error::Memory) => self.unreserve(i, entry.free(), flags.movable()),
-                            Err(e) => return Err(e),
-                        }
-                    }
-                }
-            }
-            // Allocation failed, reset best
-            best = [None, None];
-        }
-
-        Err(Error::Memory)
     }
 
     /// Find and reserve a free tree
@@ -188,10 +135,11 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         offset: usize,
         len: usize,
         free: RangeInclusive<usize>,
-        mut get_lower: impl FnMut(usize, Flags) -> Result<usize>,
+        mut get_lower: impl FnMut(LocalTree, Flags) -> Result<LocalTree>,
     ) -> Result<LocalTree> {
         // There has to be enough space for the current allocation
         let free = (1 << flags.order()).max(*free.start())..=*free.end();
+        let min_huge = (1 << flags.order()) / HUGE_FRAMES;
 
         let start = (start + self.entries.len()) as isize;
         for i in offset as isize..len as isize {
@@ -199,11 +147,14 @@ impl<'a, const LN: usize> Trees<'a, LN> {
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
             if let Ok(entry) =
-                self.entries[i].fetch_update(|v| v.reserve(free.clone(), LN, flags.movable()))
+                self.entries[i].fetch_update(|v| v.reserve(free.clone(), min_huge, flags.movable()))
             {
-                match get_lower(i * LN, flags) {
-                    Ok(frame) => return Ok(LocalTree::new(frame, entry.free() as _)),
-                    Err(Error::Memory) => self.unreserve(i, entry.free(), flags.movable()),
+                let tree = LocalTree::new(i * TREE_FRAMES, entry.free(), entry.huge());
+                match get_lower(tree, flags) {
+                    Ok(tree) => return Ok(tree),
+                    Err(Error::Memory) => {
+                        self.unreserve(i, entry.free(), entry.huge(), flags.movable())
+                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -217,8 +168,7 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         cores: usize,
         start: usize,
         flags: Flags,
-        get_lower: impl FnMut(usize, Flags) -> Result<usize> + Copy,
-        steal: impl FnOnce(Flags) -> Result<LocalTree>,
+        get_lower: impl FnMut(LocalTree, Flags) -> Result<LocalTree> + Copy,
     ) -> Result<LocalTree> {
         const CACHELINE: usize = align_of::<Align>() / size_of::<Tree>();
         let start = align_down(start, CACHELINE);
@@ -227,28 +177,40 @@ impl<'a, const LN: usize> Trees<'a, LN> {
         let near = (self.len() / cores / 4).clamp(CACHELINE / 4, CACHELINE * 2);
 
         // Over half filled trees
-        let half = (4 << flags.order()).max(LN / 16)..=LN / 2;
+        let half = (2 << flags.order()).max(TREE_FRAMES / 16)..=TREE_FRAMES / 2;
         match self.reserve_matching(start, flags, 1, near, half, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Partially filled trees
-        let partial = (2 << flags.order()).max(LN / 64)..=LN - LN / 16;
+        let partial = (2 << flags.order()).max(TREE_FRAMES / 64)..=TREE_FRAMES - TREE_FRAMES / 16;
         match self.reserve_matching(start, flags, 1, 2 * near, partial, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Not free trees
-        match self.reserve_matching(start, flags, 1, 4 * near, 0..=LN - 4, get_lower) {
+        match self.reserve_matching(start, flags, 1, 4 * near, 0..=TREE_FRAMES - 4, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Any tree
-        match self.reserve_matching(start, flags, 0, self.len(), 0..=LN, get_lower) {
-            Err(Error::Memory) => {}
-            r => return r,
+        self.reserve_matching(start, flags, 0, self.len(), 0..=TREE_FRAMES, get_lower)
+    }
+
+    #[allow(unused)]
+    pub fn dump(&'a self) -> TreeDbg<'a> {
+        TreeDbg(self)
+    }
+}
+
+pub struct TreeDbg<'a>(&'a Trees<'a>);
+impl fmt::Debug for TreeDbg<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "[")?;
+        for entry in self.0.entries {
+            writeln!(f, "    {:?}", entry.load())?;
         }
-        // steal from another core
-        steal(flags)
+        write!(f, "]")?;
+        Ok(())
     }
 }

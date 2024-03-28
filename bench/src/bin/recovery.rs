@@ -9,7 +9,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use llfree::frame::{Frame, PT_LEN};
+use llfree::frame::Frame;
 use llfree::mmap::MMap;
 use llfree::util::{self, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
@@ -102,7 +102,7 @@ fn main() {
 }
 
 fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
-    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
+    let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
     let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len()).secondary).leak();
     let alloc = Allocator::create(threads, &mut mapping, false, volatile).unwrap();
     warn!("Prepare alloc");
@@ -133,7 +133,7 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 }
 
 fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
-    let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
+    let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
     let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len()).secondary).leak();
 
     warn!("Recover alloc");

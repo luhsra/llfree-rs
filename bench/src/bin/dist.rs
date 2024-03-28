@@ -10,10 +10,10 @@ use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::Parser;
-use llfree::frame::{Frame, PT_LEN};
+use llfree::frame::Frame;
 use llfree::mmap::{self, MMap};
 use llfree::util::{aligned_buf, logging};
-use llfree::{thread, Alloc, Flags, Init, LLFree};
+use llfree::{thread, Alloc, Flags, Init, LLFree, HUGE_FRAMES};
 use log::warn;
 
 type Allocator<'a> = LLFree<'a>;
@@ -57,7 +57,7 @@ fn main() {
     assert!(threads >= 1);
     assert!(threads <= std::thread::available_parallelism().unwrap().get());
 
-    let frames = PT_LEN * PT_LEN * threads;
+    let frames = HUGE_FRAMES * HUGE_FRAMES * threads;
 
     assert!(start < end);
     let mut get_buckets = vec![0usize; buckets];
@@ -80,7 +80,7 @@ fn main() {
 
         // Allocate half the memory
         let allocs = (frames / threads) / (2 * (1 << order));
-        assert!(allocs % PT_LEN == 0);
+        assert!(allocs % HUGE_FRAMES == 0);
         warn!("\n\n>>> bench t={threads} o={order:?} {allocs}\n");
 
         let barrier = Barrier::new(threads);

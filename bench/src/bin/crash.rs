@@ -6,7 +6,7 @@ use std::sync::Barrier;
 use std::time::Duration;
 
 use clap::Parser;
-use llfree::frame::{Frame, PT_LEN};
+use llfree::frame::Frame;
 use llfree::mmap::{self, MMap};
 use llfree::util::{self, align_up, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
@@ -41,7 +41,7 @@ fn main() {
 
     util::logging();
 
-    let pages = memory * PT_LEN * PT_LEN;
+    let pages = (memory << 30) / Frame::SIZE;
 
     let allocs = pages / threads / 2 / (1 << order);
     let out_size = align_up(allocs + 2, Frame::SIZE) * threads;

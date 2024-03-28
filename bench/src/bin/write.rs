@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use clap::Parser;
-use llfree::frame::{Frame, PT_LEN};
+use llfree::frame::Frame;
 use llfree::mmap::{self, madvise, MAdvise, MMap};
 use llfree::thread;
 use llfree::util::{avg_bounds, logging, WyRand};
@@ -60,7 +60,7 @@ fn main() {
     let t_map = Instant::now();
     let mut mapping = mapping(
         0x1000_0000_0000,
-        memory * PT_LEN * PT_LEN,
+        (memory << 30) / Frame::SIZE,
         dax,
         private,
         populate,

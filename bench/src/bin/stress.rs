@@ -11,7 +11,7 @@ use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::Parser;
-use llfree::frame::PT_LEN;
+use llfree::frame::Frame;
 use llfree::util::{aligned_buf, WyRand};
 use llfree::*;
 use log::warn;
@@ -57,7 +57,7 @@ fn main() {
 
     util::logging();
 
-    assert!(order <= Allocator::MAX_ORDER);
+    assert!(order <= MAX_ORDER);
 
     // `thread::pin` uses this to select every nth cpu
     if stride > 1 {
@@ -65,7 +65,7 @@ fn main() {
     }
 
     // Map memory for the allocator and initialize it
-    let pages = memory * PT_LEN * PT_LEN;
+    let pages = (memory << 30) / Frame::SIZE;
     let ms = Allocator::metadata_size(threads, pages);
     let mut primary = aligned_buf(ms.primary);
     let mut secondary = aligned_buf(ms.secondary);
@@ -95,17 +95,16 @@ fn main() {
                 let elapsed = start.elapsed();
                 if elapsed.as_secs() > frag_sec {
                     if let Some(frag) = frag.as_mut() {
-                        for i in 0..alloc.frames().div_ceil(1 << Allocator::HUGE_ORDER) {
-                            let free =
-                                alloc.free_at(i << Allocator::HUGE_ORDER, Allocator::HUGE_ORDER);
+                        for i in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
+                            let free = alloc.free_at(i << HUGE_ORDER, HUGE_ORDER);
                             let level = if free == 0 { 0 } else { 1 + free / 64 };
                             write!(frag, "{level:?}").unwrap();
                         }
                         writeln!(frag).unwrap();
                     }
 
-                    let huge = alloc.free_huge_frames();
-                    let optimal = alloc.free_frames() >> Allocator::HUGE_ORDER;
+                    let huge = alloc.free_huge();
+                    let optimal = alloc.free_frames() >> HUGE_ORDER;
                     let fraction = 100.0 * huge as f32 / optimal as f32;
                     warn!("free-huge {huge}/{optimal} = {fraction:.1}");
                     score += fraction;

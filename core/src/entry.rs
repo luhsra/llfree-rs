@@ -8,6 +8,7 @@ use core::sync::atomic::{self, AtomicU16, AtomicU32, AtomicU64};
 use bitfield_struct::bitfield;
 
 use crate::atomic::{Atom, Atomic};
+use crate::{TREE_FRAMES, TREE_HUGE};
 
 pub trait AtomicArray<T: Copy, const L: usize> {
     /// Overwrite the content of the whole array non-atomically.
@@ -31,70 +32,90 @@ impl<T: Atomic, const L: usize> AtomicArray<T, L> for [Atom<T>; L] {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct LocalTree {
     pub frame: usize,
-    pub free: u16,
+    pub free: usize,
+    pub huge: usize,
 }
 impl LocalTree {
-    pub fn new(frame: usize, free: u16) -> Self {
-        Self { frame, free }
+    pub fn new(frame: usize, free: usize, huge: usize) -> Self {
+        Self { frame, free, huge }
     }
 }
 
-#[bitfield(u16)]
+#[bitfield(u32)]
 #[derive(PartialEq, Eq)]
 pub struct Tree {
     /// Number of free 4K frames.
-    #[bits(14)]
+    #[bits(13)]
     pub free: usize,
+    /// Number of free 4K frames.
+    #[bits(4)]
+    pub huge: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
     /// Are the frames movable?
-    #[bits(1, default = true)]
     pub movable: bool,
+    #[bits(13)]
+    __: (),
 }
+
+const _: () = assert!(1 << Tree::FREE_BITS >= TREE_FRAMES);
+const _: () = assert!(1 << Tree::HUGE_BITS >= TREE_HUGE);
+
 impl Atomic for Tree {
-    type I = AtomicU16;
+    type I = AtomicU32;
 }
 impl Tree {
     /// Creates a new entry.
-    pub fn with(frames: usize, reserved: bool, movable: bool) -> Self {
+    pub fn with(free: usize, huge: usize, reserved: bool, movable: bool) -> Self {
+        assert!(free <= TREE_FRAMES && huge <= TREE_HUGE);
         Self::new()
-            .with_free(frames)
+            .with_free(free)
+            .with_huge(huge)
             .with_reserved(reserved)
             .with_movable(movable)
     }
     /// Increments the free frames counter.
-    pub fn inc(self, num_frames: usize, max: usize) -> Self {
-        let frames = self.free() + num_frames;
-        assert!(frames <= max);
-        self.with_free(frames)
-            .with_movable(self.movable() || frames == max)
+    pub fn inc(self, free: usize, huge: usize) -> Self {
+        let free = self.free() + free;
+        let huge = self.huge() + huge;
+        assert!(free <= TREE_FRAMES && huge <= TREE_HUGE);
+        self.with_free(free)
+            .with_huge(huge)
+            .with_movable(self.movable())
     }
     /// Reserves this entry if its frame count is in `range`.
-    pub fn reserve(self, free: impl RangeBounds<usize>, max: usize, movable: bool) -> Option<Self> {
+    pub fn reserve(
+        self,
+        free: impl RangeBounds<usize>,
+        min_huge: usize,
+        movable: bool,
+    ) -> Option<Self> {
         if !self.reserved()
             && free.contains(&self.free())
-            && (movable == self.movable() || self.free() == max)
+            && self.huge() >= min_huge
+            && (movable == self.movable() || self.free() == TREE_FRAMES)
         {
-            Some(Self::with(0, true, movable))
+            Some(Self::with(0, 0, true, movable))
         } else {
             None
         }
     }
     /// Add the frames from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
-    pub fn unreserve_add(self, add: usize, max: usize, movable: bool) -> Option<Self> {
+    pub fn unreserve_add(self, free: usize, huge: usize, movable: bool) -> Option<Self> {
         if self.reserved() {
-            let frames = self.free() + add;
-            assert!(frames <= max);
-            Some(Self::with(frames, false, movable || frames == max))
+            let free = self.free() + free;
+            let huge = self.huge() + huge;
+            assert!(free <= TREE_FRAMES && huge <= TREE_HUGE);
+            Some(Self::with(free, huge, false, movable))
         } else {
             None
         }
     }
     /// Set the free counter to zero if it is large enough for synchronization
-    pub fn sync_steal(self, min: usize) -> Option<Self> {
-        if self.reserved() && self.free() > min {
-            Some(self.with_free(0))
+    pub fn sync_steal(self, min: usize, min_huge: usize) -> Option<Self> {
+        if self.reserved() && self.free() > min && self.huge() >= min_huge {
+            Some(self.with_free(0).with_huge(0))
         } else {
             None
         }
@@ -249,11 +270,11 @@ mod test {
     use core::sync::atomic::AtomicU64;
 
     use crate::atomic::Atom;
-    use crate::frame::PT_LEN;
+    use crate::HUGE_FRAMES;
 
     #[test]
     fn pt() {
-        let pt: [Atom<u64>; PT_LEN] = [const { Atom(AtomicU64::new(0)) }; PT_LEN];
+        let pt: [Atom<u64>; HUGE_FRAMES] = [const { Atom(AtomicU64::new(0)) }; HUGE_FRAMES];
         pt[0].compare_exchange(0, 42).unwrap();
         pt[0].fetch_update(|v| Some(v + 1)).unwrap();
         assert_eq!(pt[0].load(), 43);

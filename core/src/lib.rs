@@ -45,6 +45,19 @@ mod trees;
 
 use core::fmt;
 
+/// Number of huge frames in tree
+pub const TREE_HUGE: usize = 8;
+/// Number of small frames in tree
+pub const TREE_FRAMES: usize = TREE_HUGE << HUGE_ORDER;
+/// Order for huge frames
+pub const HUGE_ORDER: usize = 9;
+pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
+/// Maximum order the llfree supports
+pub const MAX_ORDER: usize = HUGE_ORDER + 1;
+
+/// Order of a physical frame
+const FRAME_ORDER: usize = 12;
+
 /// Allocation error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -66,11 +79,6 @@ pub const CAS_RETRIES: usize = 8;
 
 /// The general interface of the allocator implementations.
 pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
-    /// Maximum allocation size order.
-    const MAX_ORDER: usize;
-    /// Maximum allocation size order.
-    const HUGE_ORDER: usize;
-
     /// Return the name of the allocator.
     #[cold]
     fn name() -> &'static str;
@@ -107,7 +115,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// Return the number of free frames.
     fn free_frames(&self) -> usize;
     /// Return the number of free huge frames or 0 if the allocator cannot allocate huge frames.
-    fn free_huge_frames(&self) -> usize {
+    fn free_huge(&self) -> usize {
         0
     }
 
@@ -124,6 +132,10 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     fn drain(&self, _core: usize) -> Result<()> {
         Ok(())
     }
+
+    /// Validate the internal state
+    #[cold]
+    fn validate(&self) {}
 }
 
 /// Size of the required metadata
@@ -172,8 +184,7 @@ mod test {
     use log::{error, warn};
 
     use super::*;
-    use crate::frame::{Frame, PT_LEN};
-    use crate::lower::Lower;
+    use crate::frame::Frame;
     use crate::util::{aligned_buf, logging, WyRand};
     use crate::wrapper::NvmAlloc;
 
@@ -244,6 +255,7 @@ mod test {
         warn!("put >>>");
         alloc.put(0, frame1, Flags::o(0)).unwrap();
         warn!("put <<<");
+        alloc.validate();
     }
 
     #[test]
@@ -275,6 +287,7 @@ mod test {
 
         warn!("allocated {}", 1 + frames.len());
         warn!("check...");
+        alloc.validate();
 
         assert_eq!(alloc.allocated_frames(), 1 + frames.len());
         assert_eq!(alloc.allocated_frames(), alloc.frames());
@@ -289,7 +302,7 @@ mod test {
         warn!("realloc...");
 
         // Free some
-        const FREE_NUM: usize = PT_LEN * PT_LEN - 10;
+        const FREE_NUM: usize = HUGE_FRAMES * HUGE_FRAMES - 10;
         for frame in &frames[..FREE_NUM] {
             alloc.put(0, *frame, Flags::o(0)).unwrap();
         }
@@ -299,6 +312,7 @@ mod test {
             1 + frames.len() - FREE_NUM,
             "{alloc:?}"
         );
+        alloc.validate();
 
         // Realloc
         for frame in &mut frames[..FREE_NUM] {
@@ -314,6 +328,7 @@ mod test {
         }
 
         assert_eq!(alloc.allocated_frames(), 0);
+        alloc.validate();
     }
 
     #[test]
@@ -335,6 +350,8 @@ mod test {
 
         warn!("check...");
         assert_eq!(alloc.allocated_frames(), frames.len());
+        alloc.validate();
+
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
         for &[a, b] in frames.array_windows() {
@@ -354,6 +371,7 @@ mod test {
 
         warn!("check...");
         assert_eq!(alloc.allocated_frames(), frames.len());
+        alloc.validate();
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
         for &[a, b] in frames.array_windows() {
@@ -367,6 +385,7 @@ mod test {
             alloc.put(0, *frame, Flags::o(0)).unwrap();
         }
         assert_eq!(alloc.allocated_frames(), 0);
+        alloc.validate()
     }
 
     #[test]
@@ -425,14 +444,16 @@ mod test {
             }
         });
 
+        assert_eq!(alloc.free_huge(), FRAMES / HUGE_FRAMES);
         assert_eq!(alloc.allocated_frames(), 0);
+        alloc.validate();
     }
 
     #[test]
     fn init() {
         logging();
         // 8GiB
-        const MEM_SIZE: usize = 8 << 30;
+        const MEM_SIZE: usize = 2 << 30;
         const FRAMES: usize = MEM_SIZE / Frame::SIZE;
 
         let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
@@ -450,14 +471,14 @@ mod test {
         warn!("start stress test");
 
         // Stress test
-        let mut frames = vec![0; PT_LEN * PT_LEN];
+        let mut frames = vec![0; HUGE_FRAMES * HUGE_FRAMES];
         for frame in &mut frames {
             *frame = alloc.get(0, Flags::o(0)).unwrap();
         }
 
         warn!("check");
-
         assert_eq!(alloc.allocated_frames(), expected_frames + frames.len());
+        alloc.validate();
 
         frames.sort_unstable();
 
@@ -470,30 +491,34 @@ mod test {
         warn!("free some...");
 
         // Free some
-        for frame in &frames[10..PT_LEN + 10] {
+        for frame in &frames[10..HUGE_FRAMES + 10] {
             alloc.put(0, *frame, Flags::o(0)).unwrap();
         }
+        alloc.validate();
 
         warn!("free special...");
 
         alloc.put(0, small, Flags::o(0)).unwrap();
         alloc.put(0, huge, Flags::o(9)).unwrap();
+        alloc.validate();
 
         warn!("realloc...");
 
         // Realloc
-        for frame in &mut frames[10..PT_LEN + 10] {
+        for frame in &mut frames[10..HUGE_FRAMES + 10] {
             *frame = alloc.get(0, Flags::o(0)).unwrap();
         }
+        alloc.validate();
 
         warn!("free...");
-
         // Free all
         for frame in &frames {
             alloc.put(0, *frame, Flags::o(0)).unwrap();
         }
 
         assert_eq!(alloc.allocated_frames(), 0);
+        assert_eq!(alloc.free_huge(), FRAMES / HUGE_FRAMES);
+        alloc.validate();
     }
 
     #[test]
@@ -501,8 +526,8 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
-        const FRAMES: usize = 2 * THREADS * PT_LEN * PT_LEN;
+        const ALLOC_PER_THREAD: usize = HUGE_FRAMES * (HUGE_FRAMES - 2 * THREADS);
+        const FRAMES: usize = 2 * THREADS * HUGE_FRAMES * HUGE_FRAMES;
 
         let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
@@ -526,6 +551,7 @@ mod test {
 
         assert_eq!(alloc.allocated_frames(), frames.len());
         warn!("allocated frames: {}", frames.len());
+        alloc.validate();
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
@@ -539,7 +565,7 @@ mod test {
     fn alloc_all() {
         logging();
 
-        const FRAMES: usize = 2 * PT_LEN * PT_LEN;
+        const FRAMES: usize = 2 * HUGE_FRAMES * HUGE_FRAMES;
 
         let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
 
@@ -558,7 +584,10 @@ mod test {
         warn!("{alloc:?}");
 
         assert_eq!(alloc.allocated_frames(), frames.len());
+        assert_eq!(alloc.free_frames(), 0);
+        assert_eq!(alloc.free_huge(), 0);
         warn!("allocated frames: {}", frames.len());
+        alloc.validate();
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
@@ -573,7 +602,7 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const FRAMES: usize = 2 * THREADS * PT_LEN * PT_LEN;
+        const FRAMES: usize = 2 * THREADS * HUGE_FRAMES * HUGE_FRAMES;
 
         let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
@@ -600,7 +629,8 @@ mod test {
         let mut frames = frames.into_iter().flatten().collect::<Vec<_>>();
 
         assert_eq!(alloc.allocated_frames(), frames.len());
-        warn!("allocated frames: {}", frames.len());
+        warn!("allocated frames: {}/{}", frames.len(), alloc.frames());
+        alloc.validate();
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
@@ -645,6 +675,7 @@ mod test {
 
         assert_eq!(alloc.allocated_frames(), frames.len());
         warn!("allocated frames: {}", frames.len());
+        alloc.validate();
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
@@ -666,6 +697,7 @@ mod test {
         );
 
         assert_eq!(alloc.allocated_frames(), 0);
+        alloc.validate();
     }
 
     #[test]
@@ -673,9 +705,9 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = PT_LEN - 1;
+        const FRAMES: usize = (8 << 30) / Frame::SIZE; // 1GiB
+        const ALLOC_PER_THREAD: usize = FRAMES / THREADS / HUGE_FRAMES;
         // additional space for the allocators metadata
-        const FRAMES: usize = THREADS * (ALLOC_PER_THREAD + 2) * PT_LEN;
 
         let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
@@ -691,14 +723,19 @@ mod test {
                 barrier.wait();
 
                 for frame in frames {
-                    *frame = alloc.get(t, Flags::o(9)).unwrap();
+                    *frame = alloc.get(t, Flags::o(HUGE_ORDER)).unwrap();
                 }
             },
         );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
-        assert_eq!(alloc.allocated_frames(), frames.len() * PT_LEN);
-        warn!("allocated frames: {}", frames.len());
+        assert_eq!(alloc.allocated_frames(), frames.len() * HUGE_FRAMES);
+        warn!(
+            "allocated frames: {}/{}",
+            frames.len(),
+            alloc.frames() / HUGE_FRAMES
+        );
+        alloc.validate();
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
@@ -714,7 +751,8 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
+        const FRAMES: usize = (8 << 30) / Frame::SIZE; // 1GiB
+        const ALLOC_PER_THREAD: usize = FRAMES / THREADS / HUGE_FRAMES;
 
         // Stress test
         let mut frames = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -753,7 +791,8 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
+        const FRAMES: usize = (8 << 30) / Frame::SIZE; // 1GiB
+        const ALLOC_PER_THREAD: usize = FRAMES / THREADS / HUGE_FRAMES;
 
         // Stress test
         let mut frames = vec![0u64; ALLOC_PER_THREAD * THREADS];
@@ -800,8 +839,8 @@ mod test {
         logging();
 
         const THREADS: usize = 4;
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 2 * THREADS);
-        const MEM_SIZE: usize = 2 * THREADS * PT_LEN * PT_LEN * Frame::SIZE;
+        const ALLOC_PER_THREAD: usize = HUGE_FRAMES * (HUGE_FRAMES - 2 * THREADS);
+        const MEM_SIZE: usize = 2 * THREADS * HUGE_FRAMES * HUGE_FRAMES * Frame::SIZE;
 
         let area = MEM_SIZE / Frame::SIZE;
 
@@ -829,14 +868,15 @@ mod test {
 
         warn!("check");
         assert_eq!(alloc.allocated_frames(), 0);
+        alloc.validate();
     }
 
     #[test]
     fn alloc_free() {
         logging();
         const THREADS: usize = 2;
-        const ALLOC_PER_THREAD: usize = PT_LEN * (PT_LEN - 10) / 2;
-        const FRAMES: usize = 4 * PT_LEN * PT_LEN;
+        const ALLOC_PER_THREAD: usize = HUGE_FRAMES * (HUGE_FRAMES - 10) / 2;
+        const FRAMES: usize = 4 * HUGE_FRAMES * HUGE_FRAMES;
 
         let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
         warn!("{alloc:?}");
@@ -847,6 +887,7 @@ mod test {
         for frame in &mut frames {
             *frame = alloc.get(0, Flags::o(0)).unwrap();
         }
+        alloc.validate();
 
         let barrier = Barrier::new(THREADS);
         std::thread::scope(|s| {
@@ -871,6 +912,7 @@ mod test {
 
         warn!("check {alloc:?}");
         assert_eq!(alloc.allocated_frames(), ALLOC_PER_THREAD);
+        alloc.validate();
     }
 
     #[test]
@@ -886,7 +928,7 @@ mod test {
 
         thread::pin(0);
 
-        let expected_frames = (PT_LEN + 2) * (1 + (1 << 9));
+        let expected_frames = (HUGE_FRAMES + 2) * (1 + (1 << 9));
 
         let mut zone = mmap::anon(0x1000_0000_0000, FRAMES, false, false);
         let secondary = aligned_buf(Allocator::metadata_size(1, FRAMES).secondary).leak();
@@ -894,12 +936,13 @@ mod test {
         {
             let alloc = Allocator::create(1, &mut zone, false, secondary).unwrap();
 
-            for _ in 0..PT_LEN + 2 {
+            for _ in 0..HUGE_FRAMES + 2 {
                 alloc.get(0, Flags::o(0)).unwrap();
                 alloc.get(0, Flags::o(9)).unwrap();
             }
 
             assert_eq!(alloc.allocated_frames(), expected_frames);
+            alloc.validate();
 
             // leak (crash)
             std::mem::forget(alloc);
@@ -908,11 +951,11 @@ mod test {
         let secondary = aligned_buf(secondary.len()).leak();
         let alloc = Allocator::create(1, &mut zone, true, secondary).unwrap();
         assert_eq!(alloc.allocated_frames(), expected_frames);
+        alloc.validate();
     }
 
     #[test]
     fn different_orders() {
-        const MAX_ORDER: usize = Lower::MAX_ORDER;
         const THREADS: usize = 4;
         const FRAMES: usize = ((MAX_ORDER + 1) << MAX_ORDER) * (THREADS * 2 + 1);
 
@@ -958,6 +1001,7 @@ mod test {
         });
 
         assert_eq!(alloc.allocated_frames(), 0);
+        alloc.validate();
     }
 
     #[test]
@@ -971,30 +1015,31 @@ mod test {
         assert_eq!(alloc.frames(), FRAMES);
         assert_eq!(alloc.allocated_frames(), FRAMES);
 
-        for frame in (0..FRAMES).step_by(1 << Lower::HUGE_ORDER) {
-            alloc.put(0, frame, Flags::o(Lower::HUGE_ORDER)).unwrap();
+        for frame in (0..FRAMES).step_by(1 << HUGE_ORDER) {
+            alloc.put(0, frame, Flags::o(HUGE_ORDER)).unwrap();
         }
         assert_eq!(alloc.allocated_frames(), 0);
 
         thread::parallel(0..THREADS, |core| {
             thread::pin(core);
-            for _ in 0..(FRAMES / THREADS) / (1 << Lower::HUGE_ORDER) {
-                alloc.get(core, Flags::o(Lower::HUGE_ORDER)).unwrap();
+            for _ in 0..(FRAMES / THREADS) / (1 << HUGE_ORDER) {
+                alloc.get(core, Flags::o(HUGE_ORDER)).unwrap();
             }
         });
         assert_eq!(alloc.allocated_frames(), FRAMES);
+        alloc.validate();
     }
 
     #[test]
     fn fragmentation_retry() {
         logging();
 
-        const FRAMES: usize = Lower::N * 2;
+        const FRAMES: usize = TREE_FRAMES * 2;
         let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
 
         // Alloc a whole subtree
-        let mut frames = Vec::with_capacity(Lower::N / 2);
-        for i in 0..Lower::N {
+        let mut frames = Vec::with_capacity(TREE_FRAMES / 2);
+        for i in 0..TREE_FRAMES {
             if i % 2 == 0 {
                 frames.push(alloc.get(0, Flags::o(0)).unwrap());
             } else {
@@ -1009,11 +1054,12 @@ mod test {
         let huge = alloc.get(0, Flags::o(9)).unwrap();
         warn!("huge = {huge}");
         warn!("{alloc:?}");
+        alloc.validate();
     }
 
     #[test]
     fn drain() {
-        const FRAMES: usize = Lower::N * 2;
+        const FRAMES: usize = TREE_FRAMES * 2;
         let alloc = Allocator::create(2, FRAMES, Init::FreeAll).unwrap();
         // should not change anything
         alloc.drain(0).unwrap();
@@ -1023,10 +1069,11 @@ mod test {
         alloc.get(1, Flags::o(0)).unwrap();
 
         // completely the subtree of the first core
-        for _ in 0..Lower::N {
+        for _ in 0..TREE_FRAMES {
             alloc.get(0, Flags::o(0)).unwrap();
         }
         // next allocation should trigger drain+reservation (no subtree left)
         println!("{:?}", alloc.get(0, Flags::o(0)));
+        alloc.validate();
     }
 }
