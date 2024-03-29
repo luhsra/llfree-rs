@@ -71,6 +71,7 @@ fn main() {
     let mut secondary = aligned_buf(ms.secondary);
     let alloc =
         Allocator::new(threads, pages, Init::FreeAll, &mut primary, &mut secondary).unwrap();
+    alloc.validate();
 
     // Operate on half of the avaliable memory
     let barrier = Barrier::new(threads + 1);
@@ -81,6 +82,7 @@ fn main() {
     let running = AtomicBool::new(true);
 
     warn!("start");
+    let rand = unsafe { libc::rand() as u64 };
 
     let (allocated, score) = std::thread::scope(|s| {
         let monitor = s.spawn(|| {
@@ -121,7 +123,7 @@ fn main() {
 
         let allocated = thread::parallel(0..threads, |t| {
             thread::pin(t);
-            let mut rng = WyRand::new(t as u64 + 100);
+            let mut rng = WyRand::new(t as u64 + rand);
             let mut pages = Vec::with_capacity(pages_per_thread);
 
             barrier.wait();
@@ -161,7 +163,7 @@ fn main() {
         allocated.into_iter().sum::<usize>(),
         alloc.allocated_frames()
     );
-
+    alloc.validate();
     warn!("{alloc:?}");
     warn!("score = {score:.1}")
 }

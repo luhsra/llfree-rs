@@ -15,6 +15,8 @@
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
 
+#![debugger_visualizer(gdb_script_file = "../../scripts/gdb.py")]
+
 #[cfg(feature = "std")]
 #[macro_use]
 extern crate std;
@@ -1074,6 +1076,50 @@ mod test {
         }
         // next allocation should trigger drain+reservation (no subtree left)
         println!("{:?}", alloc.get(0, Flags::o(0)));
+        alloc.validate();
+    }
+
+    #[test]
+    fn stress() {
+        const THREADS: usize = 4;
+        const FRAMES: usize = (1 << 30) / Frame::SIZE;
+        const ITER: usize = 100;
+
+        logging();
+
+        let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
+        alloc.validate();
+
+        let rand = unsafe { libc::rand() as u64 };
+        let barrier = Barrier::new(THREADS);
+
+        let allocated = thread::parallel(0..THREADS, |t| {
+            thread::pin(t);
+            let mut rng = WyRand::new(rand + t as u64);
+            let mut frames = Vec::with_capacity(FRAMES / THREADS);
+            barrier.wait();
+
+            for _ in 0..ITER {
+                let target = rng.range(0..(FRAMES / THREADS) as _) as usize;
+                while frames.len() != target {
+                    if frames.len() < target {
+                        match alloc.get(t, Flags::o(0)) {
+                            Ok(frame) => frames.push(frame),
+                            Err(Error::Memory) => break,
+                            Err(e) => panic!("{e:?}"),
+                        }
+                    } else {
+                        alloc.put(t, frames.pop().unwrap(), Flags::o(0)).unwrap();
+                    }
+                }
+            }
+            frames.len()
+        });
+
+        assert_eq!(
+            allocated.into_iter().sum::<usize>(),
+            alloc.allocated_frames()
+        );
         alloc.validate();
     }
 }

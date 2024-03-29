@@ -334,7 +334,11 @@ impl LLFree<'_> {
         let (frame, huge) = self.lower.get(tree.frame, flags)?;
         tree.frame = frame;
         tree.free -= 1 << flags.order();
-        tree.huge -= (huge as usize).max((1 << flags.order()) / HUGE_FRAMES);
+        let huge = (huge as usize).max((1 << flags.order()) / HUGE_FRAMES);
+        if huge > tree.huge {
+            assert!(self.sync_with_global(&mut tree, flags.order()));
+        }
+        tree.huge -= huge;
         Ok(tree)
     }
 
