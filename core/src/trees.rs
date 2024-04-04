@@ -42,8 +42,8 @@ impl<'a, const LN: usize> fmt::Debug for Trees<'a, LN> {
 }
 
 impl<'a, const LN: usize> Trees<'a, LN> {
-    pub const MIN_FREE: usize = 1 << 10;
-    pub const MAX_FREE: usize = LN - (1 << 10);
+    pub const MIN_FREE: usize = 1 << 11; //This is the 12.5% threshold that is descrobed in the paper, but for 16K bf
+    pub const MAX_FREE: usize = LN - (1 << 11);
 
     pub fn metadata_size(frames: usize) -> usize {
         // Event thought the elements are not cache aligned, the whole array should be
