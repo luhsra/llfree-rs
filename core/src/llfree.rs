@@ -6,10 +6,10 @@ use core::{fmt, slice};
 use log::{error, info, warn};
 use spin::mutex::SpinMutex;
 
-use crate::entry::LocalTree;
+use crate::entry::{Kind, LocalTree};
 use crate::lower::Lower;
 use crate::trees::Trees;
-use crate::util::{size_of_slice, Align};
+use crate::util::{size_of_slice, Align, FmtFn};
 use crate::{
     Alloc, Error, Flags, Init, MetaSize, Result, CAS_RETRIES, HUGE_FRAMES, HUGE_ORDER, MAX_ORDER,
     TREE_FRAMES, TREE_HUGE,
@@ -155,10 +155,8 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             error!("invalid frame number");
             return Err(Error::Memory);
         }
-        // Ignore on small memory sizes
-        if flags.movable() && self.trees.len() <= self.local.len() / 2 {
-            flags.set_movable(false);
-        }
+        // Put usually does not know about movability
+        flags.set_movable(false);
 
         // First free the frame in the lower allocator
         let huge = self.lower.put(frame, flags)?;
@@ -174,21 +172,27 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
         // Try update own trees first
         let num_frames = 1usize << flags.order();
-        if let Some(preferred) = &mut local.movable
-            && preferred.frame / TREE_FRAMES == i
-        {
-            preferred.free += num_frames;
-            preferred.huge += huge;
-            assert!(preferred.free <= TREE_FRAMES && preferred.huge <= TREE_HUGE);
-            return Ok(());
-        }
-        if let Some(preferred) = &mut local.immovable
-            && preferred.frame / TREE_FRAMES == i
-        {
-            preferred.free += num_frames;
-            preferred.huge += huge;
-            assert!(preferred.free <= TREE_FRAMES && preferred.huge <= TREE_HUGE);
-            return Ok(());
+        if flags.order() >= HUGE_ORDER {
+            if let Some(preferred) = &mut local.huge
+                && preferred.frame / TREE_FRAMES == i
+            {
+                preferred.free += num_frames;
+                preferred.huge += huge;
+                assert!(preferred.free <= TREE_FRAMES && preferred.huge <= TREE_HUGE);
+                return Ok(());
+            }
+        } else {
+            // Might be movable or fixed
+            for kind in [Kind::Movable, Kind::Fixed] {
+                if let Some(preferred) = &mut local.preferred(kind)
+                    && preferred.frame / TREE_FRAMES == i
+                {
+                    preferred.free += num_frames;
+                    preferred.huge += huge;
+                    assert!(preferred.free <= TREE_FRAMES && preferred.huge <= TREE_HUGE);
+                    return Ok(());
+                }
+            }
         }
 
         // Increment or reserve the tree
@@ -199,7 +203,8 @@ impl<'a> Alloc<'a> for LLFree<'a> {
                 tree.free() + num_frames,
                 tree.huge() + huge,
             );
-            self.swap_reserved(local.preferred(tree.movable()), Some(entry), tree.movable());
+            let kind = flags.with_movable(tree.kind() == Kind::Movable).into();
+            self.swap_reserved(local.preferred(kind), Some(entry), kind);
         }
         Ok(())
     }
@@ -226,8 +231,9 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
     fn drain(&self, core: usize) -> Result<()> {
         if let Some(mut local) = self.local[core % self.local.len()].try_lock() {
-            self.swap_reserved(&mut local.movable, None, true);
-            self.swap_reserved(&mut local.immovable, None, false);
+            self.swap_reserved(&mut local.fixed, None, Kind::Fixed);
+            self.swap_reserved(&mut local.movable, None, Kind::Movable);
+            self.swap_reserved(&mut local.huge, None, Kind::Huge);
         }
         Ok(())
     }
@@ -238,11 +244,10 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         // Frames allocated in reserved trees
         for local in self.local.iter() {
             if let Some(local) = local.try_lock() {
-                if let Some(tree) = local.movable {
-                    frames += tree.free as usize;
-                }
-                if let Some(tree) = local.immovable {
-                    frames += tree.free as usize;
+                for tree in [local.movable, local.fixed, local.huge] {
+                    if let Some(tree) = tree {
+                        frames += tree.free as usize;
+                    }
                 }
             }
         }
@@ -255,11 +260,10 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         // Frames allocated in reserved trees
         for local in self.local.iter() {
             if let Some(local) = local.try_lock() {
-                if let Some(tree) = local.movable {
-                    huge += tree.huge as usize;
-                }
-                if let Some(tree) = local.immovable {
-                    huge += tree.huge as usize;
+                for tree in [local.movable, local.fixed, local.huge] {
+                    if let Some(tree) = tree {
+                        huge += tree.huge as usize;
+                    }
                 }
             }
         }
@@ -272,15 +276,12 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             if global.reserved() {
                 for local in self.local {
                     if let Some(local) = local.try_lock() {
-                        if let Some(tree) = local.movable
-                            && tree.frame / TREE_FRAMES == frame / TREE_FRAMES
-                        {
-                            return global.free() + tree.free;
-                        }
-                        if let Some(tree) = local.immovable
-                            && tree.frame / TREE_FRAMES == frame / TREE_FRAMES
-                        {
-                            return global.free() + tree.free;
+                        for tree in [local.movable, local.fixed, local.huge] {
+                            if let Some(tree) = tree {
+                                if tree.frame / TREE_FRAMES == frame / TREE_FRAMES {
+                                    return global.free() + tree.free;
+                                }
+                            }
                         }
                     }
                 }
@@ -310,19 +311,14 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
         for local in self.local {
             let local = local.lock();
-            if let Some(tree) = local.movable {
-                let global = self.trees.get(tree.frame / TREE_FRAMES);
-                let (free, huge) = self.lower.free_in_tree(tree.frame);
-                assert_eq!(tree.free + global.free(), free);
-                assert_eq!(tree.huge + global.huge(), huge);
-                reserved -= 1;
-            }
-            if let Some(tree) = local.immovable {
-                let global = self.trees.get(tree.frame / TREE_FRAMES);
-                let (free, huge) = self.lower.free_in_tree(tree.frame);
-                assert_eq!(tree.free + global.free(), free);
-                assert_eq!(tree.huge + global.huge(), huge);
-                reserved -= 1;
+            for tree in [local.movable, local.fixed, local.huge] {
+                if let Some(tree) = tree {
+                    let global = self.trees.get(tree.frame / TREE_FRAMES);
+                    let (free, huge) = self.lower.free_in_tree(tree.frame);
+                    assert_eq!(tree.free + global.free(), free);
+                    assert_eq!(tree.huge + global.huge(), huge);
+                    reserved -= 1;
+                }
             }
         }
         assert!(reserved == 0);
@@ -347,14 +343,14 @@ impl LLFree<'_> {
         for i in 1..self.local.len() {
             let target_core = (core + i) % self.local.len();
             if let Some(mut target) = self.local[target_core].try_lock()
-            && let Some(tree) = target.preferred(flags.movable())
-            && tree.free >= (1 << flags.order())
-            && tree.huge >= (1 << flags.order()) / HUGE_FRAMES
-            && let Ok(new) = self.lower_get(*tree, flags)
+                && let Some(tree) = target.preferred(flags.into())
+                && tree.free >= (1 << flags.order())
+                && tree.huge >= (1 << flags.order()) / HUGE_FRAMES
+                && let Ok(new) = self.lower_get(*tree, flags)
             {
                 warn!("steal");
                 assert!(new.frame / TREE_FRAMES == tree.frame / TREE_FRAMES);
-                *target.preferred(flags.movable()) = None;
+                *target.preferred(flags.into()) = None;
                 return Ok(new);
             }
         }
@@ -368,7 +364,7 @@ impl LLFree<'_> {
         let min_huge = (1 << flags.order()) / HUGE_FRAMES;
 
         // Try decrementing the local counter
-        if let Some(tree) = local.preferred(flags.movable())
+        if let Some(tree) = local.preferred(flags.into())
             && tree.free >= 1 << flags.order()
             && tree.huge >= min_huge
         {
@@ -388,7 +384,7 @@ impl LLFree<'_> {
             }
         } else {
             // Try sync with global counter
-            if let Some(tree) = local.preferred(flags.movable()) {
+            if let Some(tree) = local.preferred(flags.into()) {
                 if self.sync_with_global(tree, flags.order()) {
                     // Success -> Retry allocation
                     return Err(Error::Retry);
@@ -420,7 +416,7 @@ impl LLFree<'_> {
     /// Reserve a new tree and allocate the frame in it
     fn reserve_and_get(&self, local: &mut Local, core: usize, flags: Flags) -> Result<usize> {
         // Try reserve new tree
-        let preferred = local.preferred(flags.movable());
+        let preferred = local.preferred(flags.into());
         let start = if let Some(tree) = *preferred {
             tree.frame / TREE_FRAMES
         } else {
@@ -435,13 +431,13 @@ impl LLFree<'_> {
             .reserve(cores, start, flags, |t, f| self.lower_get(t, f))
         {
             Ok(new) => {
-                self.swap_reserved(preferred, Some(new), flags.movable());
+                self.swap_reserved(preferred, Some(new), flags.into());
                 Ok(new.frame)
             }
             Err(Error::Memory) => {
                 // Fall back to stealing from other cores
                 let new = self.steal_tree(core, flags)?;
-                self.swap_reserved(preferred, Some(new), flags.movable());
+                self.swap_reserved(preferred, Some(new), flags.into());
                 Ok(new.frame)
             }
             Err(e) => Err(e),
@@ -451,38 +447,45 @@ impl LLFree<'_> {
     /// Swap the current reserved tree out replacing it with a new one.
     /// The old tree is unreserved.
     /// Returns false if the swap failed.
-    fn swap_reserved(
-        &self,
-        preferred: &mut Option<LocalTree>,
-        new: Option<LocalTree>,
-        movable: bool,
-    ) {
+    fn swap_reserved(&self, preferred: &mut Option<LocalTree>, new: Option<LocalTree>, kind: Kind) {
         let old_tree = core::mem::replace(preferred, new);
         if let Some(LocalTree { frame, free, huge }) = old_tree {
-            self.trees
-                .unreserve(frame / TREE_FRAMES, free, huge, movable);
+            self.trees.unreserve(frame / TREE_FRAMES, free, huge, kind);
         }
     }
 }
 
 impl fmt::Debug for LLFree<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{} {{", Self::name())?;
         let huge = self.frames() / (1 << HUGE_ORDER);
-        writeln!(f, "    managed: {} frames ({huge} huge)", self.frames())?;
         let free = self.free_frames();
         let free_huge = self.free_huge();
-        writeln!(f, "    free: {free} frames ({free_huge} huge)")?;
-        writeln!(f, "    trees: {:?} (N={})", self.trees, TREE_FRAMES)?;
-        for (t, local) in self.local.iter().enumerate() {
-            let local = local.lock();
-            writeln!(
-                f,
-                "    L{t:>2}: m={:?} f={:?}",
-                local.movable, local.immovable
-            )?;
-        }
-        write!(f, "}}")?;
+
+        f.debug_struct(Self::name())
+            .field(
+                "managed",
+                &FmtFn(|f| write!(f, "{} frames ({huge} huge)", self.frames())),
+            )
+            .field(
+                "free",
+                &FmtFn(|f| write!(f, "{free} frames ({free_huge} huge)")),
+            )
+            .field(
+                "trees",
+                &FmtFn(|f| write!(f, "{:?} (N={})", self.trees, TREE_FRAMES)),
+            )
+            .field(
+                "locals",
+                &FmtFn(|f| {
+                    let mut f = f.debug_list();
+                    for local in self.local.iter() {
+                        let local = local.lock();
+                        f.entry(&local);
+                    }
+                    f.finish()
+                }),
+            )
+            .finish()?;
         Ok(())
     }
 }
@@ -493,7 +496,9 @@ struct Local {
     /// Reserved tree for movable (user) allocations
     movable: Option<LocalTree>,
     /// Reserved tree for immovable (kernel) allocations
-    immovable: Option<LocalTree>,
+    fixed: Option<LocalTree>,
+    /// Reserved tree for huge allocations
+    huge: Option<LocalTree>,
     /// Tree index of the last freed frame
     last_idx: usize,
     /// Last frees counter
@@ -504,11 +509,11 @@ impl Local {
     /// Threshold for the number of frees after which a tree is reserved
     const F: u8 = 4;
 
-    fn preferred(&mut self, movable: bool) -> &mut Option<LocalTree> {
-        if movable {
-            &mut self.movable
-        } else {
-            &mut self.immovable
+    fn preferred(&mut self, kind: Kind) -> &mut Option<LocalTree> {
+        match kind {
+            Kind::Huge => &mut self.huge,
+            Kind::Movable => &mut self.movable,
+            Kind::Fixed => &mut self.fixed,
         }
     }
 

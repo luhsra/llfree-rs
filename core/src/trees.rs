@@ -3,7 +3,7 @@ use core::ops::RangeInclusive;
 use core::{fmt, slice};
 
 use crate::atomic::Atom;
-use crate::entry::{LocalTree, Tree};
+use crate::entry::{Kind, LocalTree, Tree};
 use crate::util::{align_down, size_of_slice, Align};
 use crate::{Error, Flags, Result, HUGE_FRAMES, TREE_FRAMES};
 
@@ -54,7 +54,7 @@ impl<'a> Trees<'a> {
 
         for (i, e) in entries.iter_mut().enumerate() {
             let (frames, huge) = free_in_tree(i * TREE_FRAMES);
-            *e = Atom::new(Tree::with(frames, huge, false, false));
+            *e = Atom::new(Tree::with(frames, huge, false, Kind::Fixed));
         }
 
         Self { entries }
@@ -121,9 +121,9 @@ impl<'a> Trees<'a> {
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: usize, free: usize, huge: usize, movable: bool) {
+    pub fn unreserve(&self, i: usize, free: usize, huge: usize, kind: Kind) {
         self.entries[i]
-            .fetch_update(|v| v.unreserve_add(free, huge, movable))
+            .fetch_update(|v| v.unreserve_add(free, huge, kind))
             .expect("Unreserve failed");
     }
 
@@ -147,13 +147,13 @@ impl<'a> Trees<'a> {
             let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
             let i = (start + off) as usize % self.entries.len();
             if let Ok(entry) =
-                self.entries[i].fetch_update(|v| v.reserve(free.clone(), min_huge, flags.movable()))
+                self.entries[i].fetch_update(|v| v.reserve(free.clone(), min_huge, flags.into()))
             {
                 let tree = LocalTree::new(i * TREE_FRAMES, entry.free(), entry.huge());
                 match get_lower(tree, flags) {
                     Ok(tree) => return Ok(tree),
                     Err(Error::Memory) => {
-                        self.unreserve(i, entry.free(), entry.huge(), flags.movable())
+                        self.unreserve(i, entry.free(), entry.huge(), flags.into())
                     }
                     Err(e) => return Err(e),
                 }

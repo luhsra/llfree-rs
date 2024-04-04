@@ -1024,7 +1024,7 @@ mod test {
 
         thread::parallel(0..THREADS, |core| {
             thread::pin(core);
-            for _ in 0..(FRAMES / THREADS) / (1 << HUGE_ORDER) {
+            for _ in (0..FRAMES / THREADS).step_by(1 << HUGE_ORDER) {
                 alloc.get(core, Flags::o(HUGE_ORDER)).unwrap();
             }
         });

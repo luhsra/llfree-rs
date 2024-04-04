@@ -7,8 +7,13 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Barrier;
+use std::time::Instant;
 
 use clap::Parser;
+use llfree::frame::Frame;
+use llfree::util::aligned_buf;
 use llfree::*;
 use log::warn;
 
@@ -20,12 +25,6 @@ struct Args {
     /// Max number of threads
     #[arg(short, long, default_value = "8")]
     threads: usize,
-    /// Specifies how many pages should be allocated: #pages = 2^order
-    #[arg(short = 's', long, default_value_t = 0)]
-    order: usize,
-    /// Runtime in seconds
-    #[arg(long, default_value_t = 60)]
-    time: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
     #[arg(short, long, default_value_t = 8)]
     memory: usize,
@@ -48,8 +47,6 @@ fn main() {
     let Args {
         trace,
         threads,
-        order,
-        time,
         memory,
         stride,
         frag,
@@ -72,46 +69,110 @@ fn main() {
             .filter(|op| matches!(op, Operation::Put(_, _)))
             .count()
     );
-    let mut lifetime = Vec::new();
-    for op in &trace {
-        match op {
-            Operation::Get(_) => {
-                lifetime.push(trace.len() as u32);
-            }
-            Operation::GetMovable(_) => {
-                lifetime.push(trace.len() as u32);
-            }
-            Operation::Put(_, idx) => {
-                lifetime[*idx as usize] = lifetime.len() as u32 - *idx;
-            }
-        }
-    }
-    warn!(
-        "lifetime: l={} 0={} >={} avg={:.3}",
-        lifetime.len(),
-        lifetime.iter().filter(|l| **l == 0).count(),
-        lifetime
-            .iter()
-            .filter(|l| **l >= trace.len() as u32)
-            .count(),
-        lifetime
-            .iter()
-            .filter(|l| **l < trace.len() as u32)
-            .map(|x| *x as usize)
-            .sum::<usize>() as f64
-            / lifetime.len() as f64
-    );
 
-    if let Some(frag) = frag {
-        let mut frag = BufWriter::new(File::create(frag).unwrap());
-        for l in lifetime {
-            frag.write(&l.to_ne_bytes()).unwrap();
-        }
+    // `thread::pin` uses this to select every nth cpu
+    if stride > 1 {
+        thread::STRIDE.store(stride, Ordering::Relaxed);
     }
 
     // TODO: replay allocations
+    let frames = (memory << 30) / Frame::SIZE;
+    let ms = Allocator::metadata_size(threads, frames);
+    let mut primary = aligned_buf(ms.primary);
+    let mut secondary = aligned_buf(ms.secondary);
+    let alloc =
+        Allocator::new(threads, frames, Init::FreeAll, &mut primary, &mut secondary).unwrap();
+    alloc.validate();
+
+    // Operate on half of the avaliable memory
+    let barrier = Barrier::new(threads + 1);
+
+    let start = Instant::now();
+    let running = AtomicBool::new(true);
+
+    warn!("start");
+
+    let mut traces = vec![Vec::new(); threads];
+    for t in 0..threads {
+        traces[t].extend(trace.iter().skip(t).step_by(threads).copied());
+    }
+
+    let score = std::thread::scope(|s| {
+        let monitor = s.spawn(|| {
+            thread::pin(threads);
+            let mut frag = frag.map(|path| BufWriter::new(File::create(path).unwrap()));
+
+            barrier.wait();
+
+            let mut frag_sec = 0;
+            let mut score = 0.0;
+            while running.load(Ordering::Relaxed) {
+                let elapsed = start.elapsed();
+                if elapsed.as_secs() > frag_sec {
+                    if let Some(frag) = frag.as_mut() {
+                        for i in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
+                            let free = alloc.free_at(i << HUGE_ORDER, HUGE_ORDER);
+                            let level = if free == 0 { 0 } else { 1 + free / 64 };
+                            write!(frag, "{level:?}").unwrap();
+                        }
+                        writeln!(frag).unwrap();
+                    }
+
+                    let huge = alloc.free_huge();
+                    let optimal = alloc.free_frames() >> HUGE_ORDER;
+                    let fraction = 100.0 * huge as f32 / optimal as f32;
+                    warn!("free-huge {huge}/{optimal} = {fraction:.1}");
+                    score += fraction;
+                    frag_sec += 1;
+                }
+            }
+            score / frag_sec as f32
+        });
+
+        thread::parallel(traces.into_iter().enumerate(), |(t, trace)| {
+            thread::pin(t);
+            let allocations = trace
+                .iter()
+                .filter(|op| matches!(op, Operation::Get(_) | Operation::GetMovable(_)))
+                .count();
+            let mut allocations = HashMap::with_capacity(allocations);
+
+            barrier.wait();
+
+            let mut alloc_idx = 0;
+            for op in trace {
+                match op {
+                    Operation::Get(order) => {
+                        let frame = alloc.get(t, Flags::o(order as _)).unwrap();
+                        allocations.insert(alloc_idx, frame);
+                        alloc_idx += 1;
+                    }
+                    Operation::GetMovable(order) => {
+                        let frame = alloc
+                            .get(order as _, Flags::o(order as _).with_movable(true))
+                            .unwrap();
+                        allocations.insert(alloc_idx, frame);
+                        alloc_idx += 1;
+                    }
+                    Operation::Put(order, idx) => {
+                        if let Some(frame) = allocations.remove(&(idx as usize)) {
+                            let _ = alloc.put(t, frame, Flags::o(order as _));
+                        }
+                    }
+                }
+            }
+            running.store(false, Ordering::Relaxed);
+        });
+
+        monitor.join().unwrap()
+    });
+
+    alloc.validate();
+    warn!("{alloc:#?}");
+    warn!("score = {score:.1}")
 }
 
+#[derive(Debug, Clone, Copy)]
 enum Operation {
     Get(u8),
     GetMovable(u8),

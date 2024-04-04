@@ -8,7 +8,7 @@ use core::sync::atomic::{self, AtomicU16, AtomicU32, AtomicU64};
 use bitfield_struct::bitfield;
 
 use crate::atomic::{Atom, Atomic};
-use crate::{TREE_FRAMES, TREE_HUGE};
+use crate::{Flags, HUGE_ORDER, TREE_FRAMES, TREE_HUGE};
 
 pub trait AtomicArray<T: Copy, const L: usize> {
     /// Overwrite the content of the whole array non-atomically.
@@ -53,9 +53,46 @@ pub struct Tree {
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
     /// Are the frames movable?
-    pub movable: bool,
-    #[bits(13)]
+    #[bits(2)]
+    pub kind: Kind,
+    #[bits(12)]
     __: (),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Huge,
+    Movable,
+    Fixed,
+}
+
+impl Kind {
+    const fn from_bits(bits: u8) -> Self {
+        match bits {
+            0 => Self::Huge,
+            1 => Self::Movable,
+            2 => Self::Fixed,
+            _ => unreachable!(),
+        }
+    }
+    const fn into_bits(self) -> u8 {
+        match self {
+            Self::Huge => 0,
+            Self::Movable => 1,
+            Self::Fixed => 2,
+        }
+    }
+}
+impl From<Flags> for Kind {
+    fn from(flags: Flags) -> Self {
+        if flags.order() >= HUGE_ORDER {
+            Self::Huge
+        } else if flags.movable() {
+            Self::Movable
+        } else {
+            Self::Fixed
+        }
+    }
 }
 
 const _: () = assert!(1 << Tree::FREE_BITS >= TREE_FRAMES);
@@ -66,48 +103,46 @@ impl Atomic for Tree {
 }
 impl Tree {
     /// Creates a new entry.
-    pub fn with(free: usize, huge: usize, reserved: bool, movable: bool) -> Self {
+    pub fn with(free: usize, huge: usize, reserved: bool, kind: Kind) -> Self {
         assert!(free <= TREE_FRAMES && huge <= TREE_HUGE);
         Self::new()
             .with_free(free)
             .with_huge(huge)
             .with_reserved(reserved)
-            .with_movable(movable)
+            .with_kind(kind)
     }
     /// Increments the free frames counter.
     pub fn inc(self, free: usize, huge: usize) -> Self {
         let free = self.free() + free;
         let huge = self.huge() + huge;
         assert!(free <= TREE_FRAMES && huge <= TREE_HUGE);
-        self.with_free(free)
-            .with_huge(huge)
-            .with_movable(self.movable())
+        self.with_free(free).with_huge(huge)
     }
     /// Reserves this entry if its frame count is in `range`.
     pub fn reserve(
         self,
         free: impl RangeBounds<usize>,
         min_huge: usize,
-        movable: bool,
+        kind: Kind,
     ) -> Option<Self> {
         if !self.reserved()
             && free.contains(&self.free())
             && self.huge() >= min_huge
-            && (movable == self.movable() || self.free() == TREE_FRAMES)
+            && (kind == self.kind() || self.free() == TREE_FRAMES)
         {
-            Some(Self::with(0, 0, true, movable))
+            Some(Self::with(0, 0, true, kind))
         } else {
             None
         }
     }
     /// Add the frames from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
-    pub fn unreserve_add(self, free: usize, huge: usize, movable: bool) -> Option<Self> {
+    pub fn unreserve_add(self, free: usize, huge: usize, kind: Kind) -> Option<Self> {
         if self.reserved() {
             let free = self.free() + free;
             let huge = self.huge() + huge;
             assert!(free <= TREE_FRAMES && huge <= TREE_HUGE);
-            Some(Self::with(free, huge, false, movable))
+            Some(Self::with(free, huge, false, kind))
         } else {
             None
         }
