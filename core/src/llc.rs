@@ -123,6 +123,10 @@ impl<'a> Alloc<'a> for LLC {
     fn free_at(&self, frame: usize, order: usize) -> usize {
         unsafe { llfree_free_at(self.raw.as_ptr().cast(), frame as _, order) }
     }
+
+    fn validate(&self) {
+        unsafe { llfree_validate(self.raw.as_ptr().cast()) }
+    }
 }
 
 impl fmt::Debug for LLC {
@@ -240,6 +244,9 @@ extern "C" {
         writer: extern "C" fn(*mut c_void, *const c_char),
         arg: *mut c_void,
     );
+
+    /// Validates the allocator's state
+    fn llfree_validate(this: *const llfree_t);
 }
 
 #[cfg(test)]

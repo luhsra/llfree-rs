@@ -177,19 +177,19 @@ impl<'a> Trees<'a> {
         let near = (self.len() / cores / 4).clamp(CACHELINE / 4, CACHELINE * 2);
 
         // Over half filled trees
-        let half = (2 << flags.order()).max(TREE_FRAMES / 16)..=TREE_FRAMES / 2;
+        let half = TREE_FRAMES / 16..=TREE_FRAMES / 2;
         match self.reserve_matching(start, flags, 1, near, half, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Partially filled trees
-        let partial = (2 << flags.order()).max(TREE_FRAMES / 64)..=TREE_FRAMES - TREE_FRAMES / 16;
+        let partial = TREE_FRAMES / 64..=TREE_FRAMES - TREE_FRAMES / 16;
         match self.reserve_matching(start, flags, 1, 2 * near, partial, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }
         // Not free trees
-        match self.reserve_matching(start, flags, 1, 4 * near, 0..=TREE_FRAMES - 4, get_lower) {
+        match self.reserve_matching(start, flags, 1, self.len(), 0..=TREE_FRAMES - 1, get_lower) {
             Err(Error::Memory) => {}
             r => return r,
         }

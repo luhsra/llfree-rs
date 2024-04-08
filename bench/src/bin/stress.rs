@@ -27,7 +27,7 @@ struct Args {
     #[arg(short = 's', long, default_value_t = 0)]
     order: usize,
     /// Runtime in seconds
-    #[arg(long, default_value_t = 60)]
+    #[arg(long, default_value_t = 20)]
     time: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
     #[arg(short, long, default_value_t = 8)]

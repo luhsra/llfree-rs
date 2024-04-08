@@ -439,6 +439,11 @@ mod test {
                 assert!(a < FRAMES && b < FRAMES);
             }
 
+            if barrier.wait().is_leader() {
+                alloc.validate();
+            }
+            barrier.wait();
+
             warn!("free...");
             rng.shuffle(&mut frames);
             for frame in &frames {

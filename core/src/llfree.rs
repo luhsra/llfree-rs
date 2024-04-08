@@ -348,7 +348,6 @@ impl LLFree<'_> {
                 && tree.huge >= (1 << flags.order()) / HUGE_FRAMES
                 && let Ok(new) = self.lower_get(*tree, flags)
             {
-                warn!("steal");
                 assert!(new.frame / TREE_FRAMES == tree.frame / TREE_FRAMES);
                 *target.preferred(flags.into()) = None;
                 return Ok(new);
