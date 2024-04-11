@@ -42,7 +42,13 @@ impl<'a, const LN: usize> fmt::Debug for Trees<'a, LN> {
 }
 
 impl<'a, const LN: usize> Trees<'a, LN> {
+    #[cfg(not(feature = "16K"))]
+    pub const MIN_FREE: usize = 1 << 10;
+    #[cfg(not(feature = "16K"))]
+    pub const MAX_FREE: usize = LN - (1 << 10);
+    #[cfg(feature = "16K")]
     pub const MIN_FREE: usize = 1 << 11; //This is the 12.5% threshold that is descrobed in the paper, but for 16K bf
+    #[cfg(feature = "16K")]
     pub const MAX_FREE: usize = LN - (1 << 11);
 
     pub fn metadata_size(frames: usize) -> usize {
