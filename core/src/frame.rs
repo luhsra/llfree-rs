@@ -2,7 +2,7 @@
 
 use core::mem::{align_of, size_of, transmute};
 
-use crate::FRAME_ORDER;
+use crate::FRAME_SIZE;
 
 /// Correctly sized and aligned page frame.
 #[derive(Clone)]
@@ -15,8 +15,7 @@ const _: () = assert!(size_of::<Frame>() == Frame::SIZE);
 const _: () = assert!(align_of::<Frame>() == Frame::SIZE);
 
 impl Frame {
-    pub const SIZE: usize = 1 << FRAME_ORDER;
-    pub const SIZE_BITS: usize = FRAME_ORDER;
+    pub const SIZE: usize = FRAME_SIZE;
 
     pub const fn new() -> Self {
         Self {

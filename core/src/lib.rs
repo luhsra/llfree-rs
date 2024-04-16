@@ -31,7 +31,6 @@ pub mod util;
 pub mod wrapper;
 
 mod bitfield;
-mod entry;
 mod llfree;
 use bitfield_struct::bitfield;
 pub use llfree::LLFree;
@@ -42,6 +41,7 @@ mod llc;
 pub use llc::LLC;
 use util::Align;
 
+mod local;
 mod lower;
 mod trees;
 
@@ -49,18 +49,22 @@ use core::fmt;
 use core::mem::align_of;
 use core::ops::Range;
 
+/// Order of a physical frame
+pub const FRAME_SIZE: usize = 0x1000;
+/// Order of a huge frame
+pub const HUGE_ORDER: usize = 9;
+/// Number of frames in a huge frame
+pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
+/// Maximum order the allocator supports
+pub const MAX_ORDER: usize = HUGE_ORDER + 1;
+
 /// Number of huge frames in tree
 pub const TREE_HUGE: usize = 8;
 /// Number of small frames in tree
 pub const TREE_FRAMES: usize = TREE_HUGE << HUGE_ORDER;
-/// Order for huge frames
-pub const HUGE_ORDER: usize = 9;
-pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
-/// Maximum order the llfree supports
-pub const MAX_ORDER: usize = HUGE_ORDER + 1;
 
-/// Order of a physical frame
-const FRAME_ORDER: usize = 12;
+/// Number of retries if an atomic operation fails.
+pub const RETRIES: usize = 4;
 
 /// Allocation error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,9 +81,6 @@ pub enum Error {
 
 /// Allocation result
 pub type Result<T> = core::result::Result<T, Error>;
-
-/// Number of retries if an atomic operation fails.
-pub const CAS_RETRIES: usize = 8;
 
 /// The general interface of the allocator implementations.
 pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
