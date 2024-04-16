@@ -13,7 +13,7 @@ use clap::Parser;
 use llfree::frame::Frame;
 use llfree::mmap::{self, MMap};
 use llfree::util::{aligned_buf, logging};
-use llfree::{thread, Alloc, Flags, Init, LLFree, HUGE_FRAMES};
+use llfree::{thread, Alloc, Flags, Init, LLFree, MetaData, HUGE_FRAMES};
 use log::warn;
 
 type Allocator<'a> = LLFree<'a>;
@@ -66,15 +66,19 @@ fn main() {
     assert!(bucket_size > 0);
 
     let ms = Allocator::metadata_size(threads, frames);
-    let mut primary = mapping(0x1000_0000_0000, ms.primary.div_ceil(Frame::SIZE), dax);
-    let primary = unsafe { slice::from_raw_parts_mut(primary.as_mut_ptr().cast(), ms.primary) };
-    let mut secondary = aligned_buf(ms.secondary);
+    let mut lower = mapping(0x1000_0000_0000, ms.lower.div_ceil(Frame::SIZE), dax);
+    let mut local = aligned_buf(ms.local);
+    let mut trees = aligned_buf(ms.trees);
 
     for _ in 0..iterations {
         let timer = Instant::now();
 
-        let alloc =
-            Allocator::new(threads, frames, Init::FreeAll, primary, &mut secondary).unwrap();
+        let meta = MetaData {
+            local: &mut local,
+            trees: &mut trees,
+            lower: unsafe { slice::from_raw_parts_mut(lower.as_mut_ptr().cast(), ms.lower) },
+        };
+        let alloc = Allocator::new(threads, frames, Init::FreeAll, meta).unwrap();
 
         warn!("init time {}ms", timer.elapsed().as_millis());
 

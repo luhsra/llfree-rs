@@ -103,8 +103,10 @@ fn main() {
 
 fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
-    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len()).secondary).leak();
-    let alloc = Allocator::create(threads, &mut mapping, false, volatile).unwrap();
+    let ms = Allocator::metadata_size(threads, mapping.len());
+    let local = aligned_buf(ms.local).leak();
+    let trees = aligned_buf(ms.trees).leak();
+    let alloc = Allocator::create(threads, &mut mapping, false, local, trees).unwrap();
     warn!("Prepare alloc");
 
     thread::parallel(0..threads, |t| {
@@ -134,11 +136,13 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 
 fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
-    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len()).secondary).leak();
+    let ms = Allocator::metadata_size(threads, mapping.len());
+    let local = aligned_buf(ms.local).leak();
+    let trees = aligned_buf(ms.trees).leak();
 
     warn!("Recover alloc");
     let timer = Instant::now();
-    let alloc = Allocator::create(threads, &mut mapping, true, volatile).unwrap();
+    let alloc = Allocator::create(threads, &mut mapping, true, local, trees).unwrap();
     let time = timer.elapsed().as_nanos();
 
     let num_alloc = alloc.allocated_frames();

@@ -80,8 +80,10 @@ fn execute(
     // Align to prevent false-sharing
     let out_size = align_up(allocs + 2, Frame::SIZE);
 
-    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len()).secondary).leak();
-    let alloc = Allocator::create(threads, mapping, false, volatile).unwrap();
+    let m = Allocator::metadata_size(threads, mapping.len());
+    let local = aligned_buf(m.local).leak();
+    let trees = aligned_buf(m.trees).leak();
+    let alloc = Allocator::create(threads, mapping, false, local, trees).unwrap();
     warn!("initialized {}", alloc.frames());
 
     let barrier = Barrier::new(threads);
@@ -167,8 +169,10 @@ fn monitor(
     warn!("check");
 
     // Recover allocator
-    let volatile = aligned_buf(Allocator::metadata_size(threads, mapping.len()).secondary).leak();
-    let alloc = Allocator::create(threads, mapping, true, volatile).unwrap();
+    let m = Allocator::metadata_size(threads, mapping.len());
+    let local = aligned_buf(m.local).leak();
+    let trees = aligned_buf(m.trees).leak();
+    let alloc = Allocator::create(threads, mapping, true, local, trees).unwrap();
     warn!("recovered {}", alloc.frames());
 
     let expected = allocs * threads - threads;

@@ -40,6 +40,11 @@ impl<'a> Trees<'a> {
             .next_multiple_of(align_of::<Align>())
     }
 
+    pub fn metadata(&mut self) -> &'a mut [u8] {
+        let len = Self::metadata_size(self.len() * TREE_FRAMES);
+        unsafe { slice::from_raw_parts_mut(self.entries.as_ptr().cast_mut().cast(), len) }
+    }
+
     /// Initialize the tree array
     pub fn new<F: Fn(usize) -> (usize, usize)>(
         frames: usize,
@@ -149,7 +154,7 @@ impl<'a> Trees<'a> {
             if let Ok(entry) =
                 self.entries[i].fetch_update(|v| v.reserve(free.clone(), min_huge, flags.into()))
             {
-                let tree = LocalTree::new(i * TREE_FRAMES, entry.free(), entry.huge());
+                let tree = LocalTree::with(i * TREE_FRAMES, entry.free(), entry.huge());
                 match get_lower(tree, flags) {
                     Ok(tree) => return Ok(tree),
                     Err(Error::Memory) => {

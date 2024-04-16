@@ -13,7 +13,6 @@ use std::time::Instant;
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::util::aligned_buf;
 use llfree::*;
 use log::warn;
 
@@ -78,10 +77,8 @@ fn main() {
     // TODO: replay allocations
     let frames = (memory << 30) / Frame::SIZE;
     let ms = Allocator::metadata_size(threads, frames);
-    let mut primary = aligned_buf(ms.primary);
-    let mut secondary = aligned_buf(ms.secondary);
-    let alloc =
-        Allocator::new(threads, frames, Init::FreeAll, &mut primary, &mut secondary).unwrap();
+    let meta = MetaData::alloc(ms);
+    let alloc = Allocator::new(threads, frames, Init::FreeAll, meta).unwrap();
     alloc.validate();
 
     // Operate on half of the avaliable memory

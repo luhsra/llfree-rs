@@ -10,7 +10,7 @@ use std::sync::{Barrier, Mutex};
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::util::{aligned_buf, WyRand};
+use llfree::util::WyRand;
 use llfree::*;
 use log::warn;
 
@@ -70,10 +70,8 @@ fn main() {
     // Map memory for the allocator and initialize it
     let pages = (memory << 30) / Frame::SIZE;
     let ms = Allocator::metadata_size(threads, pages);
-    let mut primary = aligned_buf(ms.primary);
-    let mut secondary = aligned_buf(ms.secondary);
-    let alloc =
-        Allocator::new(threads, pages, Init::FreeAll, &mut primary, &mut secondary).unwrap();
+    let meta = MetaData::alloc(ms);
+    let alloc = Allocator::new(threads, pages, Init::FreeAll, meta).unwrap();
 
     let out = Mutex::new(BufWriter::new(File::create(outfile).unwrap()));
 

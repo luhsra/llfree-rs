@@ -29,15 +29,22 @@ impl<T: Atomic, const L: usize> AtomicArray<T, L> for [Atom<T>; L] {
 }
 
 /// Local tree copy
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[bitfield(u64)]
+#[derive(PartialEq, Eq)]
 pub struct LocalTree {
+    #[bits(45)]
     pub frame: usize,
+    #[bits(15)]
     pub free: usize,
+    #[bits(4)]
     pub huge: usize,
 }
 impl LocalTree {
-    pub fn new(frame: usize, free: usize, huge: usize) -> Self {
-        Self { frame, free, huge }
+    pub fn with(frame: usize, free: usize, huge: usize) -> Self {
+        Self::new()
+            .with_frame(frame)
+            .with_free(free)
+            .with_huge(huge)
     }
 }
 

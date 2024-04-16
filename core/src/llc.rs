@@ -29,27 +29,24 @@ impl<'a> Alloc<'a> for LLC {
     fn metadata_size(cores: usize, frames: usize) -> crate::MetaSize {
         let m = unsafe { llfree_metadata_size(cores as _, frames as _) };
         crate::MetaSize {
-            primary: m.primary as _,
-            secondary: m.secondary as _,
+            local: m.local,
+            trees: m.trees,
+            lower: m.lower,
         }
     }
 
-    fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
+    fn metadata(&mut self) -> super::MetaData<'a> {
         let cores = unsafe { llfree_cores(self.raw.as_ptr().cast()) };
         let ms = Self::metadata_size(cores, self.frames());
         let m = unsafe { llfree_metadata(self.raw.as_mut_ptr().cast()) };
-        let primary = unsafe { slice::from_raw_parts_mut(m.primary.cast(), ms.primary) };
-        let secondary = unsafe { slice::from_raw_parts_mut(m.secondary.cast(), ms.secondary) };
-        (primary, secondary)
+        super::MetaData {
+            local: unsafe { slice::from_raw_parts_mut(m.local, ms.local) },
+            trees: unsafe { slice::from_raw_parts_mut(m.trees, ms.trees) },
+            lower: unsafe { slice::from_raw_parts_mut(m.lower, ms.lower) },
+        }
     }
 
-    fn new(
-        cores: usize,
-        frames: usize,
-        init: Init,
-        primary: &'a mut [u8],
-        secondary: &'a mut [u8],
-    ) -> Result<Self> {
+    fn new(cores: usize, frames: usize, init: Init, meta: super::MetaData<'a>) -> Result<Self> {
         let mut raw = [0u8; size_of::<Self>()];
 
         let init = match init {
@@ -59,20 +56,16 @@ impl<'a> Alloc<'a> for LLC {
             Init::Recover(true) => 3,
         };
 
-        let m = Self::metadata_size(cores, frames);
-        assert!(primary.len() >= m.primary);
-        assert!(secondary.len() >= m.secondary);
-
-        let ret = unsafe {
-            llfree_init(
-                raw.as_mut_ptr().cast(),
-                cores as _,
-                frames,
-                init,
-                primary.as_mut_ptr(),
-                secondary.as_mut_ptr(),
-            )
+        let m = unsafe { llfree_metadata_size(cores as _, frames as _) };
+        assert!(size_of::<Self>() >= m.llfree);
+        assert!(meta.valid(Self::metadata_size(cores, frames)));
+        let meta = Meta {
+            local: meta.local.as_mut_ptr(),
+            trees: meta.trees.as_mut_ptr(),
+            lower: meta.lower.as_mut_ptr(),
         };
+
+        let ret = unsafe { llfree_init(raw.as_mut_ptr().cast(), cores as _, frames, init, meta) };
         ret.ok().map(|_| LLC { raw })
     }
 
@@ -186,14 +179,17 @@ impl result_t {
 
 #[repr(C)]
 struct MetaSize {
-    primary: c_size_t,
-    secondary: c_size_t,
+    llfree: c_size_t,
+    local: c_size_t,
+    trees: c_size_t,
+    lower: c_size_t,
 }
 
 #[repr(C)]
 struct Meta {
-    primary: *mut u8,
-    secondary: *mut u8,
+    local: *mut u8,
+    trees: *mut u8,
+    lower: *mut u8,
 }
 
 #[link(name = "llc", kind = "static")]
@@ -204,8 +200,7 @@ extern "C" {
         cores: c_size_t,
         frames: c_size_t,
         init: u8,
-        primary: *mut u8,
-        secondary: *mut u8,
+        meta: Meta,
     ) -> result_t;
 
     /// Returns the size of the metadata buffers required for initialization
