@@ -6,11 +6,11 @@ use std::sync::Barrier;
 use std::time::Duration;
 
 use clap::Parser;
-use llfree::frame::{Frame, PT_LEN};
+use llfree::frame::Frame;
 use llfree::mmap::{self, MMap};
 use llfree::util::{self, align_up, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
-use llfree::{thread, Alloc, LLFree};
+use llfree::{thread, Alloc, Flags, LLFree};
 use log::{error, warn};
 
 /// Crash testing an allocator.
@@ -41,7 +41,7 @@ fn main() {
 
     util::logging();
 
-    let pages = memory * PT_LEN * PT_LEN;
+    let pages = (memory << 30) / Frame::SIZE;
 
     let allocs = pages / threads / 2 / (1 << order);
     let out_size = align_up(allocs + 2, Frame::SIZE) * threads;
@@ -98,7 +98,7 @@ fn execute(
 
         for (i, page) in data.iter_mut().enumerate() {
             *idx = i as _;
-            *page = alloc.get(t, order).unwrap();
+            *page = alloc.get(t, Flags::o(order)).unwrap();
         }
 
         warn!("repeat");
@@ -109,8 +109,8 @@ fn execute(
             let i = rng.range(0..allocs as u64) as usize;
             *idx = i as _;
 
-            alloc.put(t, data[i], order).unwrap();
-            data[i] = alloc.get(t, order).unwrap();
+            alloc.put(t, data[i], Flags::o(order)).unwrap();
+            data[i] = alloc.get(t, Flags::o(order)).unwrap();
         }
     });
 }
@@ -193,7 +193,7 @@ fn monitor(
 
         for (i, addr) in data[0..allocs].iter().enumerate() {
             if i != *idx {
-                alloc.put(t, *addr, order).unwrap();
+                alloc.put(t, *addr, Flags::o(order)).unwrap();
             }
         }
     }

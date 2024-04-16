@@ -10,10 +10,10 @@ use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::Parser;
-use llfree::frame::{Frame, PT_LEN};
+use llfree::frame::Frame;
 use llfree::mmap::{self, MMap};
 use llfree::util::{aligned_buf, logging};
-use llfree::{thread, Alloc, Init, LLFree};
+use llfree::{thread, Alloc, Flags, Init, LLFree, HUGE_FRAMES};
 use log::warn;
 
 type Allocator<'a> = LLFree<'a>;
@@ -57,7 +57,7 @@ fn main() {
     assert!(threads >= 1);
     assert!(threads <= std::thread::available_parallelism().unwrap().get());
 
-    let frames = PT_LEN * PT_LEN * threads;
+    let frames = HUGE_FRAMES * HUGE_FRAMES * threads;
 
     assert!(start < end);
     let mut get_buckets = vec![0usize; buckets];
@@ -80,7 +80,7 @@ fn main() {
 
         // Allocate half the memory
         let allocs = (frames / threads) / (2 * (1 << order));
-        assert!(allocs % PT_LEN == 0);
+        assert!(allocs % HUGE_FRAMES == 0);
         warn!("\n\n>>> bench t={threads} o={order:?} {allocs}\n");
 
         let barrier = Barrier::new(threads);
@@ -96,7 +96,7 @@ fn main() {
 
             for _ in 0..allocs {
                 let timer = Instant::now();
-                let page = alloc.get(t, order).unwrap();
+                let page = alloc.get(t, Flags::o(order)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
 
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
@@ -108,7 +108,7 @@ fn main() {
 
             for page in pages {
                 let timer = Instant::now();
-                alloc.put(t, page, order).unwrap();
+                alloc.put(t, page, Flags::o(order)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
 
@@ -120,7 +120,6 @@ fn main() {
         });
 
         assert_eq!(alloc.allocated_frames(), 0);
-        drop(alloc);
 
         for (get_b, put_b) in t_buckets {
             for i in 0..buckets {

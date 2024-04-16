@@ -8,6 +8,7 @@ use core::sync::atomic::{self, AtomicU16, AtomicU32, AtomicU64};
 use bitfield_struct::bitfield;
 
 use crate::atomic::{Atom, Atomic};
+use crate::{Flags, HUGE_ORDER, TREE_FRAMES, TREE_HUGE};
 
 pub trait AtomicArray<T: Copy, const L: usize> {
     /// Overwrite the content of the whole array non-atomically.
@@ -27,166 +28,129 @@ impl<T: Atomic, const L: usize> AtomicArray<T, L> for [Atom<T>; L] {
     }
 }
 
-/// Level 3 entry
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Preferred {
-    /// If this subtree locked for a reservation.
-    pub locked: bool,
-    /// The local tree copy.
-    pub tree: Option<LocalTree>,
-}
-
 /// Local tree copy
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct LocalTree {
     pub frame: usize,
     pub free: usize,
+    pub huge: usize,
 }
-impl Atomic for Preferred {
-    type I = AtomicU64;
-}
-
-impl Preferred {
-    pub fn tree(start: usize, free: usize, locked: bool) -> Self {
-        Self {
-            locked,
-            tree: Some(LocalTree { frame: start, free }),
-        }
-    }
-
-    /// Decrement or lock the tree if decrement fails
-    pub fn dec_or_lock(self, num_frames: usize, locked: &mut bool) -> Option<Self> {
-        if let Some(t) = self.tree
-            && t.free >= num_frames
-        {
-            Some(Preferred::tree(t.frame, t.free - num_frames, self.locked))
-        } else if !self.locked {
-            *locked = true;
-            Some(Preferred {
-                locked: true,
-                ..self
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Increments the free frames counter.
-    pub fn inc(
-        self,
-        num_frames: usize,
-        max: usize,
-        check_start: impl FnOnce(usize) -> bool,
-    ) -> Option<Self> {
-        if let Some(LocalTree { frame: start, free }) = self.tree
-            && check_start(start)
-        {
-            let frames = free + num_frames;
-            assert!(frames <= max);
-            Some(Preferred::tree(start, frames, self.locked))
-        } else {
-            None
-        }
-    }
-
-    /// Increment the free counter and unlock.
-    pub fn inc_unlock(self, num_frames: usize, max: usize) -> Option<Self> {
-        assert!(self.locked);
-        let LocalTree { frame: start, free } = self.tree.unwrap();
-        let frames = free + num_frames;
-        assert!(frames <= max);
-        Some(Preferred::tree(start, frames, false))
+impl LocalTree {
+    pub fn new(frame: usize, free: usize, huge: usize) -> Self {
+        Self { frame, free, huge }
     }
 }
 
-#[bitfield(u64)]
-struct PTreeBits {
-    #[bits(16)]
-    free: usize,
-    locked: bool,
-    reserved: bool,
-    #[bits(46)]
-    start: usize,
-}
-impl From<u64> for Preferred {
-    fn from(value: u64) -> Self {
-        let bits = PTreeBits::from(value);
-        if bits.reserved() {
-            Self {
-                locked: bits.locked(),
-                tree: Some(LocalTree {
-                    frame: bits.start() * 64,
-                    free: bits.free(),
-                }),
-            }
-        } else {
-            Self {
-                locked: bits.locked(),
-                tree: None,
-            }
-        }
-    }
-}
-impl From<Preferred> for u64 {
-    fn from(value: Preferred) -> Self {
-        match value.tree {
-            Some(LocalTree { free, frame: start }) => PTreeBits::new()
-                .with_reserved(true)
-                .with_locked(value.locked)
-                .with_free(free)
-                .with_start(start / 64)
-                .into(),
-            None => PTreeBits::new().with_locked(value.locked).into(),
-        }
-    }
-}
-
-#[bitfield(u16)]
+#[bitfield(u32)]
 #[derive(PartialEq, Eq)]
-// Changes for 16K: None, as we handle 265MiB Trees, wich are 2^14 16KiB BF, so counter stays the same, only the number of children changes from 32 to 8.
 pub struct Tree {
-    /// Number of free 4K/16K base frames.
+    /// Number of free 4K frames.
     #[bits(15)]
     pub free: usize,
+    /// Number of free 4K frames.
+    #[bits(4)]
+    pub huge: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
+    /// Are the frames movable?
+    #[bits(2)]
+    pub kind: Kind,
+    #[bits(10)]
+    __: (),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Huge,
+    Movable,
+    Fixed,
+}
+
+impl Kind {
+    const fn from_bits(bits: u8) -> Self {
+        match bits {
+            0 => Self::Huge,
+            1 => Self::Movable,
+            2 => Self::Fixed,
+            _ => unreachable!(),
+        }
+    }
+    const fn into_bits(self) -> u8 {
+        match self {
+            Self::Huge => 0,
+            Self::Movable => 1,
+            Self::Fixed => 2,
+        }
+    }
+}
+impl From<Flags> for Kind {
+    fn from(flags: Flags) -> Self {
+        if flags.order() >= HUGE_ORDER {
+            Self::Huge
+        } else if flags.movable() {
+            Self::Movable
+        } else {
+            Self::Fixed
+        }
+    }
+}
+
+const _: () = assert!(1 << Tree::FREE_BITS >= TREE_FRAMES);
+const _: () = assert!(1 << Tree::HUGE_BITS >= TREE_HUGE);
+
 impl Atomic for Tree {
-    type I = AtomicU16;
+    type I = AtomicU32;
 }
 impl Tree {
     /// Creates a new entry.
-    pub fn with(frames: usize, reserved: bool) -> Self {
-        Self::new().with_free(frames).with_reserved(reserved)
+    pub fn with(free: usize, huge: usize, reserved: bool, kind: Kind) -> Self {
+        assert!(free <= TREE_FRAMES && huge <= TREE_HUGE);
+        Self::new()
+            .with_free(free)
+            .with_huge(huge)
+            .with_reserved(reserved)
+            .with_kind(kind)
     }
     /// Increments the free frames counter.
-    pub fn inc(self, num_frames: usize, max: usize) -> Self {
-        let frames = self.free() + num_frames;
-        assert!(frames <= max);
-        self.with_free(frames)
+    pub fn inc(self, free: usize, huge: usize) -> Self {
+        let free = self.free() + free;
+        let huge = self.huge() + huge;
+        assert!(free <= TREE_FRAMES && huge <= TREE_HUGE);
+        self.with_free(free).with_huge(huge)
     }
     /// Reserves this entry if its frame count is in `range`.
-    pub fn reserve<R: RangeBounds<usize>>(self, free: R) -> Option<Self> {
-        if !self.reserved() && free.contains(&self.free()) {
-            Some(Self::with(0, true))
+    pub fn reserve(
+        self,
+        free: impl RangeBounds<usize>,
+        min_huge: usize,
+        kind: Kind,
+    ) -> Option<Self> {
+        if !self.reserved()
+            && free.contains(&self.free())
+            && self.huge() >= min_huge
+            && (kind == self.kind() || self.free() == TREE_FRAMES)
+        {
+            Some(Self::with(0, 0, true, kind))
         } else {
             None
         }
     }
     /// Add the frames from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
-    pub fn unreserve_add(self, add: usize, max: usize) -> Option<Self> {
-        let frames = self.free() + add;
-        if self.reserved() && frames <= max {
-            Some(Self::with(frames, false))
+    pub fn unreserve_add(self, free: usize, huge: usize, kind: Kind) -> Option<Self> {
+        if self.reserved() {
+            let free = self.free() + free;
+            let huge = self.huge() + huge;
+            assert!(free <= TREE_FRAMES && huge <= TREE_HUGE);
+            Some(Self::with(free, huge, false, kind))
         } else {
             None
         }
     }
     /// Set the free counter to zero if it is large enough for synchronization
-    pub fn sync_steal(self, free: usize, min: usize) -> Option<Self> {
-        if self.reserved() && self.free() + free > min {
-            Some(self.with_free(0))
+    pub fn sync_steal(self, min: usize, min_huge: usize) -> Option<Self> {
+        if self.reserved() && self.free() > min && self.huge() >= min_huge {
+            Some(self.with_free(0).with_huge(0))
         } else {
             None
         }
@@ -342,19 +306,13 @@ mod test {
     use core::sync::atomic::AtomicU64;
 
     use crate::atomic::Atom;
-    use crate::entry::Preferred;
-    use crate::frame::PT_LEN;
+    use crate::HUGE_FRAMES;
 
     #[test]
     fn pt() {
-        let pt: [Atom<u64>; PT_LEN] = [const { Atom(AtomicU64::new(0)) }; PT_LEN];
+        let pt: [Atom<u64>; HUGE_FRAMES] = [const { Atom(AtomicU64::new(0)) }; HUGE_FRAMES];
         pt[0].compare_exchange(0, 42).unwrap();
         pt[0].fetch_update(|v| Some(v + 1)).unwrap();
         assert_eq!(pt[0].load(), 43);
-    }
-
-    #[test]
-    fn preferred() {
-        println!("{:#?}", Preferred::from(200354));
     }
 }

@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Barrier, Mutex};
 
 use clap::Parser;
-use llfree::frame::PT_LEN;
+use llfree::frame::Frame;
 use llfree::util::{aligned_buf, WyRand};
 use llfree::*;
 use log::warn;
@@ -68,7 +68,7 @@ fn main() {
     }
 
     // Map memory for the allocator and initialize it
-    let pages = memory * PT_LEN * PT_LEN;
+    let pages = (memory << 30) / Frame::SIZE;
     let ms = Allocator::metadata_size(threads, pages);
     let mut primary = aligned_buf(ms.primary);
     let mut secondary = aligned_buf(ms.secondary);
@@ -97,7 +97,7 @@ fn main() {
             let mut pages = all_pages[t].lock().unwrap();
             barrier.wait();
 
-            while let Ok(page) = alloc.get(t, order) {
+            while let Ok(page) = alloc.get(t, Flags::o(order)) {
                 pages.push(page);
             }
         };
@@ -131,7 +131,7 @@ fn main() {
             barrier.wait();
 
             for _ in 0..allocs {
-                alloc.put(t, pages.pop().unwrap(), order).unwrap();
+                alloc.put(t, pages.pop().unwrap(), Flags::o(order)).unwrap();
             }
         };
 
@@ -148,8 +148,8 @@ fn main() {
                 // realloc 10% of the remaining pages
                 for _ in 0..allocs / 10 {
                     let i = rng.range(0..pages.len() as u64) as usize;
-                    alloc.put(t, pages[i], order).unwrap();
-                    pages[i] = alloc.get(t, order).unwrap();
+                    alloc.put(t, pages[i], Flags::o(order)).unwrap();
+                    pages[i] = alloc.get(t, Flags::o(order)).unwrap();
                 }
             };
             if barrier.wait().is_leader() {
@@ -166,8 +166,8 @@ fn main() {
 
 /// count and output stats
 fn stats(out: &mut impl Write, alloc: &Allocator) -> io::Result<()> {
-    for huge in 0..alloc.frames().div_ceil(1 << Allocator::HUGE_ORDER) {
-        let free = alloc.free_at(huge << Allocator::HUGE_ORDER, Allocator::HUGE_ORDER);
+    for huge in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
+        let free = alloc.free_at(huge << HUGE_ORDER, HUGE_ORDER);
         let level = if free == 0 { 0 } else { free / 64 + 1 };
         assert!(level <= 9);
         write!(out, "{level}")?;

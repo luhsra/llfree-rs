@@ -7,7 +7,7 @@ use core::{fmt, slice};
 use log::error;
 
 use crate::frame::Frame;
-use crate::{Alloc, Error, Init, MetaSize, Result};
+use crate::{Alloc, Error, Flags, Init, MetaSize, Result, MAX_ORDER};
 
 /// Zone allocator, managing a range of memory at a given page frame offset.
 pub struct ZoneAlloc<'a, A: Alloc<'a>> {
@@ -17,9 +17,6 @@ pub struct ZoneAlloc<'a, A: Alloc<'a>> {
 }
 
 impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
-    const MAX_ORDER: usize = A::MAX_ORDER;
-    const HUGE_ORDER: usize = A::HUGE_ORDER;
-
     fn name() -> &'static str {
         A::name()
     }
@@ -43,12 +40,12 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
         self.alloc.metadata()
     }
-    fn get(&self, core: usize, order: usize) -> Result<usize> {
-        Ok(self.alloc.get(core, order)? + self.offset)
+    fn get(&self, core: usize, flags: Flags) -> Result<usize> {
+        Ok(self.alloc.get(core, flags)? + self.offset)
     }
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
+    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
         let frame = frame.checked_sub(self.offset).ok_or(Error::Address)?;
-        self.alloc.put(core, frame, order)
+        self.alloc.put(core, frame, flags)
     }
     fn frames(&self) -> usize {
         self.alloc.frames()
@@ -59,8 +56,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn free_frames(&self) -> usize {
         self.alloc.free_frames()
     }
-    fn free_huge_frames(&self) -> usize {
-        self.alloc.free_huge_frames()
+    fn free_huge(&self) -> usize {
+        self.alloc.free_huge()
     }
     fn is_free(&self, frame: usize, order: usize) -> bool {
         let Some(frame) = frame.checked_sub(self.offset) else {
@@ -88,7 +85,7 @@ impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
         primary: &'a mut [u8],
         secondary: &'a mut [u8],
     ) -> Result<Self> {
-        if offset % (1 << A::MAX_ORDER) != 0 {
+        if offset % (1 << MAX_ORDER) != 0 {
             error!("zone alignment");
             return Err(Error::Initialization);
         }
@@ -136,7 +133,7 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
     ) -> Result<Self> {
         let m = A::metadata_size(cores, zone.len());
         if size_of_val(zone) < m.primary + Frame::SIZE
-            || zone.as_ptr() as usize % (Frame::SIZE << A::MAX_ORDER) != 0
+            || zone.as_ptr() as usize % (Frame::SIZE << MAX_ORDER) != 0
         {
             error!("invalid memory region");
             return Err(Error::Initialization);
@@ -176,9 +173,6 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
 }
 
 impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
-    const MAX_ORDER: usize = A::MAX_ORDER;
-    const HUGE_ORDER: usize = A::HUGE_ORDER;
-
     fn name() -> &'static str {
         A::name()
     }
@@ -197,11 +191,11 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
         self.alloc.metadata()
     }
-    fn get(&self, core: usize, order: usize) -> Result<usize> {
-        self.alloc.get(core, order)
+    fn get(&self, core: usize, flags: Flags) -> Result<usize> {
+        self.alloc.get(core, flags)
     }
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
-        self.alloc.put(core, frame, order)
+    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
+        self.alloc.put(core, frame, flags)
     }
     fn frames(&self) -> usize {
         self.alloc.frames()
@@ -212,8 +206,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn free_frames(&self) -> usize {
         self.alloc.free_frames()
     }
-    fn free_huge_frames(&self) -> usize {
-        self.alloc.free_huge_frames()
+    fn free_huge(&self) -> usize {
+        self.alloc.free_huge()
     }
     fn is_free(&self, frame: usize, order: usize) -> bool {
         self.alloc.is_free(frame, order)

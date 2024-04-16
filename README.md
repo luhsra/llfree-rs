@@ -20,7 +20,7 @@ In: 2023 USENIX Annual Technical Conference (USENIX '23); USENIX Association
 
 To compile and test the allocator, you have to [install rust](https://www.rust-lang.org/learn/get-started).
 
-The `nightly` version `1.62.0` (or newer) is required for inline assembly and custom compiler toolchains.
+The `nightly` version `1.76.0` (or newer) is required for inline assembly and custom compiler toolchains.
 
 ```sh
 # Init dependencies
@@ -96,7 +96,7 @@ To execute the benchmark on NVM, use the `--dax` flag to specify a DAX file to b
 
 General statistics:
 
-```
+```sh
 perf stat -e <events> target/release/bench <args>
 ```
 
@@ -106,7 +106,7 @@ perf stat -e <events> target/release/bench <args>
 
 Recording events:
 
-```
+```sh
 perf record -g -F 999 target/release/bench <args>
 ```
 

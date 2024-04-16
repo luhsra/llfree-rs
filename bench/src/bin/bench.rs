@@ -10,13 +10,13 @@ use std::sync::Barrier;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
-use llfree::frame::{Frame, PT_LEN};
+use llfree::frame::Frame;
 use llfree::mmap::{self, MMap};
 use llfree::util::{self, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
 #[cfg(feature = "llc")]
 use llfree::LLC;
-use llfree::{thread, Alloc, LLFree, Result};
+use llfree::{thread, Alloc, Flags, LLFree, Result, MAX_ORDER};
 use log::warn;
 
 /// Number of allocations per block
@@ -46,8 +46,8 @@ struct Args {
     #[arg(short, long, default_value_t = 1)]
     iterations: usize,
     /// Specifies how many pages should be allocated: #pages = 2^order
-    #[arg(short = 's', long, default_value_t = 0)]
-    order: usize,
+    #[arg(short = 's', long, default_value = "0")]
+    order: Vec<usize>,
     /// Max amount of memory in GiB.
     #[arg(short, long, default_value_t = 16)]
     memory: usize,
@@ -87,18 +87,20 @@ fn main() {
     assert!(memory >= 1);
 
     let mut out = File::create(outfile).unwrap();
-    writeln!(out, "alloc,x,iteration,memory,{}", Perf::header()).unwrap();
+    writeln!(out, "alloc,x,order,iteration,memory,{}", Perf::header()).unwrap();
 
-    warn!("Allocating order {order}");
+    warn!("Allocating orders {order:?}");
 
-    let frames = (memory * (1 << 30)) / Frame::SIZE;
-    //let mut mapping = mapping(0x1000_0000_0000, memory * PT_LEN * PT_LEN, dax);
-    let mut mapping = mapping(0x1000_0000_0000, frames, dax);
+    let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
+
     for x in x {
-        for name in &allocs {
-            for i in 0..iterations {
-                let perf = bench.run(name, &mut mapping, order, threads, x);
-                writeln!(out, "{name},{x},{i},{memory},{perf}").unwrap();
+        for o in order.iter().copied() {
+            assert!(o <= MAX_ORDER);
+            for name in &allocs {
+                for i in 0..iterations {
+                    let perf = bench.run(name, &mut mapping, o, threads, x);
+                    writeln!(out, "{name},{x},{o},{i},{memory},{perf}").unwrap();
+                }
             }
         }
     }
@@ -128,10 +130,10 @@ trait DynAlloc: fmt::Debug + Send + Sync {
 
 impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
     fn get(&self, core: usize, order: usize) -> Result<usize> {
-        Alloc::get(self, core, order)
+        Alloc::get(self, core, Flags::o(order))
     }
     fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
-        Alloc::put(self, core, frame, order)
+        Alloc::put(self, core, frame, Flags::o(order))
     }
     fn frames(&self) -> usize {
         Alloc::frames(self)

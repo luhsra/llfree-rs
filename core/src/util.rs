@@ -4,20 +4,16 @@ use core::fmt;
 use core::mem::{align_of, size_of};
 use core::ops::{Add, Deref, DerefMut, Div, Range};
 
-/// Align v up to next `align` (power of two!)
+/// Align v up to next `align`
 #[inline(always)]
 pub const fn align_up(v: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    let mask = align - 1;
-    (v + mask) & !mask
+    v.next_multiple_of(align)
 }
 
-/// Align v up to previous `align` (power of two!)
+/// Align v down to previous `align` (power of two!)
 #[inline(always)]
 pub const fn align_down(v: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    let mask = align - 1;
-    v & !mask
+    (v / align) * align
 }
 
 /// Calculate the size of a slice of T, respecting any alignment constraints
@@ -55,6 +51,7 @@ impl<T: fmt::Debug> fmt::Debug for Align<T> {
 #[cfg(feature = "std")]
 pub fn logging() {
     use core::mem::transmute;
+    use std::boxed::Box;
     use std::io::Write;
     use std::thread::ThreadId;
 
@@ -70,12 +67,7 @@ pub fn logging() {
                 log::Level::Trace => "\x1b[90m",
             };
 
-            let pin = pinned();
-            let pin = if pin > isize::MAX as usize {
-                -1
-            } else {
-                pin as isize
-            };
+            let pin = pinned().map_or(-1, |p| p as isize);
 
             writeln!(
                 buf,
@@ -89,6 +81,14 @@ pub fn logging() {
             )
         })
         .try_init();
+
+    std::panic::set_hook(Box::new(panic_handler));
+}
+
+#[cfg(feature = "std")]
+fn panic_handler(info: &std::panic::PanicInfo) {
+    use std::backtrace::Backtrace;
+    log::error!("{info}\n{}", Backtrace::capture());
 }
 
 /// Simple bare bones random number generator based on wyhash.
@@ -117,7 +117,7 @@ impl WyRand {
         }
     }
     pub fn shuffle<T>(&mut self, target: &mut [T]) {
-        if target.len() > 0 {
+        if !target.is_empty() {
             for i in 0..target.len() - 1 {
                 target.swap(i, self.range(i as u64..target.len() as u64) as usize);
             }
@@ -175,6 +175,27 @@ pub fn aligned_buf(size: usize) -> std::vec::Vec<u8> {
     };
     debug_assert!(len == cap);
     unsafe { std::vec::Vec::from_raw_parts(ptr.cast(), len * ALIGN, cap * ALIGN) }
+}
+
+pub struct FmtFn<F>(pub F)
+where
+    F: Fn(&mut fmt::Formatter<'_>) -> fmt::Result;
+
+impl<F> fmt::Debug for FmtFn<F>
+where
+    F: Fn(&mut fmt::Formatter<'_>) -> fmt::Result,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (self.0)(f)
+    }
+}
+impl<F> fmt::Display for FmtFn<F>
+where
+    F: Fn(&mut fmt::Formatter<'_>) -> fmt::Result,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (self.0)(f)
+    }
 }
 
 #[cfg(all(test, feature = "std"))]

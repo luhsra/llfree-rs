@@ -23,8 +23,9 @@ pub fn cores() -> usize {
 }
 
 /// Returns the core on which we are pinned or [usize::MAX]
-pub fn pinned() -> usize {
-    PINNED.with(|p| p.load(Ordering::Acquire))
+pub fn pinned() -> Option<usize> {
+    let p = PINNED.with(|p| p.load(Ordering::Acquire));
+    (p != usize::MAX).then_some(p)
 }
 
 /// Pins the current thread to the given virtual core
@@ -54,9 +55,8 @@ pub fn pin(core: usize) {
 
 /// Pins the current thread to the given virtual core
 #[cfg(target_os = "macos")]
+#[allow(non_camel_case_types)]
 pub fn pin(core: usize) {
-    #![allow(non_camel_case_types)]
-
     use std::mem::size_of;
     use std::os::raw::{c_int, c_uint};
 
@@ -146,9 +146,9 @@ mod test {
         println!("max cores: {cores}");
 
         super::pin(0);
-        println!("Pinned to {}", super::pinned());
+        println!("Pinned to {}", super::pinned().unwrap());
         super::pin(cores - 1);
-        println!("Pinned to {}", super::pinned());
+        println!("Pinned to {}", super::pinned().unwrap());
     }
 
     #[test]
@@ -160,9 +160,9 @@ mod test {
         println!("max cores: {cores}");
 
         super::pin(0);
-        println!("Pinned to {}", super::pinned());
+        println!("Pinned to {}", super::pinned().unwrap());
         super::pin(cores / 2);
-        println!("Pinned to {}", super::pinned());
+        println!("Pinned to {}", super::pinned().unwrap());
 
         STRIDE.store(old, Ordering::Relaxed);
     }

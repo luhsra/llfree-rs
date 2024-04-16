@@ -4,7 +4,7 @@ use core::{fmt, slice};
 
 use super::{Alloc, Init};
 use crate::util::Align;
-use crate::{Error, Result};
+use crate::{Error, Flags, Result};
 
 /// C implementation of LLFree
 ///
@@ -22,9 +22,6 @@ unsafe impl Send for LLC {}
 unsafe impl Sync for LLC {}
 
 impl<'a> Alloc<'a> for LLC {
-    const MAX_ORDER: usize = 10;
-    const HUGE_ORDER: usize = 9;
-
     fn name() -> &'static str {
         "LLC"
     }
@@ -79,14 +76,20 @@ impl<'a> Alloc<'a> for LLC {
         ret.ok().map(|_| LLC { raw })
     }
 
-    fn get(&self, core: usize, order: usize) -> Result<usize> {
-        let ret = unsafe { llfree_get(self.raw.as_ptr().cast(), core as _, order as _) };
+    fn get(&self, core: usize, flags: Flags) -> Result<usize> {
+        let ret = unsafe { llfree_get(self.raw.as_ptr().cast(), core as _, flags.into()) };
         Ok(ret.ok()? as _)
     }
 
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
-        let ret =
-            unsafe { llfree_put(self.raw.as_ptr().cast(), core as _, frame as _, order as _) };
+    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
+        let ret = unsafe {
+            llfree_put(
+                self.raw.as_ptr().cast(),
+                core as _,
+                frame as _,
+                flags.into(),
+            )
+        };
         ret.ok().map(|_| ())
     }
 
@@ -113,9 +116,16 @@ impl<'a> Alloc<'a> for LLC {
     fn free_frames(&self) -> usize {
         unsafe { llfree_free_frames(self.raw.as_ptr().cast()) as _ }
     }
+    fn free_huge(&self) -> usize {
+        unsafe { llfree_free_huge(self.raw.as_ptr().cast()) as _ }
+    }
 
     fn free_at(&self, frame: usize, order: usize) -> usize {
         unsafe { llfree_free_at(self.raw.as_ptr().cast(), frame as _, order) }
+    }
+
+    fn validate(&self) {
+        unsafe { llfree_validate(self.raw.as_ptr().cast()) }
     }
 }
 
@@ -137,6 +147,21 @@ impl fmt::Debug for LLC {
         };
 
         Ok(())
+    }
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct flags_t {
+    order: u8,
+    flags: u8,
+}
+impl From<Flags> for flags_t {
+    fn from(flags: Flags) -> Self {
+        flags_t {
+            order: flags.order() as _,
+            flags: flags.movable() as _,
+        }
     }
 }
 
@@ -190,25 +215,28 @@ extern "C" {
     fn llfree_metadata(this: *mut llfree_t) -> Meta;
 
     /// Allocates a frame and returns its address, or a negative error code
-    fn llfree_get(this: *const llfree_t, core: c_size_t, order: c_size_t) -> result_t;
-
+    fn llfree_get(this: *const llfree_t, core: c_size_t, flags: flags_t) -> result_t;
     /// Frees a frame, returning 0 on success or a negative error code
-    fn llfree_put(this: *const llfree_t, core: c_size_t, frame: u64, order: c_size_t) -> result_t;
-
-    /// Checks if a frame is allocated, returning 0 if not
-    fn llfree_is_free(this: *const llfree_t, frame: u64, order: c_size_t) -> bool;
+    fn llfree_put(this: *const llfree_t, core: c_size_t, frame: u64, flags: flags_t) -> result_t;
 
     /// Frees a frame, returning 0 on success or a negative error code
     fn llfree_drain(this: *const llfree_t, core: c_size_t) -> result_t;
 
     /// Returns the number of cores this allocator was initialized with
     fn llfree_cores(this: *const llfree_t) -> c_size_t;
-
     /// Returns the total number of frames the allocator can allocate
     fn llfree_frames(this: *const llfree_t) -> c_size_t;
 
+    /// Checks if a frame is allocated, returning 0 if not
+    fn llfree_is_free(this: *const llfree_t, frame: u64, order: c_size_t) -> bool;
+    /// Returns the number of frames in the given chunk.
+    /// This is only implemented for 0, HUGE_ORDER and TREE_ORDER.
+    fn llfree_free_at(this: *const llfree_t, frame: u64, order: c_size_t) -> c_size_t;
+
     /// Returns number of currently free frames
     fn llfree_free_frames(this: *const llfree_t) -> c_size_t;
+    /// Returns number of currently free huge frames
+    fn llfree_free_huge(this: *const llfree_t) -> c_size_t;
 
     /// Prints the allocators state for debugging
     fn llfree_print_debug(
@@ -217,9 +245,8 @@ extern "C" {
         arg: *mut c_void,
     );
 
-    /// Returns the number of frames in the given chunk.
-    /// This is only implemented for 0, HUGE_ORDER and TREE_ORDER.
-    fn llfree_free_at(this: *const llfree_t, frame: u64, order: c_size_t) -> c_size_t;
+    /// Validates the allocator's state
+    fn llfree_validate(this: *const llfree_t);
 }
 
 #[cfg(test)]

@@ -2,10 +2,7 @@
 
 use core::mem::{align_of, size_of, transmute};
 
-use crate::lower::Lower;
-
-//pub const PT_ORDER: usize = 9;
-pub const PT_LEN: usize = 1 << Lower::HUGE_ORDER; //PT_ORDER;
+use crate::FRAME_ORDER;
 
 /// Correctly sized and aligned page frame.
 #[derive(Clone)]
@@ -17,15 +14,18 @@ pub const PT_LEN: usize = 1 << Lower::HUGE_ORDER; //PT_ORDER;
 pub struct Frame {
     _data: [u8; Self::SIZE],
 }
+
 const _: () = assert!(size_of::<Frame>() == Frame::SIZE);
-//const _: () = assert!(align_of::<Frame>() == Frame::SIZE);
+const _: () = assert!(align_of::<Frame>() == Frame::SIZE);
+
 impl Frame {
     #[cfg(not(feature = "16K"))]
-    pub const SIZE: usize = 0x1000; // 4KiB
+    pub const SIZE: usize = 1 << FRAME_ORDER; // 4KiB
     #[cfg(feature = "16K")]
     pub const SIZE: usize = 0x4000; // 16KiB
 
-    pub const SIZE_BITS: usize = Self::SIZE.ilog2() as _;
+    pub const SIZE_BITS: usize = FRAME_ORDER;
+
     pub const fn new() -> Self {
         Self {
             _data: [0; Self::SIZE],
