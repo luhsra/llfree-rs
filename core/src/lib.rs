@@ -74,11 +74,6 @@ pub const MAX_ORDER: usize = HUGE_ORDER + 1;
 
 /// Number of retries if an atomic operation fails.
 pub const RETRIES: usize = 4;
-/// Order of a physical frame
-#[cfg(not(feature = "16K"))]
-const FRAME_ORDER: usize = 12;
-#[cfg(feature = "16K")]
-const FRAME_ORDER: usize = 14;
 
 /// Allocation error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -994,11 +989,11 @@ mod test {
 
         logging();
 
-        const FRAMES: usize = 8 << 18;
+        const FRAMES: usize = 8*(1 << 30) / FRAME_SIZE;
 
         thread::pin(0);
 
-        let expected_frames = (HUGE_FRAMES + 2) * (1 + (1 << 9));
+        let expected_frames = 128 * (1 + (1 << 11));
 
         let mut zone = mmap::anon(0x1000_0000_0000, FRAMES, false, false);
         let m = Allocator::metadata_size(1, FRAMES);
@@ -1009,10 +1004,10 @@ mod test {
             let alloc = Allocator::create(1, &mut zone, false, local, trees).unwrap();
 
             let mut _allocated_frames = 0;
-            for _ in 0..HUGE_FRAMES + 2 {
+            for _ in 0..128 {
                 alloc.get(0, Flags::o(0)).unwrap();
                 _allocated_frames = alloc.allocated_frames();
-                alloc.get(0, Flags::o(9)).unwrap();
+                alloc.get(0, Flags::o(11)).unwrap();
                 _allocated_frames = alloc.allocated_frames();
             }
 
