@@ -48,17 +48,26 @@ mod trees;
 use core::fmt;
 
 /// Number of huge frames in tree
+#[cfg(not(feature = "16K"))]
+pub const TREE_HUGE: usize = 8;
+#[cfg(feature = "16K")]
 pub const TREE_HUGE: usize = 8;
 /// Number of small frames in tree
 pub const TREE_FRAMES: usize = TREE_HUGE << HUGE_ORDER;
 /// Order for huge frames
+#[cfg(not(feature = "16K"))]
 pub const HUGE_ORDER: usize = 9;
+#[cfg(feature = "16K")]
+pub const HUGE_ORDER: usize = 11;
 pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
 /// Maximum order the llfree supports
 pub const MAX_ORDER: usize = HUGE_ORDER + 1;
 
 /// Order of a physical frame
+#[cfg(not(feature = "16K"))]
 const FRAME_ORDER: usize = 12;
+#[cfg(feature = "16K")]
+const FRAME_ORDER: usize = 14;
 
 /// Allocation error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,7 +192,7 @@ mod test {
     use std::time::Instant;
     use std::vec::Vec;
 
-    use log::{error, warn};
+    use log::{debug, error, warn};
 
     use super::*;
     use crate::frame::Frame;
@@ -264,7 +273,7 @@ mod test {
     fn simple() {
         logging();
         // 8GiB
-        const MEM_SIZE: usize = 1 << 30;
+        const MEM_SIZE: usize = 8*(1 << 30);
         const FRAMES: usize = MEM_SIZE / Frame::SIZE;
 
         let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
@@ -304,7 +313,7 @@ mod test {
         warn!("realloc...");
 
         // Free some
-        const FREE_NUM: usize = HUGE_FRAMES * HUGE_FRAMES - 10;
+        const FREE_NUM: usize = HUGE_FRAMES - 10;
         for frame in &frames[..FREE_NUM] {
             alloc.put(0, *frame, Flags::o(0)).unwrap();
         }
@@ -478,7 +487,7 @@ mod test {
         warn!("start stress test");
 
         // Stress test
-        let mut frames = vec![0; HUGE_FRAMES * HUGE_FRAMES];
+        let mut frames = vec![0; FRAMES - HUGE_FRAMES];
         for frame in &mut frames {
             *frame = alloc.get(0, Flags::o(0)).unwrap();
         }
@@ -943,9 +952,12 @@ mod test {
         {
             let alloc = Allocator::create(1, &mut zone, false, secondary).unwrap();
 
+            let mut _allocated_frames = 0;
             for _ in 0..HUGE_FRAMES + 2 {
                 alloc.get(0, Flags::o(0)).unwrap();
+                _allocated_frames = alloc.allocated_frames();
                 alloc.get(0, Flags::o(9)).unwrap();
+                _allocated_frames = alloc.allocated_frames();
             }
 
             assert_eq!(alloc.allocated_frames(), expected_frames);

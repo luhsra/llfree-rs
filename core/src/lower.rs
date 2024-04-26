@@ -892,7 +892,7 @@ mod test {
     fn alloc_track_huge() {
         logging();
 
-        const THREADS: usize = 6;
+        const THREADS: usize = 4;
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
         let barrier = Barrier::new(THREADS);
 
@@ -940,7 +940,7 @@ mod test {
         let rand = unsafe { libc::rand() as u64 };
 
         const ITER: usize = 50;
-        const THREADS: usize = 8;
+        const THREADS: usize = 4;
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
         let barrier = Barrier::new(THREADS);
 

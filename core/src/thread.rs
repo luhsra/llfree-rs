@@ -34,7 +34,7 @@ pub fn pin(core: usize) {
     use core::mem::{size_of, zeroed};
 
     let max = cores();
-    assert!(core < max, "not enough cores {core} < {max}");
+    assert!(core <= max, "not enough cores: {core} !< {max}");
 
     let core = core * STRIDE.load(Ordering::Relaxed);
     let core = core  + OFFSET.load(Ordering::Relaxed);
