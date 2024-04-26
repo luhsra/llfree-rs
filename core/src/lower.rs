@@ -1,16 +1,16 @@
 //! Lower allocator implementations
 
-use core::mem::align_of;
+use core::mem::{align_of, size_of};
 use core::slice;
+use core::sync::atomic::{AtomicU16, AtomicU32};
 
+use bitfield_struct::bitfield;
 use log::{error, info, warn};
 
-use crate::atomic::Atom;
-use crate::entry::{AtomicArray, HugeEntry, HugePair};
+use crate::atomic::{Atom, AtomArray, Atomic};
 use crate::util::{align_down, size_of_slice, spin_wait, Align};
 use crate::{
-    Error, Flags, Init, Result, CAS_RETRIES, HUGE_FRAMES, HUGE_ORDER, MAX_ORDER, TREE_FRAMES,
-    TREE_HUGE,
+    Error, Flags, Init, Result, HUGE_FRAMES, HUGE_ORDER, MAX_ORDER, RETRIES, TREE_FRAMES, TREE_HUGE,
 };
 
 #[cfg(feature = "16K")]
@@ -484,7 +484,7 @@ impl<'a> Lower<'a> {
                 .expect("Failed partial clear");
         }
         // Wait for parallel partial_put_huge to finish
-        else if !spin_wait(CAS_RETRIES, || !table[i].load().huge()) {
+        else if !spin_wait(RETRIES, || !table[i].load().huge()) {
             panic!("Exceeding retries");
         }
 
@@ -514,6 +514,100 @@ impl<'a> Lower<'a> {
             }
         }
         warn!("{out}");
+    }
+}
+
+/// Manages huge frame, that can be allocated as base frames.
+#[bitfield(u16)]
+#[derive(PartialEq, Eq)]
+struct HugeEntry {
+    /// Number of free 4K frames or u16::MAX for a huge frame.
+    count: u16,
+}
+impl Atomic for HugeEntry {
+    type I = AtomicU16;
+}
+impl HugeEntry {
+    /// Creates an entry marked as allocated huge frame.
+    fn new_huge() -> Self {
+        Self::new().with_count(u16::MAX)
+    }
+    /// Creates a new entry with the given free counter.
+    fn new_free(free: usize) -> Self {
+        Self::new().with_count(free as _)
+    }
+    /// Returns wether this entry is allocated as huge frame.
+    fn huge(self) -> bool {
+        self.count() == u16::MAX
+    }
+    /// Returns the free frames counter
+    fn free(self) -> usize {
+        if !self.huge() {
+            self.count() as _
+        } else {
+            0
+        }
+    }
+    /// Try to allocate this entry as huge frame.
+    fn mark_huge(self, span: usize) -> Option<Self> {
+        if self.free() == span {
+            Some(Self::new_huge())
+        } else {
+            None
+        }
+    }
+    /// Decrement the free frames counter.
+    fn dec(self, num_frames: usize) -> Option<Self> {
+        if !self.huge() && self.free() >= num_frames {
+            Some(Self::new_free(self.free() - num_frames))
+        } else {
+            None
+        }
+    }
+    /// Increments the free frames counter.
+    fn inc(self, span: usize, num_frames: usize) -> Option<Self> {
+        if !self.huge() && self.free() <= span - num_frames {
+            Some(Self::new_free(self.free() + num_frames))
+        } else {
+            None
+        }
+    }
+}
+
+/// Pair of huge entries that can be changed at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C, align(4))]
+struct HugePair(HugeEntry, HugeEntry);
+impl Atomic for HugePair {
+    type I = AtomicU32;
+}
+
+const _: () = assert!(size_of::<HugePair>() == 2 * size_of::<HugeEntry>());
+const _: () = assert!(align_of::<HugePair>() == size_of::<HugePair>());
+
+impl HugePair {
+    /// Apply `f` to both entries.
+    fn map(self, f: impl Fn(HugeEntry) -> Option<HugeEntry>) -> Option<HugePair> {
+        Some(HugePair(f(self.0)?, f(self.1)?))
+    }
+    /// Check if `f` is true for both entries.
+    fn all(self, f: impl Fn(HugeEntry) -> bool) -> bool {
+        f(self.0) && f(self.1)
+    }
+}
+impl From<u32> for HugePair {
+    fn from(value: u32) -> Self {
+        let [a, b, c, d] = value.to_ne_bytes();
+        Self(
+            HugeEntry(u16::from_ne_bytes([a, b])),
+            HugeEntry(u16::from_ne_bytes([c, d])),
+        )
+    }
+}
+impl From<HugePair> for u32 {
+    fn from(value: HugePair) -> Self {
+        let ([a, b], [c, d]) = (value.0 .0.to_ne_bytes(), value.1 .0.to_ne_bytes());
+        u32::from_ne_bytes([a, b, c, d])
     }
 }
 

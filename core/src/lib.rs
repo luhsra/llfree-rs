@@ -14,7 +14,6 @@
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
-
 #![debugger_visualizer(gdb_script_file = "../../scripts/gdb.py")]
 
 #[cfg(feature = "std")]
@@ -32,7 +31,6 @@ pub mod util;
 pub mod wrapper;
 
 mod bitfield;
-mod entry;
 mod llfree;
 use bitfield_struct::bitfield;
 pub use llfree::LLFree;
@@ -41,11 +39,22 @@ pub use llfree::LLFree;
 mod llc;
 #[cfg(feature = "llc")]
 pub use llc::LLC;
+use util::Align;
 
+mod local;
 mod lower;
 mod trees;
 
 use core::fmt;
+use core::mem::align_of;
+use core::ops::Range;
+
+/// Order of a physical frame
+#[cfg(not(feature = "16K"))]
+pub const FRAME_SIZE: usize = 0x1000;
+#[cfg(feature = "16K")]
+pub const FRAME_SIZE: usize = 0x4000;
+/// Order of a huge frame
 
 /// Number of huge frames in tree
 #[cfg(not(feature = "16K"))]
@@ -63,6 +72,8 @@ pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
 /// Maximum order the llfree supports
 pub const MAX_ORDER: usize = HUGE_ORDER + 1;
 
+/// Number of retries if an atomic operation fails.
+pub const RETRIES: usize = 4;
 /// Order of a physical frame
 #[cfg(not(feature = "16K"))]
 const FRAME_ORDER: usize = 12;
@@ -85,9 +96,6 @@ pub enum Error {
 /// Allocation result
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Number of retries if an atomic operation fails.
-pub const CAS_RETRIES: usize = 8;
-
 /// The general interface of the allocator implementations.
 pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// Return the name of the allocator.
@@ -98,20 +106,14 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     ///
     /// The metadata is stored into the primary (optionally persistant) and secondary buffers.
     #[cold]
-    fn new(
-        cores: usize,
-        frames: usize,
-        init: Init,
-        primary: &'a mut [u8],
-        secondary: &'a mut [u8],
-    ) -> Result<Self>;
+    fn new(cores: usize, frames: usize, init: Init, meta: MetaData<'a>) -> Result<Self>;
 
     /// Returns the size of the metadata buffers required for initialization.
     #[cold]
     fn metadata_size(cores: usize, frames: usize) -> MetaSize;
     /// Returns the metadata buffers.
     #[cold]
-    fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]);
+    fn metadata(&mut self) -> MetaData<'a>;
 
     /// Allocate a new frame of `order` on the given `core`.
     fn get(&self, core: usize, flags: Flags) -> Result<usize>;
@@ -151,10 +153,52 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
 
 /// Size of the required metadata
 pub struct MetaSize {
+    /// Size of the volatile CPU-local data.
+    pub local: usize,
+    /// Size of the volatile trees.
+    pub trees: usize,
     /// Size of the optionally persistent data.
-    pub primary: usize,
-    /// Size of the volatile data.
-    pub secondary: usize,
+    pub lower: usize,
+}
+
+// The dynamic metadata of the allocator
+pub struct MetaData<'a> {
+    pub local: &'a mut [u8],
+    pub trees: &'a mut [u8],
+    pub lower: &'a mut [u8],
+}
+#[cfg(feature = "std")]
+impl<'a> MetaData<'a> {
+    #[allow(unused)]
+    pub fn alloc(m: MetaSize) -> Self {
+        use util::aligned_buf;
+        Self {
+            local: aligned_buf(m.local).leak(),
+            trees: aligned_buf(m.trees).leak(),
+            lower: aligned_buf(m.lower).leak(),
+        }
+    }
+}
+
+impl<'a> MetaData<'a> {
+    /// Check for alignment and overlap
+    fn valid(&self, m: MetaSize) -> bool {
+        fn overlap(a: Range<*const u8>, b: Range<*const u8>) -> bool {
+            a.contains(&b.start)
+                || a.contains(&unsafe { b.end.sub(1) })
+                || b.contains(&a.start)
+                || b.contains(&unsafe { a.end.sub(1) })
+        }
+        self.local.len() >= m.local
+            && self.trees.len() >= m.trees
+            && self.lower.len() >= m.lower
+            && self.local.as_ptr().is_aligned_to(align_of::<Align>())
+            && self.trees.as_ptr().is_aligned_to(align_of::<Align>())
+            && self.lower.as_ptr().is_aligned_to(align_of::<Align>())
+            && !overlap(self.local.as_ptr_range(), self.trees.as_ptr_range())
+            && !overlap(self.trees.as_ptr_range(), self.lower.as_ptr_range())
+            && !overlap(self.lower.as_ptr_range(), self.local.as_ptr_range())
+    }
 }
 
 /// Defines if the allocator should be allocated persistently
@@ -208,23 +252,33 @@ mod test {
 
     impl<A: Alloc<'static>> TestAlloc<A> {
         pub fn create(cores: usize, frames: usize, init: Init) -> Result<Self> {
-            let MetaSize { primary, secondary } = A::metadata_size(cores, frames);
-            let primary = aligned_buf(primary).leak();
-            let secondary = aligned_buf(secondary).leak();
-            Ok(Self(ManuallyDrop::new(A::new(
-                cores, frames, init, primary, secondary,
-            )?)))
+            let MetaSize {
+                local,
+                trees,
+                lower,
+            } = A::metadata_size(cores, frames);
+            let meta = MetaData {
+                local: aligned_buf(local).leak(),
+                trees: aligned_buf(trees).leak(),
+                lower: aligned_buf(lower).leak(),
+            };
+            Ok(Self(ManuallyDrop::new(A::new(cores, frames, init, meta)?)))
         }
     }
     impl<A: Alloc<'static>> Drop for TestAlloc<A> {
         fn drop(&mut self) {
-            let (primary, secondary) = self.0.metadata();
+            let MetaData {
+                local,
+                trees,
+                lower,
+            } = self.0.metadata();
             unsafe {
                 // drop first
                 drop(ManuallyDrop::take(&mut self.0));
                 // free metadata buffers
-                Vec::from_raw_parts(primary.as_mut_ptr(), primary.len(), primary.len());
-                Vec::from_raw_parts(secondary.as_mut_ptr(), secondary.len(), secondary.len());
+                Vec::from_raw_parts(local.as_mut_ptr(), local.len(), local.len());
+                Vec::from_raw_parts(trees.as_mut_ptr(), trees.len(), local.len());
+                Vec::from_raw_parts(lower.as_mut_ptr(), lower.len(), lower.len());
             }
         }
     }
@@ -947,10 +1001,12 @@ mod test {
         let expected_frames = (HUGE_FRAMES + 2) * (1 + (1 << 9));
 
         let mut zone = mmap::anon(0x1000_0000_0000, FRAMES, false, false);
-        let secondary = aligned_buf(Allocator::metadata_size(1, FRAMES).secondary).leak();
+        let m = Allocator::metadata_size(1, FRAMES);
+        let local = aligned_buf(m.local).leak();
+        let trees = aligned_buf(m.trees).leak();
 
         {
-            let alloc = Allocator::create(1, &mut zone, false, secondary).unwrap();
+            let alloc = Allocator::create(1, &mut zone, false, local, trees).unwrap();
 
             let mut _allocated_frames = 0;
             for _ in 0..HUGE_FRAMES + 2 {
@@ -967,8 +1023,9 @@ mod test {
             std::mem::forget(alloc);
         }
 
-        let secondary = aligned_buf(secondary.len()).leak();
-        let alloc = Allocator::create(1, &mut zone, true, secondary).unwrap();
+        let local = aligned_buf(m.local).leak();
+        let trees = aligned_buf(m.trees).leak();
+        let alloc = Allocator::create(1, &mut zone, true, local, trees).unwrap();
         assert_eq!(alloc.allocated_frames(), expected_frames);
         alloc.validate();
     }

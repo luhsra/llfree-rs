@@ -7,7 +7,7 @@ use core::{fmt, slice};
 use log::error;
 
 use crate::frame::Frame;
-use crate::{Alloc, Error, Flags, Init, MetaSize, Result, MAX_ORDER};
+use crate::{Alloc, Error, Flags, Init, MetaData, MetaSize, Result, MAX_ORDER};
 
 /// Zone allocator, managing a range of memory at a given page frame offset.
 pub struct ZoneAlloc<'a, A: Alloc<'a>> {
@@ -24,11 +24,10 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
         cores: usize,
         frames: usize,
         init: Init,
-        primary: &'a mut [u8],
-        secondary: &'a mut [u8],
+        meta: MetaData<'a>,
     ) -> Result<Self> {
         Ok(Self {
-            alloc: A::new(cores, frames, init, primary, secondary)?,
+            alloc: A::new(cores, frames, init, meta)?,
             offset: 0,
             _p: PhantomData,
         })
@@ -37,7 +36,7 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn metadata_size(cores: usize, frames: usize) -> MetaSize {
         A::metadata_size(cores, frames)
     }
-    fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
+    fn metadata(&mut self) -> MetaData<'a> {
         self.alloc.metadata()
     }
     fn get(&self, core: usize, flags: Flags) -> Result<usize> {
@@ -82,15 +81,14 @@ impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
         offset: usize,
         frames: usize,
         init: Init,
-        primary: &'a mut [u8],
-        secondary: &'a mut [u8],
+        meta: MetaData<'a>,
     ) -> Result<Self> {
         if offset % (1 << MAX_ORDER) != 0 {
             error!("zone alignment");
             return Err(Error::Initialization);
         }
         Ok(Self {
-            alloc: A::new(cores, frames, init, primary, secondary)?,
+            alloc: A::new(cores, frames, init, meta)?,
             offset,
             _p: PhantomData,
         })
@@ -129,10 +127,11 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
         cores: usize,
         zone: &'a mut [Frame],
         recover: bool,
-        volatile: &'a mut [u8],
+        local: &'a mut [u8],
+        trees: &'a mut [u8],
     ) -> Result<Self> {
         let m = A::metadata_size(cores, zone.len());
-        if size_of_val(zone) < m.primary + Frame::SIZE
+        if size_of_val(zone) < m.lower + Frame::SIZE
             || zone.as_ptr() as usize % (Frame::SIZE << MAX_ORDER) != 0
         {
             error!("invalid memory region");
@@ -157,16 +156,18 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
             Init::FreeAll
         };
 
-        let (zone, p) = zone.split_at_mut(zone.len() - m.primary.div_ceil(Frame::SIZE));
-        let primary = unsafe { slice::from_raw_parts_mut(p.as_mut_ptr().cast(), m.primary) };
+        let (zone, p) = zone.split_at_mut(zone.len() - m.lower.div_ceil(Frame::SIZE));
+        let lower = unsafe { slice::from_raw_parts_mut(p.as_mut_ptr().cast(), m.lower) };
+        let metadata = MetaData {
+            local, trees, lower
+        };
 
         let alloc = ZoneAlloc::create(
             cores,
             zone.as_ptr() as usize / Frame::SIZE,
             zone.len(),
             init,
-            primary,
-            volatile,
+            metadata,
         )?;
         Ok(Self { alloc, meta })
     }
@@ -180,15 +181,14 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
         _cores: usize,
         _frames: usize,
         _init: Init,
-        _primary: &'a mut [u8],
-        _secondary: &'a mut [u8],
+        _meta: MetaData,
     ) -> Result<Self> {
         unimplemented!()
     }
     fn metadata_size(cores: usize, frames: usize) -> MetaSize {
         A::metadata_size(cores, frames)
     }
-    fn metadata(&mut self) -> (&'a mut [u8], &'a mut [u8]) {
+    fn metadata(&mut self) -> MetaData<'a> {
         self.alloc.metadata()
     }
     fn get(&self, core: usize, flags: Flags) -> Result<usize> {

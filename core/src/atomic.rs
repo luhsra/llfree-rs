@@ -176,6 +176,24 @@ atomic_impl!(u32, AtomicU32);
 atomic_impl!(u64, AtomicU64);
 atomic_impl!(usize, AtomicUsize);
 
+pub trait AtomArray<T: Copy, const L: usize> {
+    /// Overwrite the content of the whole array non-atomically.
+    ///
+    /// This is faster than atomics but does not handle race conditions.
+    fn atomic_fill(&self, e: T);
+}
+
+impl<T: Atomic, const L: usize> AtomArray<T, L> for [Atom<T>; L] {
+    fn atomic_fill(&self, e: T) {
+        // cast to raw memory to let the compiler use vector instructions
+        #[allow(invalid_reference_casting)]
+        let mem = unsafe { &mut *(self.as_ptr() as *mut [T; L]) };
+        mem.fill(e);
+        // memory ordering has to be enforced with a memory barrier
+        fence(Release);
+    }
+}
+
 /// Very simple spin lock implementation
 pub struct Spin<T> {
     lock: AtomicBool,
