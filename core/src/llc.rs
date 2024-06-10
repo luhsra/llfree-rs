@@ -18,6 +18,8 @@ pub struct LLC {
 #[allow(non_camel_case_types)]
 type llfree_t = c_void;
 
+const _: () = assert!(size_of::<Flags>() == 2);
+
 unsafe impl Send for LLC {}
 unsafe impl Sync for LLC {}
 
@@ -54,6 +56,7 @@ impl<'a> Alloc<'a> for LLC {
             Init::AllocAll => 1,
             Init::Recover(false) => 2,
             Init::Recover(true) => 3,
+            Init::None => 4,
         };
 
         let m = unsafe { llfree_metadata_size(cores as _, frames as _) };
@@ -146,21 +149,6 @@ impl fmt::Debug for LLC {
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
-struct flags_t {
-    order: u8,
-    flags: u8,
-}
-impl From<Flags> for flags_t {
-    fn from(flags: Flags) -> Self {
-        flags_t {
-            order: flags.order() as _,
-            flags: flags.movable() as _,
-        }
-    }
-}
-
-#[repr(C)]
-#[allow(non_camel_case_types)]
 struct result_t {
     val: i64,
 }
@@ -211,9 +199,9 @@ extern "C" {
     fn llfree_metadata(this: *mut llfree_t) -> Meta;
 
     /// Allocates a frame and returns its address, or a negative error code
-    fn llfree_get(this: *const llfree_t, core: c_size_t, flags: flags_t) -> result_t;
+    fn llfree_get(this: *const llfree_t, core: c_size_t, flags: Flags) -> result_t;
     /// Frees a frame, returning 0 on success or a negative error code
-    fn llfree_put(this: *const llfree_t, core: c_size_t, frame: u64, flags: flags_t) -> result_t;
+    fn llfree_put(this: *const llfree_t, core: c_size_t, frame: u64, flags: Flags) -> result_t;
 
     /// Frees a frame, returning 0 on success or a negative error code
     fn llfree_drain(this: *const llfree_t, core: c_size_t) -> result_t;

@@ -52,7 +52,7 @@ impl<'a> Trees<'a> {
     pub fn new<F: Fn(usize) -> (usize, usize)>(
         frames: usize,
         buffer: &'a mut [u8],
-        free_in_tree: F,
+        tree_init: Option<F>,
     ) -> Self {
         assert!(buffer.len() >= Self::metadata_size(frames));
 
@@ -60,9 +60,11 @@ impl<'a> Trees<'a> {
         let entries: &mut [Atom<Tree>] =
             unsafe { slice::from_raw_parts_mut(buffer.as_mut_ptr().cast(), len) };
 
-        for (i, e) in entries.iter_mut().enumerate() {
-            let (frames, huge) = free_in_tree(i * TREE_FRAMES);
-            *e = Atom::new(Tree::with(frames, huge, false, Kind::Fixed));
+        if let Some(tree_init) = tree_init {
+            for (i, e) in entries.iter_mut().enumerate() {
+                let (frames, huge) = tree_init(i * TREE_FRAMES);
+                *e = Atom::new(Tree::with(frames, huge, false, Kind::Fixed));
+            }
         }
 
         Self { entries }

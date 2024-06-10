@@ -104,7 +104,7 @@ impl<'a> Lower<'a> {
         match init {
             Init::FreeAll => alloc.free_all(),
             Init::AllocAll => alloc.reserve_all(),
-            Init::Recover(false) => {} // skip, assuming everything is valid
+            Init::Recover(false) | Init::None => {} // skip, assuming everything is valid
             Init::Recover(true) => alloc.recover(),
         }
         Ok(alloc)

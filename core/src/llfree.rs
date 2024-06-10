@@ -75,7 +75,12 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         local.fill_with(Default::default);
 
         // Init tree array
-        let trees = Trees::new(frames, meta.trees, |start| lower.free_in_tree(start));
+        let tree_init = if init != Init::None {
+            Some(|start| lower.free_in_tree(start))
+        } else {
+            None
+        };
+        let trees = Trees::new(frames, meta.trees, tree_init);
 
         Ok(Self {
             local,

@@ -6,7 +6,6 @@
 #![cfg_attr(feature = "std", feature(new_uninit))]
 #![feature(int_roundings)]
 #![feature(array_windows)]
-#![feature(inline_const)]
 #![feature(allocator_api)]
 #![feature(c_size_t)]
 #![feature(let_chains)]
@@ -197,14 +196,16 @@ pub enum Init {
     AllocAll,
     /// Try recovering all frames from persistent memory
     Recover(bool),
+    /// Assume that the allocator is already initialized
+    None
 }
 
-#[bitfield(u64)]
+#[bitfield(u16)]
 pub struct Flags {
     #[bits(8)]
     pub order: usize,
     pub movable: bool,
-    #[bits(55)]
+    #[bits(7)]
     __: (),
 }
 impl Flags {
