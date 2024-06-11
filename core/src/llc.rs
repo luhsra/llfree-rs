@@ -6,6 +6,8 @@ use super::{Alloc, Init};
 use crate::util::Align;
 use crate::{Error, Flags, Result};
 
+use bitfield_struct::bitfield;
+
 /// C implementation of LLFree
 ///
 /// Note: This abstraction assumes that the state is movable and smaller than two cache lines!
@@ -147,20 +149,23 @@ impl fmt::Debug for LLC {
     }
 }
 
-#[repr(C)]
+#[bitfield(u64)]
 #[allow(non_camel_case_types)]
 struct result_t {
-    val: i64,
+    #[bits(55)]
+    frame: u64,
+    reclaimed: bool,
+    error: u8,
 }
 
 impl result_t {
     fn ok(self) -> Result<u64> {
-        match self.val {
-            val if val >= 0 => Ok(val as _),
-            -1 => Err(Error::Memory),
-            -2 => Err(Error::Retry),
-            -3 => Err(Error::Address),
-            -4 => Err(Error::Initialization),
+        match self.error() {
+            0 => Ok(self.frame()),
+            1 => Err(Error::Memory),
+            2 => Err(Error::Retry),
+            3 => Err(Error::Address),
+            4 => Err(Error::Initialization),
             _ => unreachable!("invalid return code"),
         }
     }

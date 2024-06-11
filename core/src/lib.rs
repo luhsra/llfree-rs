@@ -1119,7 +1119,9 @@ mod test {
 
     #[test]
     fn drain() {
-        const FRAMES: usize = TREE_FRAMES * 2;
+        logging();
+
+        const FRAMES: usize = TREE_FRAMES * 8;
         let alloc = Allocator::create(2, FRAMES, Init::FreeAll).unwrap();
         // should not change anything
         alloc.drain(0).unwrap();
@@ -1129,7 +1131,7 @@ mod test {
         alloc.get(1, Flags::o(0)).unwrap();
 
         // completely the subtree of the first core
-        for _ in 0..TREE_FRAMES {
+        for _ in 0..FRAMES - TREE_FRAMES {
             alloc.get(0, Flags::o(0)).unwrap();
         }
         // next allocation should trigger drain+reservation (no subtree left)
