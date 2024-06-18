@@ -66,9 +66,9 @@ fn main() {
 
     // Map memory for the allocator and initialize it
     let pages = (memory << 30) / Frame::SIZE;
-    let ms = Allocator::metadata_size(threads, pages);
+    let ms = Allocator::metadata_size(pages);
     let meta = MetaData::alloc(ms);
-    let alloc = Allocator::new(threads, pages, Init::FreeAll, meta).unwrap();
+    let alloc = Allocator::new(pages, Init::FreeAll, meta).unwrap();
     alloc.validate();
 
     // Operate on half of the avaliable memory
@@ -126,7 +126,7 @@ fn main() {
 
             barrier.wait();
 
-            while let Ok(page) = alloc.get(t, Flags::o(order)) {
+            while let Ok(page) = alloc.get(Flags::o(order)) {
                 pages.push(page);
             }
 
@@ -138,9 +138,9 @@ fn main() {
                 while target != pages.len() {
                     if target < pages.len() {
                         let page = pages.pop().unwrap();
-                        alloc.put(t, page, Flags::o(order)).unwrap();
+                        alloc.put(page, Flags::o(order)).unwrap();
                     } else {
-                        match alloc.get(t, Flags::o(order)) {
+                        match alloc.get(Flags::o(order)) {
                             Ok(page) => pages.push(page),
                             Err(Error::Memory) => break,
                             Err(e) => panic!("{e:?}"),

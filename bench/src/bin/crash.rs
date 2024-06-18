@@ -80,10 +80,9 @@ fn execute(
     // Align to prevent false-sharing
     let out_size = align_up(allocs + 2, Frame::SIZE);
 
-    let m = Allocator::metadata_size(threads, mapping.len());
-    let local = aligned_buf(m.local).leak();
+    let m = Allocator::metadata_size(mapping.len());
     let trees = aligned_buf(m.trees).leak();
-    let alloc = Allocator::create(threads, mapping, false, local, trees).unwrap();
+    let alloc = Allocator::create(mapping, false, trees).unwrap();
     warn!("initialized {}", alloc.frames());
 
     let barrier = Barrier::new(threads);
@@ -100,7 +99,7 @@ fn execute(
 
         for (i, page) in data.iter_mut().enumerate() {
             *idx = i as _;
-            *page = alloc.get(t, Flags::o(order)).unwrap();
+            *page = alloc.get(Flags::o(order)).unwrap();
         }
 
         warn!("repeat");
@@ -111,8 +110,8 @@ fn execute(
             let i = rng.range(0..allocs as u64) as usize;
             *idx = i as _;
 
-            alloc.put(t, data[i], Flags::o(order)).unwrap();
-            data[i] = alloc.get(t, Flags::o(order)).unwrap();
+            alloc.put(data[i], Flags::o(order)).unwrap();
+            data[i] = alloc.get(Flags::o(order)).unwrap();
         }
     });
 }
@@ -169,10 +168,9 @@ fn monitor(
     warn!("check");
 
     // Recover allocator
-    let m = Allocator::metadata_size(threads, mapping.len());
-    let local = aligned_buf(m.local).leak();
+    let m = Allocator::metadata_size(mapping.len());
     let trees = aligned_buf(m.trees).leak();
-    let alloc = Allocator::create(threads, mapping, true, local, trees).unwrap();
+    let alloc = Allocator::create(mapping, true, trees).unwrap();
     warn!("recovered {}", alloc.frames());
 
     let expected = allocs * threads - threads;
@@ -191,13 +189,13 @@ fn monitor(
     // Try to free all allocated pages
     // Except those that were allocated/freed during the crash
     warn!("try free");
-    for (t, data) in out_mapping.chunks(out_size).enumerate() {
+    for data in out_mapping.chunks(out_size) {
         let (idx, data) = data.split_first().unwrap();
         let (_realloc, data) = data.split_first().unwrap();
 
         for (i, addr) in data[0..allocs].iter().enumerate() {
             if i != *idx {
-                alloc.put(t, *addr, Flags::o(order)).unwrap();
+                alloc.put(*addr, Flags::o(order)).unwrap();
             }
         }
     }

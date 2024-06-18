@@ -112,19 +112,19 @@ pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame],
 
 /// Reduced, VTable-compatible alloc trait for dynamic dispatch
 trait DynAlloc: fmt::Debug + Send + Sync {
-    fn get(&self, core: usize, order: usize) -> Result<usize>;
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()>;
+    fn get(&self, order: usize) -> Result<usize>;
+    fn put(&self, frame: usize, order: usize) -> Result<()>;
 
     fn frames(&self) -> usize;
     fn allocated_frames(&self) -> usize;
 }
 
 impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
-    fn get(&self, core: usize, order: usize) -> Result<usize> {
-        Alloc::get(self, core, Flags::o(order))
+    fn get(&self, order: usize) -> Result<usize> {
+        Alloc::get(self, Flags::o(order))
     }
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
-        Alloc::put(self, core, frame, Flags::o(order))
+    fn put(&self, frame: usize, order: usize) -> Result<()> {
+        Alloc::put(self, frame, Flags::o(order))
     }
     fn frames(&self) -> usize {
         Alloc::frames(self)
@@ -134,19 +134,17 @@ impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
     }
 }
 
-fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAlloc + 'a> {
+fn alloc<'a>(name: &str, zone: &'a mut [Frame]) -> Box<dyn DynAlloc + 'a> {
     #[cfg(feature = "llc")]
     if LLC::name() == name {
-        let m = NvmAlloc::<LLC>::metadata_size(cores, zone.len());
-        let local = aligned_buf(m.local).leak();
+        let m = NvmAlloc::<LLC>::metadata_size(zone.len());
         let trees = aligned_buf(m.trees).leak();
-        return Box::new(NvmAlloc::<LLC>::create(cores, zone, false, local, trees).unwrap());
+        return Box::new(NvmAlloc::<LLC>::create(zone, false, trees).unwrap());
     }
     if LLFree::name() == name {
-        let m = NvmAlloc::<LLFree>::metadata_size(cores, zone.len());
-        let local = aligned_buf(m.local).leak();
+        let m = NvmAlloc::<LLFree>::metadata_size(zone.len());
         let trees = aligned_buf(m.trees).leak();
-        return Box::new(NvmAlloc::<LLFree>::create(cores, zone, false, local, trees).unwrap());
+        return Box::new(NvmAlloc::<LLFree>::create(zone, false, trees).unwrap());
     }
     panic!("Unknown allocator");
 }
@@ -176,7 +174,7 @@ impl Benchmark {
         x: usize,
     ) -> Perf {
         warn!(">>> bench {self:?} x={x} o={order} {name}\n");
-        let mut alloc = alloc(name, threads, mapping);
+        let mut alloc = alloc(name, mapping);
 
         match self {
             Benchmark::Bulk => bulk(alloc.as_mut(), order, threads, x),
@@ -209,14 +207,14 @@ fn bulk(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usi
             barrier.wait();
             let timer = Instant::now();
             for _ in 0..allocs {
-                pages.push(alloc.get(t, order).unwrap());
+                pages.push(alloc.get(order).unwrap());
             }
             get += timer.elapsed().as_nanos() / allocs as u128;
 
             barrier.wait();
             let timer = Instant::now();
             while let Some(page) = pages.pop() {
-                alloc.put(t, page, order).unwrap();
+                alloc.put(page, order).unwrap();
             }
             put += timer.elapsed().as_nanos() / allocs as u128;
         }
@@ -252,16 +250,16 @@ fn repeat(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: u
     let mut perf = Perf::avg(thread::parallel(0..threads, |t| {
         thread::pin(t);
         for _ in 0..allocs {
-            alloc.get(t, order).unwrap();
+            alloc.get(order).unwrap();
         }
 
         barrier.wait();
         let timer = Instant::now();
         for _ in 0..(1 << order) {
             for _ in 0..allocs {
-                let page = alloc.get(t, order).unwrap();
+                let page = alloc.get(order).unwrap();
                 let page = black_box(page);
-                alloc.put(t, page, order).unwrap();
+                alloc.put(page, order).unwrap();
             }
         }
 
@@ -307,7 +305,7 @@ fn rand(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usi
             barrier.wait();
             let timer = Instant::now();
             for page in pages.iter_mut() {
-                *page = alloc.get(t, order).unwrap();
+                *page = alloc.get(order).unwrap();
             }
             get += timer.elapsed().as_nanos() / allocs as u128;
 
@@ -325,7 +323,7 @@ fn rand(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usi
 
             let timer = Instant::now();
             for page in pages.iter() {
-                alloc.put(t, *page, order).unwrap();
+                alloc.put(*page, order).unwrap();
             }
             put += timer.elapsed().as_nanos() / allocs as u128;
         }
@@ -368,7 +366,7 @@ fn rand_block(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, thread
         thread::pin(t);
 
         for page in pages.iter_mut() {
-            *page = alloc.get(t, order).unwrap();
+            *page = alloc.get(order).unwrap();
         }
 
         barrier.wait();
@@ -393,7 +391,7 @@ fn rand_block(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, thread
 
         let timer = Instant::now();
         for page in pages {
-            alloc.put(t, *page, order).unwrap();
+            alloc.put(*page, order).unwrap();
         }
         let put = timer.elapsed().as_nanos() / allocs as u128;
 
@@ -433,7 +431,7 @@ fn filling(alloc: &mut dyn DynAlloc, order: usize, threads: usize, level: usize)
     let mut perf = Perf::avg(thread::parallel(0..threads, |t| {
         thread::pin(t);
         for _ in 0..fill {
-            alloc.get(t, order).unwrap();
+            alloc.get(order).unwrap();
         }
         barrier.wait();
 
@@ -447,7 +445,7 @@ fn filling(alloc: &mut dyn DynAlloc, order: usize, threads: usize, level: usize)
             // Operate on filling level.
             let timer = Instant::now();
             for _ in 0..allocs {
-                let Ok(page) = alloc.get(t, order) else {
+                let Ok(page) = alloc.get(order) else {
                     break;
                 };
                 pages.push(page);
@@ -461,7 +459,7 @@ fn filling(alloc: &mut dyn DynAlloc, order: usize, threads: usize, level: usize)
 
             let timer = Instant::now();
             while let Some(page) = pages.pop() {
-                alloc.put(t, page, order).unwrap();
+                alloc.put(page, order).unwrap();
             }
             put += timer.elapsed().as_nanos() / num_alloc as u128;
         }

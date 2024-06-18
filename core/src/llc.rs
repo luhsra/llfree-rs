@@ -5,7 +5,7 @@ use core::{fmt, slice};
 use bitfield_struct::bitfield;
 
 use super::{Alloc, Init};
-use crate::util::Align;
+use crate::util::{align_up, Align};
 use crate::{Error, Flags, Result};
 
 /// C implementation of LLFree
@@ -30,27 +30,24 @@ impl<'a> Alloc<'a> for LLC {
         "LLC"
     }
 
-    fn metadata_size(cores: usize, frames: usize) -> crate::MetaSize {
-        let m = unsafe { llfree_metadata_size(cores as _, frames as _) };
+    fn metadata_size(frames: usize) -> crate::MetaSize {
+        let m = unsafe { llfree_metadata_size(1, frames as _) };
         crate::MetaSize {
-            local: m.local,
-            trees: m.trees,
+            trees: align_up(m.trees, align_of::<Align>()) + align_up(m.local, align_of::<Align>()),
             lower: m.lower,
         }
     }
 
     fn metadata(&mut self) -> super::MetaData<'a> {
-        let cores = unsafe { llfree_cores(self.raw.as_ptr().cast()) };
-        let ms = Self::metadata_size(cores, self.frames());
+        let ms = Self::metadata_size(self.frames());
         let m = unsafe { llfree_metadata(self.raw.as_mut_ptr().cast()) };
         super::MetaData {
-            local: unsafe { slice::from_raw_parts_mut(m.local, ms.local) },
             trees: unsafe { slice::from_raw_parts_mut(m.trees, ms.trees) },
             lower: unsafe { slice::from_raw_parts_mut(m.lower, ms.lower) },
         }
     }
 
-    fn new(cores: usize, frames: usize, init: Init, meta: super::MetaData<'a>) -> Result<Self> {
+    fn new(frames: usize, init: Init, meta: super::MetaData<'a>) -> Result<Self> {
         let mut raw = [0u8; size_of::<Self>()];
 
         let init = match init {
@@ -61,34 +58,31 @@ impl<'a> Alloc<'a> for LLC {
             Init::None => 4,
         };
 
-        let m = unsafe { llfree_metadata_size(cores as _, frames as _) };
+        let m = unsafe { llfree_metadata_size(1, frames as _) };
         assert!(size_of::<Self>() >= m.llfree);
 
-        assert!(meta.valid(Self::metadata_size(cores, frames)));
+        assert!(meta.valid(Self::metadata_size(frames)));
         let meta = Meta {
-            local: meta.local.as_mut_ptr(),
+            local: unsafe {
+                meta.trees
+                    .as_mut_ptr()
+                    .add(align_up(m.trees, align_of::<Align>()))
+            },
             trees: meta.trees.as_mut_ptr(),
             lower: meta.lower.as_mut_ptr(),
         };
 
-        let ret = unsafe { llfree_init(raw.as_mut_ptr().cast(), cores as _, frames, init, meta) };
+        let ret = unsafe { llfree_init(raw.as_mut_ptr().cast(), 1, frames, init, meta) };
         ret.ok().map(|_| LLC { raw })
     }
 
-    fn get(&self, core: usize, flags: Flags) -> Result<usize> {
-        let ret = unsafe { llfree_get(self.raw.as_ptr().cast(), core as _, flags.into()) };
+    fn get(&self, flags: Flags) -> Result<usize> {
+        let ret = unsafe { llfree_get(self.raw.as_ptr().cast(), 0, flags.into()) };
         Ok(ret.ok()? as _)
     }
 
-    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
-        let ret = unsafe {
-            llfree_put(
-                self.raw.as_ptr().cast(),
-                core as _,
-                frame as _,
-                flags.into(),
-            )
-        };
+    fn put(&self, frame: usize, flags: Flags) -> Result<()> {
+        let ret = unsafe { llfree_put(self.raw.as_ptr().cast(), 0, frame as _, flags.into()) };
         ret.ok().map(|_| ())
     }
 
@@ -96,20 +90,12 @@ impl<'a> Alloc<'a> for LLC {
         unsafe { llfree_is_free(self.raw.as_ptr().cast(), frame as _, order as _) }
     }
 
-    fn drain(&self, core: usize) -> Result<()> {
-        unsafe {
-            llfree_drain(self.raw.as_ptr().cast(), core as _)
-                .ok()
-                .map(|_| ())
-        }
+    fn drain(&self) -> Result<()> {
+        unsafe { llfree_drain(self.raw.as_ptr().cast(), 0).ok().map(|_| ()) }
     }
 
     fn frames(&self) -> usize {
         unsafe { llfree_frames(self.raw.as_ptr().cast()) as _ }
-    }
-
-    fn cores(&self) -> usize {
-        unsafe { llfree_cores(self.raw.as_ptr().cast()) as _ }
     }
 
     fn free_frames(&self) -> usize {
@@ -212,8 +198,6 @@ extern "C" {
     /// Frees a frame, returning 0 on success or a negative error code
     fn llfree_drain(this: *const llfree_t, core: c_size_t) -> result_t;
 
-    /// Returns the number of cores this allocator was initialized with
-    fn llfree_cores(this: *const llfree_t) -> c_size_t;
     /// Returns the total number of frames the allocator can allocate
     fn llfree_frames(this: *const llfree_t) -> c_size_t;
 
@@ -247,7 +231,7 @@ mod test {
 
     #[test]
     fn test_debug() {
-        let alloc = TestAlloc::<LLC>::create(1, 1024, Init::FreeAll).unwrap();
+        let alloc = TestAlloc::<LLC>::create(1024, Init::FreeAll).unwrap();
         println!("{alloc:?}");
     }
 }

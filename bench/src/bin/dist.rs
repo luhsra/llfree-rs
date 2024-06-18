@@ -65,20 +65,18 @@ fn main() {
     let bucket_size = (end - start) / buckets;
     assert!(bucket_size > 0);
 
-    let ms = Allocator::metadata_size(threads, frames);
+    let ms = Allocator::metadata_size(frames);
     let mut lower = mapping(0x1000_0000_0000, ms.lower.div_ceil(Frame::SIZE), dax);
-    let mut local = aligned_buf(ms.local);
     let mut trees = aligned_buf(ms.trees);
 
     for _ in 0..iterations {
         let timer = Instant::now();
 
         let meta = MetaData {
-            local: &mut local,
             trees: &mut trees,
             lower: unsafe { slice::from_raw_parts_mut(lower.as_mut_ptr().cast(), ms.lower) },
         };
-        let alloc = Allocator::new(threads, frames, Init::FreeAll, meta).unwrap();
+        let alloc = Allocator::new(frames, Init::FreeAll, meta).unwrap();
 
         warn!("init time {}ms", timer.elapsed().as_millis());
 
@@ -100,7 +98,7 @@ fn main() {
 
             for _ in 0..allocs {
                 let timer = Instant::now();
-                let page = alloc.get(t, Flags::o(order)).unwrap();
+                let page = alloc.get(Flags::o(order)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
 
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
@@ -112,7 +110,7 @@ fn main() {
 
             for page in pages {
                 let timer = Instant::now();
-                alloc.put(t, page, Flags::o(order)).unwrap();
+                alloc.put(page, Flags::o(order)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
 

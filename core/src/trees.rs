@@ -88,39 +88,11 @@ impl<'a> Trees<'a> {
     pub fn free_frames(&self) -> usize {
         self.entries.iter().map(|e| e.load().free()).sum()
     }
-    /// Sync with the global tree, stealing its counters
-    pub fn sync(&self, i: usize, min: usize) -> Option<Tree> {
-        self.entries[i].fetch_update(|e| e.sync_steal(min)).ok()
-    }
-
-    /// Increment or reserve the tree
-    pub fn inc_or_reserve(&self, i: usize, free: usize, may_reserve: bool) -> Option<Tree> {
-        let mut reserved = false;
-        let tree = self.entries[i]
-            .fetch_update(|v| {
-                let v = v.inc(free);
-                if may_reserve && !v.reserved() && v.free() > Self::MIN_FREE {
-                    // Reserve the tree that was targeted by the last N frees
-                    reserved = true;
-                    Some(v.with_free(0).with_reserved(true))
-                } else {
-                    reserved = false; // <- This one is very important if CAS fails!
-                    Some(v)
-                }
-            })
-            .unwrap();
-
-        if reserved {
-            Some(tree)
-        } else {
-            None
-        }
-    }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: usize, free: usize, kind: Kind) {
+    pub fn unreserve(&self, i: usize, kind: Kind, inc: usize) {
         self.entries[i]
-            .fetch_update(|v| v.unreserve_add(free, kind))
+            .fetch_update(|v| v.unreserve(kind, inc))
             .expect("Unreserve failed");
     }
 
@@ -245,7 +217,14 @@ impl Tree {
         assert!(free <= TREE_FRAMES);
         self.with_free(free)
     }
-    pub fn dec_force(mut self, free: usize, kind: Kind) -> Option<Self> {
+    pub fn dec(self, kind: Kind, free: usize) -> Option<Self> {
+        if self.reserved() && self.kind() == kind && self.free() >= free {
+            Some(self.with_free(self.free() - free))
+        } else {
+            None
+        }
+    }
+    pub fn dec_force(mut self, kind: Kind, free: usize) -> Option<Self> {
         if !self.reserved() && self.free() >= free {
             if !self.kind().accepts(kind) {
                 self.set_kind(kind);
@@ -257,31 +236,23 @@ impl Tree {
     }
 
     /// Reserves this entry if its frame count is in `range`.
-    pub fn reserve(self, free: impl RangeBounds<usize>, kind: Kind) -> Option<Self> {
+    pub fn reserve(self, free: impl RangeBounds<usize>, kind: Kind, dec: usize) -> Option<Self> {
         if !self.reserved()
             && free.contains(&self.free())
+            && self.free() >= dec
             && (kind == self.kind() || self.free() == TREE_FRAMES)
         {
-            Some(Self::with(0, true, kind))
+            Some(Self::with(self.free() - dec, true, kind))
         } else {
             None
         }
     }
     /// Add the frames from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
-    pub fn unreserve_add(self, free: usize, kind: Kind) -> Option<Self> {
+    pub fn unreserve(self, kind: Kind, inc: usize) -> Option<Self> {
         if self.reserved() {
-            let free = self.free() + free;
-            assert!(free <= TREE_FRAMES);
-            Some(Self::with(free, false, kind))
-        } else {
-            None
-        }
-    }
-    /// Set the free counter to zero if it is large enough for synchronization
-    pub fn sync_steal(self, min: usize) -> Option<Self> {
-        if self.reserved() && self.free() > min {
-            Some(self.with_free(0))
+            assert!(self.free() + inc <= TREE_FRAMES);
+            Some(Self::with(self.free() + inc, false, kind))
         } else {
             None
         }

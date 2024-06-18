@@ -20,32 +20,29 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn name() -> &'static str {
         A::name()
     }
-    fn new(cores: usize, frames: usize, init: Init, meta: MetaData<'a>) -> Result<Self> {
+    fn new(frames: usize, init: Init, meta: MetaData<'a>) -> Result<Self> {
         Ok(Self {
-            alloc: A::new(cores, frames, init, meta)?,
+            alloc: A::new(frames, init, meta)?,
             offset: 0,
             _p: PhantomData,
         })
     }
 
-    fn metadata_size(cores: usize, frames: usize) -> MetaSize {
-        A::metadata_size(cores, frames)
+    fn metadata_size(frames: usize) -> MetaSize {
+        A::metadata_size(frames)
     }
     fn metadata(&mut self) -> MetaData<'a> {
         self.alloc.metadata()
     }
-    fn get(&self, core: usize, flags: Flags) -> Result<usize> {
-        Ok(self.alloc.get(core, flags)? + self.offset)
+    fn get(&self, flags: Flags) -> Result<usize> {
+        Ok(self.alloc.get(flags)? + self.offset)
     }
-    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
+    fn put(&self, frame: usize, flags: Flags) -> Result<()> {
         let frame = frame.checked_sub(self.offset).ok_or(Error::Address)?;
-        self.alloc.put(core, frame, flags)
+        self.alloc.put(frame, flags)
     }
     fn frames(&self) -> usize {
         self.alloc.frames()
-    }
-    fn cores(&self) -> usize {
-        self.alloc.cores()
     }
     fn free_frames(&self) -> usize {
         self.alloc.free_frames()
@@ -65,14 +62,13 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
         };
         self.alloc.free_at(frame, order)
     }
-    fn drain(&self, core: usize) -> Result<()> {
-        self.alloc.drain(core)
+    fn drain(&self) -> Result<()> {
+        self.alloc.drain()
     }
 }
 
 impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
     pub fn create(
-        cores: usize,
         offset: usize,
         frames: usize,
         init: Init,
@@ -83,7 +79,7 @@ impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
             return Err(Error::Initialization);
         }
         Ok(Self {
-            alloc: A::new(cores, frames, init, meta)?,
+            alloc: A::new(frames, init, meta)?,
             offset,
             _p: PhantomData,
         })
@@ -119,13 +115,11 @@ pub struct NvmAlloc<'a, A: Alloc<'a>> {
 
 impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
     pub fn create(
-        cores: usize,
         zone: &'a mut [Frame],
         recover: bool,
-        local: &'a mut [u8],
         trees: &'a mut [u8],
     ) -> Result<Self> {
-        let m = A::metadata_size(cores, zone.len());
+        let m = A::metadata_size(zone.len());
         if size_of_val(zone) < m.lower + Frame::SIZE
             || zone.as_ptr() as usize % (Frame::SIZE << MAX_ORDER) != 0
         {
@@ -154,13 +148,11 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
         let (zone, p) = zone.split_at_mut(zone.len() - m.lower.div_ceil(Frame::SIZE));
         let lower = unsafe { slice::from_raw_parts_mut(p.as_mut_ptr().cast(), m.lower) };
         let metadata = MetaData {
-            local,
             trees,
             lower,
         };
 
         let alloc = ZoneAlloc::create(
-            cores,
             zone.as_ptr() as usize / Frame::SIZE,
             zone.len(),
             init,
@@ -174,26 +166,23 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn name() -> &'static str {
         A::name()
     }
-    fn new(_cores: usize, _frames: usize, _init: Init, _meta: MetaData) -> Result<Self> {
+    fn new(_frames: usize, _init: Init, _meta: MetaData) -> Result<Self> {
         unimplemented!()
     }
-    fn metadata_size(cores: usize, frames: usize) -> MetaSize {
-        A::metadata_size(cores, frames)
+    fn metadata_size(frames: usize) -> MetaSize {
+        A::metadata_size(frames)
     }
     fn metadata(&mut self) -> MetaData<'a> {
         self.alloc.metadata()
     }
-    fn get(&self, core: usize, flags: Flags) -> Result<usize> {
-        self.alloc.get(core, flags)
+    fn get(&self, flags: Flags) -> Result<usize> {
+        self.alloc.get(flags)
     }
-    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
-        self.alloc.put(core, frame, flags)
+    fn put(&self, frame: usize, flags: Flags) -> Result<()> {
+        self.alloc.put(frame, flags)
     }
     fn frames(&self) -> usize {
         self.alloc.frames()
-    }
-    fn cores(&self) -> usize {
-        self.alloc.cores()
     }
     fn free_frames(&self) -> usize {
         self.alloc.free_frames()
@@ -207,8 +196,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn free_at(&self, frame: usize, order: usize) -> usize {
         self.alloc.free_at(frame, order)
     }
-    fn drain(&self, core: usize) -> Result<()> {
-        self.alloc.drain(core)
+    fn drain(&self) -> Result<()> {
+        self.alloc.drain()
     }
 }
 

@@ -103,10 +103,9 @@ fn main() {
 
 fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
-    let ms = Allocator::metadata_size(threads, mapping.len());
-    let local = aligned_buf(ms.local).leak();
+    let ms = Allocator::metadata_size(mapping.len());
     let trees = aligned_buf(ms.trees).leak();
-    let alloc = Allocator::create(threads, &mut mapping, false, local, trees).unwrap();
+    let alloc = Allocator::create(&mut mapping, false, trees).unwrap();
     warn!("Prepare alloc");
 
     thread::parallel(0..threads, |t| {
@@ -116,15 +115,15 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 
         let mut pages = Vec::with_capacity(allocs);
         for _ in 0..allocs {
-            pages.push(alloc.get(t, Flags::o(0)).unwrap());
+            pages.push(alloc.get(Flags::o(0)).unwrap());
         }
 
         if crash {
             loop {
                 let i = rng.range(0..pages.len() as _) as usize;
-                alloc.put(t, pages[i], Flags::o(0)).unwrap();
+                alloc.put(pages[i], Flags::o(0)).unwrap();
                 black_box(pages[i]);
-                pages[i] = alloc.get(t, Flags::o(0)).unwrap();
+                pages[i] = alloc.get(Flags::o(0)).unwrap();
             }
         }
     });
@@ -136,13 +135,12 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 
 fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
-    let ms = Allocator::metadata_size(threads, mapping.len());
-    let local = aligned_buf(ms.local).leak();
+    let ms = Allocator::metadata_size(mapping.len());
     let trees = aligned_buf(ms.trees).leak();
 
     warn!("Recover alloc");
     let timer = Instant::now();
-    let alloc = Allocator::create(threads, &mut mapping, true, local, trees).unwrap();
+    let alloc = Allocator::create(&mut mapping, true, trees).unwrap();
     let time = timer.elapsed().as_nanos();
 
     let num_alloc = alloc.allocated_frames();

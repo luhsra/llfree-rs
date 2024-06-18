@@ -76,9 +76,9 @@ fn main() {
 
     // TODO: replay allocations
     let frames = (memory << 30) / Frame::SIZE;
-    let ms = Allocator::metadata_size(threads, frames);
+    let ms = Allocator::metadata_size(frames);
     let meta = MetaData::alloc(ms);
-    let alloc = Allocator::new(threads, frames, Init::FreeAll, meta).unwrap();
+    let alloc = Allocator::new(frames, Init::FreeAll, meta).unwrap();
     alloc.validate();
 
     // Operate on half of the avaliable memory
@@ -140,20 +140,20 @@ fn main() {
             for op in trace {
                 match op {
                     Operation::Get(order) => {
-                        let frame = alloc.get(t, Flags::o(order as _)).unwrap();
+                        let frame = alloc.get(Flags::o(order as _)).unwrap();
                         allocations.insert(alloc_idx, frame);
                         alloc_idx += 1;
                     }
                     Operation::GetMovable(order) => {
                         let frame = alloc
-                            .get(order as _, Flags::o(order as _).with_movable(true))
+                            .get(Flags::o(order as _).with_movable(true))
                             .unwrap();
                         allocations.insert(alloc_idx, frame);
                         alloc_idx += 1;
                     }
                     Operation::Put(order, idx) => {
                         if let Some(frame) = allocations.remove(&(idx as usize)) {
-                            let _ = alloc.put(t, frame, Flags::o(order as _));
+                            let _ = alloc.put(frame, Flags::o(order as _));
                         }
                     }
                 }
