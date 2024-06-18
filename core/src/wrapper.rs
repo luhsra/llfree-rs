@@ -20,12 +20,7 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn name() -> &'static str {
         A::name()
     }
-    fn new(
-        cores: usize,
-        frames: usize,
-        init: Init,
-        meta: MetaData<'a>,
-    ) -> Result<Self> {
+    fn new(cores: usize, frames: usize, init: Init, meta: MetaData<'a>) -> Result<Self> {
         Ok(Self {
             alloc: A::new(cores, frames, init, meta)?,
             offset: 0,
@@ -159,7 +154,9 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
         let (zone, p) = zone.split_at_mut(zone.len() - m.lower.div_ceil(Frame::SIZE));
         let lower = unsafe { slice::from_raw_parts_mut(p.as_mut_ptr().cast(), m.lower) };
         let metadata = MetaData {
-            local, trees, lower
+            local,
+            trees,
+            lower,
         };
 
         let alloc = ZoneAlloc::create(
@@ -177,12 +174,7 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn name() -> &'static str {
         A::name()
     }
-    fn new(
-        _cores: usize,
-        _frames: usize,
-        _init: Init,
-        _meta: MetaData,
-    ) -> Result<Self> {
+    fn new(_cores: usize, _frames: usize, _init: Init, _meta: MetaData) -> Result<Self> {
         unimplemented!()
     }
     fn metadata_size(cores: usize, frames: usize) -> MetaSize {

@@ -137,6 +137,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
 }
 
 /// Size of the required metadata
+#[derive(Debug)]
 pub struct MetaSize {
     /// Size of the volatile CPU-local data.
     pub local: usize,
@@ -197,7 +198,7 @@ pub enum Init {
     /// Try recovering all frames from persistent memory
     Recover(bool),
     /// Assume that the allocator is already initialized
-    None
+    None,
 }
 
 #[bitfield(u16)]

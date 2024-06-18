@@ -2,11 +2,11 @@ use core::ffi::{c_char, c_size_t, c_void, CStr};
 use core::mem::{align_of, size_of};
 use core::{fmt, slice};
 
+use bitfield_struct::bitfield;
+
 use super::{Alloc, Init};
 use crate::util::Align;
 use crate::{Error, Flags, Result};
-
-use bitfield_struct::bitfield;
 
 /// C implementation of LLFree
 ///
@@ -63,6 +63,7 @@ impl<'a> Alloc<'a> for LLC {
 
         let m = unsafe { llfree_metadata_size(cores as _, frames as _) };
         assert!(size_of::<Self>() >= m.llfree);
+
         assert!(meta.valid(Self::metadata_size(cores, frames)));
         let meta = Meta {
             local: meta.local.as_mut_ptr(),

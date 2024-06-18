@@ -65,7 +65,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         assert!(meta.valid(Self::metadata_size(cores, frames)));
 
         if frames < TREE_FRAMES * cores {
-            warn!("memory {} < {}", frames, TREE_FRAMES * cores);
+            warn!("memory {frames} < {}", TREE_FRAMES * cores);
             cores = frames.div_ceil(TREE_FRAMES);
         }
 
@@ -168,7 +168,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         let i = frame / TREE_FRAMES;
         let local = &self.local[core % self.local.len()];
         // Update the put-reserve heuristic
-        let may_reserve = local.frees_push(i);
+        let may_reserve = self.cores() > 1 && local.frees_push(i);
 
         // Try update own trees first
         let num_frames = 1usize << flags.order();
