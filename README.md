@@ -6,6 +6,7 @@ They are designed for multicore, hybrid systems with volatile and non-volatile m
 The two main design goals are multicore scalability and crash consistency.
 
 **Related Projects**
+- C Implementation: https://github.com/luhsra/llfree-c
 - Benchmarks: https://github.com/luhsra/llfree-bench
 - Modified Linux: https://github.com/luhsra/llfree-linux
 - Benchmark Module: https://github.com/luhsra/linux-alloc-bench
@@ -44,7 +45,7 @@ In general, LLFree is separated into a lower allocator, responsible for allocati
 
 The persistent lower allocator can be found in [lower](core/src/lower.rs).
 Internally, this allocator has 512-bit-large bit fields at the lowest level.
-They stores which 4K pages are allocated.
+They store which 4K pages are allocated.
 The second level consists of 2M entries, one for each bit field. These entries contain a counter of free pages in the related bit field and a flag if the whole subtree is allocated as a 2M huge page.
 These 2M entries are further grouped into trees with 32 entries (this can be defined at compile-time).
 

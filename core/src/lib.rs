@@ -6,7 +6,6 @@
 #![cfg_attr(feature = "std", feature(new_uninit))]
 #![feature(int_roundings)]
 #![feature(array_windows)]
-#![feature(inline_const)]
 #![feature(allocator_api)]
 #![feature(c_size_t)]
 #![feature(let_chains)]
@@ -147,6 +146,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
 }
 
 /// Size of the required metadata
+#[derive(Debug)]
 pub struct MetaSize {
     /// Size of the volatile CPU-local data.
     pub local: usize,
@@ -206,14 +206,16 @@ pub enum Init {
     AllocAll,
     /// Try recovering all frames from persistent memory
     Recover(bool),
+    /// Assume that the allocator is already initialized
+    None,
 }
 
-#[bitfield(u64)]
+#[bitfield(u16)]
 pub struct Flags {
     #[bits(8)]
     pub order: usize,
     pub movable: bool,
-    #[bits(55)]
+    #[bits(7)]
     __: (),
 }
 impl Flags {
@@ -1133,7 +1135,9 @@ mod test {
 
     #[test]
     fn drain() {
-        const FRAMES: usize = TREE_FRAMES * 2;
+        logging();
+
+        const FRAMES: usize = TREE_FRAMES * 8;
         let alloc = Allocator::create(2, FRAMES, Init::FreeAll).unwrap();
         // should not change anything
         alloc.drain(0).unwrap();
@@ -1143,7 +1147,7 @@ mod test {
         alloc.get(1, Flags::o(0)).unwrap();
 
         // completely the subtree of the first core
-        for _ in 0..TREE_FRAMES {
+        for _ in 0..FRAMES - TREE_FRAMES {
             alloc.get(0, Flags::o(0)).unwrap();
         }
         // next allocation should trigger drain+reservation (no subtree left)
