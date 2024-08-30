@@ -37,7 +37,7 @@ pub fn pin(core: usize) {
     assert!(core <= max, "not enough cores: {core} !< {max}");
 
     let core = core * STRIDE.load(Ordering::Relaxed);
-    let core = core  + OFFSET.load(Ordering::Relaxed);
+    let core = core + OFFSET.load(Ordering::Relaxed);
     let core = (core / max) + (core % max); // wrap around
 
     let mut set = unsafe { zeroed::<libc::cpu_set_t>() };

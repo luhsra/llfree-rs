@@ -233,7 +233,7 @@ mod test {
     use std::time::Instant;
     use std::vec::Vec;
 
-    use log::{debug, error, warn};
+    use log::{error, warn};
 
     use super::*;
     use crate::frame::Frame;
@@ -324,7 +324,7 @@ mod test {
     fn simple() {
         logging();
         // 8GiB
-        const MEM_SIZE: usize = 8*(1 << 30);
+        const MEM_SIZE: usize = 8 * (1 << 30);
         const FRAMES: usize = MEM_SIZE / Frame::SIZE;
 
         let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
@@ -529,16 +529,16 @@ mod test {
 
         warn!("start alloc");
         let small = alloc.get(0, Flags::o(0)).unwrap();
-        let huge = alloc.get(0, Flags::o(9)).unwrap();
+        let huge = alloc.get(0, Flags::o(HUGE_ORDER)).unwrap();
 
-        let expected_frames = 1 + (1 << 9);
+        let expected_frames = 1 + HUGE_FRAMES;
         assert_eq!(alloc.allocated_frames(), expected_frames);
         assert!(small != huge);
 
         warn!("start stress test");
 
         // Stress test
-        let mut frames = vec![0; FRAMES - HUGE_FRAMES];
+        let mut frames = vec![0; FRAMES / 2];
         for frame in &mut frames {
             *frame = alloc.get(0, Flags::o(0)).unwrap();
         }
@@ -566,7 +566,7 @@ mod test {
         warn!("free special...");
 
         alloc.put(0, small, Flags::o(0)).unwrap();
-        alloc.put(0, huge, Flags::o(9)).unwrap();
+        alloc.put(0, huge, Flags::o(HUGE_ORDER)).unwrap();
         alloc.validate();
 
         warn!("realloc...");
@@ -991,11 +991,11 @@ mod test {
 
         logging();
 
-        const FRAMES: usize = 8*(1 << 30) / FRAME_SIZE;
+        const FRAMES: usize = 8 * (1 << 30) / FRAME_SIZE;
 
         thread::pin(0);
 
-        let expected_frames = 128 * (1 + (1 << 11));
+        let expected_frames = 128 * (1 + (1 << HUGE_ORDER));
 
         let mut zone = mmap::anon(0x1000_0000_0000, FRAMES, false, false);
         let m = Allocator::metadata_size(1, FRAMES);
@@ -1009,7 +1009,7 @@ mod test {
             for _ in 0..128 {
                 alloc.get(0, Flags::o(0)).unwrap();
                 _allocated_frames = alloc.allocated_frames();
-                alloc.get(0, Flags::o(11)).unwrap();
+                alloc.get(0, Flags::o(HUGE_ORDER)).unwrap();
                 _allocated_frames = alloc.allocated_frames();
             }
 

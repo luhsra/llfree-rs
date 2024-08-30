@@ -13,11 +13,8 @@ use crate::{
     Error, Init, Result, HUGE_FRAMES, HUGE_ORDER, MAX_ORDER, RETRIES, TREE_FRAMES, TREE_HUGE,
 };
 
-#[cfg(feature = "16K")]
-type Bitfield = crate::bitfield::Bitfield<32>; // 16K base frames need 2048 bit bitfields -> 32x64bit
-
-#[cfg(not(feature = "16K"))]
-type Bitfield = crate::bitfield::Bitfield<8>;
+const CHILDREN: usize = HUGE_FRAMES / crate::bitfield::Bitfield::<1>::ENTRY_BITS;
+type Bitfield = crate::bitfield::Bitfield<CHILDREN>;
 
 /// Lower-level frame allocator.
 ///
@@ -74,24 +71,6 @@ impl Metadata {
 }
 
 impl<'a> Lower<'a> {
-    /// Number of huge pages managed by a chunk
-    #[cfg(feature = "16K")]
-    pub const HP: usize = 8; // translates to 256MiB of memory managed by a chunk (or 2^14 Base Frames)
-    #[cfg(not(feature = "16K"))]
-    pub const HP: usize = 32;
-    /// Pages per chunk. Every alloc only searches in a chunk of this size.
-    pub const N: usize = Self::HP * Bitfield::LEN; //LEN for 16K is 2048
-    /// The maximal allowed order of this allocator
-    #[cfg(not(feature = "16K"))]
-    pub const HUGE_ORDER: usize = Bitfield::ORDER; //order for 16K is 11
-    #[cfg(not(feature = "16K"))]
-    pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1;
-    #[cfg(feature = "16K")]
-    pub const HUGE_ORDER: usize = Bitfield::ORDER; //Bitfield::ORDER for 16K is 11
-    #[cfg(feature = "16K")]
-    pub const MAX_ORDER: usize = Self::HUGE_ORDER + 1; //MAX_ORDER for 16K is 11, as 2^11*2^14B (16KiB) = 2^25B -> 32 MiB
-
-    //Metadata does not need to be adapted for 16K -> or DOES it? -> TODO: Align_up prüfen
     pub fn metadata_size(frames: usize) -> usize {
         let m = Metadata::new(frames);
         m.bitfield_size + m.table_size
@@ -112,12 +91,10 @@ impl<'a> Lower<'a> {
         // Start of the l1 table array
         let bitfields =
             unsafe { slice::from_raw_parts_mut(bitfields.as_mut_ptr().cast(), m.bitfield_len) };
-        //info!("{:?}", bitfields.as_ptr_range());
 
         // Start of the l2 table array
         let children =
             unsafe { slice::from_raw_parts_mut(children.as_mut_ptr().cast(), m.table_len) };
-        //info!("{:?}", children.as_ptr_range());
 
         let alloc = Self {
             len: frames,
@@ -397,7 +374,6 @@ impl<'a> Lower<'a> {
         }
 
         info!("Nothing found o={order}");
-        //info!("Lower State: {:?}", &self.children);
         Err(Error::Memory)
     }
 

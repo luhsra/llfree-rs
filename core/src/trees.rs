@@ -1,6 +1,6 @@
 use core::mem::align_of;
 use core::ops::RangeBounds;
-use core::sync::atomic::AtomicU16;
+use core::sync::atomic::AtomicU32;
 use core::{fmt, slice};
 
 use bitfield_struct::bitfield;
@@ -167,38 +167,15 @@ impl fmt::Debug for TreeDbg<'_> {
 /// Tree entry for 4K frames
 #[bitfield(u32)]
 #[derive(PartialEq, Eq)]
-#[cfg(not(feature = "16K"))]
 pub struct Tree {
     /// Number of free 4K frames.
-    #[bits(13)]
+    #[bits(29)]
     pub free: usize,
-    /// Number of free huge frames.
-    #[bits(4)]
-    pub huge: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
     /// Are the frames movable?
     #[bits(2)]
     pub kind: Kind,
-}
-/// Tree entry for 16K frames
-#[bitfield(u32)]
-#[derive(PartialEq, Eq)]
-#[cfg(feature = "16K")]
-pub struct Tree {
-    /// Number of free 16K frames.
-    #[bits(15)]
-    pub free: usize,
-    /// Number of free huge frames.
-    #[bits(4)]
-    pub huge: usize,
-    /// If this subtree is reserved by a CPU.
-    pub reserved: bool,
-    /// Are the frames movable?
-    #[bits(2)]
-    pub kind: Kind,
-    #[bits(10)]
-    __: (),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,7 +228,7 @@ impl From<usize> for Kind {
 const _: () = assert!(1 << Tree::FREE_BITS >= TREE_FRAMES);
 
 impl Atomic for Tree {
-    type I = AtomicU16;
+    type I = AtomicU32;
 }
 impl Tree {
     /// Creates a new entry.

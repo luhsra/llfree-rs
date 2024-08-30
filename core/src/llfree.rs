@@ -49,14 +49,15 @@ unsafe impl Sync for LLFree<'_> {}
 impl<'a> Alloc<'a> for LLFree<'a> {
     /// Return the name of the allocator.
     #[cold]
-    #[cfg(feature = "16K")]
     fn name() -> &'static str {
-        "LLFree16K"
-    }
-
-    #[cfg(not(feature = "16K"))]
-    fn name() -> &'static str {
-        "LLFree"
+        #[cfg(feature = "16K")]
+        {
+            "LLFree16K"
+        }
+        #[cfg(not(feature = "16K"))]
+        {
+            "LLFree"
+        }
     }
 
     /// Initialize the allocator.
