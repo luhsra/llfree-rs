@@ -49,18 +49,27 @@ use core::mem::align_of;
 use core::ops::Range;
 
 /// Order of a physical frame
+#[cfg(not(feature = "16K"))]
 pub const FRAME_SIZE: usize = 0x1000;
+#[cfg(feature = "16K")]
+pub const FRAME_SIZE: usize = 0x4000;
 /// Order of a huge frame
-pub const HUGE_ORDER: usize = 9;
-/// Number of frames in a huge frame
-pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
-/// Maximum order the allocator supports
-pub const MAX_ORDER: usize = HUGE_ORDER + 1;
 
 /// Number of huge frames in tree
+#[cfg(not(feature = "16K"))]
+pub const TREE_HUGE: usize = 8;
+#[cfg(feature = "16K")]
 pub const TREE_HUGE: usize = 8;
 /// Number of small frames in tree
 pub const TREE_FRAMES: usize = TREE_HUGE << HUGE_ORDER;
+/// Order for huge frames
+#[cfg(not(feature = "16K"))]
+pub const HUGE_ORDER: usize = 9;
+#[cfg(feature = "16K")]
+pub const HUGE_ORDER: usize = 11;
+pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
+/// Maximum order the llfree supports
+pub const MAX_ORDER: usize = HUGE_ORDER + 1;
 
 /// Number of retries if an atomic operation fails.
 pub const RETRIES: usize = 4;
@@ -315,7 +324,7 @@ mod test {
     fn simple() {
         logging();
         // 8GiB
-        const MEM_SIZE: usize = 1 << 30;
+        const MEM_SIZE: usize = 8 * (1 << 30);
         const FRAMES: usize = MEM_SIZE / Frame::SIZE;
 
         let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
@@ -355,7 +364,7 @@ mod test {
         warn!("realloc...");
 
         // Free some
-        const FREE_NUM: usize = HUGE_FRAMES * HUGE_FRAMES - 10;
+        const FREE_NUM: usize = HUGE_FRAMES - 10;
         for frame in &frames[..FREE_NUM] {
             alloc.put(0, *frame, Flags::o(0)).unwrap();
         }
@@ -520,16 +529,16 @@ mod test {
 
         warn!("start alloc");
         let small = alloc.get(0, Flags::o(0)).unwrap();
-        let huge = alloc.get(0, Flags::o(9)).unwrap();
+        let huge = alloc.get(0, Flags::o(HUGE_ORDER)).unwrap();
 
-        let expected_frames = 1 + (1 << 9);
+        let expected_frames = 1 + HUGE_FRAMES;
         assert_eq!(alloc.allocated_frames(), expected_frames);
         assert!(small != huge);
 
         warn!("start stress test");
 
         // Stress test
-        let mut frames = vec![0; HUGE_FRAMES * HUGE_FRAMES];
+        let mut frames = vec![0; FRAMES / 2];
         for frame in &mut frames {
             *frame = alloc.get(0, Flags::o(0)).unwrap();
         }
@@ -557,7 +566,7 @@ mod test {
         warn!("free special...");
 
         alloc.put(0, small, Flags::o(0)).unwrap();
-        alloc.put(0, huge, Flags::o(9)).unwrap();
+        alloc.put(0, huge, Flags::o(HUGE_ORDER)).unwrap();
         alloc.validate();
 
         warn!("realloc...");
@@ -982,11 +991,11 @@ mod test {
 
         logging();
 
-        const FRAMES: usize = 8 << 18;
+        const FRAMES: usize = 8 * (1 << 30) / FRAME_SIZE;
 
         thread::pin(0);
 
-        let expected_frames = (HUGE_FRAMES + 2) * (1 + (1 << 9));
+        let expected_frames = 128 * (1 + (1 << HUGE_ORDER));
 
         let mut zone = mmap::anon(0x1000_0000_0000, FRAMES, false, false);
         let m = Allocator::metadata_size(1, FRAMES);
@@ -996,9 +1005,12 @@ mod test {
         {
             let alloc = Allocator::create(1, &mut zone, false, local, trees).unwrap();
 
-            for _ in 0..HUGE_FRAMES + 2 {
+            let mut _allocated_frames = 0;
+            for _ in 0..128 {
                 alloc.get(0, Flags::o(0)).unwrap();
-                alloc.get(0, Flags::o(9)).unwrap();
+                _allocated_frames = alloc.allocated_frames();
+                alloc.get(0, Flags::o(HUGE_ORDER)).unwrap();
+                _allocated_frames = alloc.allocated_frames();
             }
 
             assert_eq!(alloc.allocated_frames(), expected_frames);
@@ -1018,12 +1030,12 @@ mod test {
     #[test]
     fn different_orders() {
         const THREADS: usize = 4;
-        const FRAMES: usize = ((MAX_ORDER + 1) << MAX_ORDER) * (THREADS * 2 + 1);
+        const FRAMES: usize = (1 << MAX_ORDER) * (MAX_ORDER + 2) * THREADS; // 6 GiB for 16K
 
         logging();
 
         let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
-
+        warn!("Created Allocator \n {:?}", alloc);
         let barrier = Barrier::new(THREADS);
 
         thread::parallel(0..THREADS, |t| {
@@ -1045,9 +1057,12 @@ mod test {
             for (order, frame) in &mut frames {
                 *frame = match alloc.get(t, Flags::o(*order)) {
                     Ok(frame) => frame,
-                    Err(e) => panic!("{e:?} o={order} {alloc:?}"),
+                    Err(e) => panic!("{e:?} o={order} {alloc:?} on core {t}"),
                 };
                 assert!(*frame % (1 << *order) == 0, "{frame} {:x}", 1 << *order);
+                if *order > 8 {
+                    //info!("allocated order {order}, {alloc:?} on core {t}");
+                }
             }
 
             let mut rng = WyRand::new(t as _);

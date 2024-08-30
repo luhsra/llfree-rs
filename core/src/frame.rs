@@ -6,7 +6,8 @@ use crate::FRAME_SIZE;
 
 /// Correctly sized and aligned page frame.
 #[derive(Clone)]
-#[repr(align(0x1000))]
+#[cfg_attr(feature = "16K", repr(align(0x4000)))]
+#[cfg_attr(not(feature = "16K"), repr(align(0x1000)))]
 pub struct Frame {
     _data: [u8; Self::SIZE],
 }

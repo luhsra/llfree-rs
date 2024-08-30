@@ -50,7 +50,14 @@ impl<'a> Alloc<'a> for LLFree<'a> {
     /// Return the name of the allocator.
     #[cold]
     fn name() -> &'static str {
-        "LLFree"
+        #[cfg(feature = "16K")]
+        {
+            "LLFree16K"
+        }
+        #[cfg(not(feature = "16K"))]
+        {
+            "LLFree"
+        }
     }
 
     /// Initialize the allocator.

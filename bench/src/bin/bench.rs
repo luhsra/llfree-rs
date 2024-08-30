@@ -54,6 +54,9 @@ struct Args {
     /// Use every n-th cpu.
     #[arg(long, default_value_t = 1)]
     stride: usize,
+
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
 }
 
 fn main() {
@@ -68,12 +71,17 @@ fn main() {
         order,
         memory,
         stride,
+        offset,
     } = Args::parse();
 
     util::logging();
 
     if stride > 1 {
         thread::STRIDE.store(stride, Ordering::Relaxed);
+    }
+
+    if offset > 0 {
+        thread::OFFSET.store(offset, Ordering::Relaxed);
     }
 
     assert!(memory >= 1);
@@ -107,6 +115,7 @@ pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame],
         warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
         return mmap::file(begin, length, &file, true);
     }
+    warn!("Mapping {length} frames ({} bytes).", length * Frame::SIZE);
     mmap::anon(begin, length, false, false)
 }
 

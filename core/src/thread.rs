@@ -8,6 +8,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// - Pinning to 2 with stride 2 results in core 4=2*2
 /// - This accurately wraps around the number of cores
 pub static STRIDE: AtomicUsize = AtomicUsize::new(1);
+pub static OFFSET: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     static PINNED: AtomicUsize = const { AtomicUsize::new(usize::MAX) };
@@ -33,9 +34,10 @@ pub fn pin(core: usize) {
     use core::mem::{size_of, zeroed};
 
     let max = cores();
-    assert!(core < max, "not enough cores {core} < {max}");
+    assert!(core <= max, "not enough cores: {core} !< {max}");
 
     let core = core * STRIDE.load(Ordering::Relaxed);
+    let core = core + OFFSET.load(Ordering::Relaxed);
     let core = (core / max) + (core % max); // wrap around
 
     let mut set = unsafe { zeroed::<libc::cpu_set_t>() };

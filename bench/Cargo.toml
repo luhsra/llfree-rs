@@ -14,6 +14,7 @@ raw-cpuid = { version = "11.0" }
 
 [features]
 llc = ["llfree/llc"]
+16K = ["llfree/16K"]
 
 # binaries
 

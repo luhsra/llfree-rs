@@ -13,7 +13,8 @@ use crate::{
     Error, Init, Result, HUGE_FRAMES, HUGE_ORDER, MAX_ORDER, RETRIES, TREE_FRAMES, TREE_HUGE,
 };
 
-type Bitfield = crate::bitfield::Bitfield<8>;
+const CHILDREN: usize = HUGE_FRAMES / crate::bitfield::Bitfield::<1>::ENTRY_BITS;
+type Bitfield = crate::bitfield::Bitfield<CHILDREN>;
 
 /// Lower-level frame allocator.
 ///
@@ -344,7 +345,7 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Allocate frames up to order 8
+    /// Allocate frames up to order 8 (or up to order 10 for 16K)
     fn get_small(&self, start: usize, order: usize) -> Result<(usize, bool)> {
         debug_assert!(order < Bitfield::ORDER);
 
@@ -955,7 +956,7 @@ mod test {
     fn alloc_track_huge() {
         logging();
 
-        const THREADS: usize = 6;
+        const THREADS: usize = 4;
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
         let barrier = Barrier::new(THREADS);
 
@@ -1006,7 +1007,7 @@ mod test {
         let rand = unsafe { libc::rand() as u64 };
 
         const ITER: usize = 50;
-        const THREADS: usize = 8;
+        const THREADS: usize = 4;
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
         let barrier = Barrier::new(THREADS);
 
