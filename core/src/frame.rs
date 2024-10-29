@@ -15,6 +15,12 @@ pub struct Frame {
 const _: () = assert!(size_of::<Frame>() == Frame::SIZE);
 const _: () = assert!(align_of::<Frame>() == Frame::SIZE);
 
+impl Default for Frame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Frame {
     pub const SIZE: usize = FRAME_SIZE;
 

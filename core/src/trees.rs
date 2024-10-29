@@ -15,7 +15,7 @@ pub struct Trees<'a> {
     pub entries: &'a [Atom<Tree>],
 }
 
-impl<'a> fmt::Debug for Trees<'a> {
+impl fmt::Debug for Trees<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let max = self.entries.len();
         let mut free = 0;

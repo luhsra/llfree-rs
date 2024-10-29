@@ -415,7 +415,7 @@ impl<'a> Lower<'a> {
         let bitfield = &self.bitfields[frame / Bitfield::LEN];
         let i = frame % Bitfield::LEN;
         if bitfield.toggle(i, order, true).is_err() {
-            error!("L1 put failed i{i} p={frame}");
+            error!("L1 put failed o={order} i={i} p={frame}");
             return Err(Error::Address);
         }
 
@@ -601,7 +601,7 @@ mod test {
 
     struct LowerTest<'a>(ManuallyDrop<Lower<'a>>);
 
-    impl<'a> LowerTest<'a> {
+    impl LowerTest<'_> {
         fn create(frames: usize, init: Init) -> Result<Self> {
             let primary = aligned_buf(Lower::metadata_size(frames)).leak();
             Ok(Self(ManuallyDrop::new(Lower::new(frames, init, primary)?)))
@@ -613,7 +613,7 @@ mod test {
             &self.0
         }
     }
-    impl<'a> Drop for LowerTest<'a> {
+    impl Drop for LowerTest<'_> {
         fn drop(&mut self) {
             let meta = self.0.metadata();
             unsafe {
@@ -694,7 +694,7 @@ mod test {
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.put(frames[t as usize], 0).unwrap();
+            lower.put(frames[t], 0).unwrap();
         });
 
         assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
@@ -715,7 +715,7 @@ mod test {
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.put(frames[t as usize], 0).unwrap();
+            lower.put(frames[t], 0).unwrap();
         });
 
         let table = &lower.children[0];
@@ -797,7 +797,7 @@ mod test {
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.put(frames[t as usize], t + 1).unwrap();
+            lower.put(frames[t], t + 1).unwrap();
         });
 
         assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);

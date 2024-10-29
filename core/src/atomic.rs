@@ -234,19 +234,19 @@ impl<T: Default> Default for Spin<T> {
 pub struct SpinGuard<'a, T> {
     spin: &'a Spin<T>,
 }
-impl<'a, T> Deref for SpinGuard<'a, T> {
+impl<T> Deref for SpinGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.spin.value.get() }
     }
 }
-impl<'a, T> DerefMut for SpinGuard<'a, T> {
+impl<T> DerefMut for SpinGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.spin.value.get() }
     }
 }
-impl<'a, T> Drop for SpinGuard<'a, T> {
+impl<T> Drop for SpinGuard<'_, T> {
     fn drop(&mut self) {
         self.spin.lock.store(false, Release);
     }

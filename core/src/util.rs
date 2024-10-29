@@ -86,7 +86,7 @@ pub fn logging() {
 }
 
 #[cfg(feature = "std")]
-fn panic_handler(info: &std::panic::PanicInfo) {
+fn panic_handler(info: &std::panic::PanicHookInfo) {
     use std::backtrace::Backtrace;
     log::error!("{info}\n{}", Backtrace::capture());
 }

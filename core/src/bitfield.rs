@@ -5,6 +5,8 @@ use core::mem::size_of;
 use core::ops::{Not, Range};
 use core::sync::atomic::AtomicU64;
 
+use log::warn;
+
 use crate::atomic::{Atom, Atomic};
 use crate::{Error, Result};
 
@@ -37,7 +39,6 @@ impl<const N: usize> fmt::Debug for Bitfield<N> {
     }
 }
 
-#[allow(unused)]
 impl<const N: usize> Bitfield<N> {
     pub const ENTRY_BITS: usize = 64;
     pub const ENTRIES: usize = N;
@@ -102,7 +103,9 @@ impl<const N: usize> Bitfield<N> {
                 let di = i / Self::ENTRY_BITS;
                 for i in di..di + num_entries {
                     let expected = if expected { !0 } else { 0 };
-                    if let Err(_) = self.data[i].compare_exchange(expected, !expected) {
+                    if let Err(e) = self.data[i].compare_exchange(expected, !expected) {
+                        warn!("Toggle failed {e:x} != {expected:x}");
+
                         // Undo changes
                         for j in (di..i).rev() {
                             self.data[j]

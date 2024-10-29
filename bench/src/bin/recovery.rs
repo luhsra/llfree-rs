@@ -1,6 +1,4 @@
-#![feature(int_roundings)]
 #![feature(allocator_api)]
-#![feature(new_uninit)]
 
 use std::fs::File;
 use std::hint::black_box;

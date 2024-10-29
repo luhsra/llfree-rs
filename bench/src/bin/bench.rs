@@ -1,5 +1,4 @@
 #![feature(allocator_api)]
-#![feature(new_uninit)]
 
 use core::{fmt, slice};
 use std::fs::File;

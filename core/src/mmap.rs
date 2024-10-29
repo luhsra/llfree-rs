@@ -119,7 +119,7 @@ unsafe impl Allocator for MMap {
             // This non-null slice is somewhat cursed
             Ok(unsafe { std::slice::from_raw_parts(addr.cast(), layout.size()) }.into())
         } else {
-            unsafe { libc::perror(b"mmap failed\0".as_ptr().cast()) };
+            unsafe { libc::perror(c"mmap failed".as_ptr()) };
             Err(AllocError)
         }
     }
@@ -128,7 +128,7 @@ unsafe impl Allocator for MMap {
         if layout.size() > 0 {
             let ret = unsafe { libc::munmap(ptr.as_ptr() as _, layout.size() as _) };
             if ret != 0 {
-                unsafe { libc::perror(b"munmap failed\0".as_ptr().cast()) };
+                unsafe { libc::perror(c"munmap failed".as_ptr()) };
                 panic!("unmap {layout:?}");
             }
         }
@@ -154,7 +154,7 @@ pub fn m_async<T>(slice: &[T]) {
     unsafe {
         let ret = libc::msync(slice.as_ptr() as _, size_of_val(slice), libc::MS_ASYNC);
         if ret != 0 {
-            libc::perror(b"fsync failed\0".as_ptr().cast());
+            libc::perror(c"fsync failed".as_ptr());
         }
     }
 }
@@ -192,8 +192,10 @@ pub enum MAdvise {
     HwPoison = libc::MADV_HWPOISON,
 
     /// see /usr/include/bits/mman-linux.h
+    #[cfg(target_os = "linux")]
     Cold = 20,
     /// see /usr/include/bits/mman-linux.h
+    #[cfg(target_os = "linux")]
     PageOut = 21,
 }
 
@@ -207,7 +209,7 @@ pub fn madvise(mem: &mut [Frame], advise: MAdvise) {
         )
     };
     if ret != 0 {
-        unsafe { libc::perror(b"madvice\0".as_ptr().cast()) };
+        unsafe { libc::perror(c"madvice".as_ptr()) };
         panic!("madvice {ret}");
     }
 }

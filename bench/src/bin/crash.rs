@@ -1,5 +1,4 @@
 #![feature(allocator_api)]
-#![feature(new_uninit)]
 
 use std::cmp::Ordering::*;
 use std::sync::Barrier;
@@ -63,7 +62,7 @@ fn main() {
         Equal => execute(allocs, threads, order, &mut mapping, &mut out_mapping),
         Greater => monitor(allocs, threads, order, pid, &mut mapping, &out_mapping),
         Less => {
-            unsafe { libc::perror(b"fork failed\0".as_ptr().cast()) };
+            unsafe { libc::perror(c"fork failed".as_ptr()) };
             panic!();
         }
     }

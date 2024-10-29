@@ -1,6 +1,4 @@
-#![feature(int_roundings)]
 #![feature(allocator_api)]
-#![feature(new_uninit)]
 
 use core::slice;
 use std::fs::File;

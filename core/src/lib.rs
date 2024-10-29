@@ -3,7 +3,6 @@
 // Disable standard library
 #![no_std]
 // Unstable (but useful) features
-#![cfg_attr(feature = "std", feature(new_uninit))]
 #![feature(int_roundings)]
 #![feature(array_windows)]
 #![feature(allocator_api)]
@@ -49,24 +48,18 @@ use core::mem::align_of;
 use core::ops::Range;
 
 /// Order of a physical frame
-#[cfg(not(feature = "16K"))]
-pub const FRAME_SIZE: usize = 0x1000;
-#[cfg(feature = "16K")]
-pub const FRAME_SIZE: usize = 0x4000;
-/// Order of a huge frame
-
+pub const FRAME_SIZE: usize = if cfg!(feature = "16K") {
+    0x4000
+} else {
+    0x1000
+};
 /// Number of huge frames in tree
-#[cfg(not(feature = "16K"))]
-pub const TREE_HUGE: usize = 8;
-#[cfg(feature = "16K")]
 pub const TREE_HUGE: usize = 8;
 /// Number of small frames in tree
 pub const TREE_FRAMES: usize = TREE_HUGE << HUGE_ORDER;
 /// Order for huge frames
-#[cfg(not(feature = "16K"))]
-pub const HUGE_ORDER: usize = 9;
-#[cfg(feature = "16K")]
-pub const HUGE_ORDER: usize = 11;
+pub const HUGE_ORDER: usize = if cfg!(feature = "16K") { 11 } else { 9 };
+/// Number of small frames in huge frame
 pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
 /// Maximum order the llfree supports
 pub const MAX_ORDER: usize = HUGE_ORDER + 1;
@@ -163,8 +156,7 @@ pub struct MetaData<'a> {
     pub lower: &'a mut [u8],
 }
 #[cfg(feature = "std")]
-impl<'a> MetaData<'a> {
-    #[allow(unused)]
+impl MetaData<'_> {
     pub fn alloc(m: MetaSize) -> Self {
         use util::aligned_buf;
         Self {
@@ -175,7 +167,7 @@ impl<'a> MetaData<'a> {
     }
 }
 
-impl<'a> MetaData<'a> {
+impl MetaData<'_> {
     /// Check for alignment and overlap
     fn valid(&self, m: MetaSize) -> bool {
         fn overlap(a: Range<*const u8>, b: Range<*const u8>) -> bool {
@@ -287,7 +279,7 @@ mod test {
     }
     impl<A: Alloc<'static>> fmt::Debug for TestAlloc<A> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            A::fmt(&self, f)
+            A::fmt(self, f)
         }
     }
 
@@ -1054,24 +1046,21 @@ mod test {
             warn!("allocate {num_frames} frames up to order <{MAX_ORDER}");
             barrier.wait();
 
+            // reallocate all
             for (order, frame) in &mut frames {
                 *frame = match alloc.get(t, Flags::o(*order)) {
                     Ok(frame) => frame,
                     Err(e) => panic!("{e:?} o={order} {alloc:?} on core {t}"),
                 };
                 assert!(*frame % (1 << *order) == 0, "{frame} {:x}", 1 << *order);
-                if *order > 8 {
-                    //info!("allocated order {order}, {alloc:?} on core {t}");
-                }
             }
 
-            let mut rng = WyRand::new(t as _);
             rng.shuffle(&mut frames);
 
+            // free all
             for (order, frame) in frames {
-                match alloc.put(t, frame, Flags::o(order)) {
-                    Ok(_) => {}
-                    Err(e) => panic!("{e:?} o={order} {alloc:?}"),
+                if let Err(e) = alloc.put(t, frame, Flags::o(order)) {
+                    panic!("{e:?} o={order} {alloc:#?}")
                 }
             }
         });
