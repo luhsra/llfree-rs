@@ -88,8 +88,8 @@ fn main() {
     warn!("start");
 
     let mut traces = vec![Vec::new(); threads];
-    for t in 0..threads {
-        traces[t].extend(trace.iter().skip(t).step_by(threads).copied());
+    for (t, subtrace) in traces.iter_mut().enumerate() {
+        subtrace.extend(trace.iter().skip(t).step_by(threads).copied());
     }
 
     let score = std::thread::scope(|s| {

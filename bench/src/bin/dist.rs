@@ -65,15 +65,15 @@ fn main() {
 
     let ms = Allocator::metadata_size(threads, frames);
     let mut lower = mapping(0x1000_0000_0000, ms.lower.div_ceil(Frame::SIZE), dax);
-    let mut local = aligned_buf(ms.local);
-    let mut trees = aligned_buf(ms.trees);
+    let local = aligned_buf(ms.local);
+    let trees = aligned_buf(ms.trees);
 
     for _ in 0..iterations {
         let timer = Instant::now();
 
         let meta = MetaData {
-            local: &mut local,
-            trees: &mut trees,
+            local,
+            trees,
             lower: unsafe { slice::from_raw_parts_mut(lower.as_mut_ptr().cast(), ms.lower) },
         };
         let alloc = Allocator::new(threads, frames, Init::FreeAll, meta).unwrap();

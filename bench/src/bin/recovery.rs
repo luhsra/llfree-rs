@@ -102,8 +102,8 @@ fn main() {
 fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
     let ms = Allocator::metadata_size(threads, mapping.len());
-    let local = aligned_buf(ms.local).leak();
-    let trees = aligned_buf(ms.trees).leak();
+    let local = aligned_buf(ms.local);
+    let trees = aligned_buf(ms.trees);
     let alloc = Allocator::create(threads, &mut mapping, false, local, trees).unwrap();
     warn!("Prepare alloc");
 
@@ -135,8 +135,8 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
     let ms = Allocator::metadata_size(threads, mapping.len());
-    let local = aligned_buf(ms.local).leak();
-    let trees = aligned_buf(ms.trees).leak();
+    let local = aligned_buf(ms.local);
+    let trees = aligned_buf(ms.trees);
 
     warn!("Recover alloc");
     let timer = Instant::now();

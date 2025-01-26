@@ -146,14 +146,14 @@ fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAllo
     #[cfg(feature = "llc")]
     if LLC::name() == name {
         let m = NvmAlloc::<LLC>::metadata_size(cores, zone.len());
-        let local = aligned_buf(m.local).leak();
-        let trees = aligned_buf(m.trees).leak();
+        let local = aligned_buf(m.local);
+        let trees = aligned_buf(m.trees);
         return Box::new(NvmAlloc::<LLC>::create(cores, zone, false, local, trees).unwrap());
     }
     if LLFree::name() == name {
         let m = NvmAlloc::<LLFree>::metadata_size(cores, zone.len());
-        let local = aligned_buf(m.local).leak();
-        let trees = aligned_buf(m.trees).leak();
+        let local = aligned_buf(m.local);
+        let trees = aligned_buf(m.trees);
         return Box::new(NvmAlloc::<LLFree>::create(cores, zone, false, local, trees).unwrap());
     }
     panic!("Unknown allocator");

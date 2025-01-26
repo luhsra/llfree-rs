@@ -80,8 +80,8 @@ fn execute(
     let out_size = align_up(allocs + 2, Frame::SIZE);
 
     let m = Allocator::metadata_size(threads, mapping.len());
-    let local = aligned_buf(m.local).leak();
-    let trees = aligned_buf(m.trees).leak();
+    let local = aligned_buf(m.local);
+    let trees = aligned_buf(m.trees);
     let alloc = Allocator::create(threads, mapping, false, local, trees).unwrap();
     warn!("initialized {}", alloc.frames());
 
@@ -169,8 +169,8 @@ fn monitor(
 
     // Recover allocator
     let m = Allocator::metadata_size(threads, mapping.len());
-    let local = aligned_buf(m.local).leak();
-    let trees = aligned_buf(m.trees).leak();
+    let local = aligned_buf(m.local);
+    let trees = aligned_buf(m.trees);
     let alloc = Allocator::create(threads, mapping, true, local, trees).unwrap();
     warn!("recovered {}", alloc.frames());
 

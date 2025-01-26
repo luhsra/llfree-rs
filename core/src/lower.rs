@@ -603,7 +603,7 @@ mod test {
 
     impl LowerTest<'_> {
         fn create(frames: usize, init: Init) -> Result<Self> {
-            let primary = aligned_buf(Lower::metadata_size(frames)).leak();
+            let primary = aligned_buf(Lower::metadata_size(frames));
             Ok(Self(ManuallyDrop::new(Lower::new(frames, init, primary)?)))
         }
     }

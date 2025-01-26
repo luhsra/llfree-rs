@@ -160,9 +160,9 @@ impl MetaData<'_> {
     pub fn alloc(m: MetaSize) -> Self {
         use util::aligned_buf;
         Self {
-            local: aligned_buf(m.local).leak(),
-            trees: aligned_buf(m.trees).leak(),
-            lower: aligned_buf(m.lower).leak(),
+            local: aligned_buf(m.local),
+            trees: aligned_buf(m.trees),
+            lower: aligned_buf(m.lower),
         }
     }
 }
@@ -247,9 +247,9 @@ mod test {
                 lower,
             } = A::metadata_size(cores, frames);
             let meta = MetaData {
-                local: aligned_buf(local).leak(),
-                trees: aligned_buf(trees).leak(),
-                lower: aligned_buf(lower).leak(),
+                local: aligned_buf(local),
+                trees: aligned_buf(trees),
+                lower: aligned_buf(lower),
             };
             Ok(Self(ManuallyDrop::new(A::new(cores, frames, init, meta)?)))
         }
@@ -991,8 +991,8 @@ mod test {
 
         let mut zone = mmap::anon(0x1000_0000_0000, FRAMES, false, false);
         let m = Allocator::metadata_size(1, FRAMES);
-        let local = aligned_buf(m.local).leak();
-        let trees = aligned_buf(m.trees).leak();
+        let local = aligned_buf(m.local);
+        let trees = aligned_buf(m.trees);
 
         {
             let alloc = Allocator::create(1, &mut zone, false, local, trees).unwrap();
@@ -1012,8 +1012,8 @@ mod test {
             std::mem::forget(alloc);
         }
 
-        let local = aligned_buf(m.local).leak();
-        let trees = aligned_buf(m.trees).leak();
+        let local = aligned_buf(m.local);
+        let trees = aligned_buf(m.trees);
         let alloc = Allocator::create(1, &mut zone, true, local, trees).unwrap();
         assert_eq!(alloc.allocated_frames(), expected_frames);
         alloc.validate();

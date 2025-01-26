@@ -166,15 +166,10 @@ where
 }
 
 #[cfg(feature = "std")]
-pub fn aligned_buf(size: usize) -> std::vec::Vec<u8> {
-    const ALIGN: usize = align_of::<Align>();
-    let primary = vec![Align([0u8; ALIGN]); size.div_ceil(ALIGN)];
-    let (ptr, len, cap) = {
-        let mut me = core::mem::ManuallyDrop::new(primary);
-        (me.as_mut_ptr(), me.len(), me.capacity())
-    };
-    debug_assert!(len == cap);
-    unsafe { std::vec::Vec::from_raw_parts(ptr.cast(), len * ALIGN, cap * ALIGN) }
+pub fn aligned_buf(size: usize) -> &'static mut [u8] {
+    use std::alloc::{alloc_zeroed, Layout};
+    let ptr = unsafe { alloc_zeroed(Layout::from_size_align(size, align_of::<Align>()).unwrap()) };
+    unsafe { std::slice::from_raw_parts_mut(ptr, size) }
 }
 
 pub struct FmtFn<F>(pub F)
