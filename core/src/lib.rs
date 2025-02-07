@@ -3,8 +3,8 @@
 // Disable standard library
 #![no_std]
 // Unstable (but useful) features
-#![feature(allocator_api)]
-#![feature(c_size_t)]
+#![cfg_attr(feature = "std", feature(allocator_api))]
+#![cfg_attr(feature = "llc", feature(c_size_t))]
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
