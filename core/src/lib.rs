@@ -3,7 +3,6 @@
 // Disable standard library
 #![no_std]
 // Unstable (but useful) features
-#![feature(array_windows)]
 #![feature(allocator_api)]
 #![feature(c_size_t)]
 #![feature(let_chains)]
@@ -346,7 +345,7 @@ mod test {
         frames.sort_unstable();
 
         // Check that the same frame was not allocated twice
-        for &[a, b] in frames.array_windows() {
+        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
             assert!(a < FRAMES && b < FRAMES);
         }
@@ -406,7 +405,7 @@ mod test {
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
-        for &[a, b] in frames.array_windows() {
+        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
             assert!(a < FRAMES && b < FRAMES);
         }
@@ -426,7 +425,7 @@ mod test {
         alloc.validate();
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
-        for &[a, b] in frames.array_windows() {
+        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
             assert!(a < FRAMES && b < FRAMES);
         }
@@ -465,7 +464,7 @@ mod test {
             warn!("check...");
             // Check that the same frame was not allocated twice
             frames.sort_unstable();
-            for &[a, b] in frames.array_windows() {
+            for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
                 assert_ne!(a, b);
                 assert!(a < FRAMES && b < FRAMES);
             }
@@ -484,7 +483,7 @@ mod test {
             warn!("check...");
             // Check that the same frame was not allocated twice
             frames.sort_unstable();
-            for &[a, b] in frames.array_windows() {
+            for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
                 assert_ne!(a, b);
                 assert!(a < FRAMES && b < FRAMES);
             }
@@ -540,7 +539,7 @@ mod test {
         frames.sort_unstable();
 
         // Check that the same frame was not allocated twice
-        for &[a, b] in frames.array_windows() {
+        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
             assert!(a < FRAMES && b < FRAMES);
         }
@@ -612,7 +611,7 @@ mod test {
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
-        for &[a, b] in frames.array_windows() {
+        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
             assert!(a < FRAMES && b < FRAMES);
         }
@@ -648,7 +647,7 @@ mod test {
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
-        for &[a, b] in frames.array_windows() {
+        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
             assert!(a < FRAMES && b < FRAMES);
         }
@@ -691,7 +690,7 @@ mod test {
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
-        for &[a, b] in frames.array_windows() {
+        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
             assert!(a < FRAMES && b < FRAMES);
         }
@@ -736,7 +735,7 @@ mod test {
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
-        for &[a, b] in frames.array_windows() {
+        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
             assert!(a < FRAMES && b < FRAMES);
         }
@@ -796,7 +795,7 @@ mod test {
 
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
-        for &[a, b] in frames.array_windows() {
+        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
             assert!(a < FRAMES && b < FRAMES);
         }
