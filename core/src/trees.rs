@@ -134,9 +134,13 @@ impl<'a> Trees<'a> {
     ) -> Result<usize> {
         // There has to be enough space for the current allocation
         let start = (start + self.entries.len()) as isize;
-        for i in offset as isize..len as isize {
+        for i in offset..len {
             // Alternating between before and after this entry
-            let off = if i % 2 == 0 { i / 2 } else { -i.div_ceil(2) };
+            let off = if i % 2 == 0 {
+                (i / 2) as isize
+            } else {
+                -(i.div_ceil(2) as isize)
+            };
             let i = (start + off) as usize % self.entries.len();
             match f(i) {
                 Err(Error::Memory) => {}
