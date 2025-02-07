@@ -8,7 +8,6 @@
 #![feature(allocator_api)]
 #![feature(c_size_t)]
 #![feature(let_chains)]
-#![feature(pointer_is_aligned_to)]
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
@@ -179,9 +178,9 @@ impl MetaData<'_> {
         self.local.len() >= m.local
             && self.trees.len() >= m.trees
             && self.lower.len() >= m.lower
-            && self.local.as_ptr().is_aligned_to(align_of::<Align>())
-            && self.trees.as_ptr().is_aligned_to(align_of::<Align>())
-            && self.lower.as_ptr().is_aligned_to(align_of::<Align>())
+            && self.local.as_ptr().align_offset(align_of::<Align>()) == 0
+            && self.trees.as_ptr().align_offset(align_of::<Align>()) == 0
+            && self.lower.as_ptr().align_offset(align_of::<Align>()) == 0
             && !overlap(self.local.as_ptr_range(), self.trees.as_ptr_range())
             && !overlap(self.trees.as_ptr_range(), self.lower.as_ptr_range())
             && !overlap(self.lower.as_ptr_range(), self.local.as_ptr_range())
