@@ -1,5 +1,7 @@
 use std::env;
+use std::num::NonZeroUsize;
 use std::process::Command;
+use std::thread::available_parallelism;
 
 fn main() {
     if env::var("CARGO_FEATURE_LLC").is_ok() {
@@ -12,6 +14,10 @@ fn main() {
         let output = Command::new("make")
             .arg(format!("DEBUG={}", is_debug as usize))
             .arg(format!("BUILDDIR={outdir}"))
+            .arg(format!(
+                "-j{}",
+                available_parallelism().unwrap_or(NonZeroUsize::MIN)
+            ))
             .arg("-C")
             .arg(&c_project_dir)
             .arg(format!("{outdir}/libllc.a"))
