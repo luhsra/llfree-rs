@@ -3,7 +3,6 @@
 // Disable standard library
 #![no_std]
 // Unstable (but useful) features
-#![feature(int_roundings)]
 #![feature(array_windows)]
 #![feature(allocator_api)]
 #![feature(c_size_t)]
