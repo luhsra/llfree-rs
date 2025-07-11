@@ -1,10 +1,8 @@
-#![feature(allocator_api)]
-
 use std::time::Instant;
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::mmap::{self, madvise, MAdvise, MMap};
+use llfree::mmap::{madvise, MAdvise, Mapping};
 use llfree::thread;
 use llfree::util::{avg_bounds, logging, WyRand};
 
@@ -115,11 +113,11 @@ pub fn mapping(
     dax: Option<String>,
     private: bool,
     populate: bool,
-) -> Box<[Frame], MMap> {
+) -> Mapping<Frame> {
     #[cfg(target_os = "linux")]
     if let Some(file) = dax {
         log::warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
-        return mmap::file(begin, length, &file, true);
+        return Mapping::file(begin, length, &file, true).unwrap();
     }
-    mmap::anon(begin, length, !private, populate)
+    Mapping::anon(begin, length, !private, populate).unwrap()
 }

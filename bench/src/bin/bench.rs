@@ -1,5 +1,3 @@
-#![feature(allocator_api)]
-
 use core::{fmt, slice};
 use std::fs::File;
 use std::hint::black_box;
@@ -10,7 +8,7 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use llfree::frame::Frame;
-use llfree::mmap::{self, MMap};
+use llfree::mmap::Mapping;
 use llfree::util::{self, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
 #[cfg(feature = "llc")]
@@ -108,14 +106,14 @@ fn main() {
 }
 
 #[allow(unused_variables)]
-pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame], MMap> {
+pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Mapping<Frame> {
     #[cfg(target_os = "linux")]
     if let Some(file) = dax {
         warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
-        return mmap::file(begin, length, &file, true);
+        return Mapping::file(begin, length, &file, true).unwrap();
     }
     warn!("Mapping {length} frames ({} bytes).", length * Frame::SIZE);
-    mmap::anon(begin, length, false, false)
+    Mapping::anon(begin, length, false, false).unwrap()
 }
 
 /// Reduced, VTable-compatible alloc trait for dynamic dispatch

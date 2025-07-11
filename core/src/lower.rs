@@ -81,7 +81,7 @@ impl<'a> Lower<'a> {
         let m = Metadata::new(frames);
 
         if primary.len() < m.bitfield_size + m.table_size
-            || primary.as_ptr() as usize % align_of::<Align>() != 0
+            || !(primary.as_ptr() as usize).is_multiple_of(align_of::<Align>())
         {
             error!("primary metadata");
             return Err(Error::Initialization);
@@ -211,7 +211,7 @@ impl<'a> Lower<'a> {
 
     /// Returns if the frame is free. This might be racy!
     pub fn is_free(&self, frame: usize, order: usize) -> bool {
-        debug_assert!(frame % (1 << order) == 0);
+        debug_assert!(frame.is_multiple_of(1 << order));
         if order > MAX_ORDER || frame + (1 << order) > self.frames() {
             return false;
         }

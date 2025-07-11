@@ -1,5 +1,3 @@
-#![feature(allocator_api)]
-
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
@@ -8,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::mmap::MMap;
+use llfree::mmap::Mapping;
 use llfree::util::{self, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
 use llfree::{thread, Alloc, Flags, LLFree};
@@ -82,6 +80,7 @@ fn main() {
             if let Some(sec) = crash {
                 std::thread::sleep(Duration::from_secs(sec));
                 process.kill().unwrap();
+                process.wait().unwrap();
             } else {
                 let ret = process.wait().unwrap();
                 assert!(ret.success());
@@ -152,11 +151,11 @@ fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
 }
 
 #[allow(unused_variables)]
-pub fn mapping(begin: usize, length: usize, dax: &str) -> Box<[Frame], MMap> {
+pub fn mapping(begin: usize, length: usize, dax: &str) -> Mapping<Frame> {
     #[cfg(target_os = "linux")]
     {
         warn!("MMap file {dax} l={}G", (length * Frame::SIZE) >> 30);
-        llfree::mmap::file(begin, length, dax, true)
+        Mapping::file(begin, length, dax, true).unwrap()
     }
     #[cfg(not(target_os = "linux"))]
     panic!("No NVRAM!")

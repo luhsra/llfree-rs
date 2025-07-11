@@ -1,12 +1,10 @@
-#![feature(allocator_api)]
-
 use std::cmp::Ordering::*;
 use std::sync::Barrier;
 use std::time::Duration;
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::mmap::{self, MMap};
+use llfree::mmap::Mapping;
 use llfree::util::{self, align_up, aligned_buf, WyRand};
 use llfree::wrapper::NvmAlloc;
 use llfree::{thread, Alloc, Flags, LLFree};
@@ -46,7 +44,7 @@ fn main() {
     let out_size = align_up(allocs + 2, Frame::SIZE) * threads;
     // Shared memory where the allocated pages are backupped
     // Layout: [ ( idx | realloc | pages... ) for each thread ]
-    let mut out_mapping = mmap::anon(0x1100_0000_0000, out_size, true, false);
+    let mut out_mapping = Mapping::anon(0x1100_0000_0000, out_size, true, false).unwrap();
     let out_size = out_size / threads;
     // Initialize with zero
     for out in out_mapping.chunks_mut(out_size) {
@@ -208,11 +206,11 @@ fn monitor(
 }
 
 #[allow(unused_variables)]
-pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame], MMap> {
+pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Mapping<Frame> {
     #[cfg(target_os = "linux")]
     if let Some(file) = dax {
         warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
-        return mmap::file(begin, length, &file, true);
+        return Mapping::file(begin, length, &file, true).unwrap();
     }
-    mmap::anon(begin, length, true, false)
+    Mapping::anon(begin, length, true, false).unwrap()
 }

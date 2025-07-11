@@ -1,150 +1,167 @@
 //! Barebones linux mmap wrapper
 
-use core::alloc::{AllocError, Allocator, Layout};
+use core::alloc::Layout;
+use core::error::Error;
+use core::fmt;
+use core::num::NonZero;
+use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
-use std::boxed::Box;
 use std::fs::File;
 use std::os::unix::prelude::AsRawFd;
+use std::path::Path;
 
 use crate::frame::Frame;
 
-/// Create an private anonymous mapping
-pub fn anon<T>(begin: usize, len: usize, shared: bool, populate: bool) -> Box<[T], MMap> {
-    unsafe { Box::new_uninit_slice_in(len, MMap::anon(begin, shared, populate)).assume_init() }
-}
-/// Create an file backed mapping (optionally DAX)
-pub fn file<T>(begin: usize, len: usize, path: &str, dax: bool) -> Box<[T], MMap> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .unwrap();
-    unsafe { Box::new_uninit_slice_in(len, MMap::file(begin, file, dax)).assume_init() }
-}
-
-/// Wrapper for POSIX mmap syscalls.
-///
-/// Tested on Linux and MacOS.
-pub struct MMap {
-    begin: usize,
-    shared: bool,
-    #[allow(unused)]
-    populate: bool,
-    file: Option<(File, bool)>,
-}
-
-impl MMap {
-    pub fn anon(begin: usize, shared: bool, populate: bool) -> Self {
-        Self {
-            begin,
-            shared,
-            populate,
-            file: None,
-        }
-    }
-
-    #[cfg(target_family = "unix")]
-    pub fn file(begin: usize, file: File, dax: bool) -> Self {
-        Self {
-            begin,
-            shared: true,
-            populate: false,
-            file: Some((file, dax)),
-        }
+#[derive(Debug)]
+pub struct AllocError;
+impl fmt::Display for AllocError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AllocError")
     }
 }
+impl Error for AllocError {}
 
-#[cfg(target_family = "unix")]
-unsafe impl Allocator for MMap {
-    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        // Enforce alignment
-        let begin = if layout.align() != 0 {
-            self.begin.next_multiple_of(layout.align())
+pub struct Mapping<T> {
+    ptr: NonNull<T>,
+    size: NonZero<usize>,
+}
+
+impl<T> Mapping<T> {
+    pub fn anon(
+        begin: usize,
+        len: usize,
+        shared: bool,
+        populate: bool,
+    ) -> Result<Self, AllocError> {
+        let (begin, size) = calc_layout::<T>(begin, len)?;
+
+        let visibility = if shared {
+            libc::MAP_SHARED
         } else {
-            self.begin
+            libc::MAP_PRIVATE
         };
-        // Nothing to allocate
-        if layout.size() == 0 {
-            return Ok(unsafe { std::slice::from_raw_parts(begin as _, 0) }.into());
-        }
-        // Now ask the os for the memory
-        let addr = if let Some((file, _dax)) = &self.file {
-            let fd = file.as_raw_fd();
 
-            #[allow(unused_mut)]
-            let mut flags = libc::MAP_SHARED;
+        #[allow(unused_mut)]
+        let mut populate_f = 0;
+        #[cfg(target_os = "linux")]
+        if populate {
+            populate_f = libc::MAP_POPULATE
+        };
 
-            #[cfg(target_os = "linux")]
-            if *_dax {
-                flags = libc::MAP_SHARED_VALIDATE | libc::MAP_SYNC;
-            }
-
-            unsafe {
-                libc::mmap(
-                    begin as _,
-                    layout.size() as _,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    flags,
-                    fd,
-                    0,
-                )
-            }
-        } else {
-            let visibility = if self.shared {
-                libc::MAP_SHARED
-            } else {
-                libc::MAP_PRIVATE
-            };
-
-            #[allow(unused_mut)]
-            let mut populate = 0;
-            #[cfg(target_os = "linux")]
-            if self.populate {
-                populate = libc::MAP_POPULATE
-            };
-
-            unsafe {
-                libc::mmap(
-                    begin as _,
-                    layout.size() as _,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_ANONYMOUS | visibility | populate,
-                    -1,
-                    0,
-                )
-            }
+        let addr = unsafe {
+            libc::mmap(
+                begin as _,
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_ANONYMOUS | visibility | populate_f,
+                -1,
+                0,
+            )
         };
 
         if addr != libc::MAP_FAILED {
             // This non-null slice is somewhat cursed
-            Ok(unsafe { std::slice::from_raw_parts(addr.cast(), layout.size()) }.into())
+            Ok(Self {
+                ptr: NonNull::new(addr.cast()).ok_or(AllocError)?,
+                size: NonZero::new(size).ok_or(AllocError)?,
+            })
         } else {
             unsafe { libc::perror(c"mmap failed".as_ptr()) };
             Err(AllocError)
         }
     }
 
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        if layout.size() > 0 {
-            let ret = unsafe { libc::munmap(ptr.as_ptr() as _, layout.size() as _) };
-            if ret != 0 {
-                unsafe { libc::perror(c"munmap failed".as_ptr()) };
-                panic!("unmap {layout:?}");
-            }
+    pub fn file(
+        begin: usize,
+        len: usize,
+        file: impl AsRef<Path>,
+        dax: bool,
+    ) -> Result<Self, AllocError> {
+        let (begin, size) = calc_layout::<T>(begin, len)?;
+
+        #[allow(unused_mut)]
+        let mut flags = libc::MAP_SHARED;
+
+        #[cfg(target_os = "linux")]
+        if dax {
+            flags = libc::MAP_SHARED_VALIDATE | libc::MAP_SYNC;
+        }
+
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .open(file)
+            .map_err(|_| AllocError)?;
+        let fd = file.as_raw_fd();
+        let addr = unsafe {
+            libc::mmap(
+                begin as _,
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                flags,
+                fd,
+                0,
+            )
+        };
+
+        if addr != libc::MAP_FAILED {
+            Ok(Self {
+                ptr: NonNull::new(addr.cast()).ok_or(AllocError)?,
+                size: NonZero::new(size).ok_or(AllocError)?,
+            })
+        } else {
+            unsafe { libc::perror(c"mmap failed".as_ptr()) };
+            Err(AllocError)
         }
     }
 }
 
-// Fallback for non-unix systems
-#[cfg(not(target_family = "unix"))]
-unsafe impl Allocator for MMap {
-    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        unsafe { std::alloc::alloc_zeroed(layout) }
+impl<T> Drop for Mapping<T> {
+    fn drop(&mut self) {
+        let ret = unsafe { libc::munmap(self.ptr.as_ptr() as _, self.size.get()) };
+        if ret != 0 {
+            unsafe { libc::perror(c"munmap failed".as_ptr()) };
+            panic!("unmap failed");
+        }
     }
+}
 
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        unsafe { std::alloc::dealloc(ptr, layout) }
+impl<T> Deref for Mapping<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        let layout = Layout::new::<T>();
+        unsafe {
+            core::slice::from_raw_parts(
+                self.ptr.as_ptr(),
+                self.size.get() / layout.size().next_multiple_of(layout.align()),
+            )
+        }
     }
+}
+impl<T> DerefMut for Mapping<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        let layout = Layout::new::<T>();
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.ptr.as_ptr(),
+                self.size.get() / layout.size().next_multiple_of(layout.align()),
+            )
+        }
+    }
+}
+
+fn calc_layout<T>(begin: usize, len: usize) -> Result<(usize, usize), AllocError> {
+    let layout = Layout::new::<T>();
+    if layout.size() == 0 || layout.align() == 0 {
+        return Err(AllocError);
+    }
+    let begin = begin
+        .next_multiple_of(layout.align())
+        .next_multiple_of(Frame::SIZE);
+    let size = (len * layout.size())
+        .next_multiple_of(layout.align())
+        .next_multiple_of(Frame::SIZE);
+    Ok((begin, size))
 }
 
 #[cfg(target_family = "unix")]
@@ -215,14 +232,14 @@ pub fn madvise(mem: &mut [Frame], advise: MAdvise) {
 }
 
 #[cfg(test)]
-pub fn test_mapping(begin: usize, length: usize) -> Box<[Frame], MMap> {
+pub fn test_mapping(begin: usize, length: usize) -> Mapping<Frame> {
     #[cfg(target_os = "linux")]
     if let Ok(f) = std::env::var("NVM_FILE") {
         use log::warn;
         warn!("MMap file {f} l={}G", (length * Frame::SIZE) >> 30);
-        return file(begin, length, &f, true);
+        return Mapping::file(begin, length, &f, true).unwrap();
     }
-    anon(begin, length, false, true)
+    Mapping::anon(begin, length, false, true).unwrap()
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -231,6 +248,7 @@ mod test {
 
     use log::info;
 
+    use super::Mapping;
     use crate::frame::Frame;
     use crate::util::logging;
 
@@ -247,7 +265,8 @@ mod test {
         f.set_len(Frame::SIZE as _).unwrap();
         drop(f);
 
-        let mut mapping = super::file(0x0000_1000_0000_0000, Frame::SIZE, "memfile", false);
+        let mut mapping =
+            Mapping::file(0x0000_1000_0000_0000, Frame::SIZE, "memfile", false).unwrap();
 
         mapping[0] = 42u8;
         assert_eq!(mapping[0], 42);
@@ -267,7 +286,7 @@ mod test {
 
         info!("MMap file {file} l=1G");
 
-        let mut mapping = super::file(0x0000_1000_0000_0000, 1 << 30, &file, true);
+        let mut mapping = Mapping::file(0x0000_1000_0000_0000, 1 << 30, &file, true).unwrap();
 
         info!("previously {}", mapping[0]);
 
@@ -281,7 +300,7 @@ mod test {
     fn anonymous() {
         logging();
 
-        let mut mapping = super::anon(0x1000_0000_0000, 1024, false, true);
+        let mut mapping = Mapping::anon(0x1000_0000_0000, 1024, false, true).unwrap();
         mapping[0] = 42;
         assert_eq!(mapping[0], 42);
 

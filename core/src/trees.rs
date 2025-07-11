@@ -136,7 +136,7 @@ impl<'a> Trees<'a> {
         let start = (start + self.entries.len()) as isize;
         for i in offset..len {
             // Alternating between before and after this entry
-            let off = if i % 2 == 0 {
+            let off = if i.is_multiple_of(2) {
                 (i / 2) as isize
             } else {
                 -(i.div_ceil(2) as isize)

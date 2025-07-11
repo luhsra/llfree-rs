@@ -16,7 +16,7 @@ pub struct Bitfield<const N: usize> {
 }
 
 const _: () = assert!(size_of::<Bitfield<64>>() >= 8);
-const _: () = assert!(Bitfield::<64>::LEN % Bitfield::<64>::ENTRY_BITS == 0);
+const _: () = assert!(Bitfield::<64>::LEN.is_multiple_of(Bitfield::<64>::ENTRY_BITS));
 const _: () = assert!(1 << Bitfield::<64>::ORDER == Bitfield::<64>::LEN);
 const _: () = assert!(Bitfield::<2>::ORDER == 7);
 
@@ -76,7 +76,7 @@ impl<const N: usize> Bitfield<N> {
     /// Orders above 6 need multiple CAS operations, which might lead to race conditions!
     pub fn toggle(&self, i: usize, order: usize, expected: bool) -> Result<()> {
         let num_bits = 1 << order;
-        debug_assert!(i % num_bits == 0, "not aligned");
+        debug_assert!(i.is_multiple_of(num_bits), "not aligned");
         match order {
             0..=2 => {
                 // Updates within a single entry
@@ -142,7 +142,7 @@ impl<const N: usize> Bitfield<N> {
     pub fn is_zero(&self, i: usize, order: usize) -> bool {
         let num_bits = 1 << order;
         debug_assert!(i < Self::LEN && order <= Self::ORDER);
-        debug_assert!(i % num_bits == 0, "not aligned");
+        debug_assert!(i.is_multiple_of(num_bits), "not aligned");
 
         let entry_i = i / Self::ENTRY_BITS;
         if num_bits > Self::ENTRY_BITS {

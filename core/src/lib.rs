@@ -2,9 +2,6 @@
 #![doc = include_str!("../../README.md")]
 // Disable standard library
 #![no_std]
-// Unstable (but useful) features
-#![cfg_attr(feature = "std", feature(allocator_api))]
-#![cfg_attr(feature = "llc", feature(c_size_t))]
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
@@ -985,7 +982,7 @@ mod test {
 
         let expected_frames = 128 * (1 + (1 << HUGE_ORDER));
 
-        let mut zone = mmap::anon(0x1000_0000_0000, FRAMES, false, false);
+        let mut zone = mmap::Mapping::anon(0x1000_0000_0000, FRAMES, false, false).unwrap();
         let m = Allocator::metadata_size(1, FRAMES);
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);

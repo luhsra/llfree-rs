@@ -78,7 +78,7 @@ impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
         init: Init,
         meta: MetaData<'a>,
     ) -> Result<Self> {
-        if offset % (1 << MAX_ORDER) != 0 {
+        if !offset.is_multiple_of(1 << MAX_ORDER) {
             error!("zone alignment");
             return Err(Error::Initialization);
         }
@@ -127,7 +127,7 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
     ) -> Result<Self> {
         let m = A::metadata_size(cores, zone.len());
         if size_of_val(zone) < m.lower + Frame::SIZE
-            || zone.as_ptr() as usize % (Frame::SIZE << MAX_ORDER) != 0
+            || !(zone.as_ptr() as usize).is_multiple_of(Frame::SIZE << MAX_ORDER)
         {
             error!("invalid memory region");
             return Err(Error::Initialization);

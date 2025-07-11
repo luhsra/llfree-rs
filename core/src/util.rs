@@ -102,13 +102,13 @@ impl WyRand {
     pub fn new(seed: u64) -> Self {
         Self { seed }
     }
-    pub fn gen(&mut self) -> u64 {
+    pub fn generate(&mut self) -> u64 {
         self.seed = self.seed.wrapping_add(0xa076_1d64_78bd_642f);
         let t: u128 = (self.seed as u128).wrapping_mul((self.seed ^ 0xe703_7ed1_a0b4_28db) as u128);
         (t.wrapping_shr(64) ^ t) as u64
     }
     pub fn range(&mut self, range: Range<u64>) -> u64 {
-        let mut val = self.gen();
+        let mut val = self.generate();
         if range.start < range.end {
             val %= range.end - range.start;
             val + range.start

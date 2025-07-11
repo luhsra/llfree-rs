@@ -208,7 +208,7 @@ impl<T> Spin<T> {
             value: Align(UnsafeCell::new(value)),
         }
     }
-    pub fn lock(&self) -> SpinGuard<T> {
+    pub fn lock(&self) -> SpinGuard<'_, T> {
         while let Err(_) = self
             .lock
             .compare_exchange_weak(false, true, Acquire, Relaxed)
@@ -217,7 +217,7 @@ impl<T> Spin<T> {
         }
         SpinGuard { spin: self }
     }
-    pub fn try_lock(&self) -> Option<SpinGuard<T>> {
+    pub fn try_lock(&self) -> Option<SpinGuard<'_, T>> {
         if let Ok(_) = self.lock.compare_exchange(false, true, Acquire, Relaxed) {
             Some(SpinGuard { spin: self })
         } else {

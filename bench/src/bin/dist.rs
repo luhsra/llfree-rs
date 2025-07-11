@@ -1,5 +1,3 @@
-#![feature(allocator_api)]
-
 use core::slice;
 use std::fs::File;
 use std::io::Write;
@@ -9,7 +7,7 @@ use std::time::Instant;
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::mmap::{self, MMap};
+use llfree::mmap::Mapping;
 use llfree::util::{aligned_buf, logging};
 use llfree::{thread, Alloc, Flags, Init, LLFree, MetaData, HUGE_FRAMES};
 use log::warn;
@@ -82,7 +80,7 @@ fn main() {
 
         // Allocate half the memory
         let allocs = (frames / threads) / (2 * (1 << order));
-        assert!(allocs % HUGE_FRAMES == 0);
+        assert!(allocs.is_multiple_of(HUGE_FRAMES));
         warn!("\n\n>>> bench t={threads} o={order:?} {allocs}\n");
 
         let barrier = Barrier::new(threads);
@@ -142,11 +140,11 @@ fn main() {
 }
 
 #[allow(unused_variables)]
-pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Box<[Frame], MMap> {
+pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Mapping<Frame> {
     #[cfg(target_os = "linux")]
     if let Some(file) = dax {
         warn!("MMap file {file} l={}G", (length * Frame::SIZE) >> 30);
-        return mmap::file(begin, length, &file, true);
+        return Mapping::file(begin, length, &file, true).unwrap();
     }
-    mmap::anon(begin, length, false, true)
+    Mapping::anon(begin, length, false, true).unwrap()
 }

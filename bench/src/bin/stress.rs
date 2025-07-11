@@ -1,6 +1,3 @@
-#![feature(allocator_api)]
-#![feature(let_chains)]
-
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;

@@ -1,4 +1,4 @@
-use core::ffi::{c_char, c_size_t, c_void, CStr};
+use core::ffi::{c_char, c_void, CStr};
 use core::mem::{align_of, size_of};
 use core::{fmt, slice};
 
@@ -174,10 +174,10 @@ impl result_t {
 
 #[repr(C)]
 struct MetaSize {
-    llfree: c_size_t,
-    local: c_size_t,
-    trees: c_size_t,
-    lower: c_size_t,
+    llfree: usize,
+    local: usize,
+    trees: usize,
+    lower: usize,
 }
 
 #[repr(C)]
@@ -188,45 +188,45 @@ struct Meta {
 }
 
 #[link(name = "llc", kind = "static")]
-extern "C" {
+unsafe extern "C" {
     /// Initializes the allocator for the given memory region, returning 0 on success or a negative error code
     fn llfree_init(
         this: *mut llfree_t,
-        cores: c_size_t,
-        frames: c_size_t,
+        cores: usize,
+        frames: usize,
         init: u8,
         meta: Meta,
     ) -> result_t;
 
     /// Returns the size of the metadata buffers required for initialization
-    fn llfree_metadata_size(cores: c_size_t, frames: c_size_t) -> MetaSize;
+    fn llfree_metadata_size(cores: usize, frames: usize) -> MetaSize;
 
     /// Returns the metadata
     fn llfree_metadata(this: *mut llfree_t) -> Meta;
 
     /// Allocates a frame and returns its address, or a negative error code
-    fn llfree_get(this: *const llfree_t, core: c_size_t, flags: Flags) -> result_t;
+    fn llfree_get(this: *const llfree_t, core: usize, flags: Flags) -> result_t;
     /// Frees a frame, returning 0 on success or a negative error code
-    fn llfree_put(this: *const llfree_t, core: c_size_t, frame: u64, flags: Flags) -> result_t;
+    fn llfree_put(this: *const llfree_t, core: usize, frame: u64, flags: Flags) -> result_t;
 
     /// Frees a frame, returning 0 on success or a negative error code
-    fn llfree_drain(this: *const llfree_t, core: c_size_t) -> result_t;
+    fn llfree_drain(this: *const llfree_t, core: usize) -> result_t;
 
     /// Returns the number of cores this allocator was initialized with
-    fn llfree_cores(this: *const llfree_t) -> c_size_t;
+    fn llfree_cores(this: *const llfree_t) -> usize;
     /// Returns the total number of frames the allocator can allocate
-    fn llfree_frames(this: *const llfree_t) -> c_size_t;
+    fn llfree_frames(this: *const llfree_t) -> usize;
 
     /// Checks if a frame is allocated, returning 0 if not
-    fn llfree_is_free(this: *const llfree_t, frame: u64, order: c_size_t) -> bool;
+    fn llfree_is_free(this: *const llfree_t, frame: u64, order: usize) -> bool;
     /// Returns the number of frames in the given chunk.
     /// This is only implemented for 0, HUGE_ORDER and TREE_ORDER.
-    fn llfree_free_at(this: *const llfree_t, frame: u64, order: c_size_t) -> c_size_t;
+    fn llfree_free_at(this: *const llfree_t, frame: u64, order: usize) -> usize;
 
     /// Returns number of currently free frames
-    fn llfree_free_frames(this: *const llfree_t) -> c_size_t;
+    fn llfree_free_frames(this: *const llfree_t) -> usize;
     /// Returns number of currently free huge frames
-    fn llfree_free_huge(this: *const llfree_t) -> c_size_t;
+    fn llfree_free_huge(this: *const llfree_t) -> usize;
 
     /// Prints the allocators state for debugging
     fn llfree_print_debug(

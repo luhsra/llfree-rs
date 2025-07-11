@@ -4,7 +4,7 @@ fn getcpu() -> (usize, usize) {
     use std::os::raw::{c_int, c_uint};
     use std::ptr::null_mut;
 
-    extern "C" {
+    unsafe extern "C" {
         fn getcpu(cpu: *mut c_uint, node: *mut c_uint, tcache: *mut c_void) -> c_int;
     }
     let mut cpu: c_uint = 0;
