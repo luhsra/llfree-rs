@@ -61,11 +61,10 @@ class BitfieldPrinter(gdb.ValuePrinter):
 
 
 BITFIELDS = {
-    "llfree::entry::Tree": [
-        Field("free", 0, 13, "usize"),
-        Field("huge", 13, 4, "usize"),
-        Field("reserved", 17, 1, "bool"),
-        Field("movable", 18, 1, "bool"),
+    "llfree::trees::Tree": [
+        Field("free", 0, 29, "usize"),
+        Field("reserved", 29, 1, "bool"),
+        Field("kind", 30, 2, "usize"),
     ],
 }
 
