@@ -8,9 +8,9 @@ use bitfield_struct::bitfield;
 use log::{error, info, warn};
 
 use crate::atomic::{Atom, AtomArray, Atomic};
-use crate::util::{align_down, size_of_slice, spin_wait, Align};
+use crate::util::{Align, align_down, size_of_slice, spin_wait};
 use crate::{
-    Error, Init, Result, HUGE_FRAMES, HUGE_ORDER, MAX_ORDER, RETRIES, TREE_FRAMES, TREE_HUGE,
+    Error, HUGE_FRAMES, HUGE_ORDER, Init, MAX_ORDER, RETRIES, Result, TREE_FRAMES, TREE_HUGE,
 };
 
 const CHILDREN: usize = HUGE_FRAMES / crate::bitfield::Bitfield::<1>::ENTRY_BITS;
@@ -174,6 +174,44 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Try allocating a specific `frame`.
+    pub fn get_at(&self, frame: usize, order: usize) -> Result<bool> {
+        debug_assert!(order <= MAX_ORDER);
+        debug_assert!(frame.is_multiple_of(1 << order));
+        debug_assert!(frame < self.frames());
+
+        let i = (frame / Bitfield::LEN) % TREE_HUGE;
+        let child = &self.children[frame / TREE_FRAMES][i];
+
+        if order == MAX_ORDER {
+            if let Ok(_) = self.child_pair(frame)[i / 2]
+                .fetch_update(|v| v.map(|v| v.mark_huge(Bitfield::LEN)))
+            {
+                return Ok(true);
+            }
+        } else if order == HUGE_ORDER {
+            if let Ok(_) = child.fetch_update(|v| v.mark_huge(Bitfield::LEN)) {
+                return Ok(true);
+            }
+        } else {
+            if let Ok(old) = child.fetch_update(|v| v.dec(1 << order)) {
+                if let Ok(_) = self.bitfields[frame / Bitfield::LEN].toggle(
+                    frame % Bitfield::LEN,
+                    order,
+                    false,
+                ) {
+                    return Ok(old.free() == Bitfield::LEN);
+                } else {
+                    // Undo
+                    child
+                        .fetch_update(|v| v.inc(Bitfield::LEN, 1 << order))
+                        .expect("Undo failed");
+                }
+            }
+        }
+        Err(Error::Memory)
+    }
+
     /// Free single frame, returning whether a whole huge page has become free.
     pub fn put(&self, frame: usize, order: usize) -> Result<bool> {
         debug_assert!(order <= MAX_ORDER);
@@ -219,7 +257,7 @@ impl<'a> Lower<'a> {
         if order > Bitfield::ORDER {
             // multiple huge frames
             let i = (frame / Bitfield::LEN) % TREE_HUGE;
-            self.table_pair(frame)[i / 2]
+            self.child_pair(frame)[i / 2]
                 .load()
                 .all(|e| e.free() == Bitfield::LEN)
         } else {
@@ -274,7 +312,7 @@ impl<'a> Lower<'a> {
     }
 
     /// Returns the table with pair entries that can be updated at once.
-    fn table_pair(&self, frame: usize) -> &[Atom<HugePair>; TREE_HUGE / 2] {
+    fn child_pair(&self, frame: usize) -> &[Atom<HugePair>; TREE_HUGE / 2] {
         let table = &self.children[frame / TREE_FRAMES];
         unsafe { &*table.as_ptr().cast() }
     }
@@ -395,7 +433,7 @@ impl<'a> Lower<'a> {
 
     /// Allocate multiple huge frames
     fn get_max(&self, start: usize) -> Result<usize> {
-        let table_pair = self.table_pair(start);
+        let table_pair = self.child_pair(start);
         let offset = ((start / Bitfield::LEN) % TREE_HUGE) / 2;
 
         for i in 0..TREE_HUGE / 2 {
@@ -428,7 +466,7 @@ impl<'a> Lower<'a> {
     }
 
     pub fn put_max(&self, frame: usize) -> Result<()> {
-        let table_pair = self.table_pair(frame);
+        let table_pair = self.child_pair(frame);
         let i = ((frame / Bitfield::LEN) % TREE_HUGE) / 2;
 
         if let Err(old) = table_pair[i].compare_exchange(
@@ -516,11 +554,7 @@ impl HugeEntry {
     }
     /// Returns the free frames counter
     fn free(self) -> usize {
-        if !self.huge() {
-            self.count() as _
-        } else {
-            0
-        }
+        if !self.huge() { self.count() as _ } else { 0 }
     }
     /// Try to allocate this entry as huge frame.
     fn mark_huge(self, span: usize) -> Option<Self> {
@@ -580,7 +614,7 @@ impl From<u32> for HugePair {
 }
 impl From<HugePair> for u32 {
     fn from(value: HugePair) -> Self {
-        let ([a, b], [c, d]) = (value.0 .0.to_ne_bytes(), value.1 .0.to_ne_bytes());
+        let ([a, b], [c, d]) = (value.0.0.to_ne_bytes(), value.1.0.to_ne_bytes());
         u32::from_ne_bytes([a, b, c, d])
     }
 }
@@ -596,8 +630,8 @@ mod test {
 
     use super::Bitfield;
     use crate::lower::Lower;
-    use crate::util::{aligned_buf, logging, WyRand};
-    use crate::{thread, Error, Init, Result, HUGE_FRAMES, MAX_ORDER, TREE_FRAMES, TREE_HUGE};
+    use crate::util::{WyRand, aligned_buf, logging};
+    use crate::{Error, HUGE_FRAMES, Init, MAX_ORDER, Result, TREE_FRAMES, TREE_HUGE, thread};
 
     struct LowerTest<'a>(ManuallyDrop<Lower<'a>>);
 

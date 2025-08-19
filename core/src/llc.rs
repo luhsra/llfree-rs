@@ -1,4 +1,4 @@
-use core::ffi::{c_char, c_void, CStr};
+use core::ffi::{CStr, c_char, c_void};
 use core::mem::{align_of, size_of};
 use core::{fmt, slice};
 
@@ -6,7 +6,7 @@ use bitfield_struct::bitfield;
 
 use super::{Alloc, Init};
 use crate::util::Align;
-use crate::{Error, Flags, Result};
+use crate::{Error, Flags, HUGE_ORDER, Result, TREE_FRAMES, TREE_HUGE};
 
 /// C implementation of LLFree
 ///
@@ -65,7 +65,7 @@ impl<'a> Alloc<'a> for LLC {
         assert!(size_of::<Self>() >= m.llfree);
 
         assert!(meta.valid(Self::metadata_size(cores, frames)));
-        let meta = Meta {
+        let meta = llfree_meta {
             local: meta.local.as_mut_ptr(),
             trees: meta.trees.as_mut_ptr(),
             lower: meta.lower.as_mut_ptr(),
@@ -78,6 +78,18 @@ impl<'a> Alloc<'a> for LLC {
     fn get(&self, core: usize, flags: Flags) -> Result<usize> {
         let ret = unsafe { llfree_get(self.raw.as_ptr().cast(), core as _, flags.into()) };
         Ok(ret.ok()? as _)
+    }
+
+    fn get_at(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
+        let ret = unsafe {
+            llfree_get_at(
+                self.raw.as_ptr().cast(),
+                core as _,
+                frame as _,
+                flags.into(),
+            )
+        };
+        ret.ok().map(|_| ())
     }
 
     fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
@@ -93,7 +105,10 @@ impl<'a> Alloc<'a> for LLC {
     }
 
     fn is_free(&self, frame: usize, order: usize) -> bool {
-        unsafe { llfree_is_free(self.raw.as_ptr().cast(), frame as _, order as _) }
+        let stats = unsafe { llfree_full_stats_at(self.raw.as_ptr().cast(), frame as _, order as _) };
+        order == 0 && stats.free_frames == 1
+            || order == HUGE_ORDER && stats.free_huge == 1
+            || order == TREE_FRAMES.ilog2() as usize && stats.free_huge == TREE_HUGE
     }
 
     fn drain(&self, core: usize) -> Result<()> {
@@ -113,15 +128,15 @@ impl<'a> Alloc<'a> for LLC {
     }
 
     fn free_frames(&self) -> usize {
-        unsafe { llfree_free_frames(self.raw.as_ptr().cast()) as _ }
+        unsafe { llfree_full_stats(self.raw.as_ptr().cast()).free_frames }
     }
 
     fn free_huge(&self) -> usize {
-        unsafe { llfree_free_huge(self.raw.as_ptr().cast()) as _ }
+        unsafe { llfree_full_stats(self.raw.as_ptr().cast()).free_huge }
     }
 
     fn free_at(&self, frame: usize, order: usize) -> usize {
-        unsafe { llfree_free_at(self.raw.as_ptr().cast(), frame as _, order) }
+        unsafe { llfree_full_stats_at(self.raw.as_ptr().cast(), frame as _, order).free_frames }
     }
 
     fn validate(&self) {
@@ -150,16 +165,27 @@ impl fmt::Debug for LLC {
     }
 }
 
+#[bitfield(u16)]
+#[allow(non_camel_case_types)]
+struct llflags {
+    order: u8,
+    movable: bool,
+    zeroed: bool,
+    #[bits(6)]
+    __: (),
+}
+
 #[bitfield(u64)]
 #[allow(non_camel_case_types)]
-struct result_t {
-    #[bits(55)]
+struct result {
+    #[bits(54)]
     frame: u64,
     reclaimed: bool,
+    zeroed: bool,
     error: u8,
 }
 
-impl result_t {
+impl result {
     fn ok(self) -> Result<u64> {
         match self.error() {
             0 => Ok(self.frame()),
@@ -173,7 +199,8 @@ impl result_t {
 }
 
 #[repr(C)]
-struct MetaSize {
+#[allow(non_camel_case_types)]
+struct llfree_meta_size {
     llfree: usize,
     local: usize,
     trees: usize,
@@ -181,10 +208,22 @@ struct MetaSize {
 }
 
 #[repr(C)]
-struct Meta {
+#[allow(non_camel_case_types)]
+struct llfree_meta {
     local: *mut u8,
     trees: *mut u8,
     lower: *mut u8,
+}
+
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct ll_stats {
+    frames: usize,
+    huge: usize,
+    free_frames: usize,
+    free_huge: usize,
+    zeroed_huge: usize,
+    reclaimed_huge: usize,
 }
 
 #[link(name = "llc", kind = "static")]
@@ -195,38 +234,38 @@ unsafe extern "C" {
         cores: usize,
         frames: usize,
         init: u8,
-        meta: Meta,
-    ) -> result_t;
+        meta: llfree_meta,
+    ) -> result;
 
     /// Returns the size of the metadata buffers required for initialization
-    fn llfree_metadata_size(cores: usize, frames: usize) -> MetaSize;
+    fn llfree_metadata_size(cores: usize, frames: usize) -> llfree_meta_size;
 
     /// Returns the metadata
-    fn llfree_metadata(this: *mut llfree_t) -> Meta;
+    fn llfree_metadata(this: *mut llfree_t) -> llfree_meta;
 
     /// Allocates a frame and returns its address, or a negative error code
-    fn llfree_get(this: *const llfree_t, core: usize, flags: Flags) -> result_t;
-    /// Frees a frame, returning 0 on success or a negative error code
-    fn llfree_put(this: *const llfree_t, core: usize, frame: u64, flags: Flags) -> result_t;
+    fn llfree_get(this: *const llfree_t, core: usize, flags: Flags) -> result;
+    /// Allocates a specific frame and returns its address, or a negative error code
+    fn llfree_get_at(this: *const llfree_t, core: usize, frame: u64, flags: Flags) -> result;
 
     /// Frees a frame, returning 0 on success or a negative error code
-    fn llfree_drain(this: *const llfree_t, core: usize) -> result_t;
+    fn llfree_put(this: *const llfree_t, core: usize, frame: u64, flags: Flags) -> result;
+
+    /// Frees a frame, returning 0 on success or a negative error code
+    fn llfree_drain(this: *const llfree_t, core: usize) -> result;
 
     /// Returns the number of cores this allocator was initialized with
     fn llfree_cores(this: *const llfree_t) -> usize;
     /// Returns the total number of frames the allocator can allocate
     fn llfree_frames(this: *const llfree_t) -> usize;
 
-    /// Checks if a frame is allocated, returning 0 if not
-    fn llfree_is_free(this: *const llfree_t, frame: u64, order: usize) -> bool;
-    /// Returns the number of frames in the given chunk.
-    /// This is only implemented for 0, HUGE_ORDER and TREE_ORDER.
-    fn llfree_free_at(this: *const llfree_t, frame: u64, order: usize) -> usize;
-
-    /// Returns number of currently free frames
-    fn llfree_free_frames(this: *const llfree_t) -> usize;
-    /// Returns number of currently free huge frames
-    fn llfree_free_huge(this: *const llfree_t) -> usize;
+    /// Returns number of currently free/huge/zeroed frames.
+    /// Does not include reclaimed frames and huge/zeroed can be inaccurate.
+    fn llfree_full_stats(this: *const llfree_t) -> ll_stats;
+    /// Returns the stats for the frame (order == 0), huge frame (order == LLFREE_HUGE_ORDER),
+    /// or tree (order == LLFREE_TREE_ORDER).
+    /// Might not include reclaimed frames and huge/zeroed can be inaccurate.
+    fn llfree_full_stats_at(this: *const llfree_t, frame: u64, order: usize) -> ll_stats;
 
     /// Prints the allocators state for debugging
     fn llfree_print_debug(
@@ -239,7 +278,7 @@ unsafe extern "C" {
     fn llfree_validate(this: *const llfree_t);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std", feature = "llc"))]
 mod test {
     use super::super::test::TestAlloc;
     use super::LLC;

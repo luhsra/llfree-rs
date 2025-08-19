@@ -84,7 +84,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
 
     /// Initialize the allocator.
     ///
-    /// The metadata is stored into the primary (optionally persistant) and secondary buffers.
+    /// The metadata is stored into the primary (optionally persistent) and secondary buffers.
     #[cold]
     fn new(cores: usize, frames: usize, init: Init, meta: MetaData<'a>) -> Result<Self>;
 
@@ -97,6 +97,8 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
 
     /// Allocate a new frame of `order` on the given `core`.
     fn get(&self, core: usize, flags: Flags) -> Result<usize>;
+    /// Try allocating this specific `frame`
+    fn get_at(&self, core: usize, frame: usize, flags: Flags) -> Result<()>;
     /// Free the `frame` of `order` on the given `core`..
     fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()>;
 
@@ -373,6 +375,37 @@ mod test {
         for frame in &frames {
             alloc.put(0, *frame, Flags::o(0)).unwrap();
         }
+
+        assert_eq!(alloc.allocated_frames(), 0);
+        alloc.validate();
+    }
+
+
+    #[test]
+    fn alloc_at() {
+        logging();
+        const MEM_SIZE: usize = 1 << 30;
+        let frames = MEM_SIZE / Frame::SIZE;
+
+        let alloc = Allocator::create(1, frames, Init::FreeAll).unwrap();
+
+        assert_eq!(alloc.free_frames(), alloc.frames());
+
+        alloc.get_at(0, 1, Flags::o(0)).unwrap();
+        alloc.get_at(0, 2, Flags::o(0)).unwrap();
+        alloc.get_at(0, HUGE_FRAMES, Flags::o(HUGE_ORDER)).unwrap();
+
+        // Test normal allocation
+        let frame = alloc.get(0, Flags::o(0)).unwrap();
+        assert!(frame != 1 && frame != 2 && frame != HUGE_FRAMES);
+
+        assert_eq!(alloc.allocated_frames(), 3 + HUGE_FRAMES);
+        alloc.validate();
+
+        alloc.put(0, HUGE_FRAMES, Flags::o(HUGE_ORDER)).unwrap();
+        alloc.put(0, 2, Flags::o(0)).unwrap();
+        alloc.put(0, 1, Flags::o(0)).unwrap();
+        alloc.put(0, frame, Flags::o(0)).unwrap();
 
         assert_eq!(alloc.allocated_frames(), 0);
         alloc.validate();

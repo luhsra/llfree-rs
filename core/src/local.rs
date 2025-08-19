@@ -2,9 +2,9 @@ use core::sync::atomic::AtomicU64;
 
 use bitfield_struct::bitfield;
 
+use crate::TREE_FRAMES;
 use crate::atomic::{Atom, Atomic};
 use crate::trees::Kind;
-use crate::TREE_FRAMES;
 
 /// Core-local data
 #[derive(Default, Debug)]
@@ -55,8 +55,8 @@ impl LocalTree {
     pub fn none() -> Self {
         Self::new().with_present(false)
     }
-    pub fn dec(self, free: usize) -> Option<Self> {
-        if self.present() {
+    pub fn dec(self, frame: Option<usize>, free: usize) -> Option<Self> {
+        if self.present() && frame.is_none_or(|i| self.frame() / TREE_FRAMES == i / TREE_FRAMES) {
             Some(self.with_free(self.free().checked_sub(free)?))
         } else {
             None
@@ -77,8 +77,11 @@ impl LocalTree {
             None
         }
     }
-    pub fn steal(self, free: usize) -> Option<Self> {
-        if self.present() && self.free() >= free {
+    pub fn steal(self, free: usize, frame: Option<usize>) -> Option<Self> {
+        if self.present()
+            && self.free() >= free
+            && frame.is_none_or(|i| self.frame() / TREE_FRAMES == i / TREE_FRAMES)
+        {
             Some(Self::none())
         } else {
             None

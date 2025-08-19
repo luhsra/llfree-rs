@@ -10,9 +10,9 @@ use crate::atomic::Atom;
 use crate::local::{Local, LocalTree};
 use crate::lower::Lower;
 use crate::trees::{Kind, Tree, Trees};
-use crate::util::{size_of_slice, Align, FmtFn};
+use crate::util::{Align, FmtFn, size_of_slice};
 use crate::{
-    Alloc, Error, Flags, Init, MetaData, MetaSize, Result, HUGE_ORDER, MAX_ORDER, RETRIES,
+    Alloc, Error, Flags, HUGE_ORDER, Init, MAX_ORDER, MetaData, MetaSize, RETRIES, Result,
     TREE_FRAMES,
 };
 
@@ -125,10 +125,10 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
         let mut old = LocalTree::none();
         // Try local reservation first (if enough memory)
-        if self.trees.len() > 3 * self.cores() {
+        if self.has_locals() {
             // Retry allocation up to n times if it fails due to a concurrent update
             for _ in 0..RETRIES {
-                match self.get_from_local(core, flags.into(), flags.order()) {
+                match self.get_from_local(core, flags.into(), flags.order(), None) {
                     Ok(frame) => return Ok(frame),
                     Err((Error::Retry, _)) => {}
                     Err((Error::Memory, old_n)) => {
@@ -145,7 +145,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             }
 
             for _ in 0..RETRIES {
-                match self.steal_from_reserved(core, flags) {
+                match self.steal_from_reserved(core, flags, None) {
                     Err(Error::Retry) => {}
                     Err(Error::Memory) => break,
                     r => return r,
@@ -157,10 +157,56 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         self.get_any_global(start / TREE_FRAMES, flags)
     }
 
-    fn put(&self, core: usize, frame: usize, mut flags: Flags) -> Result<()> {
-        if frame >= self.lower.frames() {
+    fn get_at(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
+        if frame >= self.lower.frames() || !frame.is_multiple_of(1 << flags.order()) {
             error!("invalid frame number");
-            return Err(Error::Memory);
+            return Err(Error::Address);
+        }
+        // We might have more cores than CPU-local data
+        let core = core % self.local.len();
+
+        for _ in 0..RETRIES {
+            // Decrement reserved
+            if self.has_locals() {
+                match self.get_from_local(core, flags.into(), flags.order(), Some(frame)) {
+                    Err((Error::Retry, _)) => continue,
+                    Err((Error::Memory, _)) => (),
+                    Ok(_) => return Ok(()),
+                    Err((e, _)) => return Err(e),
+                };
+            }
+
+            // Decrement global
+            if let Ok(_) = self.trees.entries[frame / TREE_FRAMES]
+                .fetch_update(|v| v.dec_force(1 << flags.order(), flags.into()))
+            {
+                match self.lower.get_at(frame, flags.order()) {
+                    Err(Error::Memory) => {
+                        self.trees.entries[frame / TREE_FRAMES]
+                            .fetch_update(|v| Some(v.inc(1 << flags.order())))
+                            .expect("Undo failed");
+                        // try next
+                    }
+                    Ok(_) => return Ok(()),
+                    Err(e) => return Err(e),
+                };
+            }
+
+            // Steal from reserved
+            match self.steal_from_reserved(core, flags, Some(frame)) {
+                Err(Error::Retry) => continue,
+                Err(Error::Memory) => break,
+                Ok(_) => return Ok(()),
+                Err(e) => return Err(e),
+            };
+        }
+        Err(Error::Memory)
+    }
+
+    fn put(&self, core: usize, frame: usize, mut flags: Flags) -> Result<()> {
+        if frame >= self.lower.frames() || !frame.is_multiple_of(1 << flags.order()) {
+            error!("invalid frame number");
+            return Err(Error::Address);
         }
         // Put usually does not know about movability
         flags.set_movable(false);
@@ -301,8 +347,20 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 }
 
 impl LLFree<'_> {
-    fn lower_get(&self, mut tree: LocalTree, order: usize) -> Result<LocalTree> {
-        let (frame, _huge) = self.lower.get(tree.frame(), order)?;
+    fn has_locals(&self) -> bool {
+        self.trees.len() > Kind::LEN * self.cores()
+    }
+
+    fn lower_get(
+        &self,
+        mut tree: LocalTree,
+        order: usize,
+        frame: Option<usize>,
+    ) -> Result<LocalTree> {
+        let (frame, _huge) = match frame {
+            Some(frame) => self.lower.get_at(frame, order).map(|h| (frame, h))?,
+            None => self.lower.get(tree.frame(), order)?,
+        };
         tree.set_frame(frame);
         tree.set_free(tree.free() - (1 << order));
         Ok(tree)
@@ -313,11 +371,12 @@ impl LLFree<'_> {
         core: usize,
         kind: Kind,
         order: usize,
+        frame: Option<usize>,
     ) -> core::result::Result<usize, (Error, LocalTree)> {
         let preferred = self.local[core].preferred(kind);
 
-        match preferred.fetch_update(|v| v.dec(1 << order)) {
-            Ok(old) => match self.lower_get(old, order) {
+        match preferred.fetch_update(|v| v.dec(frame, 1 << order)) {
+            Ok(old) => match self.lower_get(old, order, frame) {
                 Ok(new) => {
                     if old.frame() / 64 != new.frame() / 64 {
                         let _ = preferred.fetch_update(|v| v.set_start(new.frame(), false));
@@ -383,7 +442,11 @@ impl LLFree<'_> {
             if let Ok(old) =
                 self.trees.entries[i].fetch_update(|v| v.reserve(range.clone(), flags.into()))
             {
-                match self.lower_get(LocalTree::with(i * TREE_FRAMES, old.free()), flags.order()) {
+                match self.lower_get(
+                    LocalTree::with(i * TREE_FRAMES, old.free()),
+                    flags.order(),
+                    None,
+                ) {
                     Ok(new) => {
                         self.swap_reserved(preferred, new, flags.into());
                         Ok(new.frame())
@@ -432,7 +495,12 @@ impl LLFree<'_> {
     }
 
     /// Steal a tree from another core
-    fn steal_from_reserved(&self, core: usize, flags: Flags) -> Result<usize> {
+    fn steal_from_reserved(
+        &self,
+        core: usize,
+        flags: Flags,
+        frame: Option<usize>,
+    ) -> Result<usize> {
         let kind = Kind::from(flags);
         for i in 1..self.local.len() {
             let target_core = (core + i) % self.local.len();
@@ -441,13 +509,13 @@ impl LLFree<'_> {
 
                 if t_kind.accepts(kind) {
                     // Less strict kind, just allocate
-                    match self.get_from_local(target_core, t_kind, flags.order()) {
+                    match self.get_from_local(target_core, t_kind, flags.order(), frame) {
                         Err((Error::Memory, _)) => {}
                         r => return r.map_err(|e| e.0),
                     }
                 } else {
                     // More strict kind, steal and convert tree
-                    match self.steal_tree(target_core, t_kind, flags.order()) {
+                    match self.steal_tree(target_core, t_kind, flags.order(), frame) {
                         Ok(stolen) => {
                             self.swap_reserved(self.local[core].preferred(kind), stolen, kind);
                             return Ok(stolen.frame());
@@ -461,10 +529,16 @@ impl LLFree<'_> {
         Err(Error::Memory)
     }
 
-    fn steal_tree(&self, core: usize, kind: Kind, order: usize) -> Result<LocalTree> {
+    fn steal_tree(
+        &self,
+        core: usize,
+        kind: Kind,
+        order: usize,
+        frame: Option<usize>,
+    ) -> Result<LocalTree> {
         let preferred = self.local[core].preferred(kind);
-        match preferred.fetch_update(|v| v.steal(1 << order)) {
-            Ok(stolen) => match self.lower_get(stolen, order) {
+        match preferred.fetch_update(|v| v.steal(1 << order, frame)) {
+            Ok(stolen) => match self.lower_get(stolen, order, frame) {
                 Ok(stolen) => Ok(stolen),
                 Err(e) => {
                     assert!(stolen.present());

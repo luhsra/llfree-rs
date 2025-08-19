@@ -41,6 +41,10 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
         let frame = frame.checked_sub(self.offset).ok_or(Error::Address)?;
         self.alloc.put(core, frame, flags)
     }
+    fn get_at(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
+        let frame = frame.checked_sub(self.offset).ok_or(Error::Address)?;
+        self.alloc.get_at(core, frame, flags)
+    }
     fn frames(&self) -> usize {
         self.alloc.frames()
     }
@@ -185,6 +189,9 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     }
     fn get(&self, core: usize, flags: Flags) -> Result<usize> {
         self.alloc.get(core, flags)
+    }
+    fn get_at(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
+        self.alloc.get_at(core, frame, flags)
     }
     fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
         self.alloc.put(core, frame, flags)
