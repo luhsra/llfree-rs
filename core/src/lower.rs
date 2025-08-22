@@ -322,23 +322,19 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Debug function returning number of free frames in each order 9 chunk
-    pub fn for_each_child<F: FnMut(usize, usize)>(&self, mut f: F) {
-        for (ti, table) in self.children.iter().enumerate() {
-            for (ci, child) in table.iter().enumerate() {
-                f(ti * TREE_HUGE + ci, child.load().free())
-            }
-        }
-    }
-
     /// Returns statistics.
     pub fn stats(&self) -> Stats {
         let mut stats = Stats::default();
-        self.for_each_child(|_, f| {
-            stats.free_frames += f;
-            stats.free_huge += (f == HUGE_FRAMES) as usize;
-            stats.free_trees += (f == TREE_FRAMES) as usize;
-        });
+        for children in self.children {
+            let mut free = 0;
+            for child in &children.0 {
+                let f = child.load().free();
+                stats.free_frames += f;
+                stats.free_huge += (f == HUGE_FRAMES) as usize;
+                free += f;
+            }
+            stats.free_trees += (free == TREE_FRAMES) as usize;
+        }
         stats
     }
 

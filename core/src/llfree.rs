@@ -276,7 +276,6 @@ impl<'a> Alloc<'a> for LLFree<'a> {
                     if kind == Kind::Huge || stats.free_frames == TREE_FRAMES {
                         stats.free_huge += preferred.free() / HUGE_FRAMES;
                     }
-                    stats.free_trees += preferred.free() / TREE_FRAMES;
                 }
             }
         }
@@ -621,7 +620,7 @@ impl fmt::Debug for LLFree<'_> {
         let Stats {
             free_frames,
             free_huge,
-            free_trees,
+            free_trees: _,
         } = self.stats();
 
         f.debug_struct(Self::name())
@@ -631,12 +630,7 @@ impl fmt::Debug for LLFree<'_> {
             )
             .field(
                 "free",
-                &FmtFn(|f| {
-                    write!(
-                        f,
-                        "{free_frames} frames ({free_huge} huge, {free_trees} trees)"
-                    )
-                }),
+                &FmtFn(|f| write!(f, "{free_frames} frames ({free_huge} huge)")),
             )
             .field(
                 "trees",
