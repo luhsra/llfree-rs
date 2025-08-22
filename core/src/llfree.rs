@@ -4,7 +4,6 @@ use core::ops::Range;
 use core::{fmt, slice};
 
 use log::{error, info, warn};
-use spin::mutex::SpinMutex;
 
 use crate::atomic::Atom;
 use crate::local::{Local, LocalTree};
@@ -102,7 +101,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
     fn metadata_size(cores: usize, frames: usize) -> MetaSize {
         let cores = cores.clamp(1, frames.div_ceil(TREE_FRAMES));
         MetaSize {
-            local: size_of_slice::<Align<SpinMutex<Local>>>(cores),
+            local: size_of_slice::<Align<Local>>(cores),
             trees: Trees::metadata_size(frames),
             lower: Lower::metadata_size(frames),
         }
