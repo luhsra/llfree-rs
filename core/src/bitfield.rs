@@ -16,7 +16,7 @@ pub struct Bitfield<const N: usize> {
 }
 
 const _: () = assert!(size_of::<Bitfield<64>>() >= 8);
-const _: () = assert!(Bitfield::<64>::LEN.is_multiple_of(Bitfield::<64>::ENTRY_BITS));
+const _: () = assert!(Bitfield::<64>::LEN.is_multiple_of(Bitfield::<64>::ROW_BITS));
 const _: () = assert!(1 << Bitfield::<64>::ORDER == Bitfield::<64>::LEN);
 const _: () = assert!(Bitfield::<2>::ORDER == 7);
 
@@ -40,9 +40,9 @@ impl<const N: usize> fmt::Debug for Bitfield<N> {
 }
 
 impl<const N: usize> Bitfield<N> {
-    pub const ENTRY_BITS: usize = 64;
-    pub const ENTRIES: usize = N;
-    pub const LEN: usize = N * Self::ENTRY_BITS;
+    pub const ROW_BITS: usize = 64;
+    pub const ROWS: usize = N;
+    pub const LEN: usize = N * Self::ROW_BITS;
     pub const ORDER: usize = Self::LEN.ilog2() as _;
 
     /// Overwrite the `range` of bits with `v`
@@ -50,12 +50,12 @@ impl<const N: usize> Bitfield<N> {
         assert!(range.start <= range.end && range.end <= Self::LEN);
 
         if range.start != range.end {
-            for ei in range.start / Self::ENTRY_BITS..=(range.end - 1) / Self::ENTRY_BITS {
-                let bit_off = ei * Self::ENTRY_BITS;
+            for ei in range.start / Self::ROW_BITS..=(range.end - 1) / Self::ROW_BITS {
+                let bit_off = ei * Self::ROW_BITS;
                 let bit_start = range.start.saturating_sub(bit_off);
-                let bit_end = (range.end - bit_off).min(Self::ENTRY_BITS);
+                let bit_end = (range.end - bit_off).min(Self::ROW_BITS);
                 let bits = bit_end - bit_start;
-                let byte = (u64::MAX >> (Self::ENTRY_BITS - bits)) << bit_start;
+                let byte = (u64::MAX >> (Self::ROW_BITS - bits)) << bit_start;
                 if v {
                     self.data[ei].fetch_or(byte);
                 } else {
@@ -65,8 +65,8 @@ impl<const N: usize> Bitfield<N> {
         }
     }
 
-    /// Return the  `i`-th entry
-    pub fn get_entry(&self, i: usize) -> u64 {
+    /// Return the  `i`-th row
+    pub fn get_row(&self, i: usize) -> u64 {
         self.data[i].load()
     }
 
@@ -79,9 +79,9 @@ impl<const N: usize> Bitfield<N> {
         debug_assert!(i.is_multiple_of(num_bits), "not aligned");
         match order {
             0..=2 => {
-                // Updates within a single entry
-                let mask = (u64::MAX >> (Self::ENTRY_BITS - num_bits)) << (i % Self::ENTRY_BITS);
-                let di = i / Self::ENTRY_BITS;
+                // Updates within a single row
+                let mask = (u64::MAX >> (Self::ROW_BITS - num_bits)) << (i % Self::ROW_BITS);
+                let di = i / Self::ROW_BITS;
                 match self.data[di].fetch_update(|e| {
                     if expected {
                         (e & mask == mask).then_some(e & !mask)
@@ -98,10 +98,10 @@ impl<const N: usize> Bitfield<N> {
             5 => self.toggle_int::<u32>(i, expected),
             6 => self.toggle_int::<u64>(i, expected),
             _ => {
-                // Update multiple entries
-                let num_entries = num_bits / Self::ENTRY_BITS;
-                let di = i / Self::ENTRY_BITS;
-                for i in di..di + num_entries {
+                // Update multiple rows
+                let num_rows = num_bits / Self::ROW_BITS;
+                let di = i / Self::ROW_BITS;
+                for i in di..di + num_rows {
                     let expected = if expected { !0 } else { 0 };
                     if let Err(e) = self.data[i].compare_exchange(expected, !expected) {
                         warn!("Toggle failed {e:x} != {expected:x}");
@@ -125,7 +125,7 @@ impl<const N: usize> Bitfield<N> {
     /// Note: This only seems to make a difference between a 64 bit fetch_update on Intel Optane
     fn toggle_int<I: Atomic + Default + Not<Output = I>>(&self, i: usize, e: bool) -> Result<()> {
         assert!(i < Self::LEN);
-        debug_assert!(size_of::<I>() <= Self::ENTRY_BITS / 8);
+        debug_assert!(size_of::<I>() <= Self::ROW_BITS / 8);
 
         let idx = i / (8 * size_of::<I>());
         let val = if e { !I::default() } else { I::default() };
@@ -144,14 +144,14 @@ impl<const N: usize> Bitfield<N> {
         debug_assert!(i < Self::LEN && order <= Self::ORDER);
         debug_assert!(i.is_multiple_of(num_bits), "not aligned");
 
-        let entry_i = i / Self::ENTRY_BITS;
-        if num_bits > Self::ENTRY_BITS {
-            let end_i = (i + num_bits) / Self::ENTRY_BITS;
-            (entry_i..end_i).all(|i| self.get_entry(i) == 0)
+        let row_i = i / Self::ROW_BITS;
+        if num_bits > Self::ROW_BITS {
+            let end_i = (i + num_bits) / Self::ROW_BITS;
+            (row_i..end_i).all(|i| self.get_row(i) == 0)
         } else {
-            let entry = self.get_entry(entry_i);
-            let mask = (u64::MAX >> (u64::BITS as usize - num_bits)) << (i % Self::ENTRY_BITS);
-            (entry & mask) == 0
+            let row = self.get_row(row_i);
+            let mask = (u64::MAX >> (u64::BITS as usize - num_bits)) << (i % Self::ROW_BITS);
+            (row & mask) == 0
         }
     }
 
@@ -159,15 +159,15 @@ impl<const N: usize> Bitfield<N> {
     ///
     /// # Warning
     /// Orders above 6 need multiple CAS operations, which might lead to race conditions!
-    pub fn set_first_zeros(&self, start_entry: usize, order: usize) -> Result<usize> {
-        debug_assert!(start_entry < Self::ENTRIES);
+    pub fn set_first_zeros(&self, start_row: usize, order: usize) -> Result<usize> {
+        debug_assert!(start_row < Self::ROWS);
 
-        if order > Self::ENTRY_BITS.ilog2() as usize {
-            return self.set_first_zero_entries(order);
+        if order > Self::ROW_BITS.ilog2() as usize {
+            return self.set_first_zero_rows(order);
         }
 
         for i in 0..self.data.len() {
-            let i = (i + start_entry) % self.data.len();
+            let i = (i + start_row) % self.data.len();
 
             let mut offset = 0;
             if let Ok(_) = self.data[i].fetch_update(|e| {
@@ -175,37 +175,37 @@ impl<const N: usize> Bitfield<N> {
                 offset = o;
                 Some(val)
             }) {
-                return Ok(i * Self::ENTRY_BITS + offset);
+                return Ok(i * Self::ROW_BITS + offset);
             }
         }
         Err(Error::Memory)
     }
 
-    /// Allocate multiple entries with multiple CAS
+    /// Allocate multiple rows with multiple CAS
     ///
     /// # Warning
     /// Using multiple CAS operations might lead to race conditions!
-    fn set_first_zero_entries(&self, order: usize) -> Result<usize> {
-        debug_assert!(order > Self::ENTRY_BITS.ilog2() as usize);
+    fn set_first_zero_rows(&self, order: usize) -> Result<usize> {
+        debug_assert!(order > Self::ROW_BITS.ilog2() as usize);
         debug_assert!(order <= Self::ORDER);
 
-        let num_entries = 1 << (order - Self::ENTRY_BITS.ilog2() as usize);
+        let num_rows = 1 << (order - Self::ROW_BITS.ilog2() as usize);
 
-        for (i, chunk) in self.data.chunks(num_entries).enumerate() {
-            // Check that these entries are free
-            if chunk.iter().all(|e| e.load() == 0) {
-                for (j, entry) in chunk.iter().enumerate() {
-                    if let Err(_) = entry.compare_exchange(0, u64::MAX) {
+        for (i, rows) in self.data.chunks(num_rows).enumerate() {
+            // Check that these rows are free
+            if rows.iter().all(|e| e.load() == 0) {
+                for (j, row) in rows.iter().enumerate() {
+                    if let Err(_) = row.compare_exchange(0, u64::MAX) {
                         // Undo previous updates
                         for k in (0..j).rev() {
-                            chunk[k]
+                            rows[k]
                                 .compare_exchange(u64::MAX, 0)
                                 .expect("Failed undo search");
                         }
                         break;
                     }
                 }
-                return Ok(i * num_entries * Self::ENTRY_BITS);
+                return Ok(i * num_rows * Self::ROW_BITS);
             }
         }
         Err(Error::Memory)
@@ -280,29 +280,29 @@ mod test {
     fn bit_set() {
         let bitfield = super::Bitfield::<2>::default();
         bitfield.set(0..0, true);
-        assert_eq!(bitfield.get_entry(0), 0);
-        assert_eq!(bitfield.get_entry(1), 0);
+        assert_eq!(bitfield.get_row(0), 0);
+        assert_eq!(bitfield.get_row(1), 0);
         bitfield.set(0..1, true);
-        assert_eq!(bitfield.get_entry(0), 0b1);
-        assert_eq!(bitfield.get_entry(1), 0b0);
+        assert_eq!(bitfield.get_row(0), 0b1);
+        assert_eq!(bitfield.get_row(1), 0b0);
         bitfield.set(0..1, false);
-        assert_eq!(bitfield.get_entry(0), 0b0);
-        assert_eq!(bitfield.get_entry(1), 0b0);
+        assert_eq!(bitfield.get_row(0), 0b0);
+        assert_eq!(bitfield.get_row(1), 0b0);
         bitfield.set(0..2, true);
-        assert_eq!(bitfield.get_entry(0), 0b11);
-        assert_eq!(bitfield.get_entry(1), 0b0);
+        assert_eq!(bitfield.get_row(0), 0b11);
+        assert_eq!(bitfield.get_row(1), 0b0);
         bitfield.set(2..56, true);
-        assert_eq!(bitfield.get_entry(0), 0x00ff_ffff_ffff_ffff);
-        assert_eq!(bitfield.get_entry(1), 0b0);
+        assert_eq!(bitfield.get_row(0), 0x00ff_ffff_ffff_ffff);
+        assert_eq!(bitfield.get_row(1), 0b0);
         bitfield.set(60..73, true);
-        assert_eq!(bitfield.get_entry(0), 0xf0ff_ffff_ffff_ffff);
-        assert_eq!(bitfield.get_entry(1), 0x01ff);
+        assert_eq!(bitfield.get_row(0), 0xf0ff_ffff_ffff_ffff);
+        assert_eq!(bitfield.get_row(1), 0x01ff);
         bitfield.set(96..128, true);
-        assert_eq!(bitfield.get_entry(0), 0xf0ff_ffff_ffff_ffff);
-        assert_eq!(bitfield.get_entry(1), 0xffff_ffff_0000_01ff);
+        assert_eq!(bitfield.get_row(0), 0xf0ff_ffff_ffff_ffff);
+        assert_eq!(bitfield.get_row(1), 0xffff_ffff_0000_01ff);
         bitfield.set(0..128, false);
-        assert_eq!(bitfield.get_entry(0), 0);
-        assert_eq!(bitfield.get_entry(1), 0);
+        assert_eq!(bitfield.get_row(0), 0);
+        assert_eq!(bitfield.get_row(1), 0);
     }
 
     #[test]
@@ -311,39 +311,39 @@ mod test {
 
         assert!(bitfield.is_zero(8, 3));
         bitfield.toggle(8, 3, false).unwrap();
-        assert_eq!(bitfield.get_entry(0), 0xff00);
-        assert_eq!(bitfield.get_entry(1), 0);
+        assert_eq!(bitfield.get_row(0), 0xff00);
+        assert_eq!(bitfield.get_row(1), 0);
         assert!(!bitfield.is_zero(8, 3));
 
         assert!(bitfield.is_zero(16, 2));
         bitfield.toggle(16, 2, false).unwrap();
-        assert_eq!(bitfield.get_entry(0), 0xfff00);
-        assert_eq!(bitfield.get_entry(1), 0);
+        assert_eq!(bitfield.get_row(0), 0xfff00);
+        assert_eq!(bitfield.get_row(1), 0);
         assert!(!bitfield.is_zero(16, 2));
 
         assert!(bitfield.is_zero(20, 2));
         bitfield.toggle(20, 2, false).unwrap();
-        assert_eq!(bitfield.get_entry(0), 0xffff00);
-        assert_eq!(bitfield.get_entry(1), 0);
+        assert_eq!(bitfield.get_row(0), 0xffff00);
+        assert_eq!(bitfield.get_row(1), 0);
         assert!(!bitfield.is_zero(16, 2));
 
         assert!(!bitfield.is_zero(8, 3));
         bitfield.toggle(8, 3, false).expect_err("");
         bitfield.toggle(8, 3, true).unwrap();
         bitfield.toggle(16, 3, true).unwrap();
-        assert_eq!(bitfield.get_entry(0), 0);
-        assert_eq!(bitfield.get_entry(1), 0);
+        assert_eq!(bitfield.get_row(0), 0);
+        assert_eq!(bitfield.get_row(1), 0);
         assert!(bitfield.is_zero(0, super::Bitfield::<2>::ORDER));
 
         bitfield.toggle(0, 6, false).unwrap();
-        assert_eq!(bitfield.get_entry(0), u64::MAX);
-        assert_eq!(bitfield.get_entry(1), 0);
+        assert_eq!(bitfield.get_row(0), u64::MAX);
+        assert_eq!(bitfield.get_row(1), 0);
         bitfield.toggle(64, 6, false).unwrap();
-        assert_eq!(bitfield.get_entry(0), u64::MAX);
-        assert_eq!(bitfield.get_entry(1), u64::MAX);
+        assert_eq!(bitfield.get_row(0), u64::MAX);
+        assert_eq!(bitfield.get_row(1), u64::MAX);
         bitfield.toggle(0, 7, true).unwrap();
-        assert_eq!(bitfield.get_entry(0), 0);
-        assert_eq!(bitfield.get_entry(1), 0);
+        assert_eq!(bitfield.get_row(0), 0);
+        assert_eq!(bitfield.get_row(1), 0);
     }
 
     #[test]
@@ -406,7 +406,7 @@ mod test {
     }
 
     #[test]
-    fn first_zero_entries() {
+    fn first_zero_rows() {
         let bitfield = super::Bitfield::<8>::default();
 
         // 9
@@ -423,9 +423,9 @@ mod test {
         assert!(bitfield.data[4..8].iter().all(|e| e.load() == u64::MAX));
 
         assert_eq!(2 * 64, bitfield.set_first_zeros(0, 6).unwrap());
-        assert!(bitfield.get_entry(2) == u64::MAX);
+        assert!(bitfield.get_row(2) == u64::MAX);
         assert_eq!(3 * 64, bitfield.set_first_zeros(0, 6).unwrap());
-        assert!(bitfield.get_entry(3) == u64::MAX);
+        assert!(bitfield.get_row(3) == u64::MAX);
 
         bitfield.set_first_zeros(0, 9).expect_err("no mem");
         bitfield.set_first_zeros(0, 8).expect_err("no mem");

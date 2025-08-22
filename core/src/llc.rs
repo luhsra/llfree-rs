@@ -6,7 +6,7 @@ use bitfield_struct::bitfield;
 
 use super::{Alloc, Init};
 use crate::util::Align;
-use crate::{Error, Flags, HUGE_ORDER, Result, TREE_FRAMES, TREE_HUGE};
+use crate::{Error, Flags, HUGE_ORDER, Result, Stats, TREE_FRAMES, TREE_HUGE};
 
 /// C implementation of LLFree
 ///
@@ -105,7 +105,8 @@ impl<'a> Alloc<'a> for LLC {
     }
 
     fn is_free(&self, frame: usize, order: usize) -> bool {
-        let stats = unsafe { llfree_full_stats_at(self.raw.as_ptr().cast(), frame as _, order as _) };
+        let stats =
+            unsafe { llfree_full_stats_at(self.raw.as_ptr().cast(), frame as _, order as _) };
         order == 0 && stats.free_frames == 1
             || order == HUGE_ORDER && stats.free_huge == 1
             || order == TREE_FRAMES.ilog2() as usize && stats.free_huge == TREE_HUGE
@@ -127,16 +128,20 @@ impl<'a> Alloc<'a> for LLC {
         unsafe { llfree_cores(self.raw.as_ptr().cast()) as _ }
     }
 
-    fn free_frames(&self) -> usize {
-        unsafe { llfree_full_stats(self.raw.as_ptr().cast()).free_frames }
+    fn fast_stats(&self) -> crate::Stats {
+        unsafe { llfree_stats(self.raw.as_ptr().cast()).into() }
     }
 
-    fn free_huge(&self) -> usize {
-        unsafe { llfree_full_stats(self.raw.as_ptr().cast()).free_huge }
+    fn fast_stats_at(&self, frame: usize, order: usize) -> crate::Stats {
+        unsafe { llfree_stats_at(self.raw.as_ptr().cast(), frame as _, order as _).into() }
     }
 
-    fn free_at(&self, frame: usize, order: usize) -> usize {
-        unsafe { llfree_full_stats_at(self.raw.as_ptr().cast(), frame as _, order).free_frames }
+    fn stats(&self) -> crate::Stats {
+        unsafe { llfree_full_stats(self.raw.as_ptr().cast()).into() }
+    }
+
+    fn stats_at(&self, frame: usize, order: usize) -> crate::Stats {
+        unsafe { llfree_full_stats_at(self.raw.as_ptr().cast(), frame as _, order as _).into() }
     }
 
     fn validate(&self) {
@@ -225,6 +230,15 @@ struct ll_stats {
     zeroed_huge: usize,
     reclaimed_huge: usize,
 }
+impl Into<Stats> for ll_stats {
+    fn into(self) -> Stats {
+        Stats {
+            free_frames: self.free_frames,
+            free_huge: self.free_huge,
+            free_trees: 0,
+        }
+    }
+}
 
 #[link(name = "llc", kind = "static")]
 unsafe extern "C" {
@@ -261,10 +275,15 @@ unsafe extern "C" {
 
     /// Returns number of currently free/huge/zeroed frames.
     /// Does not include reclaimed frames and huge/zeroed can be inaccurate.
-    fn llfree_full_stats(this: *const llfree_t) -> ll_stats;
+    fn llfree_stats(this: *const llfree_t) -> ll_stats;
     /// Returns the stats for the frame (order == 0), huge frame (order == LLFREE_HUGE_ORDER),
     /// or tree (order == LLFREE_TREE_ORDER).
     /// Might not include reclaimed frames and huge/zeroed can be inaccurate.
+    fn llfree_stats_at(this: *const llfree_t, frame: u64, order: usize) -> ll_stats;
+    /// Counts free/huge/zeroed/reclaimed frames.
+    fn llfree_full_stats(this: *const llfree_t) -> ll_stats;
+    /// Returns the stats for the frame (order == 0), huge frame (order == LLFREE_HUGE_ORDER),
+    /// or tree (order == LLFREE_TREE_ORDER).
     fn llfree_full_stats_at(this: *const llfree_t, frame: u64, order: usize) -> ll_stats;
 
     /// Prints the allocators state for debugging

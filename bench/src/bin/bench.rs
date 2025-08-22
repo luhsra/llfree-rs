@@ -2,18 +2,18 @@ use core::{fmt, slice};
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
-use std::sync::atomic::Ordering;
 use std::sync::Barrier;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
-use llfree::frame::Frame;
-use llfree::mmap::Mapping;
-use llfree::util::{self, aligned_buf, WyRand};
-use llfree::wrapper::NvmAlloc;
 #[cfg(feature = "llc")]
 use llfree::LLC;
-use llfree::{thread, Alloc, Flags, LLFree, Result, MAX_ORDER};
+use llfree::frame::Frame;
+use llfree::mmap::Mapping;
+use llfree::util::{self, WyRand, aligned_buf};
+use llfree::wrapper::NvmAlloc;
+use llfree::{Alloc, Flags, LLFree, MAX_ORDER, Result, thread};
 use log::warn;
 
 /// Number of allocations per block
@@ -136,7 +136,7 @@ impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
         Alloc::frames(self)
     }
     fn allocated_frames(&self) -> usize {
-        Alloc::allocated_frames(self)
+        Alloc::frames(self) - Alloc::fast_stats(self).free_frames
     }
 }
 

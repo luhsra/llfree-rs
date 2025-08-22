@@ -1,8 +1,8 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Barrier;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use clap::Parser;
@@ -91,15 +91,16 @@ fn main() {
                 if elapsed.as_secs() > frag_sec {
                     if let Some(frag) = frag.as_mut() {
                         for i in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
-                            let free = alloc.free_at(i << HUGE_ORDER, HUGE_ORDER);
+                            let free = alloc.stats_at(i << HUGE_ORDER, HUGE_ORDER).free_frames;
                             let level = if free == 0 { 0 } else { 1 + free / 64 };
                             write!(frag, "{level:?}").unwrap();
                         }
                         writeln!(frag).unwrap();
                     }
 
-                    let huge = alloc.free_huge();
-                    let optimal = alloc.free_frames() >> HUGE_ORDER;
+                    let stats = alloc.stats();
+                    let huge = stats.free_huge;
+                    let optimal = stats.free_frames >> HUGE_ORDER;
                     let fraction = 100.0 * huge as f32 / optimal as f32;
                     warn!("free-huge {huge}/{optimal} = {fraction:.1}");
                     score += fraction;
@@ -154,7 +155,7 @@ fn main() {
 
     assert_eq!(
         allocated.into_iter().sum::<usize>(),
-        alloc.allocated_frames()
+        alloc.frames() - alloc.fast_stats().free_frames
     );
     alloc.validate();
     warn!("{alloc:?}");

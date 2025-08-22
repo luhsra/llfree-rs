@@ -7,7 +7,7 @@ use core::{fmt, slice};
 use log::error;
 
 use crate::frame::Frame;
-use crate::{Alloc, Error, Flags, Init, MetaData, MetaSize, Result, MAX_ORDER};
+use crate::{Alloc, Error, Flags, Init, MAX_ORDER, MetaData, MetaSize, Result, Stats};
 
 /// Zone allocator, managing a range of memory at a given page frame offset.
 pub struct ZoneAlloc<'a, A: Alloc<'a>> {
@@ -51,23 +51,29 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn cores(&self) -> usize {
         self.alloc.cores()
     }
-    fn free_frames(&self) -> usize {
-        self.alloc.free_frames()
+    fn fast_stats(&self) -> Stats {
+        self.alloc.fast_stats()
     }
-    fn free_huge(&self) -> usize {
-        self.alloc.free_huge()
+    fn fast_stats_at(&self, frame: usize, order: usize) -> Stats {
+        let Some(frame) = frame.checked_sub(self.offset) else {
+            return Stats::default();
+        };
+        self.alloc.fast_stats_at(frame, order)
+    }
+    fn stats(&self) -> Stats {
+        self.alloc.stats()
+    }
+    fn stats_at(&self, frame: usize, order: usize) -> Stats {
+        let Some(frame) = frame.checked_sub(self.offset) else {
+            return Stats::default();
+        };
+        self.alloc.stats_at(frame, order)
     }
     fn is_free(&self, frame: usize, order: usize) -> bool {
         let Some(frame) = frame.checked_sub(self.offset) else {
             return false;
         };
         self.alloc.is_free(frame, order)
-    }
-    fn free_at(&self, frame: usize, order: usize) -> usize {
-        let Some(frame) = frame.checked_sub(self.offset) else {
-            return 0;
-        };
-        self.alloc.free_at(frame, order)
     }
     fn drain(&self, core: usize) -> Result<()> {
         self.alloc.drain(core)
@@ -202,17 +208,20 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn cores(&self) -> usize {
         self.alloc.cores()
     }
-    fn free_frames(&self) -> usize {
-        self.alloc.free_frames()
+    fn fast_stats(&self) -> Stats {
+        self.alloc.fast_stats()
     }
-    fn free_huge(&self) -> usize {
-        self.alloc.free_huge()
+    fn fast_stats_at(&self, frame: usize, order: usize) -> Stats {
+        self.alloc.fast_stats_at(frame, order)
+    }
+    fn stats(&self) -> Stats {
+        self.alloc.stats()
+    }
+    fn stats_at(&self, frame: usize, order: usize) -> Stats {
+        self.alloc.stats_at(frame, order)
     }
     fn is_free(&self, frame: usize, order: usize) -> bool {
         self.alloc.is_free(frame, order)
-    }
-    fn free_at(&self, frame: usize, order: usize) -> usize {
-        self.alloc.free_at(frame, order)
     }
     fn drain(&self, core: usize) -> Result<()> {
         self.alloc.drain(core)

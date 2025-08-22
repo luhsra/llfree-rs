@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use llfree::frame::Frame;
 use llfree::mmap::Mapping;
-use llfree::util::{self, aligned_buf, WyRand};
+use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{thread, Alloc, Flags, LLFree};
+use llfree::{Alloc, Flags, LLFree, thread};
 use log::warn;
 
 /// Benchmarking the (crashed) recovery.
@@ -126,7 +126,7 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
         }
     });
     assert!(!crash);
-    let num_allocated = alloc.allocated_frames();
+    let num_allocated = alloc.frames() - alloc.fast_stats().free_frames;
     warn!("Allocated: {num_allocated}");
     assert!(0 < num_allocated && num_allocated < alloc.frames());
 }
@@ -142,7 +142,7 @@ fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
     let alloc = Allocator::create(threads, &mut mapping, true, local, trees).unwrap();
     let time = timer.elapsed().as_nanos();
 
-    let num_alloc = alloc.allocated_frames();
+    let num_alloc = alloc.frames() - alloc.fast_stats().free_frames;
     warn!("Recovered {num_alloc} allocations in {time} ns");
     let expected = alloc.frames() / 2;
     assert!(expected - threads <= num_alloc && num_alloc <= expected + threads);

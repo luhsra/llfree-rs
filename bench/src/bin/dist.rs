@@ -9,7 +9,7 @@ use clap::Parser;
 use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{aligned_buf, logging};
-use llfree::{thread, Alloc, Flags, Init, LLFree, MetaData, HUGE_FRAMES};
+use llfree::{Alloc, Flags, HUGE_FRAMES, Init, LLFree, MetaData, thread};
 use log::warn;
 
 type Allocator<'a> = LLFree<'a>;
@@ -119,7 +119,7 @@ fn main() {
             (get_buckets, put_buckets)
         });
 
-        assert_eq!(alloc.allocated_frames(), 0);
+        assert_eq!(alloc.fast_stats().free_frames, alloc.frames());
 
         for (get_b, put_b) in t_buckets {
             for i in 0..buckets {

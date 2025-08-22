@@ -6,8 +6,8 @@ use core::{fmt, slice};
 use bitfield_struct::bitfield;
 
 use crate::atomic::{Atom, Atomic};
-use crate::util::{size_of_slice, Align};
-use crate::{Error, Flags, Result, HUGE_ORDER, TREE_FRAMES};
+use crate::util::{Align, size_of_slice};
+use crate::{Error, Flags, HUGE_FRAMES, HUGE_ORDER, Result, Stats, TREE_FRAMES};
 
 #[derive(Default)]
 pub struct Trees<'a> {
@@ -77,6 +77,18 @@ impl<'a> Trees<'a> {
         self.entries[i].load()
     }
 
+    pub fn stats(&self) -> Stats {
+        self.entries.iter().fold(Stats::default(), |mut acc, e| {
+            let tree = e.load();
+            acc.free_frames += tree.free();
+            if tree.kind() == Kind::Huge || tree.free() == TREE_FRAMES {
+                acc.free_huge += tree.free() / HUGE_FRAMES;
+            }
+            acc.free_trees += tree.free() / TREE_FRAMES;
+            acc
+        })
+    }
+
     /// Return the number of entirely free trees
     pub fn free(&self) -> usize {
         self.entries
@@ -110,11 +122,7 @@ impl<'a> Trees<'a> {
             })
             .unwrap();
 
-        if reserved {
-            Some(tree)
-        } else {
-            None
-        }
+        if reserved { Some(tree) } else { None }
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
@@ -191,11 +199,9 @@ pub enum Kind {
 
 impl Kind {
     pub const LEN: usize = 3;
-
     pub fn accepts(self, other: Kind) -> bool {
         (other as usize) >= (self as usize)
     }
-
     const fn from_bits(bits: u8) -> Self {
         match bits {
             0 => Self::Fixed,
@@ -210,6 +216,9 @@ impl Kind {
             Self::Movable => 1,
             Self::Huge => 2,
         }
+    }
+    pub const fn all() -> [Kind; Self::LEN] {
+        [Self::Fixed, Self::Movable, Self::Huge]
     }
 }
 impl From<Flags> for Kind {

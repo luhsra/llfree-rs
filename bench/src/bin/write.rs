@@ -2,9 +2,9 @@ use std::time::Instant;
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::mmap::{madvise, MAdvise, Mapping};
+use llfree::mmap::{MAdvise, Mapping, madvise};
 use llfree::thread;
-use llfree::util::{avg_bounds, logging, WyRand};
+use llfree::util::{WyRand, avg_bounds, logging};
 
 /// Benchmarking the page-fault performance of a mapped memory region.
 #[derive(Parser, Debug)]

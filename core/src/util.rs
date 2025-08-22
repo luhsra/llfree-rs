@@ -1,8 +1,25 @@
 //! General utility functions
 
 use core::fmt;
-use core::mem::{align_of, size_of};
+use core::mem::{ManuallyDrop, align_of, forget, size_of};
 use core::ops::{Add, Deref, DerefMut, Div, Range};
+
+/// Function that is executed at scope exit
+#[must_use]
+pub struct Deferred<F: FnOnce()>(ManuallyDrop<F>);
+impl<F: FnOnce()> Deferred<F> {
+    pub fn new(f: F) -> Self {
+        Self(ManuallyDrop::new(f))
+    }
+    pub fn cancel(self) {
+        forget(self)
+    }
+}
+impl<F: FnOnce()> Drop for Deferred<F> {
+    fn drop(&mut self) {
+        (unsafe { ManuallyDrop::take(&mut self.0) })();
+    }
+}
 
 /// Align v up to next `align`
 #[inline(always)]
@@ -167,7 +184,7 @@ where
 
 #[cfg(feature = "std")]
 pub fn aligned_buf(size: usize) -> &'static mut [u8] {
-    use std::alloc::{alloc_zeroed, Layout};
+    use std::alloc::{Layout, alloc_zeroed};
     let ptr = unsafe { alloc_zeroed(Layout::from_size_align(size, align_of::<Align>()).unwrap()) };
     unsafe { std::slice::from_raw_parts_mut(ptr, size) }
 }
@@ -195,7 +212,7 @@ where
 
 #[cfg(all(test, feature = "std"))]
 mod test {
-    use super::{align_down, align_up, WyRand};
+    use super::{WyRand, align_down, align_up};
 
     #[test]
     fn wy_rand() {

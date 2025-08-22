@@ -5,9 +5,9 @@ use std::time::Duration;
 use clap::Parser;
 use llfree::frame::Frame;
 use llfree::mmap::Mapping;
-use llfree::util::{self, align_up, aligned_buf, WyRand};
+use llfree::util::{self, WyRand, align_up, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{thread, Alloc, Flags, LLFree};
+use llfree::{Alloc, Flags, LLFree, thread};
 use log::{error, warn};
 
 /// Crash testing an allocator.
@@ -173,7 +173,7 @@ fn monitor(
     warn!("recovered {}", alloc.frames());
 
     let expected = allocs * threads - threads;
-    let actual = alloc.allocated_frames();
+    let actual = alloc.frames() - alloc.fast_stats().free_frames;
     warn!("expected={expected} actual={actual}");
     assert!(expected <= actual && actual <= expected + threads);
 
@@ -200,7 +200,7 @@ fn monitor(
     }
     // Check if the remaining pages, that were allocated/freed during the crash,
     // is less equal to the number of concurrent threads (upper bound).
-    assert!(alloc.allocated_frames() <= threads);
+    assert!(alloc.frames() - alloc.fast_stats().free_frames <= threads);
     warn!("Ok");
     drop(alloc); // Free alloc first
 }

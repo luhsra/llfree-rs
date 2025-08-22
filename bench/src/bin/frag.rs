@@ -161,7 +161,7 @@ fn main() {
 /// count and output stats
 fn stats(out: &mut impl Write, alloc: &Allocator) -> io::Result<()> {
     for huge in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
-        let free = alloc.free_at(huge << HUGE_ORDER, HUGE_ORDER);
+        let free = alloc.stats_at(huge << HUGE_ORDER, HUGE_ORDER).free_frames;
         let level = if free == 0 { 0 } else { free / 64 + 1 };
         assert!(level <= 9);
         write!(out, "{level}")?;
