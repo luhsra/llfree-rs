@@ -151,6 +151,60 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     fn validate(&self) {}
 }
 
+/// Frame number
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FrameNum(pub usize);
+impl FrameNum {
+    pub const fn tree_idx(self) -> TreeIdx {
+        TreeIdx(self.0 / TREE_FRAMES)
+    }
+    pub const fn row_idx(self) -> RowIdx {
+        RowIdx(self.0 / BITFIELD_ROW)
+    }
+    pub const fn child_idx(self) -> ChildIdx {
+        ChildIdx(self.0 / BITFIELD_ROW)
+    }
+}
+/// Tree index
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TreeIdx(pub usize);
+impl TreeIdx {
+    pub const fn frame_num(self) -> FrameNum {
+        FrameNum(self.0 * TREE_FRAMES)
+    }
+}
+/// Child index inside a tree
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChildIdx(pub usize);
+impl ChildIdx {
+    pub const fn frame_num(self) -> FrameNum {
+        FrameNum(self.0 * HUGE_FRAMES)
+    }
+    pub const fn tree_idx(self) -> TreeIdx {
+        TreeIdx(self.0 / TREE_HUGE)
+    }
+    pub const fn norm(self) -> Self {
+        Self(self.0 % TREE_HUGE)
+    }
+}
+/// Row index inside a bitfield
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RowIdx(pub usize);
+impl RowIdx {
+    pub const fn frame_num(self) -> FrameNum {
+        FrameNum(self.0 * BITFIELD_ROW)
+    }
+    pub const fn child_idx(self) -> ChildIdx {
+        self.frame_num().child_idx()
+    }
+    pub const fn tree_idx(self) -> TreeIdx {
+        self.frame_num().tree_idx()
+    }
+    pub const fn norm(self) -> Self {
+        Self(self.0 % (HUGE_FRAMES / BITFIELD_ROW))
+    }
+}
+
 /// Size of the required metadata
 #[derive(Debug)]
 pub struct MetaSize {
