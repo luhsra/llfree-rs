@@ -136,13 +136,13 @@ fn main() {
             for op in trace {
                 match op {
                     Operation::Get(order) => {
-                        let frame = alloc.get(t, Flags::o(order as _)).unwrap();
+                        let frame = alloc.get(t, None, Flags::o(order as _)).unwrap();
                         allocations.insert(alloc_idx, frame);
                         alloc_idx += 1;
                     }
                     Operation::GetMovable(order) => {
                         let frame = alloc
-                            .get(order as _, Flags::o(order as _).with_movable(true))
+                            .get(order as _, None, Flags::o(order as _).with_movable(true))
                             .unwrap();
                         allocations.insert(alloc_idx, frame);
                         alloc_idx += 1;

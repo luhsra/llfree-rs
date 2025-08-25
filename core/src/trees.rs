@@ -36,7 +36,7 @@ impl fmt::Debug for Trees<'_> {
 impl<'a> Trees<'a> {
     pub const MIN_FREE: usize = TREE_FRAMES / 16;
 
-    pub fn metadata_size(frames: usize) -> usize {
+    pub const fn metadata_size(frames: usize) -> usize {
         // Event thought the elements are not cache aligned, the whole array should be
         size_of_slice::<Atom<Tree>>(frames.div_ceil(TREE_FRAMES))
             .next_multiple_of(align_of::<Align>())
@@ -207,7 +207,7 @@ impl Kind {
             0 => Self::Fixed,
             1 => Self::Movable,
             2 => Self::Huge,
-            _ => Self::Fixed,
+            _ => unreachable!(),
         }
     }
     const fn into_bits(self) -> u8 {

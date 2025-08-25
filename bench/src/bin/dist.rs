@@ -96,7 +96,7 @@ fn main() {
 
             for _ in 0..allocs {
                 let timer = Instant::now();
-                let page = alloc.get(t, Flags::o(order)).unwrap();
+                let page = alloc.get(t, None, Flags::o(order)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
 
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);

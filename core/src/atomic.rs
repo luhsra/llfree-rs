@@ -1,14 +1,10 @@
 //! Generic atomics
 
-use core::cell::UnsafeCell;
 use core::fmt;
-use core::ops::{Deref, DerefMut};
 use core::sync::atomic::Ordering::*;
 use core::sync::atomic::*;
 
 use log::debug;
-
-use crate::util::Align;
 
 /// Atomic value
 ///
@@ -191,63 +187,5 @@ impl<T: Atomic, const L: usize> AtomArray<T, L> for [Atom<T>; L] {
         mem.fill(e);
         // memory ordering has to be enforced with a memory barrier
         fence(Release);
-    }
-}
-
-/// Very simple spin lock implementation
-pub struct Spin<T> {
-    lock: AtomicBool,
-    /// Cache aligned value -> no races with lock
-    value: Align<UnsafeCell<T>>,
-}
-
-impl<T> Spin<T> {
-    pub const fn new(value: T) -> Self {
-        Self {
-            lock: AtomicBool::new(false),
-            value: Align(UnsafeCell::new(value)),
-        }
-    }
-    pub fn lock(&self) -> SpinGuard<'_, T> {
-        while let Err(_) = self
-            .lock
-            .compare_exchange_weak(false, true, Acquire, Relaxed)
-        {
-            core::hint::spin_loop();
-        }
-        SpinGuard { spin: self }
-    }
-    pub fn try_lock(&self) -> Option<SpinGuard<'_, T>> {
-        if let Ok(_) = self.lock.compare_exchange(false, true, Acquire, Relaxed) {
-            Some(SpinGuard { spin: self })
-        } else {
-            None
-        }
-    }
-}
-impl<T: Default> Default for Spin<T> {
-    fn default() -> Self {
-        Self::new(T::default())
-    }
-}
-
-pub struct SpinGuard<'a, T> {
-    spin: &'a Spin<T>,
-}
-impl<T> Deref for SpinGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.spin.value.get() }
-    }
-}
-impl<T> DerefMut for SpinGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.spin.value.get() }
-    }
-}
-impl<T> Drop for SpinGuard<'_, T> {
-    fn drop(&mut self) {
-        self.spin.lock.store(false, Release);
     }
 }

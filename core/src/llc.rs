@@ -75,21 +75,20 @@ impl<'a> Alloc<'a> for LLC {
         ret.ok().map(|_| LLC { raw })
     }
 
-    fn get(&self, core: usize, flags: Flags) -> Result<usize> {
-        let ret = unsafe { llfree_get(self.raw.as_ptr().cast(), core as _, flags.into()) };
-        Ok(ret.ok()? as _)
-    }
-
-    fn get_at(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
-        let ret = unsafe {
-            llfree_get_at(
-                self.raw.as_ptr().cast(),
-                core as _,
-                frame as _,
-                flags.into(),
-            )
+    fn get(&self, core: usize, frame: Option<usize>, flags: Flags) -> Result<usize> {
+        let ret = if let Some(frame) = frame {
+            unsafe {
+                llfree_get_at(
+                    self.raw.as_ptr().cast(),
+                    core as _,
+                    frame as _,
+                    flags.into(),
+                )
+            }
+        } else {
+            unsafe { llfree_get(self.raw.as_ptr().cast(), core as _, flags.into()) }
         };
-        ret.ok().map(|_| ())
+        Ok(ret.ok()? as _)
     }
 
     fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {

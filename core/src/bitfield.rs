@@ -8,7 +8,7 @@ use core::sync::atomic::AtomicU64;
 use log::warn;
 
 use crate::atomic::{Atom, Atomic};
-use crate::{Error, Result};
+use crate::{Error, Result, BITFIELD_ROW};
 
 /// Bitfield replacing the level one table.
 pub struct Bitfield<const N: usize> {
@@ -40,7 +40,7 @@ impl<const N: usize> fmt::Debug for Bitfield<N> {
 }
 
 impl<const N: usize> Bitfield<N> {
-    pub const ROW_BITS: usize = 64;
+    pub const ROW_BITS: usize = BITFIELD_ROW;
     pub const ROWS: usize = N;
     pub const LEN: usize = N * Self::ROW_BITS;
     pub const ORDER: usize = Self::LEN.ilog2() as _;

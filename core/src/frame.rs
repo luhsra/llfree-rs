@@ -12,6 +12,7 @@ pub struct Frame {
     _data: [u8; Self::SIZE],
 }
 
+const _: () = assert!(Frame::SIZE == FRAME_SIZE);
 const _: () = assert!(size_of::<Frame>() == Frame::SIZE);
 const _: () = assert!(align_of::<Frame>() == Frame::SIZE);
 

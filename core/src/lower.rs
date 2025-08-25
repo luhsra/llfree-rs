@@ -13,8 +13,8 @@ use crate::{
     Error, HUGE_FRAMES, HUGE_ORDER, Init, MAX_ORDER, RETRIES, Result, Stats, TREE_FRAMES, TREE_HUGE,
 };
 
-const CHILDREN: usize = HUGE_FRAMES / crate::bitfield::Bitfield::<1>::ROW_BITS;
-type Bitfield = crate::bitfield::Bitfield<CHILDREN>;
+const ROWS: usize = HUGE_FRAMES / crate::bitfield::Bitfield::<1>::ROW_BITS;
+type Bitfield = crate::bitfield::Bitfield<ROWS>;
 const _: () = assert!(Bitfield::LEN == HUGE_FRAMES);
 
 /// Lower-level frame allocator.
@@ -58,7 +58,7 @@ struct Metadata {
 }
 
 impl Metadata {
-    fn new(frames: usize) -> Self {
+    const fn new(frames: usize) -> Self {
         let bitfield_len = frames.div_ceil(Bitfield::LEN);
         let table_len = frames.div_ceil(TREE_FRAMES);
         Self {
@@ -72,7 +72,7 @@ impl Metadata {
 }
 
 impl<'a> Lower<'a> {
-    pub fn metadata_size(frames: usize) -> usize {
+    pub const fn metadata_size(frames: usize) -> usize {
         let m = Metadata::new(frames);
         m.bitfield_size + m.table_size
     }
@@ -241,7 +241,7 @@ impl<'a> Lower<'a> {
         } else {
             unreachable!("Order {order} is not supported")
         }
-        Err(Error::Memory)
+        Err(Error::Address)
     }
 
     /// Free single frame, returning whether a whole huge page has become free.

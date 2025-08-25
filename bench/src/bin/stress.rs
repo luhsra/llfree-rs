@@ -122,7 +122,7 @@ fn main() {
 
             barrier.wait();
 
-            while let Ok(page) = alloc.get(t, Flags::o(order)) {
+            while let Ok(page) = alloc.get(t, None, Flags::o(order)) {
                 pages.push(page);
             }
 
@@ -136,7 +136,7 @@ fn main() {
                         let page = pages.pop().unwrap();
                         alloc.put(t, page, Flags::o(order)).unwrap();
                     } else {
-                        match alloc.get(t, Flags::o(order)) {
+                        match alloc.get(t, None, Flags::o(order)) {
                             Ok(page) => pages.push(page),
                             Err(Error::Memory) => break,
                             Err(e) => panic!("{e:?}"),

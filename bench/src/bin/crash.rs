@@ -97,7 +97,7 @@ fn execute(
 
         for (i, page) in data.iter_mut().enumerate() {
             *idx = i as _;
-            *page = alloc.get(t, Flags::o(order)).unwrap();
+            *page = alloc.get(t, None, Flags::o(order)).unwrap();
         }
 
         warn!("repeat");
@@ -109,7 +109,7 @@ fn execute(
             *idx = i as _;
 
             alloc.put(t, data[i], Flags::o(order)).unwrap();
-            data[i] = alloc.get(t, Flags::o(order)).unwrap();
+            data[i] = alloc.get(t, None, Flags::o(order)).unwrap();
         }
     });
 }
