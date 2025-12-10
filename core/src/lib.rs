@@ -290,7 +290,7 @@ mod test {
                 drop(ManuallyDrop::take(&mut self.0));
                 // free metadata buffers
                 Vec::from_raw_parts(local.as_mut_ptr(), local.len(), local.len());
-                Vec::from_raw_parts(trees.as_mut_ptr(), trees.len(), local.len());
+                Vec::from_raw_parts(trees.as_mut_ptr(), trees.len(), trees.len());
                 Vec::from_raw_parts(lower.as_mut_ptr(), lower.len(), lower.len());
             }
         }

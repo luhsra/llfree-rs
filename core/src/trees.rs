@@ -3,7 +3,7 @@ use core::ops::RangeBounds;
 use core::sync::atomic::AtomicU32;
 use core::{fmt, slice};
 
-use bitfield_struct::bitfield;
+use bitfield_struct::{bitenum, bitfield};
 
 use crate::atomic::{Atom, Atomic};
 use crate::util::{Align, size_of_slice};
@@ -190,35 +190,20 @@ pub struct Tree {
     pub kind: Kind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+#[bitenum(all = true)]
 pub enum Kind {
+    #[fallback]
     Fixed,
     Movable,
     Huge,
 }
 
 impl Kind {
-    pub const LEN: usize = 3;
+    pub const LEN: usize = Self::all().len();
     pub fn accepts(self, other: Kind) -> bool {
         (other as usize) >= (self as usize)
-    }
-    const fn from_bits(bits: u8) -> Self {
-        match bits {
-            0 => Self::Fixed,
-            1 => Self::Movable,
-            2 => Self::Huge,
-            _ => unreachable!(),
-        }
-    }
-    const fn into_bits(self) -> u8 {
-        match self {
-            Self::Fixed => 0,
-            Self::Movable => 1,
-            Self::Huge => 2,
-        }
-    }
-    pub const fn all() -> [Kind; Self::LEN] {
-        [Self::Fixed, Self::Movable, Self::Huge]
     }
 }
 impl From<Flags> for Kind {

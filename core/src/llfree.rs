@@ -9,7 +9,7 @@ use crate::atomic::Atom;
 use crate::local::{Local, LocalTree};
 use crate::lower::Lower;
 use crate::trees::{Kind, Tree, Trees};
-use crate::util::{Align, FmtFn, size_of_slice};
+use crate::util::{Align, FmtFn, align_down, size_of_slice};
 use crate::{
     Alloc, BITFIELD_ROW, Error, Flags, HUGE_FRAMES, HUGE_ORDER, Init, MAX_ORDER, MetaData,
     MetaSize, RETRIES, Result, Stats, TREE_FRAMES, TREE_ORDER,
@@ -423,11 +423,16 @@ impl LLFree<'_> {
         }
 
         let i = old.frame() / TREE_FRAMES;
-        let min = (1usize << order).saturating_sub(old.free());
+        let min = 1 << order - old.free();
 
         if let Some(global) = self.trees.sync(i, min) {
             let new = LocalTree::with(old.frame(), old.free() + global.free());
             if preferred.compare_exchange(old, new).is_ok() {
+                info!(
+                    "sync success idx={i} kind={:?} free={}",
+                    global.kind(),
+                    new.free()
+                );
                 return true;
             }
             self.trees.entries[i]
@@ -442,10 +447,6 @@ impl LLFree<'_> {
     /// Reserve a new tree and allocate the frame in it
     fn reserve_and_get(&self, core: usize, flags: Flags, start_idx: usize) -> Result<usize> {
         // Try reserve new tree
-        let preferred = self.local[core].preferred(flags.into());
-        const CL: usize = align_of::<Align>() / size_of::<Tree>();
-        let near = ((self.trees.len() / self.cores()) / 4).clamp(CL / 4, CL * 2);
-
         let reserve = |i: usize, range: Range<usize>| {
             let range = (1 << flags.order()).max(range.start)..range.end;
             if let Ok(old) =
@@ -457,6 +458,7 @@ impl LLFree<'_> {
                     None,
                 ) {
                     Ok(new) => {
+                        let preferred = self.local[core].preferred(flags.into());
                         self.swap_reserved(preferred, new, flags.into());
                         Ok(new.frame())
                     }
@@ -470,23 +472,29 @@ impl LLFree<'_> {
             }
         };
 
-        // Over half filled trees
-        let range = TREE_FRAMES / 16..TREE_FRAMES / 2;
-        match self
-            .trees
-            .search(start_idx, 1, near, |i| reserve(i, range.clone()))
-        {
-            Err(Error::Memory) => {}
-            r => return r,
-        }
-        // Partially filled
-        let range = TREE_FRAMES / 64..TREE_FRAMES - TREE_FRAMES / 16;
-        match self
-            .trees
-            .search(start_idx, 1, near, |i| reserve(i, range.clone()))
-        {
-            Err(Error::Memory) => {}
-            r => return r,
+        const CL: usize = align_of::<Align>() / size_of::<Tree>();
+        let near = ((self.trees.len() / self.cores()) / 4).clamp(CL / 4, CL * 2);
+        let start_idx = align_down(start_idx, CL);
+
+        if flags.order() < HUGE_ORDER {
+            // Over half filled trees
+            let range = TREE_FRAMES / 16..TREE_FRAMES / 2;
+            match self
+                .trees
+                .search(start_idx, 1, near, |i| reserve(i, range.clone()))
+            {
+                Err(Error::Memory) => {}
+                r => return r,
+            }
+            // Partially filled
+            let range = TREE_FRAMES / 64..TREE_FRAMES - TREE_FRAMES / 16;
+            match self
+                .trees
+                .search(start_idx, 1, near, |i| reserve(i, range.clone()))
+            {
+                Err(Error::Memory) => {}
+                r => return r,
+            }
         }
         // Not free
         let range = 0..TREE_FRAMES;
@@ -500,7 +508,7 @@ impl LLFree<'_> {
         // Any
         let range = 0..usize::MAX;
         self.trees
-            .search(start_idx, 1, near, |i| reserve(i, range.clone()))
+            .search(start_idx, 0, near, |i| reserve(i, range.clone()))
     }
 
     /// Steal a tree from another core

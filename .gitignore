@@ -9,6 +9,7 @@ memfile
 .devcontainer
 /test/
 .cache/
+.direnv/
 
 /results/*
 !/results/remote_ma/
