@@ -2,7 +2,7 @@
   description = "LLZero Benchmark Environment";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -33,13 +33,13 @@
 
       # Inputs for shell environments
       devShells = forEachSupportedSystem ({ pkgs }: {
-        default = pkgs.mkShellNoCC {
+        default = pkgs.mkShell.override { stdenv = pkgs.clangStdenv; } {
           buildInputs = with pkgs;
             [
+              rustToolchain
               ruff
               pyright
               python313
-              rustToolchain
               cargo-deny
               cargo-edit
               cargo-watch
@@ -54,10 +54,13 @@
               ipykernel
               scipy
             ]);
-        };
-        env = {
-          # Required by rust-analyzer
-          RUST_SRC_PATH = "${pkgs.rustToolchain}/lib/rustlib/src/rust/library";
+          env = {
+            # Rust-analyzer
+            RUST_SRC_PATH =
+              "${pkgs.rustToolchain}/lib/rustlib/src/rust/library";
+            # Rust Bindgen
+            LIBCLANG_PATH = "${pkgs.libclang.lib}/lib/libclang.so";
+          };
         };
       });
     };
