@@ -1,4 +1,5 @@
 use core::mem::align_of;
+use core::num::NonZeroUsize;
 use core::ops::RangeBounds;
 use core::sync::atomic::AtomicU32;
 use core::{fmt, slice};
@@ -138,21 +139,25 @@ impl<'a> Trees<'a> {
         start: usize,
         offset: usize,
         len: usize,
-        filter: impl Fn(Tree) -> bool,
         access: impl Fn(usize) -> Result<usize>,
     ) -> Result<usize> {
-        let mut best: [Option<(usize, Tree)>; N] = [None; N];
+        #[derive(Clone, Copy)]
+        struct Best {
+            i: usize,
+            prio: NonZeroUsize,
+        }
+        let mut best: [Option<Best>; N] = [None; N];
 
         /// Quantize prio to prioritize selecting a tree near the start
-        fn prio(tree: Tree) -> usize {
+        fn prio(tree: Tree) -> Option<NonZeroUsize> {
             match tree.free() {
-                0 => 0,           // entirely allocated
-                TREE_FRAMES => 1, // entirely free -> introduces fragmentation
+                0 => None,                           // entirely allocated
+                TREE_FRAMES => NonZeroUsize::new(1), // entirely free -> introduces fragmentation
                 // f if f >= (TREE_FRAMES / 3) * 2 => 3, // mostly free
-                f if f >= TREE_FRAMES / 2 => 4, // half free
+                f if f >= TREE_FRAMES / 2 => NonZeroUsize::new(3), // half free
                 // f if f >= TREE_FRAMES / 16 => 5, // some free
-                f if f >= TREE_FRAMES / 64 => 6, // almost allocated
-                _ => 2,                          // low free count -> causes frequent reservations
+                f if f >= TREE_FRAMES / 64 => NonZeroUsize::new(4), // almost allocated
+                _ => NonZeroUsize::new(2), // low free count -> causes frequent reservations
             }
         }
 
@@ -167,9 +172,9 @@ impl<'a> Trees<'a> {
             let i = (s + off) as usize % self.entries.len();
 
             let curr = self.entries[i].load();
-            if filter(curr) {
+            if let Some(prio) = prio(curr) {
                 // If max prio, try immediately
-                if prio(curr) == 6 {
+                if prio.get() == 4 {
                     match access(i) {
                         Err(Error::Memory) => continue,
                         r => return r,
@@ -179,23 +184,21 @@ impl<'a> Trees<'a> {
                 let pos = best.iter().position(|e| match e {
                     None => true,
                     // Only replace if better -> prefer trees near the start
-                    Some((_, t)) => prio(curr) > prio(*t),
+                    Some(best) => prio.get() > best.prio.get(),
                 });
                 if let Some(pos) = pos {
                     for j in pos..N - 1 {
                         best[j + 1] = best[j];
                     }
-                    best[pos] = Some((i, curr));
+                    best[pos] = Some(Best { i, prio });
                 }
             }
         }
 
-        for entry in best {
-            if let Some((i, _)) = entry {
-                match access(i) {
-                    Err(Error::Memory) => {}
-                    r => return r,
-                }
+        for Best { i, .. } in best.into_iter().flatten() {
+            match access(i) {
+                Err(Error::Memory) => {}
+                r => return r,
             }
         }
 

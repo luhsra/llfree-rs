@@ -171,7 +171,12 @@ mod bindings {
         fn from(flags: super::Flags) -> Self {
             llflags_t {
                 _bitfield_align_1: [0; 0],
-                _bitfield_1: llflags_t::new_bitfield_1(flags.order() as _, flags.movable(), false, false),
+                _bitfield_1: llflags_t::new_bitfield_1(
+                    flags.order() as _,
+                    flags.movable(),
+                    false,
+                    false,
+                ),
             }
         }
     }
@@ -189,11 +194,11 @@ mod bindings {
         }
     }
 
-    impl Into<super::Stats> for ll_stats {
-        fn into(self) -> super::Stats {
+    impl From<ll_stats> for super::Stats {
+        fn from(val: ll_stats) -> Self {
             super::Stats {
-                free_frames: self.free_frames,
-                free_huge: self.free_huge,
+                free_frames: val.free_frames,
+                free_huge: val.free_huge,
                 free_trees: 0,
             }
         }

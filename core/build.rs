@@ -28,8 +28,8 @@ fn main() {
             .clang_arg(format!("-I{}", llc_dir.join("std").display()))
             .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
             .allowlist_item("(llf|LLF).*")
+            .generate_cstr(true)
             .fit_macro_constants(true)
-            .clang_macro_fallback()
             .generate()
             .expect("Unable to generate bindings");
 

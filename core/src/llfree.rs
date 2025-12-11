@@ -471,8 +471,6 @@ impl LLFree<'_> {
                 Err(Error::Memory)
             }
         };
-        let filter =
-            |t: Tree, range: Range<usize>| t.reserve(range.clone(), flags.into()).is_some();
 
         const CL: usize = align_of::<Align>() / size_of::<Tree>();
         // Why does 16 work so well? Are there better values?
@@ -484,11 +482,10 @@ impl LLFree<'_> {
         // Find best fit in fragmented trees
         if flags.order() < HUGE_ORDER {
             let range = 0..TREE_FRAMES;
-            match self.trees.search_best::<4>(
+            match self.trees.search_best::<1>(
                 start,
                 1,
                 near,
-                |t| filter(t, range.clone()),
                 |i| reserve(i, range.clone()),
             ) {
                 Err(Error::Memory) => {}
