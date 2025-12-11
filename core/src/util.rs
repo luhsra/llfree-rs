@@ -1,23 +1,23 @@
 //! General utility functions
 
 use core::fmt;
-use core::mem::{ManuallyDrop, align_of, forget, size_of};
+use core::mem::{align_of, size_of};
 use core::ops::{Add, Deref, DerefMut, Div, Range};
 
 /// Function that is executed at scope exit
 #[must_use]
-pub struct Deferred<F: FnOnce()>(ManuallyDrop<F>);
+pub struct Deferred<F: FnOnce()>(Option<F>);
 impl<F: FnOnce()> Deferred<F> {
     pub fn new(f: F) -> Self {
-        Self(ManuallyDrop::new(f))
+        Self(Some(f))
     }
-    pub fn cancel(self) {
-        forget(self)
+    pub fn cancel(mut self) {
+        self.0.take();
     }
 }
 impl<F: FnOnce()> Drop for Deferred<F> {
     fn drop(&mut self) {
-        (unsafe { ManuallyDrop::take(&mut self.0) })();
+        self.0.take().map(|f| f());
     }
 }
 

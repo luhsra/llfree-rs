@@ -132,47 +132,99 @@ impl<'a> Trees<'a> {
             .expect("Unreserve failed");
     }
 
-    /// Iterate through all trees as long `f` returns `Error::Memory`
-    pub fn search(
+    /// Iterate through all trees, trying to find the best N fits, then trying to `access` them
+    pub fn search_best<const N: usize>(
         &self,
         start: usize,
         offset: usize,
         len: usize,
-        mut f: impl FnMut(usize) -> Result<usize> + Clone,
+        filter: impl Fn(Tree) -> bool,
+        access: impl Fn(usize) -> Result<usize>,
     ) -> Result<usize> {
-        // There has to be enough space for the current allocation
-        let start = (start + self.entries.len()) as isize;
+        let mut best: [Option<(usize, Tree)>; N] = [None; N];
+
+        /// Quantize prio to prioritize selecting a tree near the start
+        fn prio(tree: Tree) -> usize {
+            match tree.free() {
+                0 => 0,           // entirely allocated
+                TREE_FRAMES => 1, // entirely free -> introduces fragmentation
+                // f if f >= (TREE_FRAMES / 3) * 2 => 3, // mostly free
+                f if f >= TREE_FRAMES / 2 => 4, // half free
+                // f if f >= TREE_FRAMES / 16 => 5, // some free
+                f if f >= TREE_FRAMES / 64 => 6, // almost allocated
+                _ => 2,                          // low free count -> causes frequent reservations
+            }
+        }
+
         for i in offset..len {
-            // Alternating between before and after this entry
+            // Alternating between before and after start
             let off = if i.is_multiple_of(2) {
                 (i / 2) as isize
             } else {
                 -(i.div_ceil(2) as isize)
             };
-            let i = (start + off) as usize % self.entries.len();
-            match f(i) {
+            let s = (start + self.entries.len()) as isize;
+            let i = (s + off) as usize % self.entries.len();
+
+            let curr = self.entries[i].load();
+            if filter(curr) {
+                // If max prio, try immediately
+                if prio(curr) == 6 {
+                    match access(i) {
+                        Err(Error::Memory) => continue,
+                        r => return r,
+                    }
+                }
+                // Otherwise insert into best list
+                let pos = best.iter().position(|e| match e {
+                    None => true,
+                    // Only replace if better -> prefer trees near the start
+                    Some((_, t)) => prio(curr) > prio(*t),
+                });
+                if let Some(pos) = pos {
+                    for j in pos..N - 1 {
+                        best[j + 1] = best[j];
+                    }
+                    best[pos] = Some((i, curr));
+                }
+            }
+        }
+
+        for entry in best {
+            if let Some((i, _)) = entry {
+                match access(i) {
+                    Err(Error::Memory) => {}
+                    r => return r,
+                }
+            }
+        }
+
+        Err(Error::Memory)
+    }
+
+    /// Iterate through all trees as long `try_use` returns `Error::Memory`
+    pub fn search(
+        &self,
+        start: usize,
+        offset: usize,
+        len: usize,
+        access: impl Fn(usize) -> Result<usize>,
+    ) -> Result<usize> {
+        for i in offset..len {
+            // Alternating between before and after start
+            let off = if i.is_multiple_of(2) {
+                (i / 2) as isize
+            } else {
+                -(i.div_ceil(2) as isize)
+            };
+            let s = (start + self.entries.len()) as isize;
+            let i = (s + off) as usize % self.entries.len();
+            match access(i) {
                 Err(Error::Memory) => {}
                 r => return r,
             }
         }
         Err(Error::Memory)
-    }
-
-    #[allow(unused)]
-    pub fn dump(&'a self) -> TreeDbg<'a> {
-        TreeDbg(self)
-    }
-}
-
-pub struct TreeDbg<'a>(&'a Trees<'a>);
-impl fmt::Debug for TreeDbg<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "[")?;
-        for entry in self.0.entries {
-            writeln!(f, "    {:?}", entry.load())?;
-        }
-        write!(f, "]")?;
-        Ok(())
     }
 }
 

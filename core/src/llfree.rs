@@ -423,7 +423,7 @@ impl LLFree<'_> {
         }
 
         let i = old.frame() / TREE_FRAMES;
-        let min = 1 << order - old.free();
+        let min = (1 << order) - old.free();
 
         if let Some(global) = self.trees.sync(i, min) {
             let new = LocalTree::with(old.frame(), old.free() + global.free());
@@ -445,7 +445,7 @@ impl LLFree<'_> {
     }
 
     /// Reserve a new tree and allocate the frame in it
-    fn reserve_and_get(&self, core: usize, flags: Flags, start_idx: usize) -> Result<usize> {
+    fn reserve_and_get(&self, core: usize, flags: Flags, start: usize) -> Result<usize> {
         // Try reserve new tree
         let reserve = |i: usize, range: Range<usize>| {
             let range = (1 << flags.order()).max(range.start)..range.end;
@@ -471,44 +471,41 @@ impl LLFree<'_> {
                 Err(Error::Memory)
             }
         };
+        let filter =
+            |t: Tree, range: Range<usize>| t.reserve(range.clone(), flags.into()).is_some();
 
         const CL: usize = align_of::<Align>() / size_of::<Tree>();
-        let near = ((self.trees.len() / self.cores()) / 4).clamp(CL / 4, CL * 2);
-        let start_idx = align_down(start_idx, CL);
+        // Why does 16 work so well? Are there better values?
+        let near = (self.trees.len() / 16).max(CL / 4);
+        // Why does align twice near help?
+        // This leaves some space between starting points...
+        let start = align_down(start, (2 * near).next_power_of_two());
 
+        // Find best fit in fragmented trees
         if flags.order() < HUGE_ORDER {
-            // Over half filled trees
-            let range = TREE_FRAMES / 16..TREE_FRAMES / 2;
-            match self
-                .trees
-                .search(start_idx, 1, near, |i| reserve(i, range.clone()))
-            {
+            let range = 0..TREE_FRAMES;
+            match self.trees.search_best::<4>(
+                start,
+                1,
+                near,
+                |t| filter(t, range.clone()),
+                |i| reserve(i, range.clone()),
+            ) {
                 Err(Error::Memory) => {}
                 r => return r,
             }
-            // Partially filled
-            let range = TREE_FRAMES / 64..TREE_FRAMES - TREE_FRAMES / 16;
-            match self
-                .trees
-                .search(start_idx, 1, near, |i| reserve(i, range.clone()))
-            {
+            // Not free
+            match self.trees.search(start, near, self.trees.len(), |i| {
+                reserve(i, 0..TREE_FRAMES)
+            }) {
                 Err(Error::Memory) => {}
                 r => return r,
             }
         }
-        // Not free
-        let range = 0..TREE_FRAMES;
-        match self
-            .trees
-            .search(start_idx, 1, near, |i| reserve(i, range.clone()))
-        {
-            Err(Error::Memory) => {}
-            r => return r,
-        }
+
         // Any
-        let range = 0..usize::MAX;
         self.trees
-            .search(start_idx, 0, near, |i| reserve(i, range.clone()))
+            .search(start, 0, self.trees.len(), |i| reserve(i, 0..usize::MAX))
     }
 
     /// Steal a tree from another core
