@@ -53,6 +53,7 @@
               qemu
               ipykernel
               scipy
+              nbconvert
             ]);
           env = {
             # Rust-analyzer
