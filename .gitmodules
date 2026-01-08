@@ -1,3 +1,6 @@
 [submodule "llc"]
 	path = llc
 	url = https://github.com/luhsra/llfree-c.git
+[submodule "llzig"]
+	path = llzig
+	url = git@scm.sra.uni-hannover.de:research/llfree/llzig/llzig.git

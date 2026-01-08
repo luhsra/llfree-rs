@@ -45,6 +45,7 @@
               cargo-watch
               lldb
               curl
+              zig
             ] ++ (with pkgs.python313Packages; [
               numpy
               seaborn
