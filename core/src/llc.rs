@@ -27,6 +27,7 @@ impl<'a> Alloc<'a> for LLC {
 
     fn metadata_size(cores: usize, frames: usize) -> crate::MetaSize {
         let m = unsafe { bindings::llfree_metadata_size(cores as _, frames as _) };
+        assert!(m.llfree as usize <= size_of::<Self>());
         crate::MetaSize {
             local: m.local,
             trees: m.trees,

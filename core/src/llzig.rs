@@ -7,7 +7,7 @@ use super::{Alloc, Init};
 use crate::util::Align;
 use crate::{Flags, HUGE_ORDER, Result, Stats, TREE_FRAMES, TREE_HUGE};
 
-/// C implementation of LLFree
+/// Zig implementation of LLFree
 ///
 /// Note: This abstraction assumes that the state is movable and smaller than two cache lines!
 #[repr(transparent)]
@@ -22,11 +22,12 @@ unsafe impl Sync for LLZig {}
 
 impl<'a> Alloc<'a> for LLZig {
     fn name() -> &'static str {
-        "LLC"
+        "LLZig"
     }
 
     fn metadata_size(cores: usize, frames: usize) -> crate::MetaSize {
         let m = unsafe { bindings::llzig_metadata_size(cores as _, frames as _) };
+        assert!(m.llfree as usize <= size_of::<Self>());
         crate::MetaSize {
             local: m.local,
             trees: m.trees,
