@@ -245,7 +245,7 @@ pub struct Stats {
 }
 
 #[cfg(all(test, feature = "std"))]
-mod test {
+mod alloc_test {
     use core::mem::ManuallyDrop;
     use core::ops::Deref;
     use core::ptr::null_mut;
@@ -260,9 +260,11 @@ mod test {
     use crate::util::{WyRand, aligned_buf, logging};
     use crate::wrapper::NvmAlloc;
 
-    #[cfg(feature = "llc")]
+    #[cfg(all(feature = "llc", not(feature = "llzig")))]
     type Allocator = TestAlloc<LLC>;
-    #[cfg(not(feature = "llc"))]
+    #[cfg(feature = "llzig")]
+    type Allocator = TestAlloc<LLZig>;
+    #[cfg(not(any(feature = "llc", feature = "llzig")))]
     type Allocator = TestAlloc<LLFree<'static>>;
 
     pub struct TestAlloc<A: Alloc<'static>>(ManuallyDrop<A>);

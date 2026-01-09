@@ -38,10 +38,16 @@ impl<'a> Alloc<'a> for LLZig {
         let cores = unsafe { bindings::llzig_cores(self.raw.get().cast()) };
         let ms = Self::metadata_size(cores, self.frames());
         let m = unsafe { bindings::llzig_metadata(self.raw.get().cast()) };
+        fn to_slice<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
+            unsafe {
+                ptr.as_mut()
+                    .map_or(&mut [], |p| slice::from_raw_parts_mut(p, len))
+            }
+        }
         super::MetaData {
-            local: unsafe { slice::from_raw_parts_mut(m.local, ms.local) },
-            trees: unsafe { slice::from_raw_parts_mut(m.trees, ms.trees) },
-            lower: unsafe { slice::from_raw_parts_mut(m.lower, ms.lower) },
+            local: to_slice(m.local, ms.local),
+            trees: to_slice(m.trees, ms.trees),
+            lower: to_slice(m.lower, ms.lower),
         }
     }
 
@@ -202,7 +208,7 @@ mod bindings {
 
 #[cfg(all(test, feature = "std", feature = "llzig"))]
 mod test {
-    use super::super::test::TestAlloc;
+    use super::super::alloc_test::TestAlloc;
     use super::LLZig;
     use crate::Init;
 

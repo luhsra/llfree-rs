@@ -165,7 +165,7 @@ mod bindings {
     #![allow(dead_code)]
     #![allow(unnecessary_transmutes)]
 
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+    include!(concat!(env!("OUT_DIR"), "/llc.rs"));
 
     impl From<super::Flags> for llflags_t {
         fn from(flags: super::Flags) -> Self {
@@ -207,7 +207,7 @@ mod bindings {
 
 #[cfg(all(test, feature = "std", feature = "llc"))]
 mod test {
-    use super::super::test::TestAlloc;
+    use super::super::alloc_test::TestAlloc;
     use super::LLC;
     use crate::Init;
 
