@@ -7,6 +7,8 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
+#[cfg(feature = "llzig")]
+use llfree::LLZig;
 #[cfg(feature = "llc")]
 use llfree::LLC;
 use llfree::frame::Frame;
@@ -147,6 +149,13 @@ fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAllo
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
         return Box::new(NvmAlloc::<LLC>::create(cores, zone, false, local, trees).unwrap());
+    }
+    #[cfg(feature = "llzig")]
+    if LLZig::name() == name {
+        let m = NvmAlloc::<LLZig>::metadata_size(cores, zone.len());
+        let local = aligned_buf(m.local);
+        let trees = aligned_buf(m.trees);
+        return Box::new(NvmAlloc::<LLZig>::create(cores, zone, false, local, trees).unwrap());
     }
     if LLFree::name() == name {
         let m = NvmAlloc::<LLFree>::metadata_size(cores, zone.len());

@@ -95,7 +95,7 @@ fn main() {
         let mut command = Command::new("zig");
         command.arg("build").current_dir(&llzig_dir);
         if !is_debug {
-            command.arg("--release");
+            command.arg("--release=fast");
         }
         let output = command.output().expect("Build llzig library");
 
