@@ -5,7 +5,7 @@ use core::{fmt, slice};
 
 use super::{Alloc, Init};
 use crate::util::Align;
-use crate::{Flags, HUGE_ORDER, Result, Stats, TREE_FRAMES, TREE_HUGE};
+use crate::{Flags, FrameId, HUGE_ORDER, Result, Stats, TREE_FRAMES, TREE_HUGE};
 
 /// Zig implementation of LLFree
 ///
@@ -77,27 +77,28 @@ impl<'a> Alloc<'a> for LLZig {
         ret.ok().map(|_| LLZig { raw })
     }
 
-    fn get(&self, core: usize, frame: Option<usize>, flags: Flags) -> Result<usize> {
+    fn get(&self, core: usize, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
         let ret = if let Some(frame) = frame {
             unsafe {
-                bindings::llzig_get_at(self.raw.get().cast(), core as _, frame as _, flags.into())
+                bindings::llzig_get_at(self.raw.get().cast(), core as _, frame.0 as _, flags.into())
             }
         } else {
             unsafe { bindings::llzig_get(self.raw.get().cast(), core as _, flags.into()) }
         };
-        Ok(ret.ok()? as _)
+        Ok(FrameId(ret.ok()? as _))
     }
 
-    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
+    fn put(&self, core: usize, frame: FrameId, flags: Flags) -> Result<()> {
         let ret = unsafe {
-            bindings::llzig_put(self.raw.get().cast(), core as _, frame as _, flags.into())
+            bindings::llzig_put(self.raw.get().cast(), core as _, frame.0 as _, flags.into())
         };
         ret.ok().map(|_| ())
     }
 
-    fn is_free(&self, frame: usize, order: usize) -> bool {
-        let stats =
-            unsafe { bindings::llzig_full_stats_at(self.raw.get().cast(), frame as _, order as _) };
+    fn is_free(&self, frame: FrameId, order: usize) -> bool {
+        let stats = unsafe {
+            bindings::llzig_full_stats_at(self.raw.get().cast(), frame.0 as _, order as _)
+        };
         order == 0 && stats.free_frames == 1
             || order == HUGE_ORDER && stats.free_huge == 1
             || order == TREE_FRAMES.ilog2() as usize && stats.free_huge == TREE_HUGE
@@ -123,17 +124,17 @@ impl<'a> Alloc<'a> for LLZig {
         unsafe { bindings::llzig_stats(self.raw.get().cast()).into() }
     }
 
-    fn fast_stats_at(&self, frame: usize, order: usize) -> crate::Stats {
-        unsafe { bindings::llzig_stats_at(self.raw.get().cast(), frame as _, order as _).into() }
+    fn fast_stats_at(&self, frame: FrameId, order: usize) -> crate::Stats {
+        unsafe { bindings::llzig_stats_at(self.raw.get().cast(), frame.0 as _, order as _).into() }
     }
 
     fn stats(&self) -> crate::Stats {
         unsafe { bindings::llzig_full_stats(self.raw.get().cast()).into() }
     }
 
-    fn stats_at(&self, frame: usize, order: usize) -> crate::Stats {
+    fn stats_at(&self, frame: FrameId, order: usize) -> crate::Stats {
         unsafe {
-            bindings::llzig_full_stats_at(self.raw.get().cast(), frame as _, order as _).into()
+            bindings::llzig_full_stats_at(self.raw.get().cast(), frame.0 as _, order as _).into()
         }
     }
 

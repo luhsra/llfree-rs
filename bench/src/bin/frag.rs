@@ -78,7 +78,7 @@ fn main() {
 
     let all_pages = {
         let mut v = Vec::with_capacity(threads);
-        v.resize_with(threads, || Mutex::new(Vec::<usize>::new()));
+        v.resize_with(threads, || Mutex::new(Vec::<FrameId>::new()));
         v
     };
 
@@ -161,7 +161,9 @@ fn main() {
 /// count and output stats
 fn stats(out: &mut impl Write, alloc: &Allocator) -> io::Result<()> {
     for huge in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
-        let free = alloc.stats_at(huge << HUGE_ORDER, HUGE_ORDER).free_frames;
+        let free = alloc
+            .stats_at(HugeId(huge).as_frame(), HUGE_ORDER)
+            .free_frames;
         let level = if free == 0 { 0 } else { free / 64 + 1 };
         assert!(level <= 9);
         write!(out, "{level}")?;

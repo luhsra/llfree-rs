@@ -51,6 +51,7 @@ pub mod util;
 pub mod wrapper;
 
 mod bitfield;
+use bitfield::RowId;
 mod llfree;
 use bitfield_struct::bitfield;
 pub use llfree::LLFree;
@@ -67,7 +68,9 @@ use util::Align;
 
 mod local;
 mod lower;
+pub use lower::HugeId;
 mod trees;
+pub use trees::TreeId;
 
 use core::fmt;
 use core::mem::align_of;
@@ -121,9 +124,9 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
 
     /// Allocate a new frame of `order` on the given `core`.
     /// If specified try allocating the given `frame`.
-    fn get(&self, core: usize, frame: Option<usize>, flags: Flags) -> Result<usize>;
+    fn get(&self, core: usize, frame: Option<FrameId>, flags: Flags) -> Result<FrameId>;
     /// Free the `frame` of `order` on the given `core`.
-    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()>;
+    fn put(&self, core: usize, frame: FrameId, flags: Flags) -> Result<()>;
 
     /// Return the total number of frames the allocator manages.
     fn frames(&self) -> usize;
@@ -134,16 +137,16 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     fn fast_stats(&self) -> Stats;
     /// Quickly retrieve allocator statistics, where `free_huge` is an under-approximation.
     /// Only TREE_ORDER, HUGE_ORDER and 0 are supported.
-    fn fast_stats_at(&self, frame: usize, order: usize) -> Stats;
+    fn fast_stats_at(&self, frame: FrameId, order: usize) -> Stats;
 
     /// Retrieve detailed allocator statistics.
     fn stats(&self) -> Stats;
     /// Retrieve detailed allocator statistics.
     /// Only TREE_ORDER, HUGE_ORDER and 0 are supported.
-    fn stats_at(&self, frame: usize, order: usize) -> Stats;
+    fn stats_at(&self, frame: FrameId, order: usize) -> Stats;
 
     /// Returns if `frame` is free. This might be racy!
-    fn is_free(&self, frame: usize, order: usize) -> bool;
+    fn is_free(&self, frame: FrameId, order: usize) -> bool;
 
     /// Unreserve cpu-local frames
     fn drain(&self, _core: usize) -> Result<()> {
@@ -153,6 +156,38 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// Validate the internal state
     #[cold]
     fn validate(&self) {}
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct FrameId(pub usize);
+impl FrameId {
+    const fn as_tree(self) -> TreeId {
+        TreeId(self.0 / TREE_FRAMES)
+    }
+    const fn as_huge(self) -> HugeId {
+        HugeId(self.0 / HUGE_FRAMES)
+    }
+    const fn as_row(self) -> RowId {
+        RowId(self.0 / BITFIELD_ROW)
+    }
+    const fn row_bit_idx(self) -> usize {
+        self.0 % BITFIELD_ROW
+    }
+    const fn is_aligned(self, order: usize) -> bool {
+        self.0 & ((1 << order) - 1) == 0
+    }
+    const fn into_bits(self) -> u64 {
+        self.0 as u64
+    }
+    const fn from_bits(bits: u64) -> Self {
+        Self(bits as usize)
+    }
+}
+impl core::ops::Add<Self> for FrameId {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
 }
 
 /// Size of the required metadata
@@ -390,7 +425,7 @@ mod alloc_test {
         // Check that the same frame was not allocated twice
         for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
-            assert!(a < FRAMES && b < FRAMES);
+            assert!(a.0 < FRAMES && b.0 < FRAMES);
         }
 
         warn!("realloc...");
@@ -435,15 +470,15 @@ mod alloc_test {
 
         assert_eq!(alloc.fast_stats().free_frames, alloc.frames());
 
-        alloc.get(0, Some(1), Flags::o(0)).unwrap();
-        alloc.get(0, Some(2), Flags::o(0)).unwrap();
+        alloc.get(0, Some(FrameId(1)), Flags::o(0)).unwrap();
+        alloc.get(0, Some(FrameId(2)), Flags::o(0)).unwrap();
         alloc
-            .get(0, Some(HUGE_FRAMES), Flags::o(HUGE_ORDER))
+            .get(0, Some(FrameId(HUGE_FRAMES)), Flags::o(HUGE_ORDER))
             .unwrap();
 
         // Test normal allocation
         let frame = alloc.get(0, None, Flags::o(0)).unwrap();
-        assert!(frame != 1 && frame != 2 && frame != HUGE_FRAMES);
+        assert!(frame != FrameId(1) && frame != FrameId(2) && frame != FrameId(HUGE_FRAMES));
 
         assert_eq!(
             alloc.frames() - alloc.fast_stats().free_frames,
@@ -451,9 +486,11 @@ mod alloc_test {
         );
         alloc.validate();
 
-        alloc.put(0, HUGE_FRAMES, Flags::o(HUGE_ORDER)).unwrap();
-        alloc.put(0, 2, Flags::o(0)).unwrap();
-        alloc.put(0, 1, Flags::o(0)).unwrap();
+        alloc
+            .put(0, FrameId(HUGE_FRAMES), Flags::o(HUGE_ORDER))
+            .unwrap();
+        alloc.put(0, FrameId(2), Flags::o(0)).unwrap();
+        alloc.put(0, FrameId(1), Flags::o(0)).unwrap();
         alloc.put(0, frame, Flags::o(0)).unwrap();
 
         assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
@@ -488,7 +525,7 @@ mod alloc_test {
         frames.sort_unstable();
         for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
-            assert!(a < FRAMES && b < FRAMES);
+            assert!(a.0 < FRAMES && b.0 < FRAMES);
         }
 
         warn!("reallocate rand...");
@@ -511,7 +548,7 @@ mod alloc_test {
         frames.sort_unstable();
         for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
-            assert!(a < FRAMES && b < FRAMES);
+            assert!(a.0 < FRAMES && b.0 < FRAMES);
         }
 
         warn!("free...");
@@ -550,7 +587,7 @@ mod alloc_test {
             frames.sort_unstable();
             for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
                 assert_ne!(a, b);
-                assert!(a < FRAMES && b < FRAMES);
+                assert!(a.0 < FRAMES && b.0 < FRAMES);
             }
 
             barrier.wait();
@@ -569,7 +606,7 @@ mod alloc_test {
             frames.sort_unstable();
             for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
                 assert_ne!(a, b);
-                assert!(a < FRAMES && b < FRAMES);
+                assert!(a.0 < FRAMES && b.0 < FRAMES);
             }
 
             if barrier.wait().is_leader() {
@@ -614,7 +651,7 @@ mod alloc_test {
         warn!("start stress test");
 
         // Stress test
-        let mut frames = vec![0; FRAMES / 2];
+        let mut frames = vec![FrameId(0); FRAMES / 2];
         for frame in &mut frames {
             *frame = alloc.get(0, None, Flags::o(0)).unwrap();
         }
@@ -631,7 +668,7 @@ mod alloc_test {
         // Check that the same frame was not allocated twice
         for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
-            assert!(a < FRAMES && b < FRAMES);
+            assert!(a.0 < FRAMES && b.0 < FRAMES);
         }
 
         warn!("free some...");
@@ -678,7 +715,7 @@ mod alloc_test {
         let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
         // Stress test
-        let mut frames = vec![0; ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![FrameId(0); ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
@@ -706,7 +743,7 @@ mod alloc_test {
         frames.sort_unstable();
         for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
-            assert!(a < FRAMES && b < FRAMES);
+            assert!(a.0 < FRAMES && b.0 < FRAMES);
         }
     }
 
@@ -745,7 +782,7 @@ mod alloc_test {
         frames.sort_unstable();
         for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
-            assert!(a < FRAMES && b < FRAMES);
+            assert!(a.0 < FRAMES && b.0 < FRAMES);
         }
     }
 
@@ -791,7 +828,7 @@ mod alloc_test {
         frames.sort_unstable();
         for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
-            assert!(a < FRAMES && b < FRAMES);
+            assert!(a.0 < FRAMES && b.0 < FRAMES);
         }
     }
 
@@ -806,7 +843,7 @@ mod alloc_test {
         let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
         // Stress test
-        let mut frames = vec![0; ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![FrameId(0); ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
@@ -839,7 +876,7 @@ mod alloc_test {
         frames.sort_unstable();
         for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
-            assert!(a < FRAMES && b < FRAMES);
+            assert!(a.0 < FRAMES && b.0 < FRAMES);
         }
 
         thread::parallel(
@@ -870,7 +907,7 @@ mod alloc_test {
         let alloc = Allocator::create(THREADS, FRAMES, Init::FreeAll).unwrap();
 
         // Stress test
-        let mut frames = vec![0; ALLOC_PER_THREAD * THREADS];
+        let mut frames = vec![FrameId(0); ALLOC_PER_THREAD * THREADS];
         let barrier = Barrier::new(THREADS);
         let timer = Instant::now();
 
@@ -902,7 +939,7 @@ mod alloc_test {
         frames.sort_unstable();
         for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
-            assert!(a < FRAMES && b < FRAMES);
+            assert!(a.0 < FRAMES && b.0 < FRAMES);
         }
     }
 
@@ -1013,7 +1050,7 @@ mod alloc_test {
             thread::pin(t);
             barrier.wait();
 
-            let mut frames = vec![0; ALLOC_PER_THREAD];
+            let mut frames = vec![FrameId(0); ALLOC_PER_THREAD];
 
             for frame in &mut frames {
                 *frame = alloc.get(t, None, Flags::o(0)).unwrap();
@@ -1044,7 +1081,7 @@ mod alloc_test {
 
         // Alloc on first thread
         thread::pin(0);
-        let mut frames = vec![0; ALLOC_PER_THREAD];
+        let mut frames = vec![FrameId(0); ALLOC_PER_THREAD];
         for frame in &mut frames {
             *frame = alloc.get(0, None, Flags::o(0)).unwrap();
         }
@@ -1061,7 +1098,7 @@ mod alloc_test {
                 }
             });
 
-            let mut frames = vec![0; ALLOC_PER_THREAD];
+            let mut frames = vec![FrameId(0); ALLOC_PER_THREAD];
 
             barrier.wait();
 
@@ -1148,7 +1185,7 @@ mod alloc_test {
             let mut frames = Vec::new();
             for order in 0..=MAX_ORDER {
                 for _ in 0..1 << (MAX_ORDER - order) {
-                    frames.push((order, 0));
+                    frames.push((order, FrameId(0)));
                     num_frames += 1 << order;
                 }
             }
@@ -1163,7 +1200,7 @@ mod alloc_test {
                     Ok(frame) => frame,
                     Err(e) => panic!("{e:?} o={order} {alloc:?} on core {t}"),
                 };
-                assert!(*frame % (1 << *order) == 0, "{frame} {:x}", 1 << *order);
+                assert!(frame.is_aligned(*order), "{frame:?} {:x}", 1 << *order);
             }
 
             rng.shuffle(&mut frames);
@@ -1192,7 +1229,7 @@ mod alloc_test {
         assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, FRAMES);
 
         for frame in (0..FRAMES).step_by(1 << HUGE_ORDER) {
-            alloc.put(0, frame, Flags::o(HUGE_ORDER)).unwrap();
+            alloc.put(0, FrameId(frame), Flags::o(HUGE_ORDER)).unwrap();
         }
         assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
 
@@ -1228,7 +1265,7 @@ mod alloc_test {
         }
 
         let huge = alloc.get(0, None, Flags::o(9)).unwrap();
-        warn!("huge = {huge}");
+        warn!("huge = {:?}", huge);
         warn!("{alloc:?}");
         alloc.validate();
     }

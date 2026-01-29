@@ -91,7 +91,7 @@ fn main() {
                 if elapsed.as_secs() > frag_sec {
                     if let Some(frag) = frag.as_mut() {
                         for i in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
-                            let free = alloc.stats_at(i << HUGE_ORDER, HUGE_ORDER).free_frames;
+                            let free = alloc.stats_at(HugeId(i).as_frame(), HUGE_ORDER).free_frames;
                             let level = if free == 0 { 0 } else { 1 + free / 64 };
                             write!(frag, "{level:?}").unwrap();
                         }

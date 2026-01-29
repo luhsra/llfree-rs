@@ -7,7 +7,7 @@ use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, align_up, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, Flags, LLFree, thread};
+use llfree::{Alloc, Flags, FrameId, LLFree, thread};
 use log::{error, warn};
 
 /// Crash testing an allocator.
@@ -46,10 +46,18 @@ fn main() {
     // Layout: [ ( idx | realloc | pages... ) for each thread ]
     let mut out_mapping = Mapping::anon(0x1100_0000_0000, out_size, true, false).unwrap();
     let out_size = out_size / threads;
-    // Initialize with zero
-    for out in out_mapping.chunks_mut(out_size) {
-        out[0] = 0; // idx = 0
-        out[1] = 0; // realloc = 0
+    // Initialize with zero - reinterpret as FrameId for initialization
+    {
+        let out_as_frameid = unsafe {
+            std::slice::from_raw_parts_mut(
+                out_mapping.as_mut_ptr() as *mut FrameId,
+                out_mapping.len() * std::mem::size_of::<Frame>() / std::mem::size_of::<FrameId>(),
+            )
+        };
+        for out in out_as_frameid.chunks_mut(out_size) {
+            out[0] = FrameId(0); // idx = 0
+            out[1] = FrameId(0); // realloc = 0
+        }
     }
     // Allocator mapping
     let mut mapping = mapping(0x1000_0000_0000, pages, dax);
@@ -72,10 +80,18 @@ fn execute(
     threads: usize,
     order: usize,
     mapping: &mut [Frame],
-    out_mapping: &mut [usize],
+    out_mapping_raw: &mut [Frame],
 ) {
     // Align to prevent false-sharing
     let out_size = align_up(allocs + 2, Frame::SIZE);
+
+    // Reinterpret Frame bytes as FrameId values for storing allocated frames
+    let out_mapping = unsafe {
+        std::slice::from_raw_parts_mut(
+            out_mapping_raw.as_mut_ptr() as *mut FrameId,
+            std::mem::size_of_val(out_mapping_raw) / std::mem::size_of::<FrameId>(),
+        )
+    };
 
     let m = Allocator::metadata_size(threads, mapping.len());
     let local = aligned_buf(m.local);
@@ -96,17 +112,17 @@ fn execute(
         warn!("alloc {allocs}");
 
         for (i, page) in data.iter_mut().enumerate() {
-            *idx = i as _;
+            *idx = FrameId(i);
             *page = alloc.get(t, None, Flags::o(order)).unwrap();
         }
 
         warn!("repeat");
-        *realloc = 1;
+        *realloc = FrameId(1);
 
         let mut rng = WyRand::new(t as _);
         for _ in 0.. {
             let i = rng.range(0..allocs as u64) as usize;
-            *idx = i as _;
+            *idx = FrameId(i);
 
             alloc.put(t, data[i], Flags::o(order)).unwrap();
             data[i] = alloc.get(t, None, Flags::o(order)).unwrap();
@@ -121,9 +137,17 @@ fn monitor(
     order: usize,
     child: i32,
     mapping: &mut [Frame],
-    out_mapping: &[usize],
+    out_mapping_raw: &[Frame],
 ) {
     let out_size = align_up(allocs + 2, Frame::SIZE);
+
+    // Reinterpret Frame bytes as FrameId values for reading allocated frames
+    let out_mapping = unsafe {
+        std::slice::from_raw_parts(
+            out_mapping_raw.as_ptr() as *const FrameId,
+            std::mem::size_of_val(out_mapping_raw) / std::mem::size_of::<FrameId>(),
+        )
+    };
 
     // Wait for the allocator to finish initialization
     warn!("wait");
@@ -133,7 +157,7 @@ fn monitor(
 
         initializing = false;
         for data in out_mapping.chunks(out_size) {
-            if data[1] != 1 {
+            if data[1] != FrameId(1) {
                 initializing = true;
                 break;
             }
@@ -181,8 +205,8 @@ fn monitor(
         let (idx, data) = data.split_first().unwrap();
         let (realloc, _) = data.split_first().unwrap();
 
-        warn!("Out t{t} idx={idx} realloc={realloc}");
-        assert_eq!(*realloc, 1);
+        warn!("Out t{t} idx={:?} realloc={:?}", idx, realloc);
+        assert_eq!(*realloc, FrameId(1));
     }
 
     // Try to free all allocated pages
@@ -193,7 +217,7 @@ fn monitor(
         let (_realloc, data) = data.split_first().unwrap();
 
         for (i, addr) in data[0..allocs].iter().enumerate() {
-            if i != *idx {
+            if i != idx.0 {
                 alloc.put(t, *addr, Flags::o(order)).unwrap();
             }
         }

@@ -7,7 +7,7 @@ use core::{fmt, slice};
 use log::error;
 
 use crate::frame::Frame;
-use crate::{Alloc, Error, Flags, Init, MAX_ORDER, MetaData, MetaSize, Result, Stats};
+use crate::{Alloc, Error, Flags, FrameId, Init, MAX_ORDER, MetaData, MetaSize, Result, Stats};
 
 /// Zone allocator, managing a range of memory at a given page frame offset.
 pub struct ZoneAlloc<'a, A: Alloc<'a>> {
@@ -34,14 +34,18 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn metadata(&mut self) -> MetaData<'a> {
         self.alloc.metadata()
     }
-    fn get(&self, core: usize, frame: Option<usize>, flags: Flags) -> Result<usize> {
+    fn get(&self, core: usize, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
         let frame = frame
-            .map(|f| f.checked_sub(self.offset).ok_or(Error::Address))
+            .map(|f| {
+                f.0.checked_sub(self.offset)
+                    .map(FrameId)
+                    .ok_or(Error::Address)
+            })
             .transpose()?;
-        Ok(self.alloc.get(core, frame, flags)? + self.offset)
+        Ok(FrameId(self.alloc.get(core, frame, flags)?.0 + self.offset))
     }
-    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
-        let frame = frame.checked_sub(self.offset).ok_or(Error::Address)?;
+    fn put(&self, core: usize, frame: FrameId, flags: Flags) -> Result<()> {
+        let frame = FrameId(frame.0.checked_sub(self.offset).ok_or(Error::Address)?);
         self.alloc.put(core, frame, flags)
     }
     fn frames(&self) -> usize {
@@ -53,8 +57,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn fast_stats(&self) -> Stats {
         self.alloc.fast_stats()
     }
-    fn fast_stats_at(&self, frame: usize, order: usize) -> Stats {
-        let Some(frame) = frame.checked_sub(self.offset) else {
+    fn fast_stats_at(&self, frame: FrameId, order: usize) -> Stats {
+        let Some(frame) = frame.0.checked_sub(self.offset).map(FrameId) else {
             return Stats::default();
         };
         self.alloc.fast_stats_at(frame, order)
@@ -62,14 +66,14 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn stats(&self) -> Stats {
         self.alloc.stats()
     }
-    fn stats_at(&self, frame: usize, order: usize) -> Stats {
-        let Some(frame) = frame.checked_sub(self.offset) else {
+    fn stats_at(&self, frame: FrameId, order: usize) -> Stats {
+        let Some(frame) = frame.0.checked_sub(self.offset).map(FrameId) else {
             return Stats::default();
         };
         self.alloc.stats_at(frame, order)
     }
-    fn is_free(&self, frame: usize, order: usize) -> bool {
-        let Some(frame) = frame.checked_sub(self.offset) else {
+    fn is_free(&self, frame: FrameId, order: usize) -> bool {
+        let Some(frame) = frame.0.checked_sub(self.offset).map(FrameId) else {
             return false;
         };
         self.alloc.is_free(frame, order)
@@ -192,10 +196,10 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn metadata(&mut self) -> MetaData<'a> {
         self.alloc.metadata()
     }
-    fn get(&self, core: usize, frame: Option<usize>, flags: Flags) -> Result<usize> {
+    fn get(&self, core: usize, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
         self.alloc.get(core, frame, flags)
     }
-    fn put(&self, core: usize, frame: usize, flags: Flags) -> Result<()> {
+    fn put(&self, core: usize, frame: FrameId, flags: Flags) -> Result<()> {
         self.alloc.put(core, frame, flags)
     }
     fn frames(&self) -> usize {
@@ -207,16 +211,16 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn fast_stats(&self) -> Stats {
         self.alloc.fast_stats()
     }
-    fn fast_stats_at(&self, frame: usize, order: usize) -> Stats {
+    fn fast_stats_at(&self, frame: FrameId, order: usize) -> Stats {
         self.alloc.fast_stats_at(frame, order)
     }
     fn stats(&self) -> Stats {
         self.alloc.stats()
     }
-    fn stats_at(&self, frame: usize, order: usize) -> Stats {
+    fn stats_at(&self, frame: FrameId, order: usize) -> Stats {
         self.alloc.stats_at(frame, order)
     }
-    fn is_free(&self, frame: usize, order: usize) -> bool {
+    fn is_free(&self, frame: FrameId, order: usize) -> bool {
         self.alloc.is_free(frame, order)
     }
     fn drain(&self, core: usize) -> Result<()> {

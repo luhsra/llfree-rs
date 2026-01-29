@@ -7,13 +7,41 @@ use core::{fmt, slice};
 use bitfield_struct::{bitenum, bitfield};
 
 use crate::atomic::{Atom, Atomic};
+use crate::bitfield::RowId;
+use crate::lower::HugeId;
 use crate::util::{Align, size_of_slice};
-use crate::{Error, Flags, HUGE_FRAMES, HUGE_ORDER, Result, Stats, TREE_FRAMES};
+use crate::{Error, Flags, FrameId, HUGE_FRAMES, HUGE_ORDER, Result, Stats, TREE_FRAMES};
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct TreeId(pub usize);
+impl TreeId {
+    pub const fn as_frame(self) -> FrameId {
+        FrameId(self.0 * TREE_FRAMES)
+    }
+    pub const fn as_huge(self) -> HugeId {
+        self.as_frame().as_huge()
+    }
+    pub const fn as_row(self) -> RowId {
+        self.as_frame().as_row()
+    }
+    pub const fn from_bits(value: u64) -> Self {
+        Self(value as _)
+    }
+    pub const fn into_bits(self) -> u64 {
+        self.0 as _
+    }
+}
+impl core::ops::Add<Self> for TreeId {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
 
 #[derive(Default)]
 pub struct Trees<'a> {
     /// Array of level 3 entries, which are the roots of the trees
-    pub entries: &'a [Atom<Tree>],
+    entries: &'a [Atom<Tree>],
 }
 
 impl fmt::Debug for Trees<'_> {
@@ -74,8 +102,12 @@ impl<'a> Trees<'a> {
         self.entries.len()
     }
 
-    pub fn get(&self, i: usize) -> Tree {
-        self.entries[i].load()
+    pub fn get(&self, i: TreeId) -> Tree {
+        self.entries[i.0].load()
+    }
+
+    pub fn at(&self, i: TreeId) -> &Atom<Tree> {
+        &self.entries[i.0]
     }
 
     pub fn stats(&self) -> Stats {
@@ -102,14 +134,14 @@ impl<'a> Trees<'a> {
         self.entries.iter().map(|e| e.load().free()).sum()
     }
     /// Sync with the global tree, stealing its counters
-    pub fn sync(&self, i: usize, min: usize) -> Option<Tree> {
-        self.entries[i].fetch_update(|e| e.sync_steal(min)).ok()
+    pub fn sync(&self, i: TreeId, min: usize) -> Option<Tree> {
+        self.at(i).fetch_update(|e| e.sync_steal(min)).ok()
     }
 
     /// Increment or reserve the tree
-    pub fn inc_or_reserve(&self, i: usize, free: usize, may_reserve: bool) -> Option<Tree> {
+    pub fn inc_or_reserve(&self, i: TreeId, free: usize, may_reserve: bool) -> Option<Tree> {
         let mut reserved = false;
-        let tree = self.entries[i]
+        let tree = self.entries[i.0]
             .fetch_update(|v| {
                 let v = v.inc(free);
                 if may_reserve && !v.reserved() && v.free() > Self::MIN_FREE {
@@ -127,8 +159,8 @@ impl<'a> Trees<'a> {
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: usize, free: usize, kind: Kind) {
-        self.entries[i]
+    pub fn unreserve(&self, i: TreeId, free: usize, kind: Kind) {
+        self.entries[i.0]
             .fetch_update(|v| v.unreserve_add(free, kind))
             .expect("Unreserve failed");
     }
@@ -136,14 +168,14 @@ impl<'a> Trees<'a> {
     /// Iterate through all trees, trying to find the best N fits, then trying to `access` them
     pub fn search_best<const N: usize>(
         &self,
-        start: usize,
+        start: TreeId,
         offset: usize,
         len: usize,
-        access: impl Fn(usize) -> Result<usize>,
-    ) -> Result<usize> {
+        access: impl Fn(TreeId) -> Result<FrameId>,
+    ) -> Result<FrameId> {
         #[derive(Clone, Copy)]
         struct Best {
-            i: usize,
+            i: TreeId,
             prio: NonZeroUsize,
         }
         let mut best: [Option<Best>; N] = [None; N];
@@ -168,11 +200,10 @@ impl<'a> Trees<'a> {
             } else {
                 -(i.div_ceil(2) as isize)
             };
-            let s = (start + self.entries.len()) as isize;
-            let i = (s + off) as usize % self.entries.len();
+            let s = (start.0 + self.entries.len()) as isize;
+            let i = TreeId((s + off) as usize % self.entries.len());
 
-            let curr = self.entries[i].load();
-            if let Some(prio) = prio(curr) {
+            if let Some(prio) = prio(self.get(i)) {
                 // If max prio, try immediately
                 if prio.get() == 4 {
                     match access(i) {
@@ -205,14 +236,14 @@ impl<'a> Trees<'a> {
         Err(Error::Memory)
     }
 
-    /// Iterate through all trees as long `try_use` returns `Error::Memory`
+    /// Iterate through all trees as long `access` returns `Error::Memory`
     pub fn search(
         &self,
-        start: usize,
+        start: TreeId,
         offset: usize,
         len: usize,
-        access: impl Fn(usize) -> Result<usize>,
-    ) -> Result<usize> {
+        access: impl Fn(TreeId) -> Result<FrameId>,
+    ) -> Result<FrameId> {
         for i in offset..len {
             // Alternating between before and after start
             let off = if i.is_multiple_of(2) {
@@ -220,8 +251,8 @@ impl<'a> Trees<'a> {
             } else {
                 -(i.div_ceil(2) as isize)
             };
-            let s = (start + self.entries.len()) as isize;
-            let i = (s + off) as usize % self.entries.len();
+            let s = (start.0 + self.entries.len()) as isize;
+            let i = TreeId((s + off) as usize % self.entries.len());
             match access(i) {
                 Err(Error::Memory) => {}
                 r => return r,

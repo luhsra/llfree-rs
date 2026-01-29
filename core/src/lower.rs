@@ -8,14 +8,38 @@ use bitfield_struct::bitfield;
 use log::{error, info, warn};
 
 use crate::atomic::{Atom, AtomArray, Atomic};
-use crate::util::{Align, Deferred, align_down, size_of_slice, spin_wait};
+use crate::bitfield::{Bitfield, RowId};
+use crate::trees::TreeId;
+use crate::util::{Align, Deferred, size_of_slice, spin_wait};
 use crate::{
-    Error, HUGE_FRAMES, HUGE_ORDER, Init, MAX_ORDER, RETRIES, Result, Stats, TREE_FRAMES, TREE_HUGE,
+    Error, FrameId, HUGE_FRAMES, HUGE_ORDER, Init, MAX_ORDER, RETRIES, Result, Stats, TREE_FRAMES,
+    TREE_HUGE,
 };
 
-const ROWS: usize = HUGE_FRAMES / crate::bitfield::Bitfield::<1>::ROW_BITS;
-type Bitfield = crate::bitfield::Bitfield<ROWS>;
 const _: () = assert!(Bitfield::LEN == HUGE_FRAMES);
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct HugeId(pub usize);
+impl HugeId {
+    pub fn as_frame(self) -> FrameId {
+        FrameId(self.0 * HUGE_FRAMES)
+    }
+    pub fn as_tree(self) -> TreeId {
+        self.as_frame().as_tree()
+    }
+    pub fn as_row(self) -> RowId {
+        self.as_frame().as_row()
+    }
+    pub fn child_idx(self) -> usize {
+        self.0 % TREE_HUGE
+    }
+}
+impl core::ops::Add<Self> for HugeId {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
 
 /// Lower-level frame allocator.
 ///
@@ -112,6 +136,13 @@ impl<'a> Lower<'a> {
         Ok(alloc)
     }
 
+    fn children(&self, tree: TreeId) -> &[Atom<HugeEntry>; TREE_HUGE] {
+        &self.children[tree.0]
+    }
+    fn bitfield(&self, huge: HugeId) -> &Bitfield {
+        &self.bitfields[huge.0]
+    }
+
     pub fn frames(&self) -> usize {
         self.len
     }
@@ -126,22 +157,22 @@ impl<'a> Lower<'a> {
     pub fn recover(&self) {
         for (i, table) in self.children.iter().enumerate() {
             for (j, a_entry) in table.iter().enumerate() {
-                let start = i * TREE_FRAMES + j * Bitfield::LEN;
+                let start = FrameId(TreeId(i).as_frame().0 + HugeId(j).as_frame().0);
                 let entry = a_entry.load();
 
                 if entry.huge() {
                     // Check that underlying bitfield is empty
-                    let p = self.bitfields[start / Bitfield::LEN].count_zeros();
+                    let p = self.bitfield(start.as_huge()).count_zeros();
                     if p != Bitfield::LEN {
-                        warn!("Invalid L2 start=0x{start:x} i{i}: h != {p}");
-                        self.bitfields[start / Bitfield::LEN].fill(false);
+                        warn!("Invalid L2 start=0x{start:?} i{i}: h != {p}");
+                        self.bitfield(start.as_huge()).fill(false);
                     }
                 } else {
                     // Check the bitfield has the same number of zero bits
-                    let zeros = self.bitfields[start / Bitfield::LEN].count_zeros();
+                    let zeros = self.bitfield(start.as_huge()).count_zeros();
                     if entry.free() != zeros {
                         warn!(
-                            "Invalid L2 start=0x{start:x} i{i}: {} != {zeros}",
+                            "Invalid L2 start=0x{start:?} i{i}: {} != {zeros}",
                             entry.free()
                         );
                         a_entry.store(HugeEntry::new_with(zeros));
@@ -154,31 +185,31 @@ impl<'a> Lower<'a> {
     /// Try allocating a new `frame` in the [LowerAlloc::N] sized chunk at `start`.
     ///
     /// Returns the allocated frame and whether a new huge frame was fragmented.
-    pub fn get(&self, start: usize, order: usize) -> Result<(usize, bool)> {
-        debug_assert!(start < self.frames());
+    pub fn get(&self, start: FrameId, order: usize) -> Result<(FrameId, bool)> {
+        debug_assert!(start.0 < self.frames());
 
-        let tree_start = align_down(start, TREE_FRAMES);
-        let child_off = (start / Bitfield::LEN) % TREE_HUGE;
-        let children = &self.children[start / TREE_FRAMES];
+        let tree_start = start.as_tree().as_frame();
+        let child_off = start.as_huge().child_idx();
+        let children = self.children(start.as_tree());
 
         if order == MAX_ORDER {
-            let table_pair = self.child_pairs(start);
+            let table_pair = self.child_pairs(start.as_tree());
             for i in 0..TREE_HUGE / 2 {
                 let i = (child_off / 2 + i) % (TREE_HUGE / 2);
                 if let Ok(_) = table_pair[i].fetch_update(|v| v.map(|v| v.mark_huge())) {
-                    return Ok((tree_start + 2 * i * Bitfield::LEN, true));
+                    return Ok((FrameId(tree_start.0 + HugeId(2 * i).as_frame().0), true));
                 }
             }
         } else if order == HUGE_ORDER {
             for i in 0..TREE_HUGE {
                 let i = (child_off + i) % TREE_HUGE;
                 if let Ok(_) = children[i].fetch_update(|v| v.mark_huge()) {
-                    return Ok((tree_start + i * Bitfield::LEN, true));
+                    return Ok((FrameId(tree_start.0 + HugeId(i).as_frame().0), true));
                 }
             }
         } else if order <= Bitfield::ORDER {
-            let first_child = tree_start / Bitfield::LEN;
-            let start_row = (start / Bitfield::ROW_BITS) % Bitfield::ROWS;
+            let first_child = tree_start.as_huge();
+            let start_row = start.as_row();
 
             for j in 0..TREE_HUGE {
                 let i = (child_off + j) % TREE_HUGE;
@@ -190,12 +221,12 @@ impl<'a> Lower<'a> {
                     });
 
                     // start with the bitfield row from the last allocation
-                    let row = if j == 0 { start_row } else { 0 };
+                    let row = if j == 0 { start_row } else { RowId(0) };
 
-                    let bf_i = first_child + i;
-                    if let Ok(offset) = self.bitfields[bf_i].set_first_zeros(row, order) {
+                    let bf_i = first_child + HugeId(i);
+                    if let Ok(offset) = self.bitfield(bf_i).set_first_zeros(row, order) {
                         undo.cancel();
-                        return Ok((bf_i * Bitfield::LEN + offset, child.free() == Bitfield::LEN));
+                        return Ok((bf_i.as_frame() + offset, child.free() == Bitfield::LEN));
                     }
                 }
             }
@@ -207,15 +238,16 @@ impl<'a> Lower<'a> {
     }
 
     /// Try allocating a specific `frame`.
-    pub fn get_at(&self, frame: usize, order: usize) -> Result<bool> {
-        debug_assert!(frame.is_multiple_of(1 << order));
-        debug_assert!(frame + (1 << order) <= self.frames());
+    pub fn get_at(&self, frame: FrameId, order: usize) -> Result<bool> {
+        debug_assert!(frame.is_aligned(order));
+        debug_assert!(frame.0 + (1 << order) <= self.frames());
 
-        let i = (frame / Bitfield::LEN) % TREE_HUGE;
-        let children = &self.children[frame / TREE_FRAMES][i];
+        let i = (frame.as_huge().0) % TREE_HUGE;
+        let children = &self.children(frame.as_tree())[i];
 
         if order == MAX_ORDER {
-            if let Ok(_) = self.child_pairs(frame)[i / 2].fetch_update(|v| v.map(|v| v.mark_huge()))
+            if let Ok(_) =
+                self.child_pairs(frame.as_tree())[i / 2].fetch_update(|v| v.map(|v| v.mark_huge()))
             {
                 return Ok(true);
             }
@@ -229,11 +261,7 @@ impl<'a> Lower<'a> {
                     children.fetch_update(|v| v.inc(1 << order)).unwrap();
                 });
 
-                if let Ok(_) = self.bitfields[frame / Bitfield::LEN].toggle(
-                    frame % Bitfield::LEN,
-                    order,
-                    false,
-                ) {
+                if let Ok(_) = self.bitfield(frame.as_huge()).toggle(frame, order, false) {
                     deferred.cancel();
                     return Ok(old.free() == Bitfield::LEN);
                 }
@@ -245,15 +273,15 @@ impl<'a> Lower<'a> {
     }
 
     /// Free single frame, returning whether a whole huge page has become free.
-    pub fn put(&self, frame: usize, order: usize) -> Result<bool> {
-        debug_assert!(frame.is_multiple_of(1 << order));
-        debug_assert!(frame + (1 << order) <= self.frames());
+    pub fn put(&self, frame: FrameId, order: usize) -> Result<bool> {
+        debug_assert!(frame.is_aligned(order));
+        debug_assert!(frame.0 + (1 << order) <= self.frames());
 
-        let i = (frame / Bitfield::LEN) % TREE_HUGE;
-        let children = &self.children[frame / TREE_FRAMES];
+        let i = frame.as_huge().child_idx();
+        let children = &self.children(frame.as_tree());
 
         if order == MAX_ORDER {
-            let table_pair = self.child_pairs(frame);
+            let table_pair = self.child_pairs(frame.as_tree());
             if let Err(old) = table_pair[i / 2].compare_exchange(
                 HugePair(HugeEntry::new_huge(), HugeEntry::new_huge()),
                 HugePair(
@@ -261,7 +289,7 @@ impl<'a> Lower<'a> {
                     HugeEntry::new_with(Bitfield::LEN),
                 ),
             ) {
-                error!("Addr {frame:x} o={order} {old:?}");
+                error!("Addr {frame:?} o={order} {old:?}");
                 Err(Error::Address)
             } else {
                 Ok(true)
@@ -270,7 +298,7 @@ impl<'a> Lower<'a> {
             if let Err(old) = children[i]
                 .compare_exchange(HugeEntry::new_huge(), HugeEntry::new_with(Bitfield::LEN))
             {
-                error!("Addr {frame:x} o={order} {old:?}");
+                error!("Addr {frame:?} o={order} {old:?}");
                 Err(Error::Address)
             } else {
                 Ok(true)
@@ -282,7 +310,7 @@ impl<'a> Lower<'a> {
             } else if old.free() <= Bitfield::LEN - (1 << order) {
                 self.put_small(frame, order)
             } else {
-                error!("Addr {frame:x} o={order} {old:?}");
+                error!("Addr {frame:?} o={order} {old:?}");
                 Err(Error::Address)
             }
         } else {
@@ -291,18 +319,18 @@ impl<'a> Lower<'a> {
     }
 
     /// Returns if the frame is free. This might be racy!
-    pub fn is_free(&self, frame: usize, order: usize) -> bool {
-        debug_assert!(frame.is_multiple_of(1 << order));
-        debug_assert!(frame + (1 << order) <= self.frames());
+    pub fn is_free(&self, frame: FrameId, order: usize) -> bool {
+        debug_assert!(frame.is_aligned(order));
+        debug_assert!(frame.0 + (1 << order) <= self.frames());
 
-        let i = (frame / Bitfield::LEN) % TREE_HUGE;
-        let children = &self.children[frame / TREE_FRAMES];
+        let i = frame.as_huge().child_idx();
+        let children = &self.children(frame.as_tree());
 
         if 1 << order == TREE_FRAMES {
             children.iter().all(|e| e.load().free() == Bitfield::LEN)
         } else if order == MAX_ORDER {
             // multiple huge frames
-            self.child_pairs(frame)[i / 2]
+            self.child_pairs(frame.as_tree())[i / 2]
                 .load()
                 .all(|e| e.free() == Bitfield::LEN)
         } else if order == HUGE_ORDER {
@@ -314,8 +342,8 @@ impl<'a> Lower<'a> {
             } else if child.free() == Bitfield::LEN {
                 true
             } else {
-                let bitfield = &self.bitfields[frame / Bitfield::LEN];
-                bitfield.is_zero(frame % Bitfield::LEN, order)
+                let bitfield = &self.bitfield(frame.as_huge());
+                bitfield.is_zero(frame, order)
             }
         } else {
             unreachable!("Order {order} is not supported")
@@ -339,20 +367,19 @@ impl<'a> Lower<'a> {
     }
 
     /// Returns statistics at a specific frame, huge frame, or tree.
-    pub fn stats_at(&self, frame: usize, order: usize) -> Stats {
+    pub fn stats_at(&self, frame: FrameId, order: usize) -> Stats {
         const TREE_ORDER: usize = TREE_FRAMES.ilog2() as usize;
-        let children = &self.children[frame / TREE_FRAMES];
-        let i = frame / Bitfield::LEN;
+        let children = &self.children(frame.as_tree());
+        let i = frame.as_huge();
         match order {
             0 => Stats {
-                free_frames: (children[i % TREE_HUGE].load().free() > 0
-                    && self.bitfields[i].is_zero(frame % Bitfield::LEN, 0))
-                    as usize,
+                free_frames: (children[i.child_idx()].load().free() > 0
+                    && self.bitfield(i).is_zero(frame, 0)) as usize,
                 free_huge: 0,
                 free_trees: 0,
             },
             HUGE_ORDER => {
-                let free = children[i % TREE_HUGE].load().free();
+                let free = children[i.child_idx()].load().free();
                 Stats {
                     free_frames: free,
                     free_huge: free / HUGE_FRAMES,
@@ -374,8 +401,8 @@ impl<'a> Lower<'a> {
     }
 
     /// Returns the table with pair entries that can be updated at once.
-    fn child_pairs(&self, frame: usize) -> &[Atom<HugePair>; TREE_HUGE / 2] {
-        let children = &self.children[frame / TREE_FRAMES];
+    fn child_pairs(&self, tree: TreeId) -> &[Atom<HugePair>; TREE_HUGE / 2] {
+        let children = &self.children(tree);
         unsafe { &*children.as_ptr().cast() }
     }
 
@@ -402,10 +429,10 @@ impl<'a> Lower<'a> {
         }
         // Bitfield might be only partially included in the memory range
         if let Some((last, excluded)) = remainder.split_first() {
-            let end = self.frames() - included.len() * Bitfield::LEN;
-            debug_assert!(end <= Bitfield::LEN);
-            last.set(0..end, false);
-            last.set(end..Bitfield::LEN, true);
+            let end = FrameId(self.frames() - included.len() * Bitfield::LEN);
+            debug_assert!(end.0 <= Bitfield::LEN);
+            last.set(FrameId(0)..end, false);
+            last.set(end..FrameId(Bitfield::LEN), true);
             remainder = excluded;
         }
         // Not part of the final memory range
@@ -445,32 +472,33 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn put_small(&self, frame: usize, order: usize) -> Result<bool> {
+    fn put_small(&self, frame: FrameId, order: usize) -> Result<bool> {
         debug_assert!(order < HUGE_ORDER);
 
-        let bitfield = &self.bitfields[frame / Bitfield::LEN];
-        let i = frame % Bitfield::LEN;
-        if bitfield.toggle(i, order, true).is_err() {
-            error!("L1 put failed o={order} i={i} p={frame}");
+        let bitfield = &self.bitfield(frame.as_huge());
+        if bitfield.toggle(frame, order, true).is_err() {
+            error!(
+                "L1 put failed o={order} i={} p={frame:?}",
+                frame.0 % Bitfield::LEN
+            );
             return Err(Error::Address);
         }
 
-        let children = &self.children[frame / TREE_FRAMES];
-        let i = (frame / Bitfield::LEN) % TREE_HUGE;
+        let children = &self.children(frame.as_tree());
+        let i = frame.as_huge().child_idx();
         match children[i].fetch_update(|v| v.inc(1 << order)) {
-            Err(entry) => panic!("Inc failed i{i} p={frame} {entry:?}"),
+            Err(entry) => panic!("Inc failed i{i} p={frame:?} {entry:?}"),
             Ok(entry) => Ok(entry.free() + (1 << order) == Bitfield::LEN),
         }
     }
 
-    fn partial_put_huge(&self, old: HugeEntry, frame: usize, order: usize) -> Result<bool> {
-        info!("partial free of huge frame {frame:x} o={order}");
-        let i = (frame / Bitfield::LEN) % TREE_HUGE;
-        let children = &self.children[frame / TREE_FRAMES];
-        let bitfield = &self.bitfields[frame / Bitfield::LEN];
-
+    fn partial_put_huge(&self, old: HugeEntry, frame: FrameId, order: usize) -> Result<bool> {
+        info!("partial free of huge frame {frame:?} o={order}");
+        let i = frame.as_huge().child_idx();
+        let children = &self.children(frame.as_tree());
+        let bitfield = &self.bitfield(frame.as_huge());
         // Try filling the whole bitfield
-        if bitfield.toggle(0, Bitfield::ORDER, false).is_ok() {
+        if bitfield.toggle(FrameId(0), Bitfield::ORDER, false).is_ok() {
             children[i]
                 .compare_exchange(old, HugeEntry::new())
                 .expect("Failed partial clear");
@@ -485,21 +513,20 @@ impl<'a> Lower<'a> {
 
     #[cfg(feature = "std")]
     #[allow(dead_code)]
-    pub fn dump(&self, start: usize) {
+    pub fn dump(&self, start: TreeId) {
         use std::fmt::Write;
 
         let mut out = std::string::String::new();
-        writeln!(out, "Dumping pt {}", start / TREE_FRAMES).unwrap();
-        let table = &self.children[start / TREE_FRAMES];
+        writeln!(out, "Dumping pt {start:?}").unwrap();
+        let table = &self.children(start);
         for (i, entry) in table.iter().enumerate() {
-            let start = align_down(start, TREE_FRAMES) + i * Bitfield::LEN;
-            if start >= self.frames() {
+            if start.as_frame().0 >= self.frames() {
                 break;
             }
 
             let entry = entry.load();
             let indent = 4;
-            let bitfield = &self.bitfields[start / Bitfield::LEN];
+            let bitfield = &self.bitfield(start.as_huge());
             writeln!(out, "{:indent$}l2 i={i}: {entry:?}\t{bitfield:?}", "").unwrap();
             if !entry.huge() {
                 assert_eq!(bitfield.count_zeros(), entry.free());
@@ -611,7 +638,10 @@ mod test {
     use super::Bitfield;
     use crate::lower::Lower;
     use crate::util::{WyRand, aligned_buf, logging};
-    use crate::{Error, HUGE_FRAMES, Init, MAX_ORDER, Result, TREE_FRAMES, TREE_HUGE, thread};
+    use crate::{
+        Error, FrameId, HUGE_FRAMES, HugeId, Init, MAX_ORDER, Result, TREE_FRAMES, TREE_HUGE,
+        TreeId, thread,
+    };
 
     struct LowerTest<'a>(ManuallyDrop<Lower<'a>>);
 
@@ -642,17 +672,20 @@ mod test {
         logging();
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
-        lower.get(0, 0).unwrap();
+        lower.get(FrameId(0), 0).unwrap();
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            let frame = lower.get(0, 0).unwrap().0;
+            let frame = lower.get(FrameId(0), 0).unwrap().0.0;
             assert!(frame < lower.frames());
         });
 
-        assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 3);
-        assert_eq!(lower.bitfields[0].count_zeros(), Bitfield::LEN - 3);
+        assert_eq!(
+            lower.children(TreeId(0))[0].load().free(),
+            Bitfield::LEN - 3
+        );
+        assert_eq!(lower.bitfield(HugeId(0)).count_zeros(), Bitfield::LEN - 3);
     }
 
     #[test]
@@ -664,12 +697,12 @@ mod test {
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.get(0, 0).unwrap();
+            lower.get(FrameId(0), 0).unwrap();
         });
 
-        let entry2 = lower.children[0][0].load();
+        let entry2 = lower.children(TreeId(0))[0].load();
         assert_eq!(entry2.free(), Bitfield::LEN - 2);
-        assert_eq!(lower.bitfields[0].count_zeros(), Bitfield::LEN - 2);
+        assert_eq!(lower.bitfield(HugeId(0)).count_zeros(), Bitfield::LEN - 2);
     }
 
     #[test]
@@ -679,19 +712,19 @@ mod test {
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
         for _ in 0..Bitfield::LEN - 1 {
-            lower.get(0, 0).unwrap();
+            lower.get(FrameId(0), 0).unwrap();
         }
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.get(0, 0).unwrap();
+            lower.get(FrameId(0), 0).unwrap();
         });
 
-        let table = &lower.children[0];
+        let table = &lower.children(TreeId(0));
         assert_eq!(table[0].load().free(), 0);
         assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
-        assert_eq!(lower.bitfields[1].count_zeros(), Bitfield::LEN - 1);
+        assert_eq!(lower.bitfield(HugeId(1)).count_zeros(), Bitfield::LEN - 1);
     }
 
     #[test]
@@ -702,16 +735,16 @@ mod test {
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
-        frames[0] = lower.get(0, 0).unwrap().0;
-        frames[1] = lower.get(0, 0).unwrap().0;
+        frames[0] = lower.get(FrameId(0), 0).unwrap().0.0;
+        frames[1] = lower.get(FrameId(0), 0).unwrap().0.0;
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.put(frames[t], 0).unwrap();
+            lower.put(FrameId(frames[t]), 0).unwrap();
         });
 
-        assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
+        assert_eq!(lower.children(TreeId(0))[0].load().free(), Bitfield::LEN);
     }
 
     #[test]
@@ -723,18 +756,18 @@ mod test {
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
         for frame in &mut frames {
-            *frame = lower.get(0, 0).unwrap().0;
+            *frame = lower.get(FrameId(0), 0).unwrap().0.0;
         }
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.put(frames[t], 0).unwrap();
+            lower.put(FrameId(frames[t]), 0).unwrap();
         });
 
-        let table = &lower.children[0];
+        let table = &lower.children(TreeId(0));
         assert_eq!(table[0].load().free(), 2);
-        assert_eq!(lower.bitfields[0].count_zeros(), 2);
+        assert_eq!(lower.bitfield(HugeId(0)).count_zeros(), 2);
     }
 
     #[test]
@@ -746,29 +779,29 @@ mod test {
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
         for frame in &mut frames[..Bitfield::LEN - 1] {
-            *frame = lower.get(0, 0).unwrap().0;
+            *frame = lower.get(FrameId(0), 0).unwrap().0.0;
         }
 
         std::thread::scope(|s| {
             s.spawn(|| {
                 thread::pin(0);
 
-                lower.get(0, 0).unwrap();
+                lower.get(FrameId(0), 0).unwrap();
             });
             thread::pin(1);
 
-            lower.put(frames[0], 0).unwrap();
+            lower.put(FrameId(frames[0]), 0).unwrap();
         });
 
-        let table = &lower.children[0];
+        let table = &lower.children(TreeId(0));
         if table[0].load().free() == 1 {
-            assert_eq!(lower.bitfields[0].count_zeros(), 1);
+            assert_eq!(lower.bitfield(HugeId(0)).count_zeros(), 1);
         } else {
             // Table entry skipped
             assert_eq!(table[0].load().free(), 2);
-            assert_eq!(lower.bitfields[0].count_zeros(), 2);
+            assert_eq!(lower.bitfield(HugeId(0)).count_zeros(), 2);
             assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
-            assert_eq!(lower.bitfields[1].count_zeros(), Bitfield::LEN - 1);
+            assert_eq!(lower.bitfield(HugeId(1)).count_zeros(), Bitfield::LEN - 1);
         }
     }
 
@@ -777,22 +810,25 @@ mod test {
         logging();
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
-        lower.get(0, 0).unwrap();
+        lower.get(FrameId(0), 0).unwrap();
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
             let order = t + 1; // order 1 and 2
-            let frame = lower.get(0, order).unwrap().0;
+            let frame = lower.get(FrameId(0), order).unwrap().0.0;
             assert!(frame < lower.frames());
         });
 
         let allocated = 1 + 2 + 4;
         assert_eq!(
-            lower.children[0][0].load().free(),
+            lower.children(TreeId(0))[0].load().free(),
             Bitfield::LEN - allocated
         );
-        assert_eq!(lower.bitfields[0].count_zeros(), Bitfield::LEN - allocated);
+        assert_eq!(
+            lower.bitfield(HugeId(0)).count_zeros(),
+            Bitfield::LEN - allocated
+        );
     }
 
     #[test]
@@ -803,18 +839,21 @@ mod test {
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
-        frames[0] = lower.get(0, 1).unwrap().0;
-        frames[1] = lower.get(0, 2).unwrap().0;
+        frames[0] = lower.get(FrameId(0), 1).unwrap().0.0;
+        frames[1] = lower.get(FrameId(0), 2).unwrap().0.0;
 
-        assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN - 2 - 4);
+        assert_eq!(
+            lower.children(TreeId(0))[0].load().free(),
+            Bitfield::LEN - 2 - 4
+        );
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.put(frames[t], t + 1).unwrap();
+            lower.put(FrameId(frames[t]), t + 1).unwrap();
         });
 
-        assert_eq!(lower.children[0][0].load().free(), Bitfield::LEN);
+        assert_eq!(lower.children(TreeId(0))[0].load().free(), Bitfield::LEN);
     }
 
     #[test]
@@ -834,7 +873,7 @@ mod test {
         let mut frames = Vec::new();
         for order in 0..=MAX_ORDER {
             for _ in 0..1usize << (MAX_ORDER - order) {
-                frames.push((order, 0));
+                frames.push((order, FrameId(0)));
                 num_frames += 1 << order;
             }
         }
@@ -845,15 +884,15 @@ mod test {
             lower.frames()
         );
 
-        let mut tree_idx = 0;
+        let mut tree_idx = TreeId(0);
         'outer: for (order, frame) in &mut frames {
             for i in 0..lower.frames().div_ceil(TREE_FRAMES) {
                 // fall back to other chunks
-                let i = (i + tree_idx) % lower.frames().div_ceil(TREE_FRAMES);
-                match lower.get(i * TREE_FRAMES, *order) {
+                let i = TreeId((TreeId(i) + tree_idx).0 % lower.frames().div_ceil(TREE_FRAMES));
+                match lower.get(i.as_frame(), *order) {
                     Ok((free, _huge)) => {
                         *frame = free;
-                        tree_idx = free / TREE_FRAMES;
+                        tree_idx = free.as_tree();
                         continue 'outer;
                     }
                     Err(Error::Memory) => {}
@@ -883,7 +922,7 @@ mod test {
         assert_eq!(lower.stats().free_frames, 0);
 
         for i in 0..FRAMES {
-            lower.put(i * (1 << MAX_ORDER), MAX_ORDER).unwrap();
+            lower.put(FrameId(i * (1 << MAX_ORDER)), MAX_ORDER).unwrap();
         }
 
         assert_eq!(
@@ -900,7 +939,7 @@ mod test {
 
         assert_eq!(lower.stats().free_frames, 0);
 
-        lower.put(0, 0).unwrap();
+        lower.put(FrameId(0), 0).unwrap();
 
         assert_eq!(lower.stats().free_frames, 1);
     }
@@ -922,9 +961,9 @@ mod test {
                 thread::pin(t);
                 barrier.wait();
 
-                let mut frames = [0; 4];
+                let mut frames = [FrameId(0); 4];
                 for p in &mut frames {
-                    *p = lower.get(0, 0).unwrap().0;
+                    *p = lower.get(FrameId(0), 0).unwrap().0;
                 }
                 frames.reverse();
                 for p in frames {
@@ -950,7 +989,7 @@ mod test {
             assert_eq!(lower.stats().free_frames, FRAMES);
 
             for frame in &mut frames[..HUGE_FRAMES - 3] {
-                *frame = lower.get(0, 0).unwrap().0;
+                *frame = lower.get(FrameId(0), 0).unwrap().0.0;
             }
 
             let barrier = Barrier::new(THREADS);
@@ -959,9 +998,9 @@ mod test {
                 barrier.wait();
 
                 if t < THREADS / 2 {
-                    lower.put(frames[t], 0).unwrap();
+                    lower.put(FrameId(frames[t]), 0).unwrap();
                 } else {
-                    lower.get(0, 0).unwrap();
+                    lower.get(FrameId(0), 0).unwrap();
                 }
             });
 
@@ -988,7 +1027,7 @@ mod test {
             let mut get = 0;
             let mut put = 0;
             loop {
-                match lower.get(0, 0) {
+                match lower.get(FrameId(0), 0) {
                     Ok((frame, huge)) => {
                         get += huge as usize;
                         frames.push(frame);
@@ -1045,7 +1084,7 @@ mod test {
                     if target < frames.len() {
                         put += lower.put(frames.pop().unwrap(), 0).unwrap() as usize;
                     } else {
-                        match lower.get(0, 0) {
+                        match lower.get(FrameId(0), 0) {
                             Ok((frame, huge)) => {
                                 get += huge as usize;
                                 frames.push(frame);

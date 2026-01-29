@@ -7,15 +7,15 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
-#[cfg(feature = "llzig")]
-use llfree::LLZig;
 #[cfg(feature = "llc")]
 use llfree::LLC;
+#[cfg(feature = "llzig")]
+use llfree::LLZig;
 use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, Flags, LLFree, MAX_ORDER, Result, thread};
+use llfree::{Alloc, Flags, FrameId, LLFree, MAX_ORDER, Result, thread};
 use log::warn;
 
 /// Number of allocations per block
@@ -120,18 +120,18 @@ pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Mapping<Fram
 
 /// Reduced, VTable-compatible alloc trait for dynamic dispatch
 trait DynAlloc: fmt::Debug + Send + Sync {
-    fn get(&self, core: usize, order: usize) -> Result<usize>;
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()>;
+    fn get(&self, core: usize, order: usize) -> Result<FrameId>;
+    fn put(&self, core: usize, frame: FrameId, order: usize) -> Result<()>;
 
     fn frames(&self) -> usize;
     fn allocated_frames(&self) -> usize;
 }
 
 impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
-    fn get(&self, core: usize, order: usize) -> Result<usize> {
+    fn get(&self, core: usize, order: usize) -> Result<FrameId> {
         Alloc::get(self, core, None, Flags::o(order))
     }
-    fn put(&self, core: usize, frame: usize, order: usize) -> Result<()> {
+    fn put(&self, core: usize, frame: FrameId, order: usize) -> Result<()> {
         Alloc::put(self, core, frame, Flags::o(order))
     }
     fn frames(&self) -> usize {
@@ -308,7 +308,7 @@ fn rand(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usi
     let allocs = alloc.frames() / max_threads / 2 / (1 << order);
     let barrier = Barrier::new(threads);
 
-    let mut all_pages = vec![0; allocs * threads];
+    let mut all_pages = vec![FrameId(0); allocs * threads];
     let all_pages_ptr = all_pages.as_mut_ptr() as usize;
 
     let chunks = all_pages.chunks_mut(allocs).enumerate();
@@ -375,7 +375,7 @@ fn rand_block(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, thread
     let allocs = alloc.frames() / max_threads / 2 / (1 << order);
     let barrier = Barrier::new(threads);
 
-    let mut all_pages = vec![0; allocs * threads];
+    let mut all_pages = vec![FrameId(0); allocs * threads];
     let all_pages_ptr = all_pages.as_mut_ptr() as usize;
 
     let chunks = all_pages.chunks_mut(allocs).enumerate();

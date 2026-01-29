@@ -8,11 +8,11 @@ use log::{error, info, warn};
 use crate::atomic::Atom;
 use crate::local::{Local, LocalTree};
 use crate::lower::Lower;
-use crate::trees::{Kind, Tree, Trees};
-use crate::util::{Align, FmtFn, align_down, size_of_slice};
+use crate::trees::{Kind, Tree, TreeId, Trees};
+use crate::util::{Align, FmtFn, align_down, size_of_slice, spin_wait};
 use crate::{
-    Alloc, BITFIELD_ROW, Error, Flags, HUGE_FRAMES, HUGE_ORDER, Init, MAX_ORDER, MetaData,
-    MetaSize, RETRIES, Result, Stats, TREE_FRAMES, TREE_ORDER,
+    Alloc, Error, Flags, FrameId, HUGE_FRAMES, HUGE_ORDER, Init, MAX_ORDER, MetaData, MetaSize,
+    RETRIES, Result, Stats, TREE_FRAMES, TREE_ORDER,
 };
 
 /// This allocator splits its memory range into chunks.
@@ -87,7 +87,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
         // Init tree array
         let tree_init = if init != Init::None {
-            Some(|start| lower.stats_at(start, TREE_FRAMES.ilog2() as _).free_frames)
+            Some(|start| lower.stats_at(FrameId(start), TREE_ORDER).free_frames)
         } else {
             None
         };
@@ -120,39 +120,57 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
     }
 
-    fn get(&self, core: usize, frame: Option<usize>, flags: Flags) -> Result<usize> {
-        self.check(0, flags.order())?;
+    fn get(&self, core: usize, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
+        self.check(FrameId(0), flags.order())?;
         // We might have more cores than cpu-local data
         let core = core % self.local.len();
 
         // Different starting points for each core
-        let mut start_idx = self.trees.len() / self.local.len() * core;
+        let mut start_idx = TreeId(self.trees.len() / self.local.len() * core);
 
         // Try local reservation first (if enough memory)
         // Retry allocation up to n times if it fails due to a concurrent update
         for _ in 0..RETRIES {
             match self.get_from_local(core, flags.into(), flags.order(), frame) {
                 Ok(frame) => return Ok(frame),
-                Err((Error::Retry, _)) => {}
+                Err((Error::Retry, _)) => continue,
                 Err((Error::Memory, old)) => {
                     if old.present() {
-                        start_idx = old.frame() / TREE_FRAMES;
+                        start_idx = old.frame().as_tree();
                     }
-                    break;
                 }
                 Err((e, _)) => return Err(e),
+            }
+            // Try reserve new tree if no specific frame is requested
+            if frame.is_none() {
+                match self.reserve_and_get(core, flags, start_idx) {
+                    Err(Error::Memory) => {}
+                    r => return r,
+                }
+            }
+
+            // few local trees -> high propability that they are shared
+            if self.local.len() < 4 {
+                // If reservation fails, there might be another concurrent update -> retry
+                spin_wait(8 * RETRIES, || {
+                    let local = self.local[core].preferred(flags.into()).load();
+                    local.dec(frame, 1 << flags.order()).is_some()
+                });
             }
         }
 
         // Global search
         if let Some(frame) = frame {
             // Do not reserve trees if a specific frame is allocated
-            if let Ok(_) = self.trees.entries[frame / TREE_FRAMES]
+            if let Ok(_) = self
+                .trees
+                .at(frame.as_tree())
                 .fetch_update(|v| v.dec_force(1 << flags.order(), flags.into()))
             {
                 match self.lower.get_at(frame, flags.order()) {
                     Err(Error::Memory) => {
-                        self.trees.entries[frame / TREE_FRAMES]
+                        self.trees
+                            .at(frame.as_tree())
                             .fetch_update(|v| Some(v.inc(1 << flags.order())))
                             .expect("Undo failed");
                         // try next
@@ -161,22 +179,18 @@ impl<'a> Alloc<'a> for LLFree<'a> {
                     Err(e) => return Err(e),
                 };
             }
-        } else {
-            match self.reserve_and_get(core, flags, start_idx) {
-                Err(Error::Memory) => {}
-                r => return r,
-            }
         }
 
+        // OOM steal from other cores
         for _ in 0..RETRIES {
             match self.steal_from_reserved(core, flags, frame) {
-                Err(Error::Retry) => {}
+                Err(Error::Retry) => continue,
                 Err(Error::Memory) => break,
                 r => return r,
             }
         }
 
-        // Global search
+        // Last resort: Global search
         if frame.is_none() {
             // Fallback to global allocation (ignoring local reservations)
             return self.get_any_global(start_idx, flags);
@@ -184,7 +198,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         Err(Error::Memory)
     }
 
-    fn put(&self, core: usize, frame: usize, mut flags: Flags) -> Result<()> {
+    fn put(&self, core: usize, frame: FrameId, mut flags: Flags) -> Result<()> {
         self.check(frame, flags.order())?;
         // Put usually does not know about movability
         flags.set_movable(false);
@@ -193,7 +207,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         self.lower.put(frame, flags.order())?;
 
         // Then update local / global counters
-        let i = frame / TREE_FRAMES;
+        let i = frame.as_tree();
         let local = &self.local[core % self.local.len()];
         // Update the put-reserve heuristic
         let may_reserve = self.cores() > 1 && local.frees_push(i);
@@ -218,14 +232,14 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         // Increment or reserve globally
         if let Some(tree) = self.trees.inc_or_reserve(i, num_frames, may_reserve) {
             // Change preferred tree to speedup future frees
-            let entry = LocalTree::with(i * TREE_FRAMES, tree.free() + num_frames);
+            let entry = LocalTree::with(frame, tree.free() + num_frames);
             let kind = flags.with_movable(tree.kind() == Kind::Movable).into();
             self.swap_reserved(local.preferred(kind), entry, kind);
         }
         Ok(())
     }
 
-    fn is_free(&self, frame: usize, order: usize) -> bool {
+    fn is_free(&self, frame: FrameId, order: usize) -> bool {
         if self.check(frame, order).is_ok() {
             self.lower.is_free(frame, order)
         } else {
@@ -269,16 +283,14 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         self.lower.stats()
     }
 
-    fn fast_stats_at(&self, frame: usize, order: usize) -> Stats {
+    fn fast_stats_at(&self, frame: FrameId, order: usize) -> Stats {
         if order == TREE_ORDER {
-            let tree = self.trees.get(frame / TREE_FRAMES);
+            let tree = self.trees.get(frame.as_tree());
             if tree.reserved() {
                 for local in self.local {
                     for kind in Kind::all() {
                         let preferred = local.preferred(kind).load();
-                        if preferred.present()
-                            && preferred.frame() / TREE_FRAMES == frame / TREE_FRAMES
-                        {
+                        if preferred.present() && preferred.frame().as_tree() == frame.as_tree() {
                             return Stats {
                                 free_frames: tree.free() + preferred.free(),
                                 free_huge: if kind == Kind::Huge || tree.free() == TREE_FRAMES {
@@ -308,7 +320,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
     }
 
-    fn stats_at(&self, frame: usize, order: usize) -> Stats {
+    fn stats_at(&self, frame: FrameId, order: usize) -> Stats {
         self.lower.stats_at(frame, order)
     }
 
@@ -319,12 +331,12 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         assert_eq!(fast_stats.free_frames, full_stats.free_frames);
         assert!(fast_stats.free_huge <= full_stats.free_huge); // under-approximation
         let mut reserved = 0;
-        for (i, tree) in self.trees.entries.iter().enumerate() {
-            let tree = tree.load();
+        for i in (0..self.trees.len()).map(TreeId) {
+            let tree = self.trees.get(i);
             if !tree.reserved() {
                 let free = self
                     .lower
-                    .stats_at(i * TREE_FRAMES, TREE_FRAMES.ilog2() as _)
+                    .stats_at(i.as_frame(), TREE_FRAMES.ilog2() as _)
                     .free_frames;
                 assert_eq!(tree.free(), free);
             } else {
@@ -335,7 +347,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             for kind in Kind::all() {
                 let tree = local.preferred(kind).load();
                 if tree.present() {
-                    let global = self.trees.get(tree.frame() / TREE_FRAMES);
+                    let global = self.trees.get(tree.frame().as_tree());
                     let free = self
                         .lower
                         .stats_at(tree.frame(), TREE_FRAMES.ilog2() as _)
@@ -350,13 +362,18 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 }
 
 impl LLFree<'_> {
-    fn check(&self, frame: usize, order: usize) -> Result<()> {
+    fn check(&self, frame: FrameId, order: usize) -> Result<()> {
         ensure!(order <= MAX_ORDER, "Invalid order {order}");
         ensure!(
-            frame + (1 << order) <= self.lower.frames(),
-            "Frame {frame} out of bounds"
+            frame.0 + (1 << order) <= self.lower.frames(),
+            "Frame {} out of bounds",
+            frame.0
         );
-        ensure!(frame.is_multiple_of(1 << order), "Frame {frame} misaligned");
+        ensure!(
+            frame.0.is_multiple_of(1 << order),
+            "Frame {} misaligned",
+            frame.0
+        );
         Ok(())
     }
 
@@ -370,7 +387,7 @@ impl LLFree<'_> {
         &self,
         mut tree: LocalTree,
         order: usize,
-        frame: Option<usize>,
+        frame: Option<FrameId>,
     ) -> Result<LocalTree> {
         let (frame, _huge) = match frame {
             Some(frame) => self.lower.get_at(frame, order).map(|h| (frame, h))?,
@@ -386,20 +403,21 @@ impl LLFree<'_> {
         core: usize,
         kind: Kind,
         order: usize,
-        frame: Option<usize>,
-    ) -> core::result::Result<usize, (Error, LocalTree)> {
+        frame: Option<FrameId>,
+    ) -> core::result::Result<FrameId, (Error, LocalTree)> {
         let preferred = self.local[core].preferred(kind);
 
         match preferred.fetch_update(|v| v.dec(frame, 1 << order)) {
             Ok(old) => match self.lower_get(old, order, frame) {
                 Ok(new) => {
-                    if old.frame() / BITFIELD_ROW != new.frame() / BITFIELD_ROW {
+                    if old.frame().as_row() != new.frame().as_row() {
                         let _ = preferred.fetch_update(|v| v.set_start(new.frame(), false));
                     }
                     Ok(new.frame())
                 }
                 Err(e) => {
-                    self.trees.entries[old.frame() / TREE_FRAMES]
+                    self.trees
+                        .at(old.frame().as_tree())
                         .fetch_update(|v| Some(v.inc(1 << order)))
                         .expect("Undo failed");
                     Err((e, old))
@@ -422,20 +440,21 @@ impl LLFree<'_> {
             return false;
         }
 
-        let i = old.frame() / TREE_FRAMES;
+        let i = old.frame().as_tree();
         let min = (1 << order) - old.free();
 
         if let Some(global) = self.trees.sync(i, min) {
             let new = LocalTree::with(old.frame(), old.free() + global.free());
             if preferred.compare_exchange(old, new).is_ok() {
                 info!(
-                    "sync success idx={i} kind={:?} free={}",
+                    "sync success idx={i:?} kind={:?} free={}",
                     global.kind(),
                     new.free()
                 );
                 return true;
             }
-            self.trees.entries[i]
+            self.trees
+                .at(i)
                 .fetch_update(|v| Some(v.inc(global.free())))
                 .expect("Undo failed");
             false
@@ -445,15 +464,17 @@ impl LLFree<'_> {
     }
 
     /// Reserve a new tree and allocate the frame in it
-    fn reserve_and_get(&self, core: usize, flags: Flags, start: usize) -> Result<usize> {
+    fn reserve_and_get(&self, core: usize, flags: Flags, start: TreeId) -> Result<FrameId> {
         // Try reserve new tree
-        let reserve = |i: usize, range: Range<usize>| {
+        let reserve = |i: TreeId, range: Range<usize>| {
             let range = (1 << flags.order()).max(range.start)..range.end;
-            if let Ok(old) =
-                self.trees.entries[i].fetch_update(|v| v.reserve(range.clone(), flags.into()))
+            if let Ok(old) = self
+                .trees
+                .at(i)
+                .fetch_update(|v| v.reserve(range.clone(), flags.into()))
             {
                 match self.lower_get(
-                    LocalTree::with(i * TREE_FRAMES, old.free()),
+                    LocalTree::with(i.as_frame(), old.free()),
                     flags.order(),
                     None,
                 ) {
@@ -477,17 +498,15 @@ impl LLFree<'_> {
         let near = (self.trees.len() / 16).max(CL / 4);
         // Why does align twice near help?
         // This leaves some space between starting points...
-        let start = align_down(start, (2 * near).next_power_of_two());
+        let start = TreeId(align_down(start.0, (2 * near).next_power_of_two()));
 
         // Find best fit in fragmented trees
         if flags.order() < HUGE_ORDER {
             let range = 0..TREE_FRAMES;
-            match self.trees.search_best::<1>(
-                start,
-                1,
-                near,
-                |i| reserve(i, range.clone()),
-            ) {
+            match self
+                .trees
+                .search_best::<2>(start, 1, near, |i| reserve(i, range.clone()))
+            {
                 Err(Error::Memory) => {}
                 r => return r,
             }
@@ -510,8 +529,8 @@ impl LLFree<'_> {
         &self,
         core: usize,
         flags: Flags,
-        frame: Option<usize>,
-    ) -> Result<usize> {
+        frame: Option<FrameId>,
+    ) -> Result<FrameId> {
         let kind = Kind::from(flags);
         for i in 1..self.local.len() {
             let target_core = (core + i) % self.local.len();
@@ -545,7 +564,7 @@ impl LLFree<'_> {
         core: usize,
         kind: Kind,
         order: usize,
-        frame: Option<usize>,
+        frame: Option<FrameId>,
     ) -> Result<LocalTree> {
         let preferred = self.local[core].preferred(kind);
         match preferred.fetch_update(|v| v.steal(1 << order, frame)) {
@@ -553,7 +572,7 @@ impl LLFree<'_> {
                 Ok(stolen) => Ok(stolen),
                 Err(e) => {
                     assert!(stolen.present());
-                    let i = stolen.frame() / TREE_FRAMES;
+                    let i = stolen.frame().as_tree();
                     self.trees.unreserve(i, stolen.free(), kind);
                     Err(e)
                 }
@@ -562,18 +581,21 @@ impl LLFree<'_> {
         }
     }
 
-    fn get_any_global(&self, start_idx: usize, flags: Flags) -> Result<usize> {
+    fn get_any_global(&self, start_idx: TreeId, flags: Flags) -> Result<FrameId> {
         self.trees.search(start_idx, 0, self.trees.len(), |i| {
-            let old = self.trees.entries[i]
+            let old = self
+                .trees
+                .at(i)
                 .fetch_update(|v| v.dec_force(1 << flags.order(), flags.into()))
                 .map_err(|_| Error::Memory)?;
 
-            match self.lower.get(i * TREE_FRAMES, flags.order()) {
+            match self.lower.get(i.as_frame(), flags.order()) {
                 Ok((frame, _)) => Ok(frame),
                 Err(e) => {
                     let exp = old.dec_force(1 << flags.order(), flags.into()).unwrap();
-                    if self.trees.entries[i].compare_exchange(exp, old).is_err() {
-                        self.trees.entries[i]
+                    if self.trees.at(i).compare_exchange(exp, old).is_err() {
+                        self.trees
+                            .at(i)
                             .fetch_update(|v| Some(v.inc(1 << flags.order())))
                             .expect("Undo failed");
                     }
@@ -590,7 +612,7 @@ impl LLFree<'_> {
         let old = preferred.swap(new);
         if old.present() {
             self.trees
-                .unreserve(old.frame() / TREE_FRAMES, old.free(), kind);
+                .unreserve(old.frame().as_tree(), old.free(), kind);
         }
     }
 }
