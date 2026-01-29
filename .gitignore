@@ -16,3 +16,4 @@ memfile
 !/results/keep/
 !/results/*.ipynb
 !/results/remote.sh
+!/results/*.typ

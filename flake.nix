@@ -46,6 +46,7 @@
               lldb
               curl
               zig
+              typst
             ] ++ (with pkgs.python313Packages; [
               numpy
               seaborn
