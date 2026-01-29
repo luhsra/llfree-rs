@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Barrier;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use bitfield_struct::bitfield;
 use clap::Parser;
 use llfree::frame::Frame;
+use llfree::util::align_down;
 use llfree::*;
-use log::warn;
+use log::{info, warn};
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
@@ -46,48 +48,31 @@ fn main() {
         frag,
     } = Args::parse();
 
-    let trace = parse_trace(&trace);
-    warn!(
-        "trace: (l={}, a={}, m={}, f={})",
-        trace.len(),
-        trace
-            .iter()
-            .filter(|op| matches!(op, Operation::Get(_)))
-            .count(),
-        trace
-            .iter()
-            .filter(|op| matches!(op, Operation::GetMovable(_)))
-            .count(),
-        trace
-            .iter()
-            .filter(|op| matches!(op, Operation::Put(_, _)))
-            .count()
-    );
+    let size = std::fs::metadata(&trace)
+        .expect("Failed accessing trace")
+        .len() as usize;
+    info!("Mapping {size} bytes from {trace:?}");
+    let data = mmap::Mapping::<TracePage>::file(0, size / size_of::<TracePage>(), &trace, false)
+        .expect("Failed opening trace");
 
     // `thread::pin` uses this to select every nth cpu
     if stride > 1 {
         thread::STRIDE.store(stride, Ordering::Relaxed);
     }
 
-    // TODO: replay allocations
     let frames = (memory << 30) / Frame::SIZE;
-    let ms = Allocator::metadata_size(threads, frames);
-    let meta = MetaData::alloc(ms);
+    let meta = MetaData::alloc(Allocator::metadata_size(threads, frames));
     let alloc = Allocator::new(threads, frames, Init::FreeAll, meta).unwrap();
     alloc.validate();
 
-    // Operate on half of the avaliable memory
-    let barrier = Barrier::new(threads + 1);
+    let barrier = Barrier::new(2);
 
     let start = Instant::now();
-    let running = AtomicBool::new(true);
+    let running = AtomicUsize::new(threads);
 
     warn!("start");
 
-    let mut traces = vec![Vec::new(); threads];
-    for (t, subtrace) in traces.iter_mut().enumerate() {
-        subtrace.extend(trace.iter().skip(t).step_by(threads).copied());
-    }
+    let trace_pages: &[TracePage] = &data[..];
 
     let score = std::thread::scope(|s| {
         let monitor = s.spawn(|| {
@@ -98,7 +83,7 @@ fn main() {
 
             let mut frag_sec = 0;
             let mut score = 0.0;
-            while running.load(Ordering::Relaxed) {
+            while running.load(Ordering::Relaxed) > 0 {
                 let elapsed = start.elapsed();
                 if elapsed.as_secs() > frag_sec {
                     if let Some(frag) = frag.as_mut() {
@@ -124,39 +109,109 @@ fn main() {
             score / frag_sec as f32
         });
 
-        thread::parallel(traces.into_iter().enumerate(), |(t, trace)| {
-            thread::pin(t);
-            let allocations = trace
-                .iter()
-                .filter(|op| matches!(op, Operation::Get(_) | Operation::GetMovable(_)))
-                .count();
-            let mut allocations = HashMap::with_capacity(allocations);
+        s.spawn(|| {
+            let mut allocated = HashMap::<u32, (FrameId, Flags)>::new();
+            #[derive(Clone)]
+            enum State {
+                Init,
+                Running { page: usize, index: usize },
+                Done,
+            }
+
+            let mut curr_pages = vec![State::Init; threads];
 
             barrier.wait();
 
-            let mut alloc_idx = 0;
-            for op in trace {
-                match op {
-                    Operation::Get(order) => {
-                        let frame = alloc.get(t, None, Flags::o(order as _)).unwrap();
-                        allocations.insert(alloc_idx, frame);
-                        alloc_idx += 1;
-                    }
-                    Operation::GetMovable(order) => {
-                        let frame = alloc
-                            .get(order as _, None, Flags::o(order as _).with_movable(true))
-                            .unwrap();
-                        allocations.insert(alloc_idx, frame);
-                        alloc_idx += 1;
-                    }
-                    Operation::Put(order, idx) => {
-                        if let Some(frame) = allocations.remove(&(idx as usize)) {
-                            let _ = alloc.put(t, frame, Flags::o(order as _));
+            loop {
+                let mut next: Option<(usize, TraceEntry)> = None;
+                for (t, page_idx) in curr_pages.iter_mut().enumerate() {
+                    let entry = match page_idx {
+                        State::Running { page, index }
+                            if *index < trace_pages[*page].entries.len() =>
+                        {
+                            &trace_pages[*page].entries[*index]
                         }
+                        State::Running { page, index } => {
+                            if *page < trace_pages.len()
+                                && let Some(next) = trace_pages[*page + 1..]
+                                    .iter()
+                                    .position(|p| p.cpuid as usize == t)
+                            {
+                                *index = 0;
+                                *page += 1 + next;
+                                &trace_pages[*page].entries[*index]
+                            } else {
+                                *page_idx = State::Done;
+                                continue;
+                            }
+                        }
+                        State::Init => {
+                            if let Some(next) =
+                                trace_pages.iter().position(|p| p.cpuid as usize == t)
+                            {
+                                *page_idx = State::Running {
+                                    page: next,
+                                    index: 0,
+                                };
+                                &trace_pages[next].entries[0]
+                            } else {
+                                *page_idx = State::Done;
+                                continue;
+                            }
+                        }
+                        State::Done => continue,
+                    };
+                    let entry = TraceEntry::from_bytes(*entry);
+                    if next.is_none()
+                        || entry.time() < next.as_ref().unwrap().1.time()
+                        || (entry.alloc() && entry.time() <= next.as_ref().unwrap().1.time())
+                    {
+                        next = Some((t, entry));
                     }
                 }
+                if let Some((t, entry)) = next {
+                    curr_pages[t] = match &curr_pages[t] {
+                        State::Running { page, index } => State::Running {
+                            page: *page,
+                            index: *index + 1,
+                        },
+                        _ => unreachable!(),
+                    };
+
+                    if entry.alloc() {
+                        let flags = flags_from_gfp(entry.flags(), entry.order() as usize);
+                        let frame = alloc.get(t, None, flags).unwrap();
+                        allocated.insert(entry.pfn(), (frame, flags));
+                        continue;
+                    }
+
+                    // free
+                    for order in entry.order() as usize..=MAX_ORDER {
+                        let pfn = align_down(entry.pfn() as _, 1 << order);
+
+                        if let Some((frame, flags)) = allocated.remove(&(pfn as u32)) {
+                            // warn!("free pfn={pfn} order={order} flags_o={}", flags.order());
+                            if !(flags.order() >= order) {
+                                break;
+                            }
+                            alloc.put(entry.pfn() as _, frame, flags).unwrap();
+
+                            for part in 0..(1 << (flags.order() - order)) {
+                                if entry.pfn() as usize % (1 << (flags.order() - order)) != part {
+                                    warn!("split free pfn={pfn}+{part} order={order}");
+                                    allocated.insert(
+                                        (pfn + part * (1 << flags.order())) as u32,
+                                        (frame, flags.with_order(order)),
+                                    );
+                                }
+                            }
+                            break;
+                        }
+                    }
+                } else {
+                    break;
+                }
             }
-            running.store(false, Ordering::Relaxed);
         });
 
         monitor.join().unwrap()
@@ -167,54 +222,49 @@ fn main() {
     warn!("score = {score:.1}")
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Operation {
-    Get(u8),
-    GetMovable(u8),
-    Put(u8, u32),
+#[bitfield(u128)]
+struct TraceEntry {
+    /// Time in microseconds -> max ~4500 hours
+    #[bits(38)]
+    time_us: u64,
+    /// Page frame number -> max 32G with padding
+    #[bits(24)]
+    pfn: u32,
+    /// Allocation (true) or free (false)
+    alloc: bool,
+    /// Allocation size order (0..=10)
+    #[bits(4)]
+    order: u8,
+    /// GFP flags
+    #[bits(29)]
+    flags: u32,
+    #[bits(32)]
+    __: (),
+}
+impl TraceEntry {
+    fn time(&self) -> f32 {
+        self.time_us() as f32 / 1_000_000.0
+    }
+    fn from_bytes([a, b, c, d, e, f, g, h, i, j, k, l]: [u8; 12]) -> Self {
+        Self::from_bits(u128::from_ne_bytes([
+            a, b, c, d, e, f, g, h, i, j, k, l, 0, 0, 0, 0,
+        ]))
+    }
 }
 
-fn parse_trace(trace: &PathBuf) -> Vec<Operation> {
-    let mut trace = File::open(trace).unwrap();
-    let mut buf = vec![0; 4096];
-    let mut allocated = HashMap::new();
+#[repr(C)]
+struct TracePage {
+    cpuid: u32,
+    entries: [[u8; 12]; FRAME_SIZE / 12],
+}
+const _: () = assert!(size_of::<TracePage>() == FRAME_SIZE);
 
-    let mut allocations = Vec::new();
-    let mut alloc_idx = 0;
-    loop {
-        let len = trace.read(&mut buf[..]).unwrap();
-
-        buf.resize(len, 0);
-        for alloc in buf.chunks(4) {
-            let op = u32::from_ne_bytes([alloc[0], alloc[1], alloc[2], alloc[3]]);
-
-            let kind = op >> 30;
-            let order = (op >> 24) & 0x3f;
-            let frame = op & 0x00ff_ffff;
-
-            match kind {
-                0 => {
-                    allocated.insert(frame, alloc_idx);
-                    alloc_idx += 1;
-                    allocations.push(Operation::Get(order as _))
-                }
-                1 => {
-                    allocated.insert(frame, alloc_idx);
-                    alloc_idx += 1;
-                    allocations.push(Operation::GetMovable(order as _))
-                }
-                2 => {
-                    if let Some(alloc_idx) = allocated.remove(&frame) {
-                        allocations.push(Operation::Put(order as _, alloc_idx));
-                    }
-                }
-                _ => panic!("unknown operation"),
-            };
-        }
-
-        if len == 0 {
-            break;
-        }
-    }
-    allocations
+fn flags_from_gfp(gfp: u32, order: usize) -> Flags {
+    const GFP_MOVABLE: u32 = 0x08;
+    const GFP_ZERO: u32 = 0x100;
+    const GFP_PAGE_CACHE: u32 = 0x10000000;
+    Flags::o(order)
+        .with_movable((gfp & GFP_MOVABLE) != 0)
+        .with_zeroed((gfp & GFP_ZERO) != 0)
+        .with_long_living((gfp & GFP_PAGE_CACHE) != 0)
 }
