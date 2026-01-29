@@ -3,7 +3,7 @@
 use core::ops::Range;
 use core::{fmt, slice};
 
-use log::{error, info, warn};
+use log::{info, warn};
 
 use crate::atomic::Atom;
 use crate::local::{Local, LocalTree};
@@ -109,14 +109,14 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
     }
 
-    fn metadata(&mut self) -> MetaData<'a> {
+    unsafe fn metadata(&mut self) -> MetaData<'a> {
         let m = Self::metadata_size(self.local.len(), self.lower.frames());
-        MetaData {
-            local: unsafe {
-                slice::from_raw_parts_mut(self.local.as_ptr().cast_mut().cast(), m.local)
-            },
-            trees: self.trees.metadata(),
-            lower: self.lower.metadata(),
+        unsafe {
+            MetaData {
+                local: slice::from_raw_parts_mut(self.local.as_ptr().cast_mut().cast(), m.local),
+                trees: self.trees.metadata(),
+                lower: self.lower.metadata(),
+            }
         }
     }
 

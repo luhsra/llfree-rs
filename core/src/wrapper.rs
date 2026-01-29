@@ -31,8 +31,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn metadata_size(cores: usize, frames: usize) -> MetaSize {
         A::metadata_size(cores, frames)
     }
-    fn metadata(&mut self) -> MetaData<'a> {
-        self.alloc.metadata()
+    unsafe fn metadata(&mut self) -> MetaData<'a> {
+        unsafe { self.alloc.metadata() }
     }
     fn get(&self, core: usize, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
         let frame = frame
@@ -193,8 +193,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn metadata_size(cores: usize, frames: usize) -> MetaSize {
         A::metadata_size(cores, frames)
     }
-    fn metadata(&mut self) -> MetaData<'a> {
-        self.alloc.metadata()
+    unsafe fn metadata(&mut self) -> MetaData<'a> {
+        unsafe { self.alloc.metadata() }
     }
     fn get(&self, core: usize, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
         self.alloc.get(core, frame, flags)

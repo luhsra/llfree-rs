@@ -35,14 +35,16 @@ impl<'a> Alloc<'a> for LLC {
         }
     }
 
-    fn metadata(&mut self) -> super::MetaData<'a> {
-        let cores = unsafe { bindings::llfree_cores(self.raw.get().cast()) };
-        let ms = Self::metadata_size(cores, self.frames());
-        let m = unsafe { bindings::llfree_metadata(self.raw.get().cast()) };
-        super::MetaData {
-            local: unsafe { slice::from_raw_parts_mut(m.local, ms.local) },
-            trees: unsafe { slice::from_raw_parts_mut(m.trees, ms.trees) },
-            lower: unsafe { slice::from_raw_parts_mut(m.lower, ms.lower) },
+    unsafe fn metadata(&mut self) -> super::MetaData<'a> {
+        unsafe {
+            let cores = bindings::llfree_cores(self.raw.get().cast());
+            let ms = Self::metadata_size(cores, self.frames());
+            let m = bindings::llfree_metadata(self.raw.get().cast());
+            super::MetaData {
+                local: slice::from_raw_parts_mut(m.local, ms.local),
+                trees: slice::from_raw_parts_mut(m.trees, ms.trees),
+                lower: slice::from_raw_parts_mut(m.lower, ms.lower),
+            }
         }
     }
 

@@ -71,7 +71,7 @@ impl<'a> Trees<'a> {
             .next_multiple_of(align_of::<Align>())
     }
 
-    pub fn metadata(&mut self) -> &'a mut [u8] {
+    pub unsafe fn metadata(&mut self) -> &'a mut [u8] {
         let len = Self::metadata_size(self.len() * TREE_FRAMES);
         unsafe { slice::from_raw_parts_mut(self.entries.as_ptr().cast_mut().cast(), len) }
     }

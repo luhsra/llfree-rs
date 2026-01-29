@@ -147,7 +147,7 @@ impl<'a> Lower<'a> {
         self.len
     }
 
-    pub fn metadata(&mut self) -> &'a mut [u8] {
+    pub unsafe fn metadata(&mut self) -> &'a mut [u8] {
         let len = Self::metadata_size(self.frames());
         unsafe { slice::from_raw_parts_mut(self.bitfields.as_ptr().cast_mut().cast(), len) }
     }
@@ -659,8 +659,8 @@ mod test {
     }
     impl Drop for LowerTest<'_> {
         fn drop(&mut self) {
-            let meta = self.0.metadata();
             unsafe {
+                let meta = self.0.metadata();
                 drop(ManuallyDrop::take(&mut self.0));
                 Vec::from_raw_parts(meta.as_mut_ptr(), meta.len(), meta.len());
             }

@@ -28,13 +28,13 @@ pub enum Error {
 macro_rules! ensure {
     ($cond:expr, $($args:expr),*) => {
         if !($cond) {
-            error!($($args),*);
+            log::error!($($args),*);
             return Err(Error::Address);
         }
     };
     ($err:expr; $cond:expr, $($args:expr),*) => {
         if !($cond) {
-            error!($($args),*);
+            log::error!($($args),*);
             return Err($err);
         }
     };
@@ -120,7 +120,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     fn metadata_size(cores: usize, frames: usize) -> MetaSize;
     /// Returns the metadata buffers.
     #[cold]
-    fn metadata(&mut self) -> MetaData<'a>;
+    unsafe fn metadata(&mut self) -> MetaData<'a>;
 
     /// Allocate a new frame of `order` on the given `core`.
     /// If specified try allocating the given `frame`.
@@ -259,7 +259,9 @@ pub struct Flags {
     #[bits(8)]
     pub order: usize,
     pub movable: bool,
-    #[bits(7)]
+    pub zeroed: bool,
+    pub long_living: bool,
+    #[bits(5)]
     __: (),
 }
 impl Flags {
@@ -321,12 +323,12 @@ mod alloc_test {
     }
     impl<A: Alloc<'static>> Drop for TestAlloc<A> {
         fn drop(&mut self) {
-            let MetaData {
-                local,
-                trees,
-                lower,
-            } = self.0.metadata();
             unsafe {
+                let MetaData {
+                    local,
+                    trees,
+                    lower,
+                } = self.0.metadata();
                 // drop first
                 drop(ManuallyDrop::take(&mut self.0));
                 // free metadata buffers
