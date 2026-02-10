@@ -1,18 +1,57 @@
 #import "@preview/lilaq:0.5.0" as lq
 
+#show: lq.set-diagram(width: 7cm, height: 4cm)
+
 #set page(width: auto, height: auto)
 #set text(font: "Rotis Sans Serif Std")
 
-= Performance
+#let data = csv("bulk.csv", row-type: dictionary)
 
-#let data = csv("out.csv", row-type: dictionary)
+#let iter = data.map(d => int(d.iteration)).reduce(calc.max) + 1
 
+#let group-by(data, ..keys) = {
+  let key-list = keys.pos()
+  if key-list.len() == 0 {
+    data
+  } else {
+    let (first-key, ..rest-keys) = key-list
+    let grouped = data.fold((:), (group, entry) => {
+      let k = entry.at(first-key)
+      if k in group {
+        group.at(k).push(entry)
+      } else {
+        group.insert(k, (entry,))
+      }
+      group
+    })
+    if rest-keys.len() > 0 {
+      grouped.pairs().fold((:), (result, pair) => {
+        let (k, v) = pair
+        result.insert(k, group-by(v, ..rest-keys))
+        result
+      })
+    } else {
+      grouped
+    }
+  }
+}
+
+#let chunks = (
+  group-by(data, "alloc", "order", "x")
+)
+
+#let stddev(values) = {
+  let avg = values.sum() / values.len()
+  calc.sqrt(values.map(v => calc.pow(v - avg, 2)).sum() / (values.len() - 1))
+}
 
 #let extract(data, alloc, column) = {
-  let filtered = data.filter(d => d.alloc == alloc)
-  (
-    filtered.map(d => int(d.x)),
-    filtered.map(d => int(d.at(column))),
+  let chunks = data.filter(d => d.alloc == alloc).chunks(iter)
+  let values = chunks.map(d => d.map(r => int(r.at(column))))
+  arguments(
+    chunks.map(d => d.map(r => int(r.x)).sum() / iter),
+    values.map(d => d.sum() / iter),
+    yerr: values.map(d => stddev(d)),
   )
 }
 
@@ -52,20 +91,26 @@
   [free],
 )
 
-#show: lq.set-diagram(width: 8cm, height: 6cm)
+#let ymax = (
+  calc.max(
+    data.map(d => int(d.get_avg)).reduce(calc.max),
+    data.map(d => int(d.put_avg)).reduce(calc.max),
+  )
+    * 1.1
+)
 
 #let data-o0 = data.filter(d => d.order == "0")
 #lq.diagram(
   title: [Bulk Alloc - Order 0],
   xlabel: "Number of Cores",
   ylabel: "Allocation Time (ns)",
-  ylim: (0, 100),
+  ylim: (0, ymax),
   cycle: cycle,
   legend: legend,
-  lq.plot(..extract(data-o0, "LLFree", "get_avg"), label: "LLFree Get"),
-  lq.plot(..extract(data-o0, "LLC", "get_avg"), label: "LLC Get"),
-  lq.plot(..extract(data-o0, "LLFree", "put_avg"), label: "LLFree Put"),
-  lq.plot(..extract(data-o0, "LLC", "put_avg"), label: "LLC Put"),
+  lq.plot(..extract(data-o0, "LLFree", "get_avg")),
+  lq.plot(..extract(data-o0, "LLC", "get_avg")),
+  lq.plot(..extract(data-o0, "LLFree", "put_avg")),
+  lq.plot(..extract(data-o0, "LLC", "put_avg")),
 )
 
 #let data-o9 = data.filter(d => d.order == "9")
@@ -73,60 +118,10 @@
   title: [Bulk Alloc - Order 9],
   xlabel: "Number of Cores",
   ylabel: "Allocation Time (ns)",
-  ylim: (0, 100),
+  ylim: (0, ymax),
   cycle: cycle,
   lq.plot(..extract(data-o9, "LLFree", "get_avg")),
   lq.plot(..extract(data-o9, "LLC", "get_avg")),
   lq.plot(..extract(data-o9, "LLFree", "put_avg")),
   lq.plot(..extract(data-o9, "LLC", "put_avg")),
 )
-
-
-== Fragmentation
-
-#let data = (
-  csv("frag.csv")
-    .slice(1)
-    .map(row => (
-      i: int(row.at(0)),
-      num_pages: int(row.at(1)),
-      allocs: int(row.at(2)),
-      huge_pages: row.slice(3).map(int),
-    ))
-)
-
-#lq.diagram(
-  title: [Free Huge Pages],
-  xlim: (0, 100),
-  xlabel: "Number of Iterations",
-  ylabel: "Number of Free Huge Pages",
-  lq.plot(
-    data.map(d => d.i),
-    data.map(d => d.huge_pages.filter(c => c == 512).len()),
-    label: "100%",
-    mark: none,
-  ),
-  lq.plot(
-    data.map(d => d.i),
-    data.map(d => d.huge_pages.filter(c => c < 512 and c > 496).len()),
-    label: "95%-99%",
-    mark: none,
-  ),
-)
-
-#let div = 16
-#let mesh = lq.colormesh(
-  data.map(d => d.i),
-  range(int(data.first().huge_pages.len() / div)),
-  (x, y) => (
-    data.at(x).huge_pages.slice(y * div, (y + 1) * div).sum() / (div * 512)
-  ),
-  map: lq.color.map.roma,
-)
-#lq.diagram(
-  xlim: (0, 100),
-  xlabel: "Number of Iterations",
-  ylabel: "Huge Page",
-  mesh,
-)
-#lq.colorbar(mesh, label: [Fraction of Used Pages])
