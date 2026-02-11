@@ -17,8 +17,8 @@ struct Args {
     /// Max number of threads
     #[arg(short, long, default_value = "6")]
     threads: usize,
-    /// Where to store the benchmark results in csv format.
-    #[arg(short, long, default_value = "results/frag.csv")]
+    /// Where to store the benchmark results in txt format.
+    #[arg(short, long, default_value = "results/frag.txt")]
     outfile: String,
     /// Specifies how many pages should be allocated: #pages = 2^order
     #[arg(short = 's', long, default_value_t = 0)]
