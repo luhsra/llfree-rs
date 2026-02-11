@@ -1,9 +1,9 @@
 #import "@preview/lilaq:0.5.0" as lq
 
+#import "util.typ": *
+
 #set page(width: auto, height: auto)
 #set text(font: "Rotis Sans Serif Std")
-
-== Fragmentation
 
 #let data = (
   read("frag-l.txt")
@@ -18,7 +18,7 @@
   title: [Free Huge Pages],
   xlim: (0, auto),
   xlabel: "Number of Iterations",
-  ylabel: "Number of Free Huge Pages",
+  ylabel: "Number of Huge Pages",
   lq.plot(
     range(int(data.len())),
     data.map(d => d.filter(c => c == 512).len()),
@@ -27,8 +27,8 @@
   ),
   lq.plot(
     range(int(data.len())),
-    data.map(d => d.filter(c => c == 512 - 32).len()),
-    label: "85%-99%",
+    data.map(d => d.filter(c => c >= 512 - 32 and c < 512).len()),
+    label: str(calc.round((512 - 32) / 512 * 100)) + "%-99%",
     mark: none,
   ),
 )
@@ -40,7 +40,11 @@
   (x, y) => (
     data.at(x).slice(y * div, (y + 1) * div).sum() / div
   ),
-  map: lq.color.map.roma,
+  map: (
+    colormap.spectral.first().darken(20%),
+    ..colormap.spectral.slice(1, -1),
+    colormap.spectral.last().darken(20%),
+  ),
 )
 #lq.diagram(
   xlim: (0, 100),
