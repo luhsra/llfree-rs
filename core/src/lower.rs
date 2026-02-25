@@ -5,7 +5,7 @@ use core::slice;
 use core::sync::atomic::{AtomicU16, AtomicU32};
 
 use bitfield_struct::bitfield;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
 use crate::atomic::{Atom, AtomArray, Atomic};
 use crate::bitfield::{Bitfield, RowId};
@@ -233,7 +233,7 @@ impl<'a> Lower<'a> {
         } else {
             unreachable!("Order {order} is not supported")
         }
-        info!("Nothing found o={order}");
+        debug!("Nothing found o={order}");
         Err(Error::Memory)
     }
 

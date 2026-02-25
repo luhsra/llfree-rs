@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.88.0"
 
 [dependencies]
-llfree = { path = "../core", features = ["std", "log_warn"] }
+llfree = { path = "../core", features = ["std", "log_info"] }
 libc = "0.2"
 log = { version = "0.4", default-features = false }
 clap = { version = "4.4", default-features = false, features = ["std", "derive", "help"] }

@@ -82,10 +82,12 @@ fn main() {
         v
     };
 
+    let seed = unsafe { libc::rand() } as u64;
+
     thread::parallel(0..threads, |t| {
         thread::pin(t);
 
-        let mut rng = WyRand::new(t as u64 + 100);
+        let mut rng = WyRand::new(t as u64 + seed);
 
         {
             let mut pages = all_pages[t].lock().unwrap();

@@ -15,8 +15,6 @@ pub struct LLC {
     raw: UnsafeCell<[u8; 2 * align_of::<Align>()]>,
 }
 
-const _: () = assert!(size_of::<Flags>() == 2);
-
 unsafe impl Send for LLC {}
 unsafe impl Sync for LLC {}
 
@@ -172,7 +170,10 @@ mod bindings {
     #![allow(non_snake_case)]
     #![allow(dead_code)]
     #![allow(unnecessary_transmutes)]
-
+    #![allow(clippy::ptr_offset_with_cast)]
+    #![allow(clippy::useless_transmute)]
+    #![allow(clippy::unnecessary_cast)]
+    #![allow(clippy::transmute_int_to_bool)]
     include!(concat!(env!("OUT_DIR"), "/llc.rs"));
 
     impl From<super::Flags> for llflags_t {
@@ -183,7 +184,7 @@ mod bindings {
                     flags.order() as _,
                     flags.movable(),
                     false,
-                    false,
+                    flags.long_living(),
                 ),
             }
         }

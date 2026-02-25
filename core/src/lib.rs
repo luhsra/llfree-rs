@@ -119,6 +119,9 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     #[cold]
     fn metadata_size(cores: usize, frames: usize) -> MetaSize;
     /// Returns the metadata buffers.
+    ///
+    /// # Safety
+    /// These buffers must must not be freed or used for other purposes.
     #[cold]
     unsafe fn metadata(&mut self) -> MetaData<'a>;
 
@@ -176,10 +179,10 @@ impl FrameId {
     const fn is_aligned(self, order: usize) -> bool {
         self.0 & ((1 << order) - 1) == 0
     }
-    const fn into_bits(self) -> u64 {
+    pub const fn into_bits(self) -> u64 {
         self.0 as u64
     }
-    const fn from_bits(bits: u64) -> Self {
+    pub const fn from_bits(bits: u64) -> Self {
         Self(bits as usize)
     }
 }
@@ -254,16 +257,18 @@ pub enum Init {
     None,
 }
 
-#[bitfield(u16)]
+#[bitfield(u8)]
 pub struct Flags {
-    #[bits(8)]
+    /// Allocation order (0..=MAX_ORDER)
+    #[bits(4)]
     pub order: usize,
     pub movable: bool,
     pub zeroed: bool,
     pub long_living: bool,
-    #[bits(5)]
+    #[bits(1)]
     __: (),
 }
+const _: () = assert!(Flags::ORDER_BITS >= MAX_ORDER.ilog2() as usize);
 impl Flags {
     pub const fn o(order: usize) -> Self {
         Self::new().with_order(order)

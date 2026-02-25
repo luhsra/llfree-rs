@@ -3,12 +3,12 @@
 use core::ops::Range;
 use core::{fmt, slice};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::atomic::Atom;
 use crate::local::{Local, LocalTree};
 use crate::lower::Lower;
-use crate::trees::{Kind, Tree, TreeId, Trees};
+use crate::trees::{Kind, Prio, Tree, TreeId, Trees};
 use crate::util::{Align, FmtFn, align_down, size_of_slice, spin_wait};
 use crate::{
     Alloc, Error, Flags, FrameId, HUGE_FRAMES, HUGE_ORDER, Init, MAX_ORDER, MetaData, MetaSize,
@@ -325,7 +325,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
     }
 
     fn validate(&self) {
-        warn!("validate");
+        debug!("validate");
         let fast_stats = self.fast_stats();
         let full_stats = self.stats();
         assert_eq!(fast_stats.free_frames, full_stats.free_frames);
@@ -446,7 +446,7 @@ impl LLFree<'_> {
         if let Some(global) = self.trees.sync(i, min) {
             let new = LocalTree::with(old.frame(), old.free() + global.free());
             if preferred.compare_exchange(old, new).is_ok() {
-                info!(
+                debug!(
                     "sync success idx={i:?} kind={:?} free={}",
                     global.kind(),
                     new.free()
@@ -502,10 +502,19 @@ impl LLFree<'_> {
 
         // Find best fit in fragmented trees
         if flags.order() < HUGE_ORDER {
+            let prio = |tree: Tree| -> Prio {
+                match tree.free() {
+                    0 | TREE_FRAMES => Prio::None,              // entirely allocated
+                    f if f >= TREE_FRAMES / 2 => Prio::Good(2), // half free
+                    f if f >= TREE_FRAMES / 64 => Prio::Best,   // almost allocated
+                    _ => Prio::Good(1), // low free count -> causes frequent reservations
+                }
+            };
+
             let range = 0..TREE_FRAMES;
             match self
                 .trees
-                .search_best::<2>(start, 1, near, |i| reserve(i, range.clone()))
+                .search_best::<2>(start, 1, near, prio, |i| reserve(i, range.clone()))
             {
                 Err(Error::Memory) => {}
                 r => return r,

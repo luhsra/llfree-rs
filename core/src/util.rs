@@ -17,7 +17,9 @@ impl<F: FnOnce()> Deferred<F> {
 }
 impl<F: FnOnce()> Drop for Deferred<F> {
     fn drop(&mut self) {
-        self.0.take().map(|f| f());
+        if let Some(f) = self.0.take() {
+            f();
+        }
     }
 }
 
@@ -68,32 +70,50 @@ impl<T: fmt::Debug> fmt::Debug for Align<T> {
 #[cfg(feature = "std")]
 pub fn logging() {
     use core::mem::transmute;
+    use core::sync::atomic::{AtomicUsize, Ordering};
     use std::boxed::Box;
     use std::io::Write;
     use std::thread::ThreadId;
 
     use crate::thread::pinned;
 
+    static MAX_LOC_WIDTH: AtomicUsize = AtomicUsize::new(0);
+
+    struct Padding(usize);
+    impl fmt::Display for Padding {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{:width$}", "", width = self.0)
+        }
+    }
+
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format(move |buf, record| {
+            const DIM: &str = "\x1b[90m";
+            const RST: &str = "\x1b[0m";
             let color = match record.level() {
                 log::Level::Error => "\x1b[91m",
                 log::Level::Warn => "\x1b[93m",
-                log::Level::Info => "\x1b[90m",
-                log::Level::Debug => "\x1b[90m",
-                log::Level::Trace => "\x1b[90m",
+                log::Level::Info => "",
+                log::Level::Debug => DIM,
+                log::Level::Trace => DIM,
             };
 
             let pin = pinned().map_or(-1, |p| p as isize);
 
+            let loc = format_args!(
+                "{}:{:<4}",
+                record.file().unwrap_or_default(),
+                record.line().unwrap_or_default()
+            );
+            let loc_len = record.file().map_or(0, |f| f.len()) + 1 + 4;
+            let max = MAX_LOC_WIDTH.fetch_max(loc_len, Ordering::Relaxed);
+            let padding = Padding(max.max(loc_len) - loc_len);
+
+            let tid = unsafe { transmute::<ThreadId, u64>(std::thread::current().id()) };
             writeln!(
                 buf,
-                "{}[{:5} {:02?}@{pin:02?} {}:{}] {}\x1b[0m",
-                color,
+                "{color}{:<5}{RST}{DIM} {tid:02?}@{pin:02?} {loc}{padding} >{RST}{color} {}{RST}",
                 record.level(),
-                unsafe { transmute::<ThreadId, u64>(std::thread::current().id()) },
-                record.file().unwrap_or_default(),
-                record.line().unwrap_or_default(),
                 record.args()
             )
         })

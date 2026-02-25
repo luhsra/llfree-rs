@@ -1,35 +1,31 @@
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use bitfield_struct::bitfield;
 use clap::Parser;
-use llfree::frame::Frame;
 use llfree::util::align_down;
 use llfree::*;
-use log::{info, warn};
+use log::{error, info, warn};
 
 /// Benchmarking the allocators against each other.
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
 struct Args {
     trace: PathBuf,
-    /// Max number of threads
-    #[arg(short, long, default_value = "8")]
-    threads: usize,
-    /// Max amount of memory in GiB. Is by the max thread count.
-    #[arg(short, long, default_value_t = 8)]
-    memory: usize,
     /// Using only every n-th CPU
     #[arg(long, default_value_t = 2)]
     stride: usize,
     /// Monitor and output fragmentation
     #[arg(long)]
     frag: Option<PathBuf>,
+    /// Time interval is ms for monitoring fragmentation
+    #[arg(long, default_value_t = 1000)]
+    interval: u64,
 }
 
 #[cfg(feature = "llc")]
@@ -42,10 +38,9 @@ fn main() {
 
     let Args {
         trace,
-        threads,
-        memory,
         stride,
         frag,
+        interval,
     } = Args::parse();
 
     let size = std::fs::metadata(&trace)
@@ -60,19 +55,38 @@ fn main() {
         thread::STRIDE.store(stride, Ordering::Relaxed);
     }
 
-    let frames = (memory << 30) / Frame::SIZE;
+    let trace_pages: &[TracePage] = &data[..];
+    let max_pfn = trace_pages
+        .iter()
+        .flat_map(|p| p.entries.iter())
+        .map(|e| TraceEntry::from_bytes(*e).pfn())
+        .max()
+        .unwrap_or(0);
+    let frames = (max_pfn as usize + 1).next_multiple_of(1 << HUGE_ORDER);
+
+    let page_cache_allocs = trace_pages
+        .iter()
+        .flat_map(|p| p.entries.iter())
+        .map(|e| TraceEntry::from_bytes(*e))
+        .filter(|e| e.alloc() && e.flags() == GFP::PAGE_CACHE)
+        .count();
+    info!("page cache allocs = {page_cache_allocs}");
+
+    let max_cpu = trace_pages.iter().map(|p| p.cpuid).max().unwrap_or(0);
+    info!("max pfn = {max_pfn} max cpu = {max_cpu}");
+    let threads = max_cpu as usize + 1;
+
     let meta = MetaData::alloc(Allocator::metadata_size(threads, frames));
     let alloc = Allocator::new(threads, frames, Init::FreeAll, meta).unwrap();
     alloc.validate();
 
     let barrier = Barrier::new(2);
 
-    let start = Instant::now();
     let running = AtomicUsize::new(threads);
 
-    warn!("start");
+    info!("start");
 
-    let trace_pages: &[TracePage] = &data[..];
+    let mut allocated = vec![Allocation::new(); frames];
 
     let score = std::thread::scope(|s| {
         let monitor = s.spawn(|| {
@@ -81,36 +95,37 @@ fn main() {
 
             barrier.wait();
 
-            let mut frag_sec = 0;
+            let start = Instant::now();
+            let mut count = 0;
             let mut score = 0.0;
             while running.load(Ordering::Relaxed) > 0 {
-                let elapsed = start.elapsed();
-                if elapsed.as_secs() > frag_sec {
-                    if let Some(frag) = frag.as_mut() {
-                        for i in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
-                            let free = alloc
-                                .stats_at(FrameId(i << HUGE_ORDER), HUGE_ORDER)
-                                .free_frames;
-                            let level = if free == 0 { 0 } else { 1 + free / 64 };
-                            write!(frag, "{level:?}").unwrap();
-                        }
-                        writeln!(frag).unwrap();
+                if let Some(frag) = frag.as_mut() {
+                    for i in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
+                        let free = alloc.stats_at(HugeId(i).as_frame(), HUGE_ORDER).free_frames;
+                        let level = if free == 0 { 0 } else { 1 + free / 64 };
+                        write!(frag, "{level:?}").unwrap();
                     }
+                    writeln!(frag).unwrap();
+                }
 
-                    let stats = alloc.stats();
-                    let huge = stats.free_huge;
-                    let optimal = stats.free_frames >> HUGE_ORDER;
-                    let fraction = 100.0 * huge as f32 / optimal as f32;
-                    warn!("free-huge {huge}/{optimal} = {fraction:.1}");
-                    score += fraction;
-                    frag_sec += 1;
+                let stats = alloc.stats();
+                let huge = stats.free_huge;
+                let optimal = stats.free_frames >> HUGE_ORDER;
+                let fraction = 100.0 * huge as f32 / optimal as f32;
+                warn!("free-huge {huge}/{optimal} = {fraction:.1}");
+                score += fraction;
+                count += 1;
+
+                let elapsed_ms = start.elapsed().as_millis();
+                let next_ms = count as u128 * interval as u128;
+                if next_ms > elapsed_ms {
+                    sleep(Duration::from_millis((next_ms - elapsed_ms) as u64));
                 }
             }
-            score / frag_sec as f32
+            score / count as f32
         });
 
         s.spawn(|| {
-            let mut allocated = HashMap::<u32, (FrameId, Flags)>::new();
             #[derive(Clone)]
             enum State {
                 Init,
@@ -181,7 +196,7 @@ fn main() {
                     if entry.alloc() {
                         let flags = flags_from_gfp(entry.flags(), entry.order() as usize);
                         let frame = alloc.get(t, None, flags).unwrap();
-                        allocated.insert(entry.pfn(), (frame, flags));
+                        allocated[entry.pfn() as usize] = Allocation::with(frame, flags);
                         continue;
                     }
 
@@ -189,19 +204,28 @@ fn main() {
                     for order in entry.order() as usize..=MAX_ORDER {
                         let pfn = align_down(entry.pfn() as _, 1 << order);
 
-                        if let Some((frame, flags)) = allocated.remove(&(pfn as u32)) {
-                            // warn!("free pfn={pfn} order={order} flags_o={}", flags.order());
-                            if !(flags.order() >= order) {
+                        let entry = &mut allocated[pfn as usize];
+                        if entry.present() {
+                            entry.set_present(false);
+                            let frame = entry.frame();
+                            let flags = entry.flags();
+
+                            if flags.order() < order {
                                 break;
                             }
-                            alloc.put(entry.pfn() as _, frame, flags).unwrap();
+                            if let Err(e) = alloc.put(t, frame, flags) {
+                                error!(
+                                    "failed to free pfn={pfn} order={order} flags_o={} error={e:?}",
+                                    flags.order()
+                                );
+                            }
 
                             for part in 0..(1 << (flags.order() - order)) {
-                                if entry.pfn() as usize % (1 << (flags.order() - order)) != part {
-                                    warn!("split free pfn={pfn}+{part} order={order}");
-                                    allocated.insert(
-                                        (pfn + part * (1 << flags.order())) as u32,
-                                        (frame, flags.with_order(order)),
+                                if frame.0 as usize % (1 << (flags.order() - order)) != part {
+                                    info!("split free pfn={pfn}+{part} order={order}");
+                                    allocated[pfn as usize + part] = Allocation::with(
+                                        FrameId((pfn + part * (1 << flags.order())) as _),
+                                        flags.with_order(order),
                                     );
                                 }
                             }
@@ -209,6 +233,7 @@ fn main() {
                         }
                     }
                 } else {
+                    running.store(0, Ordering::Relaxed);
                     break;
                 }
             }
@@ -218,8 +243,30 @@ fn main() {
     });
 
     alloc.validate();
-    warn!("{alloc:#?}");
+    let stats = alloc.stats();
+    info!("free = {} / {}", stats.free_frames, alloc.frames());
+    let huge = alloc.frames() >> HUGE_ORDER;
+    info!("huge = {} / {huge}", stats.free_huge);
     warn!("score = {score:.1}")
+}
+
+#[bitfield(u32)]
+struct Allocation {
+    present: bool,
+    /// Allocated frame number
+    #[bits(24)]
+    frame: FrameId,
+    /// Allocation size order (0..=10)
+    #[bits(7)]
+    flags: Flags,
+}
+impl Allocation {
+    fn with(frame: FrameId, flags: Flags) -> Self {
+        Self::new()
+            .with_present(true)
+            .with_frame(frame)
+            .with_flags(flags)
+    }
 }
 
 #[bitfield(u128)]
@@ -260,11 +307,48 @@ struct TracePage {
 const _: () = assert!(size_of::<TracePage>() == FRAME_SIZE);
 
 fn flags_from_gfp(gfp: u32, order: usize) -> Flags {
-    const GFP_MOVABLE: u32 = 0x08;
-    const GFP_ZERO: u32 = 0x100;
-    const GFP_PAGE_CACHE: u32 = 0x10000000;
     Flags::o(order)
-        .with_movable((gfp & GFP_MOVABLE) != 0)
-        .with_zeroed((gfp & GFP_ZERO) != 0)
-        .with_long_living((gfp & GFP_PAGE_CACHE) != 0)
+        .with_movable(gfp == GFP::MOVABLE)
+        .with_zeroed(gfp == GFP::ZERO)
+        .with_long_living(gfp == GFP::PAGE_CACHE)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms, non_camel_case_types, dead_code)]
+enum GFP {
+    DMA = 0x01,
+    HIGHMEM = 0x02,
+    DMA32 = 0x04,
+    MOVABLE = 0x08,
+    RECLAIMABLE = 0x10,
+    HIGH = 0x20,
+    IO = 0x40,
+    FS = 0x80,
+    ZERO = 0x100,
+    ATOMIC = 0x200,
+    DIRECT_RECLAIM = 0x400,
+    KSWAPD_RECLAIM = 0x800,
+    WRITE = 0x1000,
+    NOWARN = 0x2000,
+    RETRY_MAYFAIL = 0x4000,
+    NOFAIL = 0x8000,
+    NORETRY = 0x10000,
+    MEMALLOC = 0x20000,
+    COMP = 0x40000,
+    NOMEMALLOC = 0x80000,
+    HARDWALL = 0x100000,
+    THISNODE = 0x200000,
+    ACCOUNT = 0x400000,
+    ZEROTAGS = 0x800000,
+    PAGE_CACHE = 0x10000000,
+}
+impl PartialEq<u32> for GFP {
+    fn eq(&self, other: &u32) -> bool {
+        (*self as u32) & *other != 0
+    }
+}
+impl PartialEq<GFP> for u32 {
+    fn eq(&self, other: &GFP) -> bool {
+        *self & (*other as u32) != 0
+    }
 }

@@ -15,8 +15,6 @@ pub struct LLZig {
     raw: UnsafeCell<[u8; 2 * align_of::<Align>()]>,
 }
 
-const _: () = assert!(size_of::<Flags>() == 2);
-
 unsafe impl Send for LLZig {}
 unsafe impl Sync for LLZig {}
 
