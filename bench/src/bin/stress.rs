@@ -60,10 +60,17 @@ fn main() {
     }
 
     // Map memory for the allocator and initialize it
+    let kinds = [
+        KindDesc(Kind(0), threads as _),
+        KindDesc(Kind::HUGE, threads as _),
+    ];
     let pages = (memory << 30) / Frame::SIZE;
-    let ms = Allocator::metadata_size(threads, pages);
+    let ms = Allocator::metadata_size(&kinds, pages);
     let meta = MetaData::alloc(ms);
-    let alloc = Allocator::new(threads, pages, Init::FreeAll, meta).unwrap();
+    let alloc = Allocator::new(&kinds, pages, Init::FreeAll, meta).unwrap();
+    let llf = |order: usize, core: usize| {
+        Flags::with(order, core + if order >= HUGE_ORDER { threads } else { 0 })
+    };
     alloc.validate();
 
     // Operate on half of the avaliable memory
@@ -122,7 +129,7 @@ fn main() {
 
             barrier.wait();
 
-            while let Ok(page) = alloc.get(t, None, Flags::o(order)) {
+            while let Ok(page) = alloc.get(None, llf(order, t)) {
                 pages.push(page);
             }
 
@@ -134,9 +141,9 @@ fn main() {
                 while target != pages.len() {
                     if target < pages.len() {
                         let page = pages.pop().unwrap();
-                        alloc.put(t, page, Flags::o(order)).unwrap();
+                        alloc.put(page, llf(order, t)).unwrap();
                     } else {
-                        match alloc.get(t, None, Flags::o(order)) {
+                        match alloc.get(None, llf(order, t)) {
                             Ok(page) => pages.push(page),
                             Err(Error::Memory) => break,
                             Err(e) => panic!("{e:?}"),

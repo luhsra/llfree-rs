@@ -3,15 +3,15 @@ use core::ops::RangeBounds;
 use core::sync::atomic::AtomicU32;
 use core::{fmt, slice};
 
-use bitfield_struct::{bitenum, bitfield};
+use bitfield_struct::bitfield;
 
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
 use crate::lower::HugeId;
 use crate::util::{Align, size_of_slice};
-use crate::{Error, Flags, FrameId, HUGE_FRAMES, HUGE_ORDER, Result, Stats, TREE_FRAMES};
+use crate::{Error, FrameId, HUGE_FRAMES, Kind, Result, Stats, TREE_FRAMES};
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TreeId(pub usize);
 impl TreeId {
     pub const fn as_frame(self) -> FrameId {
@@ -34,6 +34,17 @@ impl core::ops::Add<Self> for TreeId {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
         Self(self.0 + rhs.0)
+    }
+}
+impl fmt::Display for TreeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "T{}", self.0)
+    }
+}
+
+impl fmt::Debug for TreeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
     }
 }
 
@@ -90,7 +101,7 @@ impl<'a> Trees<'a> {
         if let Some(tree_init) = tree_init {
             for (i, e) in entries.iter_mut().enumerate() {
                 let frames = tree_init(i * TREE_FRAMES);
-                *e = Atom::new(Tree::with(frames, false, Kind::Fixed));
+                *e = Atom::new(Tree::with(frames, false, Kind(0)));
             }
         }
 
@@ -113,7 +124,7 @@ impl<'a> Trees<'a> {
         self.entries.iter().fold(Stats::default(), |mut acc, e| {
             let tree = e.load();
             acc.free_frames += tree.free();
-            if tree.kind() == Kind::Huge || tree.free() == TREE_FRAMES {
+            if tree.kind().is_huge() || tree.free() == TREE_FRAMES {
                 acc.free_huge += tree.free() / HUGE_FRAMES;
             }
             acc.free_trees += tree.free() / TREE_FRAMES;
@@ -138,12 +149,22 @@ impl<'a> Trees<'a> {
     }
 
     /// Increment or reserve the tree
-    pub fn inc_or_reserve(&self, i: TreeId, free: usize, may_reserve: bool) -> Option<Tree> {
+    pub fn inc_or_reserve(
+        &self,
+        i: TreeId,
+        free: usize,
+        kind: Kind,
+        may_reserve: bool,
+    ) -> Option<Tree> {
         let mut reserved = false;
         let tree = self.entries[i.0]
             .fetch_update(|v| {
                 let v = v.inc(free);
-                if may_reserve && !v.reserved() && v.free() > Self::MIN_FREE {
+                if may_reserve
+                    && !v.reserved()
+                    && v.kind().accepts(kind)
+                    && v.free() > Self::MIN_FREE
+                {
                     // Reserve the tree that was targeted by the last N frees
                     reserved = true;
                     Some(v.with_free(0).with_reserved(true))
@@ -252,46 +273,13 @@ impl<'a> Trees<'a> {
 #[derive(PartialEq, Eq)]
 pub struct Tree {
     /// Number of free 4K frames.
-    #[bits(29)]
+    #[bits(28)]
     pub free: usize,
     /// If this subtree is reserved by a CPU.
     pub reserved: bool,
     /// Are the frames movable?
-    #[bits(2)]
+    #[bits(3)]
     pub kind: Kind,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-#[repr(u8)]
-#[bitenum(all = true)]
-pub enum Kind {
-    #[fallback]
-    Fixed,
-    Movable,
-    Huge,
-}
-
-impl Kind {
-    pub const LEN: usize = Self::all().len();
-    pub fn accepts(self, other: Kind) -> bool {
-        (other as usize) >= (self as usize)
-    }
-}
-impl From<Flags> for Kind {
-    fn from(flags: Flags) -> Self {
-        if flags.order() >= HUGE_ORDER {
-            Self::Huge
-        } else if flags.movable() {
-            Self::Movable
-        } else {
-            Self::Fixed
-        }
-    }
-}
-impl From<usize> for Kind {
-    fn from(value: usize) -> Self {
-        Self::from_bits(value as _)
-    }
 }
 
 const _: () = assert!(1 << Tree::FREE_BITS >= TREE_FRAMES);
@@ -300,6 +288,8 @@ impl Atomic for Tree {
     type I = AtomicU32;
 }
 impl Tree {
+    pub const KIND_SIZE: usize = Self::KIND_BITS;
+
     /// Creates a new entry.
     pub fn with(free: usize, reserved: bool, kind: Kind) -> Self {
         assert!(free <= TREE_FRAMES);
@@ -311,7 +301,7 @@ impl Tree {
     /// Increments the free frames counter.
     pub fn inc(self, free: usize) -> Self {
         let free = self.free() + free;
-        assert!(free <= TREE_FRAMES);
+        assert!(free <= TREE_FRAMES, "{free}");
         self.with_free(free)
     }
     pub fn dec_force(mut self, free: usize, kind: Kind) -> Option<Self> {

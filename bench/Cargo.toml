@@ -8,7 +8,7 @@ rust-version = "1.88.0"
 llfree = { path = "../core", features = ["std", "log_info"] }
 libc = "0.2"
 log = { version = "0.4", default-features = false }
-clap = { version = "4.4", default-features = false, features = ["std", "derive", "help"] }
+clap = { version = "4.4", features = ["derive"] }
 bitfield-struct = "0.12"
 spin = "0.10"
 

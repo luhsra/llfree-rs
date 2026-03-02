@@ -76,8 +76,29 @@ fn main() {
     info!("max pfn = {max_pfn} max cpu = {max_cpu}");
     let threads = max_cpu as usize + 1;
 
-    let meta = MetaData::alloc(Allocator::metadata_size(threads, frames));
-    let alloc = Allocator::new(threads, frames, Init::FreeAll, meta).unwrap();
+    let kinds = [
+        // Immovable
+        KindDesc(Kind(0), threads as _),
+        // Movable
+        KindDesc(Kind(1), threads as _),
+        // Page cache
+        KindDesc(Kind(2), 1),
+        // Huge
+        KindDesc(Kind::HUGE, threads as _),
+    ];
+
+    let meta = MetaData::alloc(Allocator::metadata_size(&kinds, frames));
+    let alloc = Allocator::new(&kinds, frames, Init::FreeAll, meta).unwrap();
+    let llf = |order: usize, mut core: usize, gfp: u32| {
+        core %= threads;
+        let local = match (order, core, gfp) {
+            (HUGE_ORDER..=MAX_ORDER, core, _) => core + 3 * threads + 1,
+            (_, _, gfp) if gfp == GFP::PAGE_CACHE => 2 * threads,
+            (_, core, gfp) if gfp == GFP::MOVABLE => core + threads,
+            _ => core,
+        };
+        Flags::with(order, local)
+    };
     alloc.validate();
 
     let barrier = Barrier::new(2);
@@ -194,9 +215,10 @@ fn main() {
                     };
 
                     if entry.alloc() {
-                        let flags = flags_from_gfp(entry.flags(), entry.order() as usize);
-                        let frame = alloc.get(t, None, flags).unwrap();
-                        allocated[entry.pfn() as usize] = Allocation::with(frame, flags);
+                        let flags = llf(entry.order() as usize, t, entry.flags());
+                        let frame = alloc.get(None, flags).unwrap();
+                        allocated[entry.pfn() as usize] =
+                            Allocation::with(frame, entry.order() as _);
                         continue;
                     }
 
@@ -204,16 +226,16 @@ fn main() {
                     for order in entry.order() as usize..=MAX_ORDER {
                         let pfn = align_down(entry.pfn() as _, 1 << order);
 
-                        let entry = &mut allocated[pfn as usize];
+                        let entry = &mut allocated[pfn];
                         if entry.present() {
                             entry.set_present(false);
                             let frame = entry.frame();
-                            let flags = entry.flags();
 
-                            if flags.order() < order {
+                            if entry.order() < order {
                                 break;
                             }
-                            if let Err(e) = alloc.put(t, frame, flags) {
+                            let flags = llf(order, t, 0);
+                            if let Err(e) = alloc.put(frame, flags) {
                                 error!(
                                     "failed to free pfn={pfn} order={order} flags_o={} error={e:?}",
                                     flags.order()
@@ -223,9 +245,9 @@ fn main() {
                             for part in 0..(1 << (flags.order() - order)) {
                                 if frame.0 as usize % (1 << (flags.order() - order)) != part {
                                     info!("split free pfn={pfn}+{part} order={order}");
-                                    allocated[pfn as usize + part] = Allocation::with(
+                                    allocated[pfn + part] = Allocation::with(
                                         FrameId((pfn + part * (1 << flags.order())) as _),
-                                        flags.with_order(order),
+                                        order,
                                     );
                                 }
                             }
@@ -254,18 +276,18 @@ fn main() {
 struct Allocation {
     present: bool,
     /// Allocated frame number
-    #[bits(24)]
+    #[bits(27)]
     frame: FrameId,
     /// Allocation size order (0..=10)
-    #[bits(7)]
-    flags: Flags,
+    #[bits(4)]
+    order: usize,
 }
 impl Allocation {
-    fn with(frame: FrameId, flags: Flags) -> Self {
+    fn with(frame: FrameId, order: usize) -> Self {
         Self::new()
             .with_present(true)
             .with_frame(frame)
-            .with_flags(flags)
+            .with_order(order)
     }
 }
 
@@ -305,13 +327,6 @@ struct TracePage {
     entries: [[u8; 12]; FRAME_SIZE / 12],
 }
 const _: () = assert!(size_of::<TracePage>() == FRAME_SIZE);
-
-fn flags_from_gfp(gfp: u32, order: usize) -> Flags {
-    Flags::o(order)
-        .with_movable(gfp == GFP::MOVABLE)
-        .with_zeroed(gfp == GFP::ZERO)
-        .with_long_living(gfp == GFP::PAGE_CACHE)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::upper_case_acronyms, non_camel_case_types, dead_code)]

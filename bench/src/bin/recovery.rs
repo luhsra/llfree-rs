@@ -9,7 +9,7 @@ use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, Flags, LLFree, thread};
+use llfree::{Alloc, Flags, HUGE_ORDER, Kind, KindDesc, LLFree, thread};
 use log::warn;
 
 /// Benchmarking the (crashed) recovery.
@@ -40,6 +40,8 @@ struct Args {
 }
 
 type Allocator<'a> = NvmAlloc<'a, LLFree<'a>>;
+
+const KINDS: [KindDesc; 2] = [KindDesc(Kind(0), 1), KindDesc(Kind::HUGE, 1)];
 
 fn main() {
     util::logging();
@@ -100,10 +102,13 @@ fn main() {
 
 fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
-    let ms = Allocator::metadata_size(threads, mapping.len());
+    let ms = Allocator::metadata_size(&KINDS, mapping.len());
     let local = aligned_buf(ms.local);
     let trees = aligned_buf(ms.trees);
-    let alloc = Allocator::create(threads, &mut mapping, false, local, trees).unwrap();
+    let alloc = Allocator::create(&KINDS, &mut mapping, false, local, trees).unwrap();
+    let llf = |order: usize, core: usize| {
+        Flags::with(order, core + if order >= HUGE_ORDER { threads } else { 0 })
+    };
     warn!("Prepare alloc");
 
     thread::parallel(0..threads, |t| {
@@ -113,15 +118,15 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 
         let mut pages = Vec::with_capacity(allocs);
         for _ in 0..allocs {
-            pages.push(alloc.get(t, None, Flags::o(0)).unwrap());
+            pages.push(alloc.get(None, llf(0, t)).unwrap());
         }
 
         if crash {
             loop {
                 let i = rng.range(0..pages.len() as _) as usize;
-                alloc.put(t, pages[i], Flags::o(0)).unwrap();
+                alloc.put(pages[i], llf(0, t)).unwrap();
                 black_box(pages[i]);
-                pages[i] = alloc.get(t, None, Flags::o(0)).unwrap();
+                pages[i] = alloc.get(None, llf(0, t)).unwrap();
             }
         }
     });
@@ -133,13 +138,13 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 
 fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
-    let ms = Allocator::metadata_size(threads, mapping.len());
+    let ms = Allocator::metadata_size(&KINDS, mapping.len());
     let local = aligned_buf(ms.local);
     let trees = aligned_buf(ms.trees);
 
     warn!("Recover alloc");
     let timer = Instant::now();
-    let alloc = Allocator::create(threads, &mut mapping, true, local, trees).unwrap();
+    let alloc = Allocator::create(&KINDS, &mut mapping, true, local, trees).unwrap();
     let time = timer.elapsed().as_nanos();
 
     let num_alloc = alloc.frames() - alloc.fast_stats().free_frames;

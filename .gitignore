@@ -10,6 +10,7 @@ memfile
 /test/
 .cache/
 .direnv/
+.gdb_history
 
 /results/*
 !/results/remote_ma/

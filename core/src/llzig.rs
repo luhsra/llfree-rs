@@ -5,7 +5,7 @@ use core::{fmt, slice};
 
 use super::{Alloc, Init};
 use crate::util::Align;
-use crate::{Flags, FrameId, HUGE_ORDER, Result, Stats, TREE_FRAMES, TREE_HUGE};
+use crate::{Flags, FrameId, HUGE_ORDER, KindDesc, Result, Stats, TREE_FRAMES, TREE_HUGE};
 
 /// Zig implementation of LLFree
 ///
@@ -23,7 +23,9 @@ impl<'a> Alloc<'a> for LLZig {
         "LLZig"
     }
 
-    fn metadata_size(cores: usize, frames: usize) -> crate::MetaSize {
+    fn metadata_size(kinds: &[KindDesc], frames: usize) -> crate::MetaSize {
+        assert!(kinds.len() > 0);
+        let cores = kinds[0].1 as usize;
         let m = unsafe { bindings::llzig_metadata_size(cores as _, frames as _) };
         assert!(m.llfree as usize <= size_of::<Self>());
         crate::MetaSize {
@@ -36,7 +38,8 @@ impl<'a> Alloc<'a> for LLZig {
     unsafe fn metadata(&mut self) -> super::MetaData<'a> {
         unsafe {
             let cores = bindings::llzig_cores(self.raw.get().cast());
-            let ms = Self::metadata_size(cores, self.frames());
+            let ms =
+                bindings::llzig_metadata_size(cores, bindings::llzig_frames(self.raw.get().cast()));
             let m = bindings::llzig_metadata(self.raw.get().cast());
             fn to_slice<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
                 unsafe {
@@ -52,8 +55,15 @@ impl<'a> Alloc<'a> for LLZig {
         }
     }
 
-    fn new(cores: usize, frames: usize, init: Init, meta: super::MetaData<'a>) -> Result<Self> {
+    fn new(
+        kinds: &[KindDesc],
+        frames: usize,
+        init: Init,
+        meta: super::MetaData<'a>,
+    ) -> Result<Self> {
         let raw = UnsafeCell::new([0u8; size_of::<Self>()]);
+        assert!(kinds.len() > 0);
+        let cores = kinds[0].1 as usize;
 
         let init = match init {
             Init::FreeAll => 0,
@@ -66,7 +76,7 @@ impl<'a> Alloc<'a> for LLZig {
         let m = unsafe { bindings::llzig_metadata_size(cores as _, frames as _) };
         assert!(size_of::<Self>() >= m.llfree);
 
-        assert!(meta.valid(Self::metadata_size(cores, frames)));
+        assert!(meta.valid(Self::metadata_size(kinds, frames)));
         let meta = bindings::llzig_meta {
             local: meta.local.as_mut_ptr(),
             trees: meta.trees.as_mut_ptr(),
@@ -77,7 +87,9 @@ impl<'a> Alloc<'a> for LLZig {
         ret.ok().map(|_| LLZig { raw })
     }
 
-    fn get(&self, core: usize, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
+    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
+        let cores = unsafe { bindings::llzig_cores(self.raw.get().cast()) } as usize;
+        let core = flags.local() as usize % cores;
         let ret = if let Some(frame) = frame {
             unsafe {
                 bindings::llzig_get_at(self.raw.get().cast(), core as _, frame.0 as _, flags.into())
@@ -88,7 +100,9 @@ impl<'a> Alloc<'a> for LLZig {
         Ok(FrameId(ret.ok()? as _))
     }
 
-    fn put(&self, core: usize, frame: FrameId, flags: Flags) -> Result<()> {
+    fn put(&self, frame: FrameId, flags: Flags) -> Result<()> {
+        let cores = unsafe { bindings::llzig_cores(self.raw.get().cast()) } as usize;
+        let core = flags.local() as usize % cores;
         let ret = unsafe {
             bindings::llzig_put(self.raw.get().cast(), core as _, frame.0 as _, flags.into())
         };
@@ -114,10 +128,6 @@ impl<'a> Alloc<'a> for LLZig {
 
     fn frames(&self) -> usize {
         unsafe { bindings::llzig_frames(self.raw.get().cast()) as _ }
-    }
-
-    fn cores(&self) -> usize {
-        unsafe { bindings::llzig_cores(self.raw.get().cast()) as _ }
     }
 
     fn fast_stats(&self) -> crate::Stats {
@@ -177,7 +187,7 @@ mod bindings {
         fn from(flags: super::Flags) -> Self {
             llflags_t {
                 order: flags.order() as _,
-                movable: flags.movable(),
+                movable: false,
                 zeroed: false,
                 long_living: false,
             }

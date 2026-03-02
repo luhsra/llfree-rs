@@ -1,8 +1,8 @@
 //! Lower allocator implementations
 
 use core::mem::{align_of, size_of};
-use core::slice;
 use core::sync::atomic::{AtomicU16, AtomicU32};
+use core::{fmt, slice};
 
 use bitfield_struct::bitfield;
 use log::{debug, error, info, warn};
@@ -18,7 +18,7 @@ use crate::{
 
 const _: () = assert!(Bitfield::LEN == HUGE_FRAMES);
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct HugeId(pub usize);
 impl HugeId {
     pub fn as_frame(self) -> FrameId {
@@ -38,6 +38,17 @@ impl core::ops::Add<Self> for HugeId {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
         Self(self.0 + rhs.0)
+    }
+}
+impl fmt::Display for HugeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Hx{:x}", self.0)
+    }
+}
+
+impl fmt::Debug for HugeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
     }
 }
 

@@ -3,7 +3,7 @@ use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
 use std::sync::Barrier;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
@@ -15,7 +15,9 @@ use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, Flags, FrameId, LLFree, MAX_ORDER, Result, thread};
+use llfree::{
+    Alloc, Flags, FrameId, HUGE_ORDER, Kind, KindDesc, LLFree, MAX_ORDER, Result, thread,
+};
 use log::warn;
 
 /// Number of allocations per block
@@ -58,6 +60,8 @@ struct Args {
     offset: usize,
 }
 
+static CORES: AtomicUsize = AtomicUsize::new(0);
+
 fn main() {
     let Args {
         bench,
@@ -72,6 +76,8 @@ fn main() {
         stride,
         offset,
     } = Args::parse();
+
+    CORES.store(threads, Ordering::Relaxed);
 
     util::logging();
 
@@ -129,10 +135,10 @@ trait DynAlloc: fmt::Debug + Send + Sync {
 
 impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
     fn get(&self, core: usize, order: usize) -> Result<FrameId> {
-        Alloc::get(self, core, None, Flags::o(order))
+        Alloc::get(self, None, flags(order, core))
     }
     fn put(&self, core: usize, frame: FrameId, order: usize) -> Result<()> {
-        Alloc::put(self, core, frame, Flags::o(order))
+        Alloc::put(self, frame, flags(order, core))
     }
     fn frames(&self) -> usize {
         Alloc::frames(self)
@@ -142,26 +148,40 @@ impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
     }
 }
 
+fn flags(order: usize, core: usize) -> Flags {
+    let cores = CORES.load(Ordering::Relaxed);
+    let mut local = core % cores;
+    if order >= HUGE_ORDER {
+        local += cores;
+    }
+    Flags::with(order, local)
+}
+
 fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAlloc + 'a> {
+    let kinds = [
+        KindDesc(Kind(0), cores as _),
+        KindDesc(Kind::HUGE, cores as _),
+    ];
+
     #[cfg(feature = "llc")]
     if LLC::name() == name {
-        let m = NvmAlloc::<LLC>::metadata_size(cores, zone.len());
+        let m = NvmAlloc::<LLC>::metadata_size(&kinds, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
-        return Box::new(NvmAlloc::<LLC>::create(cores, zone, false, local, trees).unwrap());
+        return Box::new(NvmAlloc::<LLC>::create(&kinds, zone, false, local, trees).unwrap());
     }
     #[cfg(feature = "llzig")]
     if LLZig::name() == name {
-        let m = NvmAlloc::<LLZig>::metadata_size(cores, zone.len());
+        let m = NvmAlloc::<LLZig>::metadata_size(&kinds, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
-        return Box::new(NvmAlloc::<LLZig>::create(cores, zone, false, local, trees).unwrap());
+        return Box::new(NvmAlloc::<LLZig>::create(&kinds, zone, false, local, trees).unwrap());
     }
     if LLFree::name() == name {
-        let m = NvmAlloc::<LLFree>::metadata_size(cores, zone.len());
+        let m = NvmAlloc::<LLFree>::metadata_size(&kinds, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
-        return Box::new(NvmAlloc::<LLFree>::create(cores, zone, false, local, trees).unwrap());
+        return Box::new(NvmAlloc::<LLFree>::create(&kinds, zone, false, local, trees).unwrap());
     }
     panic!("Unknown allocator");
 }

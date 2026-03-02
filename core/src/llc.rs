@@ -3,9 +3,10 @@ use core::ffi::{CStr, c_char, c_void};
 use core::mem::{align_of, size_of};
 use core::{fmt, slice};
 
-use super::{Alloc, Init};
 use crate::util::Align;
-use crate::{Flags, FrameId, HUGE_ORDER, Result, Stats, TREE_FRAMES, TREE_HUGE};
+use crate::{
+    Alloc, Flags, FrameId, HUGE_ORDER, Init, KindDesc, Result, Stats, TREE_FRAMES, TREE_HUGE,
+};
 
 /// C implementation of LLFree
 ///
@@ -23,8 +24,10 @@ impl<'a> Alloc<'a> for LLC {
         "LLC"
     }
 
-    fn metadata_size(cores: usize, frames: usize) -> crate::MetaSize {
-        let m = unsafe { bindings::llfree_metadata_size(cores as _, frames as _) };
+    fn metadata_size(kinds: &[KindDesc], frames: usize) -> crate::MetaSize {
+        assert!(kinds.len() > 0);
+        let cores = kinds[0].1 as usize;
+        let m = unsafe { bindings::llfree_metadata_size(cores, frames as _) };
         assert!(m.llfree as usize <= size_of::<Self>());
         crate::MetaSize {
             local: m.local,
@@ -36,8 +39,11 @@ impl<'a> Alloc<'a> for LLC {
     unsafe fn metadata(&mut self) -> super::MetaData<'a> {
         unsafe {
             let cores = bindings::llfree_cores(self.raw.get().cast());
-            let ms = Self::metadata_size(cores, self.frames());
             let m = bindings::llfree_metadata(self.raw.get().cast());
+            let ms = bindings::llfree_metadata_size(
+                cores,
+                bindings::llfree_frames(self.raw.get().cast()),
+            );
             super::MetaData {
                 local: slice::from_raw_parts_mut(m.local, ms.local),
                 trees: slice::from_raw_parts_mut(m.trees, ms.trees),
@@ -46,8 +52,15 @@ impl<'a> Alloc<'a> for LLC {
         }
     }
 
-    fn new(cores: usize, frames: usize, init: Init, meta: super::MetaData<'a>) -> Result<Self> {
+    fn new(
+        kinds: &[KindDesc],
+        frames: usize,
+        init: Init,
+        meta: super::MetaData<'a>,
+    ) -> Result<Self> {
         let raw = UnsafeCell::new([0u8; size_of::<Self>()]);
+        assert!(kinds.len() > 0);
+        let cores = kinds[0].1 as usize;
 
         let init = match init {
             Init::FreeAll => 0,
@@ -60,7 +73,7 @@ impl<'a> Alloc<'a> for LLC {
         let m = unsafe { bindings::llfree_metadata_size(cores as _, frames as _) };
         assert!(size_of::<Self>() >= m.llfree);
 
-        assert!(meta.valid(Self::metadata_size(cores, frames)));
+        assert!(meta.valid(Self::metadata_size(kinds, frames)));
         let meta = bindings::llfree_meta {
             local: meta.local.as_mut_ptr(),
             trees: meta.trees.as_mut_ptr(),
@@ -72,7 +85,9 @@ impl<'a> Alloc<'a> for LLC {
         ret.ok().map(|_| LLC { raw })
     }
 
-    fn get(&self, core: usize, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
+    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
+        let cores = unsafe { bindings::llfree_cores(self.raw.get().cast()) } as usize;
+        let core = flags.local() as usize % cores;
         let ret = if let Some(frame) = frame {
             unsafe {
                 bindings::llfree_get_at(
@@ -88,7 +103,9 @@ impl<'a> Alloc<'a> for LLC {
         Ok(FrameId(ret.ok()? as _))
     }
 
-    fn put(&self, core: usize, frame: FrameId, flags: Flags) -> Result<()> {
+    fn put(&self, frame: FrameId, flags: Flags) -> Result<()> {
+        let cores = unsafe { bindings::llfree_cores(self.raw.get().cast()) } as usize;
+        let core = flags.local() as usize % cores;
         let ret = unsafe {
             bindings::llfree_put(self.raw.get().cast(), core as _, frame.0 as _, flags.into())
         };
@@ -114,10 +131,6 @@ impl<'a> Alloc<'a> for LLC {
 
     fn frames(&self) -> usize {
         unsafe { bindings::llfree_frames(self.raw.get().cast()) as _ }
-    }
-
-    fn cores(&self) -> usize {
-        unsafe { bindings::llfree_cores(self.raw.get().cast()) as _ }
     }
 
     fn fast_stats(&self) -> crate::Stats {
@@ -174,6 +187,7 @@ mod bindings {
     #![allow(clippy::useless_transmute)]
     #![allow(clippy::unnecessary_cast)]
     #![allow(clippy::transmute_int_to_bool)]
+
     include!(concat!(env!("OUT_DIR"), "/llc.rs"));
 
     impl From<super::Flags> for llflags_t {
@@ -182,9 +196,9 @@ mod bindings {
                 _bitfield_align_1: [0; 0],
                 _bitfield_1: llflags_t::new_bitfield_1(
                     flags.order() as _,
-                    flags.movable(),
                     false,
-                    flags.long_living(),
+                    false,
+                    false,
                 ),
             }
         }

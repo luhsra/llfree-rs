@@ -15,7 +15,7 @@ use crate::{FrameId, HUGE_FRAMES};
 
 const ROWS: usize = HUGE_FRAMES / Bitfield::ROW_BITS;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RowId(pub usize);
 impl RowId {
     pub const fn as_frame(self) -> FrameId {
@@ -43,6 +43,16 @@ impl core::ops::Add<Self> for RowId {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
         Self(self.0 + rhs.0)
+    }
+}
+impl fmt::Display for RowId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Rx{:x}", self.0)
+    }
+}
+impl fmt::Debug for RowId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
     }
 }
 

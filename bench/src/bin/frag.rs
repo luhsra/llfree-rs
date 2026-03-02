@@ -65,9 +65,16 @@ fn main() {
 
     // Map memory for the allocator and initialize it
     let pages = (memory << 30) / Frame::SIZE;
-    let ms = Allocator::metadata_size(threads, pages);
+    let kinds = [
+        KindDesc(Kind(0), threads as _),
+        KindDesc(Kind::HUGE, threads as _),
+    ];
+    let ms = Allocator::metadata_size(&kinds, pages);
     let meta = MetaData::alloc(ms);
-    let alloc = Allocator::new(threads, pages, Init::FreeAll, meta).unwrap();
+    let alloc = Allocator::new(&kinds, pages, Init::FreeAll, meta).unwrap();
+    let llf = |order: usize, core: usize| {
+        Flags::with(order, core + if order >= HUGE_ORDER { threads } else { 0 })
+    };
 
     let out = Mutex::new(BufWriter::new(File::create(outfile).unwrap()));
 
@@ -93,7 +100,7 @@ fn main() {
             let mut pages = all_pages[t].lock().unwrap();
             barrier.wait();
 
-            while let Ok(page) = alloc.get(t, None, Flags::o(order)) {
+            while let Ok(page) = alloc.get(None, llf(order, t)) {
                 pages.push(page);
             }
         };
@@ -127,7 +134,7 @@ fn main() {
             barrier.wait();
 
             for _ in 0..allocs {
-                alloc.put(t, pages.pop().unwrap(), Flags::o(order)).unwrap();
+                alloc.put(pages.pop().unwrap(), llf(order, t)).unwrap();
             }
         };
 
@@ -144,8 +151,8 @@ fn main() {
                 // realloc 10% of the remaining pages
                 for _ in 0..allocs / 10 {
                     let i = rng.range(0..pages.len() as u64) as usize;
-                    alloc.put(t, pages[i], Flags::o(order)).unwrap();
-                    pages[i] = alloc.get(t, None, Flags::o(order)).unwrap();
+                    alloc.put(pages[i], llf(order, t)).unwrap();
+                    pages[i] = alloc.get(None, llf(order, t)).unwrap();
                 }
             };
             if barrier.wait().is_leader() {

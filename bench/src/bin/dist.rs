@@ -9,7 +9,9 @@ use clap::Parser;
 use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{aligned_buf, logging};
-use llfree::{Alloc, Flags, HUGE_FRAMES, Init, LLFree, MetaData, thread};
+use llfree::{
+    Alloc, Flags, HUGE_FRAMES, HUGE_ORDER, Init, Kind, KindDesc, LLFree, MetaData, thread,
+};
 use log::warn;
 
 type Allocator<'a> = LLFree<'a>;
@@ -61,7 +63,11 @@ fn main() {
     let bucket_size = (end - start) / buckets;
     assert!(bucket_size > 0);
 
-    let ms = Allocator::metadata_size(threads, frames);
+    let kinds = [
+        KindDesc(Kind(0), threads as _),
+        KindDesc(Kind::HUGE, threads as _),
+    ];
+    let ms = Allocator::metadata_size(&kinds, frames);
     let mut lower = mapping(0x1000_0000_0000, ms.lower.div_ceil(Frame::SIZE), dax);
     let local = aligned_buf(ms.local);
     let trees = aligned_buf(ms.trees);
@@ -74,7 +80,10 @@ fn main() {
             trees,
             lower: unsafe { slice::from_raw_parts_mut(lower.as_mut_ptr().cast(), ms.lower) },
         };
-        let alloc = Allocator::new(threads, frames, Init::FreeAll, meta).unwrap();
+        let alloc = Allocator::new(&kinds, frames, Init::FreeAll, meta).unwrap();
+        let llf = |order: usize, core: usize| {
+            Flags::with(order, core + if order >= HUGE_ORDER { threads } else { 0 })
+        };
 
         warn!("init time {}ms", timer.elapsed().as_millis());
 
@@ -96,7 +105,7 @@ fn main() {
 
             for _ in 0..allocs {
                 let timer = Instant::now();
-                let page = alloc.get(t, None, Flags::o(order)).unwrap();
+                let page = alloc.get(None, llf(order, t)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
 
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
@@ -108,7 +117,7 @@ fn main() {
 
             for page in pages {
                 let timer = Instant::now();
-                alloc.put(t, page, Flags::o(order)).unwrap();
+                alloc.put(page, llf(order, t)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
 
