@@ -1,6 +1,6 @@
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_void};
-use core::mem::{align_of, size_of};
+use core::mem::align_of;
 use core::{fmt, slice};
 
 use crate::util::Align;
@@ -8,12 +8,13 @@ use crate::{
     Alloc, Flags, FrameId, HUGE_ORDER, Init, KindDesc, Result, Stats, TREE_FRAMES, TREE_HUGE,
 };
 
+const SIZE: usize = 2 * align_of::<Align>();
 /// C implementation of LLFree
 ///
 /// Note: This abstraction assumes that the state is movable and smaller than two cache lines!
-#[repr(transparent)]
 pub struct LLC {
-    raw: UnsafeCell<[u8; 2 * align_of::<Align>()]>,
+    raw: UnsafeCell<[u8; SIZE]>,
+    ms: bindings::llfree_meta_size,
 }
 
 unsafe impl Send for LLC {}
@@ -26,9 +27,11 @@ impl<'a> Alloc<'a> for LLC {
 
     fn metadata_size(kinds: &[KindDesc], frames: usize) -> crate::MetaSize {
         assert!(kinds.len() > 0);
-        let cores = kinds[0].1 as usize;
-        let m = unsafe { bindings::llfree_metadata_size(cores, frames as _) };
-        assert!(m.llfree as usize <= size_of::<Self>());
+
+        let c_kinds = bindings::convert_kinds(kinds);
+
+        let m = unsafe { bindings::llfree_metadata_size(c_kinds.as_ptr(), frames as _) };
+        assert!(m.llfree as usize <= SIZE);
         crate::MetaSize {
             local: m.local,
             trees: m.trees,
@@ -38,12 +41,8 @@ impl<'a> Alloc<'a> for LLC {
 
     unsafe fn metadata(&mut self) -> super::MetaData<'a> {
         unsafe {
-            let cores = bindings::llfree_cores(self.raw.get().cast());
             let m = bindings::llfree_metadata(self.raw.get().cast());
-            let ms = bindings::llfree_metadata_size(
-                cores,
-                bindings::llfree_frames(self.raw.get().cast()),
-            );
+            let ms = &self.ms;
             super::MetaData {
                 local: slice::from_raw_parts_mut(m.local, ms.local),
                 trees: slice::from_raw_parts_mut(m.trees, ms.trees),
@@ -58,9 +57,8 @@ impl<'a> Alloc<'a> for LLC {
         init: Init,
         meta: super::MetaData<'a>,
     ) -> Result<Self> {
-        let raw = UnsafeCell::new([0u8; size_of::<Self>()]);
+        let raw = UnsafeCell::new([0u8; SIZE]);
         assert!(kinds.len() > 0);
-        let cores = kinds[0].1 as usize;
 
         let init = match init {
             Init::FreeAll => 0,
@@ -70,8 +68,10 @@ impl<'a> Alloc<'a> for LLC {
             Init::None => 4,
         };
 
-        let m = unsafe { bindings::llfree_metadata_size(cores as _, frames as _) };
-        assert!(size_of::<Self>() >= m.llfree);
+        let c_kinds = bindings::convert_kinds(kinds);
+
+        let m = unsafe { bindings::llfree_metadata_size(c_kinds.as_ptr(), frames as _) };
+        assert!(SIZE >= m.llfree);
 
         assert!(meta.valid(Self::metadata_size(kinds, frames)));
         let meta = bindings::llfree_meta {
@@ -80,35 +80,24 @@ impl<'a> Alloc<'a> for LLC {
             lower: meta.lower.as_mut_ptr(),
         };
 
-        let ret =
-            unsafe { bindings::llfree_init(raw.get().cast(), cores as _, frames, init, meta) };
-        ret.ok().map(|_| LLC { raw })
+        let ret = unsafe {
+            bindings::llfree_init(raw.get().cast(), c_kinds.as_ptr(), frames, init, meta)
+        };
+        ret.ok().map(|_| LLC { raw, ms: m })
     }
 
     fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
-        let cores = unsafe { bindings::llfree_cores(self.raw.get().cast()) } as usize;
-        let core = flags.local() as usize % cores;
-        let ret = if let Some(frame) = frame {
-            unsafe {
-                bindings::llfree_get_at(
-                    self.raw.get().cast(),
-                    core as _,
-                    frame.0 as _,
-                    flags.into(),
-                )
-            }
-        } else {
-            unsafe { bindings::llfree_get(self.raw.get().cast(), core as _, flags.into()) }
+        let frame = match frame {
+            Some(f) => bindings::ll_some(f.0 as _),
+            None => bindings::ll_none(),
         };
+        let ret = unsafe { bindings::llfree_get(self.raw.get().cast(), frame, flags.into()) };
         Ok(FrameId(ret.ok()? as _))
     }
 
     fn put(&self, frame: FrameId, flags: Flags) -> Result<()> {
-        let cores = unsafe { bindings::llfree_cores(self.raw.get().cast()) } as usize;
-        let core = flags.local() as usize % cores;
-        let ret = unsafe {
-            bindings::llfree_put(self.raw.get().cast(), core as _, frame.0 as _, flags.into())
-        };
+        let ret =
+            unsafe { bindings::llfree_put(self.raw.get().cast(), frame.0 as _, flags.into()) };
         ret.ok().map(|_| ())
     }
 
@@ -188,18 +177,17 @@ mod bindings {
     #![allow(clippy::unnecessary_cast)]
     #![allow(clippy::transmute_int_to_bool)]
 
+    use std::vec::Vec;
+
+    use crate::KindDesc;
+
     include!(concat!(env!("OUT_DIR"), "/llc.rs"));
 
     impl From<super::Flags> for llflags_t {
         fn from(flags: super::Flags) -> Self {
             llflags_t {
                 _bitfield_align_1: [0; 0],
-                _bitfield_1: llflags_t::new_bitfield_1(
-                    flags.order() as _,
-                    false,
-                    false,
-                    false,
-                ),
+                _bitfield_1: llflags_t::new_bitfield_1(flags.order() as _, flags.local() as _),
             }
         }
     }
@@ -224,6 +212,41 @@ mod bindings {
                 free_huge: val.free_huge,
                 free_trees: 0,
             }
+        }
+    }
+
+    pub fn convert_kinds(kinds: &[super::KindDesc]) -> Vec<llkind_desc> {
+        let mut c_kinds = Vec::with_capacity(kinds.len() + 1);
+        for KindDesc(kind, count) in kinds {
+            c_kinds.push(llkind_desc {
+                kind: llkind {
+                    _bitfield_align_1: [0; 0],
+                    _bitfield_1: llkind::new_bitfield_1(kind.0),
+                },
+                count: *count as _,
+            });
+        }
+        // Sentinel for the end of the array
+        c_kinds.push(llkind_desc {
+            kind: llkind {
+                _bitfield_align_1: [0; 0],
+                _bitfield_1: llkind::new_bitfield_1(0),
+            },
+            count: 0,
+        });
+        c_kinds
+    }
+
+    pub fn ll_none() -> ll_optional {
+        ll_optional {
+            _bitfield_align_1: [0; 0],
+            _bitfield_1: ll_optional::new_bitfield_1(false, 0),
+        }
+    }
+    pub fn ll_some(value: usize) -> ll_optional {
+        ll_optional {
+            _bitfield_align_1: [0; 0],
+            _bitfield_1: ll_optional::new_bitfield_1(true, value as _),
         }
     }
 }

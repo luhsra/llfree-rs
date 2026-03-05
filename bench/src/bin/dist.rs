@@ -9,9 +9,7 @@ use clap::Parser;
 use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{aligned_buf, logging};
-use llfree::{
-    Alloc, Flags, HUGE_FRAMES, HUGE_ORDER, Init, Kind, KindDesc, LLFree, MetaData, thread,
-};
+use llfree::{Alloc, HUGE_FRAMES, Init, LLFree, MetaData, Tiering, thread};
 use log::warn;
 
 type Allocator<'a> = LLFree<'a>;
@@ -63,11 +61,8 @@ fn main() {
     let bucket_size = (end - start) / buckets;
     assert!(bucket_size > 0);
 
-    let kinds = [
-        KindDesc(Kind(0), threads as _),
-        KindDesc(Kind::HUGE, threads as _),
-    ];
-    let ms = Allocator::metadata_size(&kinds, frames);
+    let (tiering, request) = Tiering::simple(threads);
+    let ms = Allocator::metadata_size(&tiering, frames);
     let mut lower = mapping(0x1000_0000_0000, ms.lower.div_ceil(Frame::SIZE), dax);
     let local = aligned_buf(ms.local);
     let trees = aligned_buf(ms.trees);
@@ -80,10 +75,7 @@ fn main() {
             trees,
             lower: unsafe { slice::from_raw_parts_mut(lower.as_mut_ptr().cast(), ms.lower) },
         };
-        let alloc = Allocator::new(&kinds, frames, Init::FreeAll, meta).unwrap();
-        let llf = |order: usize, core: usize| {
-            Flags::with(order, core + if order >= HUGE_ORDER { threads } else { 0 })
-        };
+        let alloc = Allocator::new(frames, Init::FreeAll, &tiering, meta).unwrap();
 
         warn!("init time {}ms", timer.elapsed().as_millis());
 
@@ -105,7 +97,7 @@ fn main() {
 
             for _ in 0..allocs {
                 let timer = Instant::now();
-                let page = alloc.get(None, llf(order, t)).unwrap();
+                let (_, page) = alloc.get(None, request(order, t)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
 
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
@@ -117,7 +109,7 @@ fn main() {
 
             for page in pages {
                 let timer = Instant::now();
-                alloc.put(page, llf(order, t)).unwrap();
+                alloc.put(page, request(order, t)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);
 
@@ -128,7 +120,7 @@ fn main() {
             (get_buckets, put_buckets)
         });
 
-        assert_eq!(alloc.fast_stats().free_frames, alloc.frames());
+        assert_eq!(alloc.tree_stats(&mut []).free_frames, alloc.frames());
 
         for (get_b, put_b) in t_buckets {
             for i in 0..buckets {

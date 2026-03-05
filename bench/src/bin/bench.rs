@@ -15,9 +15,7 @@ use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{
-    Alloc, Flags, FrameId, HUGE_ORDER, Kind, KindDesc, LLFree, MAX_ORDER, Result, thread,
-};
+use llfree::{Alloc, FrameId, LLFree, MAX_ORDER, Request, Result, Tiering, thread};
 use log::warn;
 
 /// Number of allocations per block
@@ -109,8 +107,6 @@ fn main() {
             }
         }
     }
-    warn!("Ok");
-    drop(allocs); // drop first
 }
 
 #[allow(unused_variables)]
@@ -124,6 +120,29 @@ pub fn mapping(begin: usize, length: usize, dax: Option<String>) -> Mapping<Fram
     Mapping::anon(begin, length, false, false).unwrap()
 }
 
+trait RequestFn: Fn(usize, usize) -> Request + Send + Sync {}
+impl<T: Fn(usize, usize) -> Request + Send + Sync> RequestFn for T {}
+
+struct BenchAlloc<'a, T: Alloc<'a>, F: RequestFn> {
+    alloc: T,
+    request: F,
+    __: core::marker::PhantomData<&'a ()>,
+}
+impl<'a, T: Alloc<'a>, F: RequestFn> fmt::Debug for BenchAlloc<'a, T, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.alloc.fmt(f)
+    }
+}
+impl<'a, T: Alloc<'a>, F: RequestFn> BenchAlloc<'a, T, F> {
+    pub fn new(alloc: T, request: F) -> Self {
+        Self {
+            alloc,
+            request,
+            __: core::marker::PhantomData,
+        }
+    }
+}
+
 /// Reduced, VTable-compatible alloc trait for dynamic dispatch
 trait DynAlloc: fmt::Debug + Send + Sync {
     fn get(&self, core: usize, order: usize) -> Result<FrameId>;
@@ -133,35 +152,25 @@ trait DynAlloc: fmt::Debug + Send + Sync {
     fn allocated_frames(&self) -> usize;
 }
 
-impl<'a, T: Alloc<'a>> DynAlloc for NvmAlloc<'a, T> {
+impl<'a, T: Alloc<'a>, F: RequestFn> DynAlloc for BenchAlloc<'a, T, F> {
     fn get(&self, core: usize, order: usize) -> Result<FrameId> {
-        Alloc::get(self, None, flags(order, core))
+        self.alloc
+            .get(None, (self.request)(order, core))
+            .map(|(_, f)| f)
     }
     fn put(&self, core: usize, frame: FrameId, order: usize) -> Result<()> {
-        Alloc::put(self, frame, flags(order, core))
+        self.alloc.put(frame, (self.request)(order, core))
     }
     fn frames(&self) -> usize {
-        Alloc::frames(self)
+        self.alloc.frames()
     }
     fn allocated_frames(&self) -> usize {
-        Alloc::frames(self) - Alloc::fast_stats(self).free_frames
+        self.alloc.frames() - self.alloc.tree_stats(&mut []).free_frames
     }
-}
-
-fn flags(order: usize, core: usize) -> Flags {
-    let cores = CORES.load(Ordering::Relaxed);
-    let mut local = core % cores;
-    if order >= HUGE_ORDER {
-        local += cores;
-    }
-    Flags::with(order, local)
 }
 
 fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAlloc + 'a> {
-    let kinds = [
-        KindDesc(Kind(0), cores as _),
-        KindDesc(Kind::HUGE, cores as _),
-    ];
+    let (tiering, request) = Tiering::simple(cores);
 
     #[cfg(feature = "llc")]
     if LLC::name() == name {
@@ -178,10 +187,13 @@ fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAllo
         return Box::new(NvmAlloc::<LLZig>::create(&kinds, zone, false, local, trees).unwrap());
     }
     if LLFree::name() == name {
-        let m = NvmAlloc::<LLFree>::metadata_size(&kinds, zone.len());
+        let m = NvmAlloc::<LLFree>::metadata_size(&tiering, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
-        return Box::new(NvmAlloc::<LLFree>::create(&kinds, zone, false, local, trees).unwrap());
+        return Box::new(BenchAlloc::new(
+            NvmAlloc::<LLFree>::create(zone, false, &tiering, local, trees).unwrap(),
+            request,
+        ));
     }
     panic!("Unknown allocator");
 }

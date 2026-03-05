@@ -42,54 +42,60 @@ enum Count {
     Pid,
 }
 
-#[derive(Clone, Copy)]
-struct Policy {
-    kind: Kind,
-    count: Count,
-    matcher: fn(order: usize, gfp: u32) -> bool,
-}
-impl Policy {
-    pub fn new(kind: Kind, count: Count, matcher: fn(order: usize, gfp: u32) -> bool) -> Self {
-        Self {
-            kind,
-            count,
-            matcher,
+fn tiering(
+    cores: usize,
+    pids: usize,
+) -> (
+    Tiering<'static>,
+    impl Fn(usize, u32, usize, usize) -> Request,
+) {
+    let tiers = vec![
+        TierConfig::new(Tier(0), cores), // immovable frames
+        TierConfig::new(Tier(1), pids),  // movable frames
+        TierConfig::new(Tier(2), pids),  // page cache frames
+        TierConfig::new(Tier(3), cores), // huge frames
+    ];
+
+    fn policy(requested: Tier, target: Tier, free: usize) -> Policy {
+        if requested.0 > target.0 {
+            return Policy::Steal;
+        } else if requested.0 < target.0 {
+            return Policy::Demote;
+        }
+        match free {
+            f if f >= TREE_FRAMES / 2 => Policy::Match(1), // half free
+            f if f >= TREE_FRAMES / 64 => Policy::Match(u8::MAX), // almost allocated
+            _ => Policy::Match(2), // low free count -> causes frequent reservations
         }
     }
-    fn desc(&self, cores: usize, pids: usize) -> KindDesc {
-        let count = match self.count {
-            Count::One => 1,
-            Count::Core => cores,
-            Count::Pid => pids,
-        };
-        KindDesc(self.kind, count as _)
-    }
-    fn check(
-        &self,
-        local: &mut usize,
+
+    fn request(
         order: usize,
         gfp: u32,
-        cores: usize,
         core: usize,
-        pids: usize,
+        cores: usize,
         pid: usize,
-    ) -> bool {
-        if (self.matcher)(order, gfp) {
-            *local += match self.count {
-                Count::One => 0,
-                Count::Core => core % cores,
-                Count::Pid => pid % pids,
-            };
-            true
+        pids: usize,
+    ) -> Request {
+        if order >= HUGE_ORDER {
+            Request::new(order, Tier(2), Some(core % cores + cores + pids + pids))
+        } else if gfp == GFP::MOVABLE && gfp == GFP::PAGE_CACHE {
+            Request::new(order, Tier(1), Some(pid % pids + cores + pids))
+        } else if gfp == GFP::MOVABLE {
+            Request::new(order, Tier(1), Some(pid % pids + cores))
         } else {
-            *local += match self.count {
-                Count::One => 1,
-                Count::Core => cores,
-                Count::Pid => pids,
-            };
-            false
+            Request::new(order, Tier(0), Some(core % cores))
         }
     }
+
+    (
+        Tiering {
+            tiers: tiers.leak(),
+            default: Tier(0),
+            policy,
+        },
+        move |order, gfp, core, pid| request(order, gfp, core, cores, pid, pids),
+    )
 }
 
 fn main() {
@@ -138,38 +144,10 @@ fn main() {
     info!("page cache allocs = {page_cache_allocs}");
 
     let pids = 8;
-    let policy = [
-        Policy::new(Kind(0), Count::Core, |order, gfp| {
-            order < HUGE_ORDER
-                && gfp != GFP::MOVABLE
-                && gfp != GFP::FS
-                && gfp != GFP::IO
-                && gfp != GFP::DIRECT_RECLAIM
-                && gfp != GFP::PAGE_CACHE
-        }),
-        Policy::new(Kind(1), Count::Core, |order, gfp| {
-            order < HUGE_ORDER && gfp != GFP::MOVABLE
-        }),
-        Policy::new(Kind(2), Count::Pid, |order, gfp| {
-            order < HUGE_ORDER && gfp != GFP::PAGE_CACHE
-        }),
-        Policy::new(Kind(3), Count::Pid, |order, _| order < HUGE_ORDER),
-        // remaining huge allocations
-        Policy::new(Kind::HUGE, Count::Core, |_, _| true),
-    ];
-    let kinds = policy.map(|p| p.desc(cores, pids));
-    let llf = |order: usize, core: usize, gfp: u32, pid: usize| {
-        let mut local = 0;
-        for p in &policy {
-            if p.check(&mut local, order, gfp, cores, core, pids, pid) {
-                return Flags::with(order, local);
-            }
-        }
-        unreachable!("no policy order={order} gfp={gfp:x}");
-    };
 
-    let meta = MetaData::alloc(Allocator::metadata_size(&kinds, frames));
-    let alloc = Allocator::new(&kinds, frames, Init::FreeAll, meta).unwrap();
+    let (tiering, request) = tiering(cores, pids);
+    let meta = MetaData::alloc(Allocator::metadata_size(&tiering, frames));
+    let alloc = Allocator::new(frames, Init::FreeAll, &tiering, meta).unwrap();
     alloc.validate();
 
     let barrier = Barrier::new(2);
@@ -285,13 +263,13 @@ fn main() {
                     };
 
                     if entry.alloc() {
-                        let flags = llf(
+                        let flags = request(
                             entry.order() as usize,
-                            t,
                             entry.flags(),
+                            t,
                             entry.pid() as usize,
                         );
-                        let frame = alloc.get(None, flags).unwrap();
+                        let (_, frame) = alloc.get(None, flags).unwrap();
                         allocated[entry.pfn() as usize] =
                             Allocation::with(frame, entry.order() as _);
                         continue;
@@ -309,19 +287,19 @@ fn main() {
                             if allocation.order() < order {
                                 break;
                             }
-                            let flags = llf(order, t, entry.flags(), entry.pid() as usize);
-                            if let Err(e) = alloc.put(frame, flags) {
+                            let req = request(order, entry.flags(), t, entry.pid() as usize);
+                            if let Err(e) = alloc.put(frame, req) {
                                 error!(
                                     "failed to free pfn={pfn} order={order} flags_o={} error={e:?}",
-                                    flags.order()
+                                    req.order
                                 );
                             }
 
-                            for part in 0..(1 << (flags.order() - order)) {
-                                if frame.0 as usize % (1 << (flags.order() - order)) != part {
+                            for part in 0..(1 << (req.order - order)) {
+                                if frame.0 as usize % (1 << (req.order - order)) != part {
                                     info!("split free pfn={pfn}+{part} order={order}");
                                     allocated[pfn + part] = Allocation::with(
-                                        FrameId((pfn + part * (1 << flags.order())) as _),
+                                        FrameId((pfn + part * (1 << req.order)) as _),
                                         order,
                                     );
                                 }

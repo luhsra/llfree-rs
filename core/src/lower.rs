@@ -141,8 +141,8 @@ impl<'a> Lower<'a> {
         match init {
             Init::FreeAll => alloc.free_all(),
             Init::AllocAll => alloc.reserve_all(),
-            Init::Recover(false) | Init::None => {} // skip, assuming everything is valid
-            Init::Recover(true) => alloc.recover(),
+            Init::Recover => alloc.recover(),
+            Init::None => {} // skip, assuming everything is valid
         }
         Ok(alloc)
     }
@@ -196,8 +196,12 @@ impl<'a> Lower<'a> {
     /// Try allocating a new `frame` in the [LowerAlloc::N] sized chunk at `start`.
     ///
     /// Returns the allocated frame and whether a new huge frame was fragmented.
-    pub fn get(&self, start: FrameId, order: usize) -> Result<(FrameId, bool)> {
+    pub fn get(&self, start: RowId, order: usize, frame: Option<FrameId>) -> Result<FrameId> {
         debug_assert!(start.0 < self.frames());
+
+        if let Some(frame) = frame {
+            return self.get_at(frame, order).map(|_| frame);
+        }
 
         let tree_start = start.as_tree().as_frame();
         let child_off = start.as_huge().child_idx();
@@ -208,23 +212,22 @@ impl<'a> Lower<'a> {
             for i in 0..TREE_HUGE / 2 {
                 let i = (child_off / 2 + i) % (TREE_HUGE / 2);
                 if let Ok(_) = table_pair[i].fetch_update(|v| v.map(|v| v.mark_huge())) {
-                    return Ok((FrameId(tree_start.0 + HugeId(2 * i).as_frame().0), true));
+                    return Ok(FrameId(tree_start.0 + HugeId(2 * i).as_frame().0));
                 }
             }
         } else if order == HUGE_ORDER {
             for i in 0..TREE_HUGE {
                 let i = (child_off + i) % TREE_HUGE;
                 if let Ok(_) = children[i].fetch_update(|v| v.mark_huge()) {
-                    return Ok((FrameId(tree_start.0 + HugeId(i).as_frame().0), true));
+                    return Ok(FrameId(tree_start.0 + HugeId(i).as_frame().0));
                 }
             }
         } else if order <= Bitfield::ORDER {
             let first_child = tree_start.as_huge();
-            let start_row = start.as_row();
 
             for j in 0..TREE_HUGE {
                 let i = (child_off + j) % TREE_HUGE;
-                if let Ok(child) = children[i].fetch_update(|v| v.dec(1 << order)) {
+                if let Ok(_) = children[i].fetch_update(|v| v.dec(1 << order)) {
                     let undo = Deferred::new(move || {
                         children[i]
                             .fetch_update(|v| v.inc(1 << order))
@@ -232,12 +235,12 @@ impl<'a> Lower<'a> {
                     });
 
                     // start with the bitfield row from the last allocation
-                    let row = if j == 0 { start_row } else { RowId(0) };
+                    let row = if j == 0 { start } else { RowId(0) };
 
                     let bf_i = first_child + HugeId(i);
                     if let Ok(offset) = self.bitfield(bf_i).set_first_zeros(row, order) {
                         undo.cancel();
-                        return Ok((bf_i.as_frame() + offset, child.free() == Bitfield::LEN));
+                        return Ok(bf_i.as_frame() + offset);
                     }
                 }
             }
@@ -249,7 +252,7 @@ impl<'a> Lower<'a> {
     }
 
     /// Try allocating a specific `frame`.
-    pub fn get_at(&self, frame: FrameId, order: usize) -> Result<bool> {
+    fn get_at(&self, frame: FrameId, order: usize) -> Result<()> {
         debug_assert!(frame.is_aligned(order));
         debug_assert!(frame.0 + (1 << order) <= self.frames());
 
@@ -260,21 +263,21 @@ impl<'a> Lower<'a> {
             if let Ok(_) =
                 self.child_pairs(frame.as_tree())[i / 2].fetch_update(|v| v.map(|v| v.mark_huge()))
             {
-                return Ok(true);
+                return Ok(());
             }
         } else if order == HUGE_ORDER {
             if let Ok(_) = children.fetch_update(|v| v.mark_huge()) {
-                return Ok(true);
+                return Ok(());
             }
         } else if order <= Bitfield::ORDER {
-            if let Ok(old) = children.fetch_update(|v| v.dec(1 << order)) {
+            if let Ok(_) = children.fetch_update(|v| v.dec(1 << order)) {
                 let deferred = Deferred::new(move || {
                     children.fetch_update(|v| v.inc(1 << order)).unwrap();
                 });
 
                 if let Ok(_) = self.bitfield(frame.as_huge()).toggle(frame, order, false) {
                     deferred.cancel();
-                    return Ok(old.free() == Bitfield::LEN);
+                    return Ok(());
                 }
             }
         } else {
@@ -284,7 +287,7 @@ impl<'a> Lower<'a> {
     }
 
     /// Free single frame, returning whether a whole huge page has become free.
-    pub fn put(&self, frame: FrameId, order: usize) -> Result<bool> {
+    pub fn put(&self, frame: FrameId, order: usize) -> Result<()> {
         debug_assert!(frame.is_aligned(order));
         debug_assert!(frame.0 + (1 << order) <= self.frames());
 
@@ -303,7 +306,7 @@ impl<'a> Lower<'a> {
                 error!("Addr {frame:?} o={order} {old:?}");
                 Err(Error::Address)
             } else {
-                Ok(true)
+                Ok(())
             }
         } else if order == HUGE_ORDER {
             if let Err(old) = children[i]
@@ -312,7 +315,7 @@ impl<'a> Lower<'a> {
                 error!("Addr {frame:?} o={order} {old:?}");
                 Err(Error::Address)
             } else {
-                Ok(true)
+                Ok(())
             }
         } else if order <= Bitfield::ORDER {
             let old = children[i].load();
@@ -483,7 +486,7 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn put_small(&self, frame: FrameId, order: usize) -> Result<bool> {
+    fn put_small(&self, frame: FrameId, order: usize) -> Result<()> {
         debug_assert!(order < HUGE_ORDER);
 
         let bitfield = &self.bitfield(frame.as_huge());
@@ -498,12 +501,12 @@ impl<'a> Lower<'a> {
         let children = &self.children(frame.as_tree());
         let i = frame.as_huge().child_idx();
         match children[i].fetch_update(|v| v.inc(1 << order)) {
+            Ok(_) => Ok(()),
             Err(entry) => panic!("Inc failed i{i} p={frame:?} {entry:?}"),
-            Ok(entry) => Ok(entry.free() + (1 << order) == Bitfield::LEN),
         }
     }
 
-    fn partial_put_huge(&self, old: HugeEntry, frame: FrameId, order: usize) -> Result<bool> {
+    fn partial_put_huge(&self, old: HugeEntry, frame: FrameId, order: usize) -> Result<()> {
         info!("partial free of huge frame {frame:?} o={order}");
         let i = frame.as_huge().child_idx();
         let children = &self.children(frame.as_tree());
@@ -683,12 +686,12 @@ mod test {
         logging();
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
-        lower.get(FrameId(0), 0).unwrap();
+        lower.get(FrameId(0).as_row(), 0, None).unwrap();
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            let frame = lower.get(FrameId(0), 0).unwrap().0.0;
+            let frame = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
             assert!(frame < lower.frames());
         });
 
@@ -708,7 +711,7 @@ mod test {
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.get(FrameId(0), 0).unwrap();
+            lower.get(FrameId(0).as_row(), 0, None).unwrap();
         });
 
         let entry2 = lower.children(TreeId(0))[0].load();
@@ -723,13 +726,13 @@ mod test {
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
         for _ in 0..Bitfield::LEN - 1 {
-            lower.get(FrameId(0), 0).unwrap();
+            lower.get(FrameId(0).as_row(), 0, None).unwrap();
         }
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
-            lower.get(FrameId(0), 0).unwrap();
+            lower.get(FrameId(0).as_row(), 0, None).unwrap();
         });
 
         let table = &lower.children(TreeId(0));
@@ -746,8 +749,8 @@ mod test {
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
-        frames[0] = lower.get(FrameId(0), 0).unwrap().0.0;
-        frames[1] = lower.get(FrameId(0), 0).unwrap().0.0;
+        frames[0] = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
+        frames[1] = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
@@ -767,7 +770,7 @@ mod test {
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
         for frame in &mut frames {
-            *frame = lower.get(FrameId(0), 0).unwrap().0.0;
+            *frame = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
         }
 
         thread::parallel(0..2, |t| {
@@ -790,14 +793,14 @@ mod test {
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
         for frame in &mut frames[..Bitfield::LEN - 1] {
-            *frame = lower.get(FrameId(0), 0).unwrap().0.0;
+            *frame = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
         }
 
         std::thread::scope(|s| {
             s.spawn(|| {
                 thread::pin(0);
 
-                lower.get(FrameId(0), 0).unwrap();
+                lower.get(FrameId(0).as_row(), 0, None).unwrap();
             });
             thread::pin(1);
 
@@ -821,13 +824,13 @@ mod test {
         logging();
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
-        lower.get(FrameId(0), 0).unwrap();
+        lower.get(FrameId(0).as_row(), 0, None).unwrap();
 
         thread::parallel(0..2, |t| {
             thread::pin(t);
 
             let order = t + 1; // order 1 and 2
-            let frame = lower.get(FrameId(0), order).unwrap().0.0;
+            let frame = lower.get(FrameId(0).as_row(), order, None).unwrap().0;
             assert!(frame < lower.frames());
         });
 
@@ -850,8 +853,8 @@ mod test {
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
-        frames[0] = lower.get(FrameId(0), 1).unwrap().0.0;
-        frames[1] = lower.get(FrameId(0), 2).unwrap().0.0;
+        frames[0] = lower.get(FrameId(0).as_row(), 1, None).unwrap().0;
+        frames[1] = lower.get(FrameId(0).as_row(), 2, None).unwrap().0;
 
         assert_eq!(
             lower.children(TreeId(0))[0].load().free(),
@@ -900,8 +903,8 @@ mod test {
             for i in 0..lower.frames().div_ceil(TREE_FRAMES) {
                 // fall back to other chunks
                 let i = TreeId((TreeId(i) + tree_idx).0 % lower.frames().div_ceil(TREE_FRAMES));
-                match lower.get(i.as_frame(), *order) {
-                    Ok((free, _huge)) => {
+                match lower.get(i.as_frame().as_row(), *order, None) {
+                    Ok(free) => {
                         *frame = free;
                         tree_idx = free.as_tree();
                         continue 'outer;
@@ -974,7 +977,7 @@ mod test {
 
                 let mut frames = [FrameId(0); 4];
                 for p in &mut frames {
-                    *p = lower.get(FrameId(0), 0).unwrap().0;
+                    *p = lower.get(FrameId(0).as_row(), 0, None).unwrap();
                 }
                 frames.reverse();
                 for p in frames {
@@ -1000,7 +1003,7 @@ mod test {
             assert_eq!(lower.stats().free_frames, FRAMES);
 
             for frame in &mut frames[..HUGE_FRAMES - 3] {
-                *frame = lower.get(FrameId(0), 0).unwrap().0.0;
+                *frame = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
             }
 
             let barrier = Barrier::new(THREADS);
@@ -1011,60 +1014,12 @@ mod test {
                 if t < THREADS / 2 {
                     lower.put(FrameId(frames[t]), 0).unwrap();
                 } else {
-                    lower.get(FrameId(0), 0).unwrap();
+                    lower.get(FrameId(0).as_row(), 0, None).unwrap();
                 }
             });
 
             assert_eq!(lower.frames() - lower.stats().free_frames, HUGE_FRAMES - 3);
         }
-    }
-
-    #[test]
-    fn alloc_track_huge() {
-        logging();
-
-        const THREADS: usize = 4;
-        let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
-        let barrier = Barrier::new(THREADS);
-
-        let huge = thread::parallel(0..THREADS, |t| {
-            thread::pin(t);
-            let mut frames = Vec::with_capacity(TREE_FRAMES);
-
-            barrier.wait();
-
-            let mut rng = WyRand::new(t as u64);
-
-            let mut get = 0;
-            let mut put = 0;
-            loop {
-                match lower.get(FrameId(0), 0) {
-                    Ok((frame, huge)) => {
-                        get += huge as usize;
-                        frames.push(frame);
-                    }
-                    Err(Error::Memory) => break,
-                    Err(e) => panic!("{e:?}"),
-                }
-            }
-
-            barrier.wait();
-
-            rng.shuffle(&mut frames);
-            while let Some(frame) = frames.pop() {
-                put += lower.put(frame, 0).unwrap() as usize;
-            }
-
-            (get, put)
-        });
-        let (get, put) = huge
-            .iter()
-            .fold((0, 0), |acc, x| (acc.0 + x.0, acc.1 + x.1));
-
-        assert_eq!(get, put);
-        assert_eq!(get, TREE_HUGE);
-        assert_eq!(lower.stats().free_frames, TREE_FRAMES);
-        assert_eq!(lower.stats().free_huge, TREE_HUGE);
     }
 
     #[test]
@@ -1078,7 +1033,7 @@ mod test {
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
         let barrier = Barrier::new(THREADS);
 
-        let huge = thread::parallel(0..THREADS, |t| {
+        thread::parallel(0..THREADS, |t| {
             thread::pin(t);
             let mut frames = Vec::with_capacity(TREE_FRAMES);
 
@@ -1086,18 +1041,15 @@ mod test {
 
             let mut rng = WyRand::new(rand + t as u64);
 
-            let mut get = 0;
-            let mut put = 0;
             for _ in 0..ITER {
                 let target = rng.range(0..(2 * TREE_FRAMES / THREADS) as _) as usize;
 
                 while frames.len() != target {
                     if target < frames.len() {
-                        put += lower.put(frames.pop().unwrap(), 0).unwrap() as usize;
+                        lower.put(frames.pop().unwrap(), 0).unwrap();
                     } else {
-                        match lower.get(FrameId(0), 0) {
-                            Ok((frame, huge)) => {
-                                get += huge as usize;
+                        match lower.get(FrameId(0).as_row(), 0, None) {
+                            Ok(frame) => {
                                 frames.push(frame);
                             }
                             Err(Error::Memory) => break,
@@ -1108,16 +1060,10 @@ mod test {
                 rng.shuffle(&mut frames);
             }
             for frame in frames {
-                put += lower.put(frame, 0).unwrap() as usize;
+                lower.put(frame, 0).unwrap();
             }
-
-            (get, put)
         });
-        let (get, put) = huge
-            .iter()
-            .fold((0, 0), |acc, x| (acc.0 + x.0, acc.1 + x.1));
 
-        assert_eq!(get, put);
         assert_eq!(lower.stats().free_frames, TREE_FRAMES);
         assert_eq!(lower.stats().free_huge, TREE_HUGE);
     }

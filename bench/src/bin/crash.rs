@@ -7,7 +7,7 @@ use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, align_up, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, Flags, FrameId, HUGE_ORDER, Kind, KindDesc, LLFree, thread};
+use llfree::{Alloc, FrameId, LLFree, Tiering, thread};
 use log::{error, warn};
 
 /// Crash testing an allocator.
@@ -74,8 +74,6 @@ fn main() {
     }
 }
 
-const KINDS: [KindDesc; 2] = [KindDesc(Kind(0), 1), KindDesc(Kind::HUGE, 1)];
-
 /// Allocate and free memory indefinitely
 fn execute(
     allocs: usize,
@@ -95,13 +93,12 @@ fn execute(
         )
     };
 
-    let m = Allocator::metadata_size(&KINDS, mapping.len());
+    let (tiering, request) = Tiering::simple(threads);
+
+    let m = Allocator::metadata_size(&tiering, mapping.len());
     let local = aligned_buf(m.local);
     let trees = aligned_buf(m.trees);
-    let alloc = Allocator::create(&KINDS, mapping, false, local, trees).unwrap();
-    let llf = |order: usize, core: usize| {
-        Flags::with(order, core + if order >= HUGE_ORDER { threads } else { 0 })
-    };
+    let alloc = Allocator::create(mapping, false, &tiering, local, trees).unwrap();
     warn!("initialized {}", alloc.frames());
 
     let barrier = Barrier::new(threads);
@@ -118,7 +115,7 @@ fn execute(
 
         for (i, page) in data.iter_mut().enumerate() {
             *idx = FrameId(i);
-            *page = alloc.get(None, llf(order, t)).unwrap();
+            *page = alloc.get(None, request(order, t)).unwrap().1;
         }
 
         warn!("repeat");
@@ -129,8 +126,8 @@ fn execute(
             let i = rng.range(0..allocs as u64) as usize;
             *idx = FrameId(i);
 
-            alloc.put(data[i], llf(order, t)).unwrap();
-            data[i] = alloc.get(None, llf(order, t)).unwrap();
+            alloc.put(data[i], request(order, t)).unwrap();
+            data[i] = alloc.get(None, request(order, t)).unwrap().1;
         }
     });
 }
@@ -195,17 +192,15 @@ fn monitor(
     warn!("check");
 
     // Recover allocator
-    let m = Allocator::metadata_size(&KINDS, mapping.len());
+    let (tiering, request) = Tiering::simple(threads);
+    let m = Allocator::metadata_size(&tiering, mapping.len());
     let local = aligned_buf(m.local);
     let trees = aligned_buf(m.trees);
-    let alloc = Allocator::create(&KINDS, mapping, true, local, trees).unwrap();
-    let llf = |order: usize, core: usize| {
-        Flags::with(order, core + if order >= HUGE_ORDER { threads } else { 0 })
-    };
+    let alloc = Allocator::create(mapping, true, &tiering, local, trees).unwrap();
     warn!("recovered {}", alloc.frames());
 
     let expected = allocs * threads - threads;
-    let actual = alloc.frames() - alloc.fast_stats().free_frames;
+    let actual = alloc.frames() - alloc.tree_stats(&mut []).free_frames;
     warn!("expected={expected} actual={actual}");
     assert!(expected <= actual && actual <= expected + threads);
 
@@ -226,15 +221,14 @@ fn monitor(
 
         for (i, addr) in data[0..allocs].iter().enumerate() {
             if i != idx.0 {
-                alloc.put(*addr, llf(order, t)).unwrap();
+                alloc.put(*addr, request(order, t)).unwrap();
             }
         }
     }
     // Check if the remaining pages, that were allocated/freed during the crash,
     // is less equal to the number of concurrent threads (upper bound).
-    assert!(alloc.frames() - alloc.fast_stats().free_frames <= threads);
+    assert!(alloc.frames() - alloc.tree_stats(&mut []).free_frames <= threads);
     warn!("Ok");
-    drop(alloc); // Free alloc first
 }
 
 #[allow(unused_variables)]

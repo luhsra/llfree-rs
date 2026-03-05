@@ -1,14 +1,15 @@
 use core::marker::PhantomData;
 use core::mem::size_of_val;
+use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::*;
-use core::sync::atomic::{AtomicBool, AtomicUsize};
 use core::{fmt, slice};
 
 use log::error;
 
 use crate::frame::Frame;
 use crate::{
-    Alloc, Error, Flags, FrameId, Init, KindDesc, MAX_ORDER, MetaData, MetaSize, Result, Stats,
+    Alloc, Error, FrameId, Init, MAX_ORDER, MetaData, MetaSize, Request, Result, Stats, Tier,
+    Tiering,
 };
 
 /// Zone allocator, managing a range of memory at a given page frame offset.
@@ -22,21 +23,21 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn name() -> &'static str {
         A::name()
     }
-    fn new(kinds: &[KindDesc], frames: usize, init: Init, meta: MetaData<'a>) -> Result<Self> {
+    fn new(frames: usize, init: Init, tiering: &Tiering, meta: MetaData<'a>) -> Result<Self> {
         Ok(Self {
-            alloc: A::new(kinds, frames, init, meta)?,
+            alloc: A::new(frames, init, tiering, meta)?,
             offset: 0,
             _p: PhantomData,
         })
     }
 
-    fn metadata_size(kinds: &[KindDesc], frames: usize) -> MetaSize {
-        A::metadata_size(kinds, frames)
+    fn metadata_size(tiering: &Tiering, frames: usize) -> MetaSize {
+        A::metadata_size(tiering, frames)
     }
     unsafe fn metadata(&mut self) -> MetaData<'a> {
         unsafe { self.alloc.metadata() }
     }
-    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
+    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(Tier, FrameId)> {
         let frame = frame
             .map(|f| {
                 f.0.checked_sub(self.offset)
@@ -44,23 +45,18 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
                     .ok_or(Error::Address)
             })
             .transpose()?;
-        Ok(FrameId(self.alloc.get(frame, flags)?.0 + self.offset))
+        let (tier, frame_id) = self.alloc.get(frame, flags)?;
+        Ok((tier, FrameId(frame_id.0 + self.offset)))
     }
-    fn put(&self, frame: FrameId, flags: Flags) -> Result<()> {
+    fn put(&self, frame: FrameId, flags: Request) -> Result<()> {
         let frame = FrameId(frame.0.checked_sub(self.offset).ok_or(Error::Address)?);
         self.alloc.put(frame, flags)
     }
     fn frames(&self) -> usize {
         self.alloc.frames()
     }
-    fn fast_stats(&self) -> Stats {
-        self.alloc.fast_stats()
-    }
-    fn fast_stats_at(&self, frame: FrameId, order: usize) -> Stats {
-        let Some(frame) = frame.0.checked_sub(self.offset).map(FrameId) else {
-            return Stats::default();
-        };
-        self.alloc.fast_stats_at(frame, order)
+    fn tree_stats(&self, tiers: &mut [crate::TierStats]) -> crate::TreeStats {
+        self.alloc.tree_stats(tiers)
     }
     fn stats(&self) -> Stats {
         self.alloc.stats()
@@ -84,10 +80,10 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
 
 impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
     pub fn create(
-        kinds: &[KindDesc],
         offset: usize,
         frames: usize,
         init: Init,
+        tiering: &Tiering,
         meta: MetaData<'a>,
     ) -> Result<Self> {
         if !offset.is_multiple_of(1 << MAX_ORDER) {
@@ -95,7 +91,7 @@ impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
             return Err(Error::Initialization);
         }
         Ok(Self {
-            alloc: A::new(kinds, frames, init, meta)?,
+            alloc: A::new(frames, init, tiering, meta)?,
             offset,
             _p: PhantomData,
         })
@@ -114,8 +110,6 @@ struct Meta {
     magic: AtomicUsize,
     /// Number of frames managed by the persistent allocator
     frames: AtomicUsize,
-    /// Flag that stores if the system has crashed or was shutdown correctly
-    crashed: AtomicBool,
 }
 impl Meta {
     /// Magic marking the meta frame.
@@ -126,18 +120,17 @@ const _: () = assert!(core::mem::size_of::<Meta>() <= Frame::SIZE);
 /// Persistent memory allocator, that is able to recover its state from the memory it manages.
 pub struct NvmAlloc<'a, A: Alloc<'a>> {
     pub alloc: ZoneAlloc<'a, A>,
-    meta: &'a Meta,
 }
 
 impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
     pub fn create(
-        kinds: &[KindDesc],
         zone: &'a mut [Frame],
         recover: bool,
+        tiering: &Tiering,
         local: &'a mut [u8],
         trees: &'a mut [u8],
     ) -> Result<Self> {
-        let m = A::metadata_size(kinds, zone.len());
+        let m = A::metadata_size(tiering, zone.len());
         if size_of_val(zone) < m.lower + Frame::SIZE
             || !(zone.as_ptr() as usize).is_multiple_of(Frame::SIZE << MAX_ORDER)
         {
@@ -150,16 +143,14 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
 
         let init = if recover {
             let frames = meta.frames.load(Acquire);
-            let crashed = meta.crashed.swap(true, AcqRel);
             if meta.magic.load(Acquire) != Meta::MAGIC || frames != zone.len() {
                 error!("no instance found");
                 return Err(Error::Initialization);
             }
-            Init::Recover(crashed)
+            Init::Recover
         } else {
             meta.magic.store(Meta::MAGIC, Release);
             meta.frames.store(zone.len(), Release);
-            meta.crashed.store(true, Release);
             Init::FreeAll
         };
 
@@ -172,13 +163,13 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
         };
 
         let alloc = ZoneAlloc::create(
-            kinds,
             zone.as_ptr() as usize / Frame::SIZE,
             zone.len(),
             init,
+            tiering,
             metadata,
         )?;
-        Ok(Self { alloc, meta })
+        Ok(Self { alloc })
     }
 }
 
@@ -186,29 +177,26 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn name() -> &'static str {
         A::name()
     }
-    fn new(_kinds: &[KindDesc], _frames: usize, _init: Init, _meta: MetaData) -> Result<Self> {
+    fn new(_frames: usize, _init: Init, _tiering: &Tiering, _meta: MetaData) -> Result<Self> {
         unimplemented!()
     }
-    fn metadata_size(kinds: &[KindDesc], frames: usize) -> MetaSize {
-        A::metadata_size(kinds, frames)
+    fn metadata_size(tiering: &Tiering, frames: usize) -> MetaSize {
+        A::metadata_size(tiering, frames)
     }
     unsafe fn metadata(&mut self) -> MetaData<'a> {
         unsafe { self.alloc.metadata() }
     }
-    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
+    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(Tier, FrameId)> {
         self.alloc.get(frame, flags)
     }
-    fn put(&self, frame: FrameId, flags: Flags) -> Result<()> {
+    fn put(&self, frame: FrameId, flags: Request) -> Result<()> {
         self.alloc.put(frame, flags)
     }
     fn frames(&self) -> usize {
         self.alloc.frames()
     }
-    fn fast_stats(&self) -> Stats {
-        self.alloc.fast_stats()
-    }
-    fn fast_stats_at(&self, frame: FrameId, order: usize) -> Stats {
-        self.alloc.fast_stats_at(frame, order)
+    fn tree_stats(&self, tiers: &mut [crate::TierStats]) -> crate::TreeStats {
+        self.alloc.tree_stats(tiers)
     }
     fn stats(&self) -> Stats {
         self.alloc.stats()
@@ -227,11 +215,5 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
 impl<'a, A: Alloc<'a>> fmt::Debug for NvmAlloc<'a, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.alloc.fmt(f)
-    }
-}
-
-impl<'a, A: Alloc<'a>> Drop for NvmAlloc<'a, A> {
-    fn drop(&mut self) {
-        self.meta.crashed.store(false, Release);
     }
 }

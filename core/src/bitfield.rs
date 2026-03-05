@@ -31,11 +31,11 @@ impl RowId {
         self.0 % ROWS
     }
     #[allow(unused)]
-    const fn into_bits(self) -> u64 {
+    pub const fn into_bits(self) -> u64 {
         self.0 as u64
     }
     #[allow(unused)]
-    const fn from_bits(bits: u64) -> Self {
+    pub const fn from_bits(bits: u64) -> Self {
         Self(bits as usize)
     }
 }
