@@ -44,25 +44,25 @@ enum Count {
 
 #[derive(Clone, Copy)]
 struct Policy {
-    kind: Kind,
+    kind: Tier,
     count: Count,
     matcher: fn(order: usize, gfp: u32) -> bool,
 }
 impl Policy {
-    pub fn new(kind: Kind, count: Count, matcher: fn(order: usize, gfp: u32) -> bool) -> Self {
+    pub fn new(kind: Tier, count: Count, matcher: fn(order: usize, gfp: u32) -> bool) -> Self {
         Self {
             kind,
             count,
             matcher,
         }
     }
-    fn desc(&self, cores: usize, pids: usize) -> KindDesc {
+    fn desc(&self, cores: usize, pids: usize) -> TierConfig {
         let count = match self.count {
             Count::One => 1,
             Count::Core => cores,
             Count::Pid => pids,
         };
-        KindDesc(self.kind, count as _)
+        TierConfig(self.kind, count as _)
     }
     fn check(
         &self,
@@ -139,7 +139,7 @@ fn main() {
 
     let pids = 8;
     let policy = [
-        Policy::new(Kind(0), Count::Core, |order, gfp| {
+        Policy::new(Tier(0), Count::Core, |order, gfp| {
             order < HUGE_ORDER
                 && gfp != GFP::MOVABLE
                 && gfp != GFP::FS
@@ -147,15 +147,15 @@ fn main() {
                 && gfp != GFP::DIRECT_RECLAIM
                 && gfp != GFP::PAGE_CACHE
         }),
-        Policy::new(Kind(1), Count::Core, |order, gfp| {
+        Policy::new(Tier(1), Count::Core, |order, gfp| {
             order < HUGE_ORDER && gfp != GFP::MOVABLE
         }),
-        Policy::new(Kind(2), Count::Pid, |order, gfp| {
+        Policy::new(Tier(2), Count::Pid, |order, gfp| {
             order < HUGE_ORDER && gfp != GFP::PAGE_CACHE
         }),
-        Policy::new(Kind(3), Count::Pid, |order, _| order < HUGE_ORDER),
+        Policy::new(Tier(3), Count::Pid, |order, _| order < HUGE_ORDER),
         // remaining huge allocations
-        Policy::new(Kind::HUGE, Count::Core, |_, _| true),
+        Policy::new(Tier::HUGE, Count::Core, |_, _| true),
     ];
     let kinds = policy.map(|p| p.desc(cores, pids));
     let llf = |order: usize, core: usize, gfp: u32, pid: usize| {

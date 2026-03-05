@@ -7,7 +7,7 @@ use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, align_up, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, Flags, FrameId, HUGE_ORDER, Kind, KindDesc, LLFree, thread};
+use llfree::{Alloc, Flags, FrameId, HUGE_ORDER, Tier, TierConfig, LLFree, thread};
 use log::{error, warn};
 
 /// Crash testing an allocator.
@@ -74,7 +74,7 @@ fn main() {
     }
 }
 
-const KINDS: [KindDesc; 2] = [KindDesc(Kind(0), 1), KindDesc(Kind::HUGE, 1)];
+const KINDS: [TierConfig; 2] = [TierConfig(Tier(0), 1), TierConfig(Tier::HUGE, 1)];
 
 /// Allocate and free memory indefinitely
 fn execute(

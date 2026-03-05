@@ -8,7 +8,8 @@ use log::error;
 
 use crate::frame::Frame;
 use crate::{
-    Alloc, Error, Flags, FrameId, Init, KindDesc, MAX_ORDER, MetaData, MetaSize, Result, Stats,
+    Alloc, Error, Flags, FrameId, Init, Tier, TierConfig, MAX_ORDER, MetaData, MetaSize, Result,
+    Stats,
 };
 
 /// Zone allocator, managing a range of memory at a given page frame offset.
@@ -22,7 +23,7 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn name() -> &'static str {
         A::name()
     }
-    fn new(kinds: &[KindDesc], frames: usize, init: Init, meta: MetaData<'a>) -> Result<Self> {
+    fn new(kinds: &[TierConfig], frames: usize, init: Init, meta: MetaData<'a>) -> Result<Self> {
         Ok(Self {
             alloc: A::new(kinds, frames, init, meta)?,
             offset: 0,
@@ -30,13 +31,13 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
         })
     }
 
-    fn metadata_size(kinds: &[KindDesc], frames: usize) -> MetaSize {
+    fn metadata_size(kinds: &[TierConfig], frames: usize) -> MetaSize {
         A::metadata_size(kinds, frames)
     }
     unsafe fn metadata(&mut self) -> MetaData<'a> {
         unsafe { self.alloc.metadata() }
     }
-    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
+    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<(Tier, FrameId)> {
         let frame = frame
             .map(|f| {
                 f.0.checked_sub(self.offset)
@@ -44,7 +45,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
                     .ok_or(Error::Address)
             })
             .transpose()?;
-        Ok(FrameId(self.alloc.get(frame, flags)?.0 + self.offset))
+        let (kind, frame_id) = self.alloc.get(frame, flags)?;
+        Ok((kind, FrameId(frame_id.0 + self.offset)))
     }
     fn put(&self, frame: FrameId, flags: Flags) -> Result<()> {
         let frame = FrameId(frame.0.checked_sub(self.offset).ok_or(Error::Address)?);
@@ -53,14 +55,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn frames(&self) -> usize {
         self.alloc.frames()
     }
-    fn fast_stats(&self) -> Stats {
-        self.alloc.fast_stats()
-    }
-    fn fast_stats_at(&self, frame: FrameId, order: usize) -> Stats {
-        let Some(frame) = frame.0.checked_sub(self.offset).map(FrameId) else {
-            return Stats::default();
-        };
-        self.alloc.fast_stats_at(frame, order)
+    fn tree_stats(&self, kinds: &mut [crate::KindStats]) -> crate::TreeStats {
+        self.alloc.tree_stats(kinds)
     }
     fn stats(&self) -> Stats {
         self.alloc.stats()
@@ -84,7 +80,7 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
 
 impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
     pub fn create(
-        kinds: &[KindDesc],
+        kinds: &[TierConfig],
         offset: usize,
         frames: usize,
         init: Init,
@@ -131,7 +127,7 @@ pub struct NvmAlloc<'a, A: Alloc<'a>> {
 
 impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
     pub fn create(
-        kinds: &[KindDesc],
+        kinds: &[TierConfig],
         zone: &'a mut [Frame],
         recover: bool,
         local: &'a mut [u8],
@@ -186,16 +182,16 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn name() -> &'static str {
         A::name()
     }
-    fn new(_kinds: &[KindDesc], _frames: usize, _init: Init, _meta: MetaData) -> Result<Self> {
+    fn new(_kinds: &[TierConfig], _frames: usize, _init: Init, _meta: MetaData) -> Result<Self> {
         unimplemented!()
     }
-    fn metadata_size(kinds: &[KindDesc], frames: usize) -> MetaSize {
+    fn metadata_size(kinds: &[TierConfig], frames: usize) -> MetaSize {
         A::metadata_size(kinds, frames)
     }
     unsafe fn metadata(&mut self) -> MetaData<'a> {
         unsafe { self.alloc.metadata() }
     }
-    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
+    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<(Tier, FrameId)> {
         self.alloc.get(frame, flags)
     }
     fn put(&self, frame: FrameId, flags: Flags) -> Result<()> {
@@ -204,11 +200,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn frames(&self) -> usize {
         self.alloc.frames()
     }
-    fn fast_stats(&self) -> Stats {
-        self.alloc.fast_stats()
-    }
-    fn fast_stats_at(&self, frame: FrameId, order: usize) -> Stats {
-        self.alloc.fast_stats_at(frame, order)
+    fn tree_stats(&self, kinds: &mut [crate::KindStats]) -> crate::TreeStats {
+        self.alloc.tree_stats(kinds)
     }
     fn stats(&self) -> Stats {
         self.alloc.stats()

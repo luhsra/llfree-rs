@@ -9,7 +9,7 @@ use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
 use crate::lower::HugeId;
 use crate::util::{Align, size_of_slice};
-use crate::{Error, FrameId, HUGE_FRAMES, Kind, Result, Stats, TREE_FRAMES};
+use crate::{Error, FrameId, Tier, KindStats, Policy, Result, TREE_FRAMES, TreeStats};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TreeId(pub usize);
@@ -101,7 +101,7 @@ impl<'a> Trees<'a> {
         if let Some(tree_init) = tree_init {
             for (i, e) in entries.iter_mut().enumerate() {
                 let frames = tree_init(i * TREE_FRAMES);
-                *e = Atom::new(Tree::with(frames, false, Kind(0)));
+                *e = Atom::new(Tree::with(frames, false, Tier(0)));
             }
         }
 
@@ -112,24 +112,26 @@ impl<'a> Trees<'a> {
         self.entries.len()
     }
 
-    pub fn get(&self, i: TreeId) -> Tree {
-        self.entries[i.0].load()
+    pub fn stats(&self, kinds: &mut [KindStats]) -> TreeStats {
+        self.entries
+            .iter()
+            .fold(TreeStats::default(), |mut acc, e| {
+                let tree = e.load();
+                acc.free_frames += tree.free();
+                if tree.free() != TREE_FRAMES
+                    && let Some(kind) = kinds.get_mut(tree.kind().0 as usize)
+                {
+                    kind.free += tree.free();
+                    kind.alloc += TREE_FRAMES - tree.free();
+                }
+                acc.free_trees += tree.free() / TREE_FRAMES;
+                acc
+            })
     }
 
-    pub fn at(&self, i: TreeId) -> &Atom<Tree> {
-        &self.entries[i.0]
-    }
-
-    pub fn stats(&self) -> Stats {
-        self.entries.iter().fold(Stats::default(), |mut acc, e| {
-            let tree = e.load();
-            acc.free_frames += tree.free();
-            if tree.kind().is_huge() || tree.free() == TREE_FRAMES {
-                acc.free_huge += tree.free() / HUGE_FRAMES;
-            }
-            acc.free_trees += tree.free() / TREE_FRAMES;
-            acc
-        })
+    pub fn stats_at(&self, i: TreeId) -> (Tier, usize, bool) {
+        let tree = self.entries[i.0].load();
+        (tree.kind(), tree.free(), tree.reserved())
     }
 
     /// Return the number of entirely free trees
@@ -144,27 +146,57 @@ impl<'a> Trees<'a> {
         self.entries.iter().map(|e| e.load().free()).sum()
     }
     /// Sync with the global tree, stealing its counters
-    pub fn sync(&self, i: TreeId, min: usize) -> Option<Tree> {
-        self.at(i).fetch_update(|e| e.sync_steal(min)).ok()
+    pub fn sync(&self, i: TreeId, min: usize) -> Option<usize> {
+        self.entries[i.0]
+            .fetch_update(|e| e.sync_steal(min))
+            .map(|tree| tree.free())
+            .ok()
     }
 
-    /// Increment or reserve the tree
-    pub fn inc_or_reserve(
+    pub fn get(&self, i: TreeId, free: usize, kind: Tier) -> bool {
+        self.entries[i.0]
+            .fetch_update(|e| e.get(free, kind))
+            .is_ok()
+    }
+
+    pub fn get_demote(
         &self,
         i: TreeId,
         free: usize,
-        kind: Kind,
+        other: Tier,
+        reserve: fn(Tier, usize) -> Policy,
+    ) -> Option<Tier> {
+        self.entries[i.0]
+            .fetch_update(|e| e.get_demote(free, other, reserve))
+            .ok()
+            .map(|e| {
+                if reserve(other, e.free()) == Policy::Demotes {
+                    other
+                } else {
+                    e.kind()
+                }
+            })
+    }
+
+    pub fn put(&self, i: TreeId, free: usize) {
+        self.entries[i.0]
+            .fetch_update(|v| Some(v.put(free)))
+            .expect("Put failed");
+    }
+
+    /// Increment or reserve the tree, returning the old free counter if it was reserved
+    pub fn put_or_reserve(
+        &self,
+        i: TreeId,
+        free: usize,
+        kind: Tier,
         may_reserve: bool,
-    ) -> Option<Tree> {
+    ) -> Option<usize> {
         let mut reserved = false;
         let tree = self.entries[i.0]
             .fetch_update(|v| {
-                let v = v.inc(free);
-                if may_reserve
-                    && !v.reserved()
-                    && v.kind().accepts(kind)
-                    && v.free() > Self::MIN_FREE
-                {
+                let v = v.put(free);
+                if may_reserve && !v.reserved() && v.kind() == kind && v.free() > Self::MIN_FREE {
                     // Reserve the tree that was targeted by the last N frees
                     reserved = true;
                     Some(v.with_free(0).with_reserved(true))
@@ -175,13 +207,25 @@ impl<'a> Trees<'a> {
             })
             .unwrap();
 
-        if reserved { Some(tree) } else { None }
+        if reserved { Some(tree.free()) } else { None }
+    }
+
+    pub fn reserve(
+        &self,
+        i: TreeId,
+        free: impl RangeBounds<usize> + Clone,
+        kind: Tier,
+    ) -> Option<usize> {
+        self.entries[i.0]
+            .fetch_update(|v| v.reserve(free.clone(), kind))
+            .map(|v| v.free())
+            .ok()
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: TreeId, free: usize, kind: Kind) {
+    pub fn unreserve(&self, i: TreeId, free: usize, kind: Tier, reserve: fn(Tier, usize) -> Policy) {
         self.entries[i.0]
-            .fetch_update(|v| v.unreserve_add(free, kind))
+            .fetch_update(|v| v.unreserve_add(free, kind, reserve))
             .expect("Unreserve failed");
     }
 
@@ -191,7 +235,7 @@ impl<'a> Trees<'a> {
         start: TreeId,
         offset: usize,
         len: usize,
-        prio: impl Fn(Tree) -> Prio,
+        reserve: fn(Tier, usize) -> Policy,
         access: impl Fn(TreeId) -> Result<FrameId>,
     ) -> Result<FrameId> {
         #[derive(Clone, Copy)]
@@ -211,9 +255,9 @@ impl<'a> Trees<'a> {
             let s = (start.0 + self.entries.len()) as isize;
             let i = TreeId((s + off) as usize % self.entries.len());
 
-            match prio(self.get(i)) {
-                Prio::None => {}
-                Prio::Good(p) => {
+            let tree = self.entries[i.0].load();
+            match reserve(tree.kind(), tree.free()) {
+                Policy::Good(p) => {
                     let pos = best.iter().position(|e| match e {
                         None => true,
                         Some(best) => p > best.prio,
@@ -225,10 +269,11 @@ impl<'a> Trees<'a> {
                         best[pos] = Some(Best { i, prio: p });
                     }
                 }
-                Prio::Best => match access(i) {
+                Policy::Best => match access(i) {
                     Err(Error::Memory) => {}
                     r => return r,
                 },
+                _ => {}
             }
         }
 
@@ -243,13 +288,13 @@ impl<'a> Trees<'a> {
     }
 
     /// Iterate through all trees as long `access` returns `Error::Memory`
-    pub fn search(
+    pub fn search<R>(
         &self,
         start: TreeId,
         offset: usize,
         len: usize,
-        access: impl Fn(TreeId) -> Result<FrameId>,
-    ) -> Result<FrameId> {
+        access: impl Fn(TreeId) -> Result<R>,
+    ) -> Result<R> {
         for i in offset..len {
             // Alternating between before and after start
             let off = if i.is_multiple_of(2) {
@@ -271,27 +316,26 @@ impl<'a> Trees<'a> {
 /// Tree entry for 4K frames
 #[bitfield(u32)]
 #[derive(PartialEq, Eq)]
-pub struct Tree {
+struct Tree {
     /// Number of free 4K frames.
     #[bits(28)]
-    pub free: usize,
+    free: usize,
     /// If this subtree is reserved by a CPU.
-    pub reserved: bool,
+    reserved: bool,
     /// Are the frames movable?
     #[bits(3)]
-    pub kind: Kind,
+    kind: Tier,
 }
 
 const _: () = assert!(1 << Tree::FREE_BITS >= TREE_FRAMES);
+const _: () = assert!(Tree::KIND_BITS == Tier::BITS);
 
 impl Atomic for Tree {
     type I = AtomicU32;
 }
 impl Tree {
-    pub const KIND_SIZE: usize = Self::KIND_BITS;
-
     /// Creates a new entry.
-    pub fn with(free: usize, reserved: bool, kind: Kind) -> Self {
+    fn with(free: usize, reserved: bool, kind: Tier) -> Self {
         assert!(free <= TREE_FRAMES);
         Self::new()
             .with_free(free)
@@ -299,15 +343,29 @@ impl Tree {
             .with_kind(kind)
     }
     /// Increments the free frames counter.
-    pub fn inc(self, free: usize) -> Self {
+    fn put(self, free: usize) -> Self {
         let free = self.free() + free;
         assert!(free <= TREE_FRAMES, "{free}");
         self.with_free(free)
     }
-    pub fn dec_force(mut self, free: usize, kind: Kind) -> Option<Self> {
-        if !self.reserved() && self.free() >= free {
-            if !self.kind().accepts(kind) {
-                self.set_kind(kind);
+
+    fn get(self, free: usize, kind: Tier) -> Option<Self> {
+        if !self.reserved() && self.free() >= free && self.kind() == kind {
+            Some(self.with_free(self.free() - free))
+        } else {
+            None
+        }
+    }
+
+    fn get_demote(
+        mut self,
+        free: usize,
+        other: Tier,
+        reserve: fn(Tier, usize) -> Policy,
+    ) -> Option<Self> {
+        if self.free() >= free {
+            if reserve(other, self.free()) == Policy::Demotes {
+                self.set_kind(other);
             }
             Some(self.with_free(self.free() - free))
         } else {
@@ -316,7 +374,7 @@ impl Tree {
     }
 
     /// Reserves this entry if its frame count is in `range`.
-    pub fn reserve(self, free: impl RangeBounds<usize>, kind: Kind) -> Option<Self> {
+    fn reserve(self, free: impl RangeBounds<usize>, kind: Tier) -> Option<Self> {
         if !self.reserved()
             && free.contains(&self.free())
             && (kind == self.kind() || self.free() == TREE_FRAMES)
@@ -328,27 +386,32 @@ impl Tree {
     }
     /// Add the frames from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
-    pub fn unreserve_add(self, free: usize, kind: Kind) -> Option<Self> {
+    fn unreserve_add(
+        self,
+        free: usize,
+        kind: Tier,
+        reserve: fn(Tier, usize) -> Policy,
+    ) -> Option<Self> {
         if self.reserved() {
-            let free = self.free() + free;
-            assert!(free <= TREE_FRAMES);
-            Some(Self::with(free, false, kind))
+            Some(
+                self.with_reserved(false)
+                    .with_kind(if reserve(kind, free) == Policy::Demotes {
+                        kind
+                    } else {
+                        self.kind()
+                    })
+                    .put(free),
+            )
         } else {
             None
         }
     }
     /// Set the free counter to zero if it is large enough for synchronization
-    pub fn sync_steal(self, min: usize) -> Option<Self> {
+    fn sync_steal(self, min: usize) -> Option<Self> {
         if self.reserved() && self.free() > min {
             Some(self.with_free(0))
         } else {
             None
         }
     }
-}
-
-pub enum Prio {
-    None,
-    Good(u8),
-    Best,
 }

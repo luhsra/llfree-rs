@@ -10,7 +10,7 @@ use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{aligned_buf, logging};
 use llfree::{
-    Alloc, Flags, HUGE_FRAMES, HUGE_ORDER, Init, Kind, KindDesc, LLFree, MetaData, thread,
+    Alloc, Flags, HUGE_FRAMES, HUGE_ORDER, Init, Tier, TierConfig, LLFree, MetaData, thread,
 };
 use log::warn;
 
@@ -64,8 +64,8 @@ fn main() {
     assert!(bucket_size > 0);
 
     let kinds = [
-        KindDesc(Kind(0), threads as _),
-        KindDesc(Kind::HUGE, threads as _),
+        TierConfig(Tier(0), threads as _),
+        TierConfig(Tier::HUGE, threads as _),
     ];
     let ms = Allocator::metadata_size(&kinds, frames);
     let mut lower = mapping(0x1000_0000_0000, ms.lower.div_ceil(Frame::SIZE), dax);

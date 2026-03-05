@@ -70,7 +70,6 @@ mod local;
 mod lower;
 pub use lower::HugeId;
 mod trees;
-use trees::Tree;
 pub use trees::TreeId;
 
 use core::fmt;
@@ -118,11 +117,11 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     ///
     /// The metadata is stored into the primary (optionally persistent) and secondary buffers.
     #[cold]
-    fn new(kinds: &[KindDesc], frames: usize, init: Init, meta: MetaData<'a>) -> Result<Self>;
+    fn new(kinds: &[TierConfig], frames: usize, init: Init, meta: MetaData<'a>) -> Result<Self>;
 
     /// Returns the size of the metadata buffers required for initialization.
     #[cold]
-    fn metadata_size(kinds: &[KindDesc], frames: usize) -> MetaSize;
+    fn metadata_size(kinds: &[TierConfig], frames: usize) -> MetaSize;
     /// Returns the metadata buffers.
     ///
     /// # Safety
@@ -132,18 +131,15 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
 
     /// Allocate a new frame of `order` on the given `local`.
     /// If specified try allocating the given `frame`.
-    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<FrameId>;
+    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<(Tier, FrameId)>;
     /// Free the `frame` of `order` on the given `local`.
     fn put(&self, frame: FrameId, flags: Flags) -> Result<()>;
 
     /// Return the total number of frames the allocator manages.
     fn frames(&self) -> usize;
 
-    /// Quickly retrieve allocator statistics, where `free_huge` is an under-approximation.
-    fn fast_stats(&self) -> Stats;
-    /// Quickly retrieve allocator statistics, where `free_huge` is an under-approximation.
-    /// Only TREE_ORDER, HUGE_ORDER and 0 are supported.
-    fn fast_stats_at(&self, frame: FrameId, order: usize) -> Stats;
+    /// Quickly retrieve tree statistics.
+    fn tree_stats(&self, kinds: &mut [KindStats]) -> TreeStats;
 
     /// Retrieve detailed allocator statistics.
     fn stats(&self) -> Stats;
@@ -256,31 +252,45 @@ impl MetaData<'_> {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug)]
-pub struct KindDesc(pub Kind, pub u8);
+pub struct Tiering<'a> {
+    /// Specifies the tiers and number of local reservations for each tier.
+    pub tiers: &'a [TierConfig],
+    /// Policy for accessing a tree with a `target` rank and `free` counter.
+    pub evaluate: fn(current: Tier, target: Tier, free: usize) -> Policy,
+}
 
-/// Opaque kind of local tree
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Kind(pub u8);
-impl Kind {
-    pub const BITS: usize = Tree::KIND_SIZE;
-    /// Kind id used for huge frames
-    pub const HUGE: Self = Self(u8::MAX >> (u8::BITS as usize - Self::BITS));
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Policy {
+    /// Match, where higher is better, [u8::MAX] is a perfect match
+    Match(u8),
+    /// Can steal from the target, but not demote it
+    Stealing,
+    /// Would demote the target to the current kind
+    Demotes,
+    /// Can't be used
+    Invalid,
+}
 
+/// Specifies how many reservations of each rank the allocator should maintain
+#[derive(Clone, Copy, Debug)]
+pub struct TierConfig {
+    /// Opaque rank of a tree, used for reservation and stealing policies
+    pub tier: Tier,
+    /// The number of local reservations of this rank or 0 for none.
+    pub count: u8,
+}
+
+
+/// Opaque rank of a tree
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tier(pub u8);
+impl Tier {
+    pub const BITS: usize = 3;
     pub const fn from_bits(bits: u8) -> Self {
         Self(bits)
     }
     pub const fn into_bits(self) -> u8 {
         self.0
-    }
-    pub const fn accepts(self, other: Self) -> bool {
-        self.0 < other.0
-    }
-    pub const fn is_huge(self) -> bool {
-        self.0 == Self::HUGE.0
-    }
-    pub const fn verify(self) {
-        assert!(self.0 <= Self::HUGE.0)
     }
 }
 
@@ -332,22 +342,26 @@ pub struct Stats {
     /// Number of entirely free trees
     pub free_trees: usize,
 }
-impl core::ops::Add<Stats> for Stats {
-    type Output = Self;
-    fn add(self, rhs: Stats) -> Self::Output {
-        Self {
-            free_frames: self.free_frames + rhs.free_frames,
-            free_huge: self.free_huge + rhs.free_huge,
-            free_trees: self.free_trees + rhs.free_trees,
-        }
-    }
+
+#[derive(Debug, Default)]
+pub struct TreeStats {
+    /// Number of total free frames
+    pub free_frames: usize,
+    /// Number of free trees
+    pub free_trees: usize,
+}
+
+pub struct KindStats {
+    /// Number of free frames
+    pub free: usize,
+    /// Number of allocated frames
+    pub alloc: usize,
 }
 
 #[cfg(all(test, feature = "std"))]
 mod alloc_test {
     use core::mem::ManuallyDrop;
     use core::ops::Deref;
-    use core::ptr::null_mut;
     use std::sync::Barrier;
     use std::time::Instant;
     use std::vec::Vec;
@@ -370,7 +384,7 @@ mod alloc_test {
 
     impl<A: Alloc<'static>> TestAlloc<A> {
         pub fn create(cores: usize, frames: usize, init: Init) -> Result<Self> {
-            let kinds = KindDesc::cores(cores);
+            let kinds = TierConfig::cores(cores);
             let MetaSize {
                 local,
                 trees,
@@ -413,10 +427,36 @@ mod alloc_test {
         }
     }
 
+    fn reserve(kind: Tier, other: Tier, free: usize) -> Policy {
+        if kind.0 > other.0 {
+            return Policy::Stealing;
+        }
+        if kind.0 < other.0 {
+            return Policy::Demotes;
+        }
+        match free {
+            TREE_FRAMES => Policy::Good(1), // fully free -> fragmentation
+            f if f >= TREE_FRAMES / 2 => Policy::Good(3), // half free
+            f if f >= TREE_FRAMES / 64 => Policy::Best, // almost allocated
+            _ => Policy::Good(2),           // low free count -> causes frequent reservations
+        }
+    }
+
     // Test setup: 2 trees per core, one for small and one for huge frames
-    impl KindDesc {
+    impl TierConfig {
         pub const fn cores(cores: usize) -> [Self; 2] {
-            [Self(Kind(0), cores as _), Self(Kind::HUGE, cores as _)]
+            [
+                Self {
+                    tier: Tier(0),
+                    count: cores as _,
+                    reserve: |other, free| reserve(Tier(0), other, free),
+                },
+                Self {
+                    tier: Tier(1),
+                    count: cores as _,
+                    reserve: |other, free| reserve(Tier(1), other, free),
+                },
+            ]
         }
     }
     fn flags(order: usize, core: usize, cores: usize) -> Flags {
@@ -437,13 +477,13 @@ mod alloc_test {
         let llf = |order, core| flags(order, core, 1);
         warn!("finit");
 
-        assert_eq!(alloc.fast_stats().free_frames, alloc.frames());
+        assert_eq!(alloc.tree_stats(&mut []).free_frames, alloc.frames());
 
         warn!("get >>>");
-        let frame1 = alloc.get(None, llf(0, 0)).unwrap();
+        let (_, frame1) = alloc.get(None, llf(0, 0)).unwrap();
         warn!("get <<<");
         warn!("get >>>");
-        let frame2 = alloc.get(None, llf(0, 0)).unwrap();
+        let (_, frame2) = alloc.get(None, llf(0, 0)).unwrap();
         warn!("get <<<");
 
         warn!("put >>>");
@@ -465,13 +505,13 @@ mod alloc_test {
         let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
         let llf = |order, core| flags(order, core, 1);
 
-        assert_eq!(alloc.fast_stats().free_frames, alloc.frames());
+        assert_eq!(alloc.tree_stats(&mut []).free_frames, alloc.frames());
 
         warn!("start alloc...");
-        let small = alloc.get(None, llf(0, 0)).unwrap();
+        let (_, small) = alloc.get(None, llf(0, 0)).unwrap();
 
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             1,
             "{alloc:?}"
         );
@@ -481,7 +521,7 @@ mod alloc_test {
         let mut frames = Vec::new();
         loop {
             match alloc.get(None, llf(0, 0)) {
-                Ok(frame) => frames.push(frame),
+                Ok((_, frame)) => frames.push(frame),
                 Err(Error::Memory) => break,
                 Err(e) => panic!("{e:?}"),
             }
@@ -492,11 +532,11 @@ mod alloc_test {
         alloc.validate();
 
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             1 + frames.len()
         );
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             alloc.frames()
         );
         frames.sort_unstable();
@@ -516,7 +556,7 @@ mod alloc_test {
         }
 
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             1 + frames.len() - FREE_NUM,
             "{alloc:?}"
         );
@@ -524,7 +564,7 @@ mod alloc_test {
 
         // Realloc
         for frame in &mut frames[..FREE_NUM] {
-            *frame = alloc.get(None, llf(0, 0)).unwrap();
+            *frame = alloc.get(None, llf(0, 0)).unwrap().1;
         }
 
         warn!("free...");
@@ -535,7 +575,7 @@ mod alloc_test {
             alloc.put(*frame, llf(0, 0)).unwrap();
         }
 
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
+        assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
         alloc.validate();
     }
 
@@ -548,7 +588,7 @@ mod alloc_test {
         let alloc = Allocator::create(1, frames, Init::FreeAll).unwrap();
         let llf = |order, core| flags(order, core, 1);
 
-        assert_eq!(alloc.fast_stats().free_frames, alloc.frames());
+        assert_eq!(alloc.tree_stats(&mut []).free_frames, alloc.frames());
 
         alloc.get(Some(FrameId(1)), llf(0, 0)).unwrap();
         alloc.get(Some(FrameId(2)), llf(0, 0)).unwrap();
@@ -557,11 +597,11 @@ mod alloc_test {
             .unwrap();
 
         // Test normal allocation
-        let frame = alloc.get(None, llf(0, 0)).unwrap();
+        let (_, frame) = alloc.get(None, llf(0, 0)).unwrap();
         assert!(frame != FrameId(1) && frame != FrameId(2) && frame != FrameId(HUGE_FRAMES));
 
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             3 + HUGE_FRAMES
         );
         alloc.validate();
@@ -571,7 +611,7 @@ mod alloc_test {
         alloc.put(FrameId(1), llf(0, 0)).unwrap();
         alloc.put(frame, llf(0, 0)).unwrap();
 
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
+        assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
         alloc.validate();
     }
 
@@ -589,13 +629,13 @@ mod alloc_test {
         const ALLOCS: usize = MEM_SIZE / Frame::SIZE / 2;
         let mut frames = Vec::with_capacity(ALLOCS);
         for _ in 0..ALLOCS {
-            frames.push(alloc.get(None, llf(0, 0)).unwrap());
+            frames.push(alloc.get(None, llf(0, 0)).unwrap().1);
         }
         warn!("allocated {}", frames.len());
 
         warn!("check...");
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             frames.len()
         );
         alloc.validate();
@@ -614,12 +654,12 @@ mod alloc_test {
         for _ in 0..frames.len() {
             let i = rng.range(0..frames.len() as _) as usize;
             alloc.put(frames[i], llf(0, 0)).unwrap();
-            frames[i] = alloc.get(None, llf(0, 0)).unwrap();
+            frames[i] = alloc.get(None, llf(0, 0)).unwrap().1;
         }
 
         warn!("check...");
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             frames.len()
         );
         alloc.validate();
@@ -635,7 +675,7 @@ mod alloc_test {
         for frame in &frames {
             alloc.put(*frame, llf(0, 0)).unwrap();
         }
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
+        assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
         alloc.validate()
     }
 
@@ -658,7 +698,7 @@ mod alloc_test {
             warn!("start alloc...");
             let mut frames = Vec::with_capacity(ALLOCS);
             for _ in 0..ALLOCS {
-                frames.push(alloc.get(None, llf(0, t)).unwrap());
+                frames.push(alloc.get(None, llf(0, t)).unwrap().1);
             }
             warn!("allocated {}", frames.len());
 
@@ -678,7 +718,7 @@ mod alloc_test {
             for _ in 0..frames.len() {
                 let i = rng.range(0..frames.len() as _) as usize;
                 alloc.put(frames[i], llf(0, t)).unwrap();
-                frames[i] = alloc.get(None, llf(0, t)).unwrap();
+                frames[i] = alloc.get(None, llf(0, t)).unwrap().1;
             }
 
             warn!("check...");
@@ -702,86 +742,7 @@ mod alloc_test {
         });
 
         assert_eq!(alloc.stats().free_huge, FRAMES / HUGE_FRAMES);
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
-        alloc.validate();
-    }
-
-    #[test]
-    fn init() {
-        logging();
-        // 8GiB
-        const MEM_SIZE: usize = 2 << 30;
-        const FRAMES: usize = MEM_SIZE / Frame::SIZE;
-
-        let alloc = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
-        let llf = |order, core| flags(order, core, 1);
-
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
-
-        warn!("start alloc");
-        let small = alloc.get(None, llf(0, 0)).unwrap();
-        let huge = alloc.get(None, llf(HUGE_ORDER, 0)).unwrap();
-
-        let expected_frames = 1 + HUGE_FRAMES;
-        assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
-            expected_frames
-        );
-        assert!(small != huge);
-
-        warn!("start stress test");
-
-        // Stress test
-        let mut frames = vec![FrameId(0); FRAMES / 2];
-        for frame in &mut frames {
-            *frame = alloc.get(None, llf(0, 0)).unwrap();
-        }
-
-        warn!("check");
-        assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
-            expected_frames + frames.len()
-        );
-        alloc.validate();
-
-        frames.sort_unstable();
-
-        // Check that the same frame was not allocated twice
-        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-            assert_ne!(a, b);
-            assert!(a.0 < FRAMES && b.0 < FRAMES);
-        }
-
-        warn!("free some...");
-
-        // Free some
-        for frame in &frames[10..HUGE_FRAMES + 10] {
-            alloc.put(*frame, llf(0, 0)).unwrap();
-        }
-        alloc.validate();
-
-        warn!("free special...");
-
-        alloc.put(small, llf(0, 0)).unwrap();
-        alloc.put(huge, llf(HUGE_ORDER, 0)).unwrap();
-        alloc.validate();
-
-        warn!("realloc...");
-
-        // Realloc
-        for frame in &mut frames[10..HUGE_FRAMES + 10] {
-            *frame = alloc.get(None, llf(0, 0)).unwrap();
-        }
-        alloc.validate();
-
-        warn!("free...");
-        // Free all
-        for frame in &frames {
-            alloc.put(*frame, llf(0, 0)).unwrap();
-        }
-
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
-        assert_eq!(alloc.stats().free_huge, FRAMES / HUGE_FRAMES);
+        assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
         alloc.validate();
     }
 
@@ -808,14 +769,14 @@ mod alloc_test {
                 barrier.wait();
 
                 for frame in frames {
-                    *frame = alloc.get(None, llf(0, t)).unwrap();
+                    *frame = alloc.get(None, llf(0, t)).unwrap().1;
                 }
             },
         );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             frames.len()
         );
         warn!("allocated frames: {}", frames.len());
@@ -844,7 +805,7 @@ mod alloc_test {
 
         loop {
             match alloc.get(None, llf(0, 0)) {
-                Ok(frame) => frames.push(frame),
+                Ok((_, frame)) => frames.push(frame),
                 Err(Error::Memory) => break,
                 Err(e) => panic!("{e:?}"),
             }
@@ -853,10 +814,10 @@ mod alloc_test {
         warn!("{alloc:?}");
 
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             frames.len()
         );
-        assert_eq!(alloc.fast_stats().free_frames, 0);
+        assert_eq!(alloc.tree_stats(&mut []).free_frames, 0);
         assert_eq!(alloc.stats().free_huge, 0);
         warn!("allocated frames: {}", frames.len());
         alloc.validate();
@@ -890,7 +851,7 @@ mod alloc_test {
 
             loop {
                 match alloc.get(None, llf(0, t)) {
-                    Ok(frame) => frames.push(frame),
+                    Ok((_, frame)) => frames.push(frame),
                     Err(Error::Memory) => break,
                     Err(e) => panic!("{e:?}"),
                 }
@@ -902,7 +863,7 @@ mod alloc_test {
         let mut frames = frames.into_iter().flatten().collect::<Vec<_>>();
 
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             frames.len()
         );
         warn!("allocated frames: {}/{}", frames.len(), alloc.frames());
@@ -939,7 +900,7 @@ mod alloc_test {
                 barrier.wait();
 
                 for (i, frame) in frames.iter_mut().enumerate() {
-                    if let Ok(f) = alloc.get(None, llf(0, t)) {
+                    if let Ok((_, f)) = alloc.get(None, llf(0, t)) {
                         *frame = f;
                     } else {
                         error!("OOM: {i}: {alloc:#?}");
@@ -951,7 +912,7 @@ mod alloc_test {
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             frames.len()
         );
         warn!("allocated frames: {}", frames.len());
@@ -977,7 +938,7 @@ mod alloc_test {
             },
         );
 
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
+        assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
         alloc.validate();
     }
 
@@ -1005,14 +966,14 @@ mod alloc_test {
                 barrier.wait();
 
                 for frame in frames {
-                    *frame = alloc.get(None, llf(HUGE_ORDER, t)).unwrap();
+                    *frame = alloc.get(None, llf(HUGE_ORDER, t)).unwrap().1;
                 }
             },
         );
         warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             frames.len() * HUGE_FRAMES
         );
         warn!(
@@ -1027,95 +988,6 @@ mod alloc_test {
         for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
             assert_ne!(a, b);
             assert!(a.0 < FRAMES && b.0 < FRAMES);
-        }
-    }
-
-    #[ignore]
-    #[test]
-    fn parallel_malloc() {
-        logging();
-
-        const THREADS: usize = 4;
-        const FRAMES: usize = (8 << 30) / Frame::SIZE; // 1GiB
-        const ALLOC_PER_THREAD: usize = FRAMES / THREADS / HUGE_FRAMES;
-
-        // Stress test
-        let mut frames = vec![0u64; ALLOC_PER_THREAD * THREADS];
-        let barrier = Barrier::new(THREADS);
-        let timer = Instant::now();
-
-        thread::parallel(
-            frames.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            |(t, frames)| {
-                thread::pin(t);
-                barrier.wait();
-
-                for frame in frames {
-                    *frame = unsafe { libc::malloc(Frame::SIZE) } as u64;
-                    assert!(*frame != 0);
-                }
-            },
-        );
-
-        warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
-        warn!("allocated frames: {}", frames.len());
-
-        // Check that the same frame was not allocated twice
-        frames.sort_unstable();
-        let mut last = None;
-        for p in frames {
-            assert!(last != Some(p));
-            unsafe { libc::free(p as _) };
-            last = Some(p);
-        }
-    }
-
-    #[ignore]
-    #[test]
-    fn parallel_mmap() {
-        logging();
-
-        const THREADS: usize = 4;
-        const FRAMES: usize = (8 << 30) / Frame::SIZE; // 1GiB
-        const ALLOC_PER_THREAD: usize = FRAMES / THREADS / HUGE_FRAMES;
-
-        // Stress test
-        let mut frames = vec![0u64; ALLOC_PER_THREAD * THREADS];
-        let barrier = Barrier::new(THREADS);
-        let timer = Instant::now();
-
-        thread::parallel(
-            frames.chunks_mut(ALLOC_PER_THREAD).enumerate(),
-            |(t, frames)| {
-                thread::pin(t);
-                barrier.wait();
-
-                for frame in frames {
-                    *frame = unsafe {
-                        libc::mmap(
-                            null_mut(),
-                            Frame::SIZE,
-                            libc::PROT_READ | libc::PROT_WRITE,
-                            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                            -1,
-                            0,
-                        )
-                    } as u64;
-                    assert!(*frame != 0);
-                }
-            },
-        );
-
-        warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
-        warn!("allocated frames: {}", frames.len());
-
-        // Check that the same frame was not allocated twice
-        frames.sort_unstable();
-        let mut last = None;
-        for p in frames {
-            assert!(last != Some(p));
-            unsafe { libc::munmap(p as _, Frame::SIZE) };
-            last = Some(p);
         }
     }
 
@@ -1141,7 +1013,7 @@ mod alloc_test {
             let mut frames = vec![FrameId(0); ALLOC_PER_THREAD];
 
             for frame in &mut frames {
-                *frame = alloc.get(None, llf(0, t)).unwrap();
+                *frame = alloc.get(None, llf(0, t)).unwrap().1;
             }
 
             let mut rng = WyRand::new(t as _);
@@ -1153,7 +1025,7 @@ mod alloc_test {
         });
 
         warn!("check");
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
+        assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
         alloc.validate();
     }
 
@@ -1172,7 +1044,7 @@ mod alloc_test {
         thread::pin(0);
         let mut frames = vec![FrameId(0); ALLOC_PER_THREAD];
         for frame in &mut frames {
-            *frame = alloc.get(None, llf(0, 0)).unwrap();
+            *frame = alloc.get(None, llf(0, 0)).unwrap().1;
         }
         alloc.validate();
 
@@ -1195,13 +1067,13 @@ mod alloc_test {
 
             // Simultaneously alloc on first thread
             for frame in &mut frames {
-                *frame = alloc.get(None, llf(0, 0)).unwrap();
+                *frame = alloc.get(None, llf(0, 0)).unwrap().1;
             }
         });
 
         warn!("check {alloc:?}");
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             ALLOC_PER_THREAD
         );
         alloc.validate();
@@ -1223,25 +1095,25 @@ mod alloc_test {
         let expected_frames = 128 * (1 + (1 << HUGE_ORDER));
 
         let mut zone = mmap::Mapping::anon(0x1000_0000_0000, FRAMES, false, false).unwrap();
-        let m = Allocator::metadata_size(&KindDesc::cores(1), FRAMES);
+        let m = Allocator::metadata_size(&TierConfig::cores(1), FRAMES);
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
 
         {
             let alloc =
-                Allocator::create(&KindDesc::cores(1), &mut zone, false, local, trees).unwrap();
+                Allocator::create(&TierConfig::cores(1), &mut zone, false, local, trees).unwrap();
             let llf = |order, core| flags(order, core, 1);
 
             let mut _allocated_frames = 0;
             for _ in 0..128 {
                 alloc.get(None, llf(0, 0)).unwrap();
-                _allocated_frames = alloc.frames() - alloc.fast_stats().free_frames;
+                _allocated_frames = alloc.frames() - alloc.tree_stats(&mut []).free_frames;
                 alloc.get(None, llf(HUGE_ORDER, 0)).unwrap();
-                _allocated_frames = alloc.frames() - alloc.fast_stats().free_frames;
+                _allocated_frames = alloc.frames() - alloc.tree_stats(&mut []).free_frames;
             }
 
             assert_eq!(
-                alloc.frames() - alloc.fast_stats().free_frames,
+                alloc.frames() - alloc.tree_stats(&mut []).free_frames,
                 expected_frames
             );
             alloc.validate();
@@ -1252,9 +1124,10 @@ mod alloc_test {
 
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
-        let alloc = Allocator::create(&KindDesc::cores(1), &mut zone, true, local, trees).unwrap();
+        let alloc =
+            Allocator::create(&TierConfig::cores(1), &mut zone, true, local, trees).unwrap();
         assert_eq!(
-            alloc.frames() - alloc.fast_stats().free_frames,
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
             expected_frames
         );
         alloc.validate();
@@ -1291,7 +1164,7 @@ mod alloc_test {
             // reallocate all
             for (order, frame) in &mut frames {
                 *frame = match alloc.get(None, llf(*order, t)) {
-                    Ok(frame) => frame,
+                    Ok((_, frame)) => frame,
                     Err(e) => panic!("{e:?} o={order} {alloc:?} on core {t}"),
                 };
                 assert!(frame.is_aligned(*order), "{frame:?} {:x}", 1 << *order);
@@ -1307,7 +1180,7 @@ mod alloc_test {
             }
         });
 
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
+        assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
         alloc.validate();
     }
 
@@ -1321,12 +1194,15 @@ mod alloc_test {
         let alloc = Allocator::create(THREADS, FRAMES, Init::AllocAll).unwrap();
         let llf = |order, core| flags(order, core, THREADS);
         assert_eq!(alloc.frames(), FRAMES);
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, FRAMES);
+        assert_eq!(
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+            FRAMES
+        );
 
         for frame in (0..FRAMES).step_by(1 << HUGE_ORDER) {
             alloc.put(FrameId(frame), llf(HUGE_ORDER, 0)).unwrap();
         }
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, 0);
+        assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
 
         thread::parallel(0..THREADS, |core| {
             thread::pin(core);
@@ -1335,7 +1211,10 @@ mod alloc_test {
                 alloc.get(None, llf(HUGE_ORDER, core)).unwrap();
             }
         });
-        assert_eq!(alloc.frames() - alloc.fast_stats().free_frames, FRAMES);
+        assert_eq!(
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+            FRAMES
+        );
         alloc.validate();
     }
 
@@ -1351,9 +1230,9 @@ mod alloc_test {
         let mut frames = Vec::with_capacity(TREE_FRAMES / 2);
         for i in 0..TREE_FRAMES {
             if i % 2 == 0 {
-                frames.push(alloc.get(None, llf(0, 0)).unwrap());
+                frames.push(alloc.get(None, llf(0, 0)).unwrap().1);
             } else {
-                alloc.get(None, llf(0, 0)).unwrap();
+                alloc.get(None, llf(0, 0)).unwrap().1;
             }
         }
         // Free every second one -> fragmentation
@@ -1416,7 +1295,7 @@ mod alloc_test {
                 while frames.len() != target {
                     if frames.len() < target {
                         match alloc.get(None, llf(0, t)) {
-                            Ok(frame) => frames.push(frame),
+                            Ok((_, frame)) => frames.push(frame),
                             Err(Error::Memory) => break,
                             Err(e) => panic!("{e:?}"),
                         }
@@ -1430,7 +1309,7 @@ mod alloc_test {
 
         assert_eq!(
             allocated.into_iter().sum::<usize>(),
-            alloc.frames() - alloc.fast_stats().free_frames
+            alloc.frames() - alloc.tree_stats(&mut []).free_frames
         );
         alloc.validate();
     }

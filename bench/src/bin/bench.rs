@@ -16,7 +16,7 @@ use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
 use llfree::{
-    Alloc, Flags, FrameId, HUGE_ORDER, Kind, KindDesc, LLFree, MAX_ORDER, Result, thread,
+    Alloc, Flags, FrameId, HUGE_ORDER, Tier, TierConfig, LLFree, MAX_ORDER, Result, thread,
 };
 use log::warn;
 
@@ -159,8 +159,8 @@ fn flags(order: usize, core: usize) -> Flags {
 
 fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAlloc + 'a> {
     let kinds = [
-        KindDesc(Kind(0), cores as _),
-        KindDesc(Kind::HUGE, cores as _),
+        TierConfig(Tier(0), cores as _),
+        TierConfig(Tier::HUGE, cores as _),
     ];
 
     #[cfg(feature = "llc")]

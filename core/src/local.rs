@@ -6,9 +6,10 @@ use bitfield_struct::bitfield;
 use log::debug;
 
 use crate::atomic::{Atom, Atomic};
+use crate::bitfield::RowId;
 use crate::util::size_of_slice;
-use crate::{Error, Kind, KindDesc, Stats};
-use crate::{FrameId, HUGE_FRAMES, TREE_FRAMES, TreeId};
+use crate::{Error, Tier, TierConfig, KindStats, Policy, TreeStats};
+use crate::{TREE_FRAMES, TreeId};
 
 pub struct Locals<'a> {
     /// Local reservations for each [Kind]
@@ -22,8 +23,8 @@ impl fmt::Debug for Locals<'_> {
 }
 
 impl<'a> Locals<'a> {
-    pub fn metadata_size(kinds: &[KindDesc]) -> usize {
-        size_of_slice::<Local>(kinds.iter().map(|k| k.1 as usize).sum())
+    pub fn metadata_size(kinds: &[TierConfig]) -> usize {
+        size_of_slice::<Local>(kinds.iter().map(|k| k.count as usize).sum())
     }
     pub unsafe fn metadata(&mut self) -> &'a mut [u8] {
         unsafe {
@@ -34,20 +35,29 @@ impl<'a> Locals<'a> {
         }
     }
 
-    pub fn new(buffer: &'a mut [u8], kinds: &[KindDesc]) -> Result<Self, Error> {
+    pub fn new(buffer: &'a mut [u8], kinds: &[TierConfig]) -> Result<Self, Error> {
         let len = buffer.len() / size_of::<Local>().next_multiple_of(align_of::<Local>());
-        let kind_len = kinds.iter().map(|k| k.1 as usize).sum::<usize>();
+        let kind_len = kinds.iter().map(|k| k.count as usize).sum::<usize>();
         if len < kind_len {
             return Err(Error::Initialization);
         }
         let local: &mut [Local] =
             unsafe { slice::from_raw_parts_mut(buffer.as_mut_ptr().cast(), kind_len) };
+
         let mut offset = 0;
-        for KindDesc(kind, count) in kinds {
+        for TierConfig {
+            tier: kind,
+            count,
+            reserve,
+        } in kinds
+        {
             for local in &mut local[offset..][..*count as usize] {
                 *local = Local {
                     kind: *kind,
-                    ..Default::default()
+                    reserve: *reserve,
+                    preferred: Atom::new(LocalTree::none()),
+                    #[cfg(feature = "free_reserve")]
+                    frees: Atom::new(FreeHistory::default()),
                 };
             }
             offset += *count as usize;
@@ -59,104 +69,105 @@ impl<'a> Locals<'a> {
         self.local.len()
     }
 
-    pub fn can_get(&self, index: usize, frame: Option<FrameId>, free: usize) -> bool {
+    pub fn can_get(&self, index: usize, tree: Option<TreeId>, free: usize) -> bool {
         let local = self.local[index].preferred.load();
-        local.dec(frame, free).is_some()
+        local.get(tree, free).is_some()
     }
 
-    pub fn kind(&self, index: usize) -> Kind {
+    pub fn kind(&self, index: usize) -> Tier {
         self.local[index].kind
+    }
+
+    pub fn can_reserve(&self, index: usize) -> fn(Tier, usize) -> Policy {
+        self.local[index].reserve
     }
 
     pub fn get(
         &self,
         index: usize,
-        frame: Option<FrameId>,
+        tree: Option<TreeId>,
         free: usize,
-    ) -> Result<FrameId, Option<(FrameId, usize)>> {
+    ) -> Result<RowId, Option<(RowId, usize)>> {
         let local = &self.local[index];
-        match local.preferred.fetch_update(|v| v.dec(frame, free)) {
-            Ok(old) => Ok(old.frame()),
-            Err(old) => Err(old.present().then_some((old.frame(), old.free()))),
+        match local.preferred.fetch_update(|v| v.get(tree, free)) {
+            Ok(old) => Ok(old.row()),
+            Err(old) => Err(old.present().then_some((old.row(), old.free()))),
         }
     }
 
-    pub fn steal(&self, index: usize, frame: Option<FrameId>, free: usize) -> Option<FrameId> {
+    /// Steal from another compatible local tree (no downgrade necessary)
+    pub fn steal(&self, index: usize, tree: Option<TreeId>, free: usize) -> Option<(Tier, RowId)> {
         let kind = self.local[index].kind;
         // Steal from same kind first
         for i in 0..self.local.len() {
             let i = (index + i) % self.local.len();
             let local = &self.local[i];
             if local.kind == kind
-                && let Ok(frame) = self.get(i, frame, free)
+                && let Ok(row) = self.get(i, tree, free)
             {
-                return Some(frame);
+                return Some((kind, row));
             }
         }
-        // Fallback to stealing from lower kinds (no downgrade necessary)
+        // Fallback to stealing kinds that would not demote
         for i in 1..self.local.len() {
             let i = (index + i) % self.local.len();
             let local = &self.local[i];
-            if local.kind < kind
-                && let Ok(frame) = self.get(i, frame, free)
+            if self.local[index].try_reserve(local.kind, free) == Policy::Stealing
+                && let Ok(row) = self.get(i, tree, free)
             {
-                return Some(frame);
+                return Some((local.kind, row));
             }
         }
         None
     }
 
-    // Find higher kind and steal and downgrade it to the current kind
+    /// Find higher kind and steal and downgrade it to the current kind
     pub fn steal_downgrade(
         &self,
         index: usize,
-        frame: Option<FrameId>,
+        tree: Option<TreeId>,
         free: usize,
-    ) -> Option<(FrameId, Option<(FrameId, usize)>)> {
-        let kind = self.local[index].kind;
+    ) -> Option<((Tier, RowId), Option<(RowId, usize)>)> {
         for i in 1..self.local.len() {
             let i = (index + i) % self.local.len();
-            let local = &self.local[i];
-            if local.kind > kind
-                && let Ok(old) = local
+            let other = &self.local[i];
+            if self.local[index].try_reserve(other.kind, free) == Policy::Demotes
+                && let Ok(old) = other
                     .preferred
-                    .fetch_update(|v| v.dec(frame, free).map(|_| LocalTree::none()))
+                    .fetch_update(|v| v.get(tree, free).map(|_| LocalTree::none()))
             {
-                let new = old.dec(frame, free).unwrap();
+                let new = old.get(tree, free).unwrap();
                 // Replace local tree and return its free count for unreservation
                 let old = self.local[index].preferred.swap(new);
                 return Some((
-                    new.frame(),
-                    old.present().then_some((old.frame(), old.free())),
+                    (other.kind, new.row()),
+                    old.present().then_some((old.row(), old.free())),
                 ));
             }
         }
         None
     }
 
-    pub fn put(&self, index: usize, frame: FrameId, free: usize) -> Result<(), Option<FrameId>> {
+    pub fn put(&self, index: usize, tree: TreeId, free: usize) -> bool {
         let local = &self.local[index];
-        match local.preferred.fetch_update(|v| v.inc(frame, free)) {
-            Ok(_) => Ok(()),
-            Err(old) => Err(old.present().then_some(old.frame())),
-        }
+        local.preferred.fetch_update(|v| v.put(tree, free)).is_ok()
     }
 
-    pub fn swap(&self, index: usize, frame: FrameId, free: usize) -> Option<(FrameId, usize)> {
+    pub fn swap(&self, index: usize, tree: TreeId, free: usize) -> Option<(RowId, usize)> {
         let local = &self.local[index];
-        let old = local.preferred.swap(LocalTree::with(frame, free));
-        old.present().then_some((old.frame(), old.free()))
+        let old = local.preferred.swap(LocalTree::with(tree.as_row(), free));
+        old.present().then_some((old.row(), old.free()))
     }
 
-    pub fn drain(&self, index: usize) -> Option<(FrameId, usize)> {
+    pub fn drain(&self, index: usize) -> Option<(RowId, usize)> {
         let local = &self.local[index];
         let old = local.preferred.swap(LocalTree::none());
-        old.present().then_some((old.frame(), old.free()))
+        old.present().then_some((old.row(), old.free()))
     }
 
-    pub fn set_start(&self, index: usize, frame: FrameId) {
+    pub fn set_start(&self, index: usize, row: RowId) {
         let local = &self.local[index];
-        let _ = local.preferred.fetch_update(|v| v.set_start(frame, false));
+        let _ = local.preferred.fetch_update(|v| v.set_start(row, false));
     }
 
     #[allow(dead_code)]
@@ -165,52 +176,40 @@ impl<'a> Locals<'a> {
         self.local[index].frees_push(tree_idx)
     }
 
-    pub fn stats(&self) -> Stats {
-        let mut s = Stats::default();
+    pub fn stats(&self, kinds: &mut [KindStats]) -> TreeStats {
+        let mut s = TreeStats::default();
         for local in self.local {
             let preferred = local.preferred.load();
             if preferred.present() {
                 s.free_frames += preferred.free();
-                if local.kind.is_huge() || preferred.free() == TREE_FRAMES {
-                    s.free_huge += preferred.free() / HUGE_FRAMES;
+                if preferred.free() != TREE_FRAMES
+                    && let Some(kind) = kinds.get_mut(local.kind.0 as usize)
+                {
+                    kind.free += preferred.free();
+                    kind.alloc += TREE_FRAMES - preferred.free();
                 }
+                s.free_trees += preferred.free() / TREE_FRAMES;
             }
         }
         s
     }
 
-    pub fn stats_at(&self, frame: FrameId, free: usize) -> Stats {
-        for local in self.local {
-            let preferred = local.preferred.load();
-            if preferred.present() && preferred.frame().as_tree() == frame.as_tree() {
-                return Stats {
-                    free_frames: free + preferred.free(),
-                    free_huge: if local.kind.is_huge() || free == TREE_FRAMES {
-                        (free + preferred.free()) / HUGE_FRAMES
-                    } else {
-                        0
-                    },
-                    free_trees: (free + preferred.free()) / TREE_FRAMES,
-                };
-            }
-        }
-        Stats::default()
-    }
-
-    pub fn load(&self, local: usize) -> Option<(FrameId, usize)> {
+    pub fn load(&self, local: usize) -> Option<(RowId, usize)> {
         let preferred = self.local[local].preferred.load();
         preferred
             .present()
-            .then_some((preferred.frame(), preferred.free()))
+            .then_some((preferred.row(), preferred.free()))
     }
 }
 
 /// Core-local data
-#[derive(Default, Debug)]
+#[derive(Debug)]
 #[repr(align(64))]
 struct Local {
     /// Kind of the local tree
-    kind: Kind,
+    kind: Tier,
+    /// Reserve function
+    reserve: fn(kind: Tier, free: usize) -> Policy,
     /// Reserved trees for each [Kind]
     preferred: Atom<LocalTree>,
     #[cfg(feature = "free_reserve")]
@@ -229,6 +228,10 @@ impl Local {
         });
         success
     }
+
+    fn try_reserve(&self, other: Tier, free: usize) -> Policy {
+        (self.reserve)(other, free)
+    }
 }
 
 /// Local tree copy
@@ -236,7 +239,7 @@ impl Local {
 #[derive(PartialEq, Eq)]
 struct LocalTree {
     #[bits(48)]
-    frame: FrameId,
+    row: RowId,
     #[bits(15)]
     free: usize,
     /// Reserved for present bit...
@@ -246,33 +249,30 @@ impl Atomic for LocalTree {
     type I = AtomicU64;
 }
 impl LocalTree {
-    fn with(frame: FrameId, free: usize) -> Self {
-        Self::new()
-            .with_frame(frame)
-            .with_free(free)
-            .with_present(true)
+    fn with(row: RowId, free: usize) -> Self {
+        Self::new().with_row(row).with_free(free).with_present(true)
     }
     fn none() -> Self {
         Self::new().with_present(false)
     }
-    fn dec(self, frame: Option<FrameId>, free: usize) -> Option<Self> {
-        if self.present() && frame.is_none_or(|i| self.frame().as_tree() == i.as_tree()) {
+    fn get(self, tree: Option<TreeId>, free: usize) -> Option<Self> {
+        if self.present() && tree.is_none_or(|i| self.row().as_tree() == i) {
             Some(self.with_free(self.free().checked_sub(free)?))
         } else {
             None
         }
     }
-    fn inc(self, frame: FrameId, free: usize) -> Option<Self> {
-        if self.present() && self.frame().as_tree() == frame.as_tree() {
+    fn put(self, tree: TreeId, free: usize) -> Option<Self> {
+        if self.present() && self.row().as_tree() == tree {
             assert!(self.free() + free <= TREE_FRAMES);
             Some(self.with_free(self.free() + free))
         } else {
             None
         }
     }
-    fn set_start(self, frame: FrameId, force: bool) -> Option<Self> {
-        if force || (self.present() && self.frame().as_tree() == frame.as_tree()) {
-            Some(self.with_frame(frame))
+    fn set_start(self, row: RowId, force: bool) -> Option<Self> {
+        if force || (self.present() && self.row().as_tree() == row.as_tree()) {
+            Some(self.with_row(row))
         } else {
             None
         }

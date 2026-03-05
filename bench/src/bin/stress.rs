@@ -61,8 +61,8 @@ fn main() {
 
     // Map memory for the allocator and initialize it
     let kinds = [
-        KindDesc(Kind(0), threads as _),
-        KindDesc(Kind::HUGE, threads as _),
+        TierConfig(Tier(0), threads as _),
+        TierConfig(Tier::HUGE, threads as _),
     ];
     let pages = (memory << 30) / Frame::SIZE;
     let ms = Allocator::metadata_size(&kinds, pages);

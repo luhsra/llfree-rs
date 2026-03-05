@@ -9,7 +9,7 @@ use llfree::frame::Frame;
 use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, Flags, HUGE_ORDER, Kind, KindDesc, LLFree, thread};
+use llfree::{Alloc, Flags, HUGE_ORDER, Tier, TierConfig, LLFree, thread};
 use log::warn;
 
 /// Benchmarking the (crashed) recovery.
@@ -41,7 +41,7 @@ struct Args {
 
 type Allocator<'a> = NvmAlloc<'a, LLFree<'a>>;
 
-const KINDS: [KindDesc; 2] = [KindDesc(Kind(0), 1), KindDesc(Kind::HUGE, 1)];
+const KINDS: [TierConfig; 2] = [TierConfig(Tier(0), 1), TierConfig(Tier::HUGE, 1)];
 
 fn main() {
     util::logging();
