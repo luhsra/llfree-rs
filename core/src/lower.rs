@@ -10,7 +10,7 @@ use log::{debug, error, info, warn};
 use crate::atomic::{Atom, AtomArray, Atomic};
 use crate::bitfield::{Bitfield, RowId};
 use crate::trees::TreeId;
-use crate::util::{Align, Deferred, size_of_slice, spin_wait};
+use crate::util::{Align, size_of_slice, spin_wait};
 use crate::{
     Error, FrameId, HUGE_FRAMES, HUGE_ORDER, Init, MAX_ORDER, RETRIES, Result, Stats, TREE_FRAMES,
     TREE_HUGE,
@@ -228,20 +228,16 @@ impl<'a> Lower<'a> {
             for j in 0..TREE_HUGE {
                 let i = (child_off + j) % TREE_HUGE;
                 if let Ok(_) = children[i].fetch_update(|v| v.dec(1 << order)) {
-                    let undo = Deferred::new(move || {
-                        children[i]
-                            .fetch_update(|v| v.inc(1 << order))
-                            .expect("Undo failed");
-                    });
-
                     // start with the bitfield row from the last allocation
                     let row = if j == 0 { start } else { RowId(0) };
 
                     let bf_i = first_child + HugeId(i);
                     if let Ok(offset) = self.bitfield(bf_i).set_first_zeros(row, order) {
-                        undo.cancel();
                         return Ok(bf_i.as_frame() + offset);
                     }
+                    children[i]
+                        .fetch_update(|v| v.inc(1 << order))
+                        .expect("Undo failed");
                 }
             }
         } else {
@@ -271,14 +267,11 @@ impl<'a> Lower<'a> {
             }
         } else if order <= Bitfield::ORDER {
             if let Ok(_) = children.fetch_update(|v| v.dec(1 << order)) {
-                let deferred = Deferred::new(move || {
-                    children.fetch_update(|v| v.inc(1 << order)).unwrap();
-                });
-
                 if let Ok(_) = self.bitfield(frame.as_huge()).toggle(frame, order, false) {
-                    deferred.cancel();
                     return Ok(());
                 }
+                // Undo decrement
+                children.fetch_update(|v| v.inc(1 << order)).unwrap();
             }
         } else {
             unreachable!("Order {order} is not supported")

@@ -4,25 +4,6 @@ use core::fmt;
 use core::mem::{align_of, size_of};
 use core::ops::{Add, Deref, DerefMut, Div, Range};
 
-/// Function that is executed at scope exit
-#[must_use]
-pub struct Deferred<F: FnOnce()>(Option<F>);
-impl<F: FnOnce()> Deferred<F> {
-    pub fn new(f: F) -> Self {
-        Self(Some(f))
-    }
-    pub fn cancel(mut self) {
-        self.0.take();
-    }
-}
-impl<F: FnOnce()> Drop for Deferred<F> {
-    fn drop(&mut self) {
-        if let Some(f) = self.0.take() {
-            f();
-        }
-    }
-}
-
 /// Align v up to next `align`
 #[inline(always)]
 pub const fn align_up(v: usize, align: usize) -> usize {
@@ -207,27 +188,6 @@ pub fn aligned_buf(size: usize) -> &'static mut [u8] {
     use std::alloc::{Layout, alloc_zeroed};
     let ptr = unsafe { alloc_zeroed(Layout::from_size_align(size, align_of::<Align>()).unwrap()) };
     unsafe { std::slice::from_raw_parts_mut(ptr, size) }
-}
-
-pub struct FmtFn<F>(pub F)
-where
-    F: Fn(&mut fmt::Formatter<'_>) -> fmt::Result;
-
-impl<F> fmt::Debug for FmtFn<F>
-where
-    F: Fn(&mut fmt::Formatter<'_>) -> fmt::Result,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        (self.0)(f)
-    }
-}
-impl<F> fmt::Display for FmtFn<F>
-where
-    F: Fn(&mut fmt::Formatter<'_>) -> fmt::Result,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        (self.0)(f)
-    }
 }
 
 #[cfg(all(test, feature = "std"))]

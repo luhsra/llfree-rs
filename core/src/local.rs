@@ -8,7 +8,7 @@ use log::debug;
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
 use crate::util::size_of_slice;
-use crate::{Error, Policy, PolicyFn, Tier, TierConfig, TierStats, Tiering, TreeStats};
+use crate::{Error, Policy, PolicyFn, Tier, TierStats, Tiering, TreeStats};
 use crate::{TREE_FRAMES, TreeId};
 
 pub struct Locals<'a> {
@@ -24,7 +24,7 @@ impl fmt::Debug for Locals<'_> {
 
 impl<'a> Locals<'a> {
     pub fn metadata_size(tiering: &Tiering) -> usize {
-        size_of_slice::<Local>(tiering.tiers.iter().map(|k| k.count).sum())
+        size_of_slice::<Local>(tiering.tiers.iter().map(|&(_, count)| count).sum())
     }
     pub unsafe fn metadata(&mut self) -> &'a mut [u8] {
         unsafe {
@@ -37,7 +37,7 @@ impl<'a> Locals<'a> {
 
     pub fn new(buffer: &'a mut [u8], tiering: &Tiering) -> Result<Self, Error> {
         let len = buffer.len() / size_of::<Local>().next_multiple_of(align_of::<Local>());
-        let tier_len = tiering.tiers.iter().map(|k| k.count).sum::<usize>();
+        let tier_len = tiering.tiers.iter().map(|&(_, count)| count).sum::<usize>();
         if len < tier_len {
             return Err(Error::Initialization);
         }
@@ -45,7 +45,7 @@ impl<'a> Locals<'a> {
             unsafe { slice::from_raw_parts_mut(buffer.as_mut_ptr().cast(), tier_len) };
 
         let mut offset = 0;
-        for TierConfig { tier, count } in tiering.tiers {
+        for (tier, count) in tiering.tiers {
             for local in &mut local[offset..][..*count] {
                 *local = Local {
                     tier: *tier,

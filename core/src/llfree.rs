@@ -8,8 +8,25 @@ use log::{debug, info, warn};
 use crate::local::Locals;
 use crate::lower::Lower;
 use crate::trees::{TreeId, Trees};
-use crate::util::{Align, FmtFn, align_down, spin_wait};
+use crate::util::{Align, align_down, spin_wait};
 use crate::*;
+
+/// Return [`Error::Address`] if condition is not met.
+#[allow(unused_macros)]
+macro_rules! ensure {
+    ($cond:expr, $($args:expr),*) => {
+        if !($cond) {
+            log::error!($($args),*);
+            return Err(Error::Address);
+        }
+    };
+    ($err:expr; $cond:expr, $($args:expr),*) => {
+        if !($cond) {
+            log::error!($($args),*);
+            return Err($err);
+        }
+    };
+}
 
 /// This allocator splits its memory range into chunks.
 /// These chunks are reserved by CPUs to reduce sharing.
@@ -525,18 +542,39 @@ impl fmt::Debug for LLFree<'_> {
         f.debug_struct(Self::name())
             .field(
                 "managed",
-                &FmtFn(|f| write!(f, "{} frames ({huge} huge)", self.frames())),
+                &fmt::from_fn(|f| write!(f, "{} frames ({huge} huge)", self.frames())),
             )
             .field(
                 "free",
-                &FmtFn(|f| write!(f, "{free_frames} frames ({free_huge} huge)")),
+                &fmt::from_fn(|f| write!(f, "{free_frames} frames ({free_huge} huge)")),
             )
             .field(
                 "trees",
-                &FmtFn(|f| write!(f, "{:?} (N={})", self.trees, TREE_FRAMES)),
+                &fmt::from_fn(|f| write!(f, "{:?} (N={})", self.trees, TREE_FRAMES)),
             )
             .field("locals", &self.locals)
             .finish()?;
         Ok(())
+    }
+}
+
+impl MetaData<'_> {
+    /// Check for alignment and overlap
+    fn valid(&self, m: MetaSize) -> bool {
+        fn overlap(a: Range<*const u8>, b: Range<*const u8>) -> bool {
+            a.contains(&b.start)
+                || a.contains(&unsafe { b.end.sub(1) })
+                || b.contains(&a.start)
+                || b.contains(&unsafe { a.end.sub(1) })
+        }
+        self.local.len() >= m.local
+            && self.trees.len() >= m.trees
+            && self.lower.len() >= m.lower
+            && self.local.as_ptr().align_offset(align_of::<Align>()) == 0
+            && self.trees.as_ptr().align_offset(align_of::<Align>()) == 0
+            && self.lower.as_ptr().align_offset(align_of::<Align>()) == 0
+            && !overlap(self.local.as_ptr_range(), self.trees.as_ptr_range())
+            && !overlap(self.trees.as_ptr_range(), self.lower.as_ptr_range())
+            && !overlap(self.lower.as_ptr_range(), self.local.as_ptr_range())
     }
 }

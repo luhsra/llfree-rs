@@ -50,10 +50,10 @@ fn tiering(
     impl Fn(usize, u32, usize, usize) -> Request,
 ) {
     let tiers = vec![
-        TierConfig::new(Tier(0), cores), // immovable frames
-        TierConfig::new(Tier(1), pids),  // movable frames
-        TierConfig::new(Tier(2), pids),  // page cache frames
-        TierConfig::new(Tier(3), cores), // huge frames
+        (Tier(0), cores), // immovable frames
+        (Tier(1), pids),  // movable frames
+        (Tier(2), pids),  // page cache frames
+        (Tier(3), cores), // huge frames
     ];
 
     fn policy(requested: Tier, target: Tier, free: usize) -> Policy {
