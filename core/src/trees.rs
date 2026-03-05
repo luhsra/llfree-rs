@@ -49,10 +49,11 @@ impl fmt::Debug for TreeId {
     }
 }
 
-#[derive(Default)]
 pub struct Trees<'a> {
     /// Array of level 3 entries, which are the roots of the trees
     entries: &'a [Atom<Tree>],
+    /// Default tier for new trees or entirely free trees,
+    default: Tier,
 }
 
 impl fmt::Debug for Trees<'_> {
@@ -92,6 +93,7 @@ impl<'a> Trees<'a> {
         frames: usize,
         buffer: &'a mut [u8],
         tree_init: Option<impl Fn(usize) -> usize>,
+        default: Tier,
     ) -> Self {
         assert!(buffer.len() >= Self::metadata_size(frames));
 
@@ -102,11 +104,11 @@ impl<'a> Trees<'a> {
         if let Some(tree_init) = tree_init {
             for (i, e) in entries.iter_mut().enumerate() {
                 let frames = tree_init(i * TREE_FRAMES);
-                *e = Atom::new(Tree::with(frames, false, Tier(0)));
+                *e = Atom::new(Tree::with(frames, false, default));
             }
         }
 
-        Self { entries }
+        Self { entries, default }
     }
 
     pub fn len(&self) -> usize {
@@ -154,12 +156,6 @@ impl<'a> Trees<'a> {
             .ok()
     }
 
-    pub fn get(&self, i: TreeId, free: usize, tier: Tier) -> bool {
-        self.entries[i.0]
-            .fetch_update(|e| e.get(free, tier))
-            .is_ok()
-    }
-
     pub fn get_demote(&self, i: TreeId, free: usize, tier: Tier, policy: PolicyFn) -> Option<Tier> {
         self.entries[i.0]
             .fetch_update(|e| e.get_demote(free, tier, policy))
@@ -175,7 +171,7 @@ impl<'a> Trees<'a> {
 
     pub fn put(&self, i: TreeId, free: usize) {
         self.entries[i.0]
-            .fetch_update(|v| Some(v.put(free)))
+            .fetch_update(|v| Some(v.put(free, self.default)))
             .expect("Put failed");
     }
 
@@ -190,7 +186,7 @@ impl<'a> Trees<'a> {
         let mut reserved = false;
         let tree = self.entries[i.0]
             .fetch_update(|v| {
-                let v = v.put(free);
+                let v = v.put(free, self.default);
                 if may_reserve && !v.reserved() && v.tier() == tier && v.free() > Self::MIN_FREE {
                     // Reserve the tree that was targeted by the last N frees
                     reserved = true;
@@ -210,9 +206,10 @@ impl<'a> Trees<'a> {
         i: TreeId,
         free: impl RangeBounds<usize> + Clone,
         tier: Tier,
+        policy: PolicyFn,
     ) -> Option<usize> {
         self.entries[i.0]
-            .fetch_update(|v| v.reserve(free.clone(), tier))
+            .fetch_update(|v| v.reserve(free.clone(), tier, policy))
             .map(|v| v.free())
             .ok()
     }
@@ -220,7 +217,7 @@ impl<'a> Trees<'a> {
     /// Unreserve an entry, adding the local entry counter to the global one
     pub fn unreserve(&self, i: TreeId, free: usize, tier: Tier, reserve: PolicyFn) {
         self.entries[i.0]
-            .fetch_update(|v| v.unreserve_add(free, tier, reserve))
+            .fetch_update(|v| v.unreserve_add(free, tier, reserve, self.default))
             .expect("Unreserve failed");
     }
 
@@ -231,6 +228,7 @@ impl<'a> Trees<'a> {
         offset: usize,
         len: usize,
         tier: Tier,
+        min: usize,
         policy: PolicyFn,
         access: impl Fn(TreeId) -> Result<FrameId>,
     ) -> Result<FrameId> {
@@ -252,6 +250,9 @@ impl<'a> Trees<'a> {
             let i = TreeId((s + off) as usize % self.entries.len());
 
             let tree = self.entries[i.0].load();
+            if tree.reserved() || tree.free() < min || tree.free() == TREE_FRAMES {
+                continue;
+            }
             match policy(tier, tree.tier(), tree.free()) {
                 Policy::Match(u8::MAX) => match access(i) {
                     Err(Error::Memory) => {}
@@ -371,23 +372,19 @@ impl Tree {
             .with_tier(tier)
     }
     /// Increments the free frames counter.
-    fn put(self, free: usize) -> Self {
+    fn put(mut self, free: usize, default: Tier) -> Self {
         let free = self.free() + free;
         assert!(free <= TREE_FRAMES, "{free}");
+        if free == TREE_FRAMES {
+            self.set_tier(default);
+        }
         self.with_free(free)
     }
-
-    fn get(self, free: usize, tier: Tier) -> Option<Self> {
-        if !self.reserved() && self.free() >= free && self.tier() == tier {
-            Some(self.with_free(self.free() - free))
-        } else {
-            None
-        }
-    }
-
+    /// Decrements the free frames counter if it is large enough, and optionally demotes the tier.
     fn get_demote(mut self, free: usize, tier: Tier, policy: PolicyFn) -> Option<Self> {
-        if self.free() >= free {
-            if policy(tier, self.tier(), self.free()) == Policy::Demote {
+        let policy = policy(tier, self.tier(), self.free());
+        if self.free() >= free && policy != Policy::Invalid {
+            if policy == Policy::Demote {
                 self.set_tier(tier);
             }
             Some(self.with_free(self.free() - free))
@@ -395,12 +392,13 @@ impl Tree {
             None
         }
     }
-
     /// Reserves this entry if its frame count is in `range`.
-    fn reserve(self, free: impl RangeBounds<usize>, tier: Tier) -> Option<Self> {
+    fn reserve(self, free: impl RangeBounds<usize>, tier: Tier, policy: PolicyFn) -> Option<Self> {
         if !self.reserved()
             && free.contains(&self.free())
-            && (tier == self.tier() || self.free() == TREE_FRAMES)
+            && (tier == self.tier()
+                || (self.free() == TREE_FRAMES
+                    && policy(tier, self.tier(), self.free()) != Policy::Invalid))
         {
             Some(Self::with(0, true, tier))
         } else {
@@ -409,7 +407,13 @@ impl Tree {
     }
     /// Add the frames from the `other` entry to the reserved `self` entry and unreserve it.
     /// `self` is the entry in the global array / table.
-    fn unreserve_add(self, free: usize, tier: Tier, reserve: PolicyFn) -> Option<Self> {
+    fn unreserve_add(
+        self,
+        free: usize,
+        tier: Tier,
+        reserve: PolicyFn,
+        default: Tier,
+    ) -> Option<Self> {
         if self.reserved() {
             Some(
                 self.with_reserved(false)
@@ -418,7 +422,7 @@ impl Tree {
                     } else {
                         self.tier()
                     })
-                    .put(free),
+                    .put(free, default),
             )
         } else {
             None
@@ -432,7 +436,7 @@ impl Tree {
             None
         }
     }
-
+    /// Change the entry if it is not reserved and the tier and free counter conditions match
     fn change(
         mut self,
         tier: Option<Tier>,

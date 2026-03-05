@@ -42,14 +42,8 @@ enum Count {
     Pid,
 }
 
-fn tiering(
-    cores: usize,
-    pids: usize,
-) -> (
-    Tiering<'static>,
-    impl Fn(usize, u32, usize, usize) -> Request,
-) {
-    let tiers = vec![
+fn tiering(cores: usize, pids: usize) -> (Tiering, impl Fn(usize, u32, usize, usize) -> Request) {
+    let tiers = [
         (Tier(0), cores), // immovable frames
         (Tier(1), pids),  // movable frames
         (Tier(2), pids),  // page cache frames
@@ -89,11 +83,7 @@ fn tiering(
     }
 
     (
-        Tiering {
-            tiers: tiers.leak(),
-            default: Tier(0),
-            policy,
-        },
+        Tiering::new(&tiers, Tier(0), policy),
         move |order, gfp, core, pid| request(order, gfp, core, cores, pid, pids),
     )
 }

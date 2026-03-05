@@ -24,7 +24,7 @@ impl fmt::Debug for Locals<'_> {
 
 impl<'a> Locals<'a> {
     pub fn metadata_size(tiering: &Tiering) -> usize {
-        size_of_slice::<Local>(tiering.tiers.iter().map(|&(_, count)| count).sum())
+        size_of_slice::<Local>(tiering.tiers().iter().map(|&(_, count)| count).sum())
     }
     pub unsafe fn metadata(&mut self) -> &'a mut [u8] {
         unsafe {
@@ -37,7 +37,7 @@ impl<'a> Locals<'a> {
 
     pub fn new(buffer: &'a mut [u8], tiering: &Tiering) -> Result<Self, Error> {
         let len = buffer.len() / size_of::<Local>().next_multiple_of(align_of::<Local>());
-        let tier_len = tiering.tiers.iter().map(|&(_, count)| count).sum::<usize>();
+        let tier_len = tiering.tiers().iter().map(|&(_, count)| count).sum::<usize>();
         if len < tier_len {
             return Err(Error::Initialization);
         }
@@ -45,7 +45,7 @@ impl<'a> Locals<'a> {
             unsafe { slice::from_raw_parts_mut(buffer.as_mut_ptr().cast(), tier_len) };
 
         let mut offset = 0;
-        for (tier, count) in tiering.tiers {
+        for (tier, count) in tiering.tiers() {
             for local in &mut local[offset..][..*count] {
                 *local = Local {
                     tier: *tier,
@@ -61,11 +61,6 @@ impl<'a> Locals<'a> {
 
     pub fn len(&self) -> usize {
         self.local.len()
-    }
-
-    pub fn can_get(&self, index: usize, tree: Option<TreeId>, free: usize) -> bool {
-        let local = self.local[index].preferred.load();
-        local.get(tree, free).is_some()
     }
 
     pub fn tier(&self, index: usize) -> Tier {

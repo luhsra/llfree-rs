@@ -8,7 +8,7 @@ use log::{debug, info, warn};
 use crate::local::Locals;
 use crate::lower::Lower;
 use crate::trees::{TreeId, Trees};
-use crate::util::{Align, align_down, spin_wait};
+use crate::util::{Align, align_down};
 use crate::*;
 
 /// Return [`Error::Address`] if condition is not met.
@@ -92,7 +92,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         } else {
             None
         };
-        let trees = Trees::new(frames, meta.trees, tree_init);
+        let trees = Trees::new(frames, meta.trees, tree_init, tiering.default);
 
         Ok(Self {
             locals,
@@ -126,9 +126,11 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         let mut start_idx =
             TreeId(self.trees.len() / self.locals.len() * request.local.unwrap_or_default());
 
-        // Try local reservation first (if enough memory)
+        // Try local reservation first (if enough trees to prevent high contention)
         // Retry allocation up to n times if it fails due to a concurrent update
-        if let Some(local) = request.local {
+        if self.locals.len() < self.trees.len()
+            && let Some(local) = request.local
+        {
             for _ in 0..RETRIES {
                 match self.get_from_local(request.order, local, frame) {
                     Ok(res) => return Ok(res),
@@ -147,19 +149,10 @@ impl<'a> Alloc<'a> for LLFree<'a> {
                         r => return r,
                     }
                 }
-
-                // few local trees -> high probability that they are shared
-                if self.locals.len() < 4 {
-                    // If reservation fails, there might be another concurrent update -> retry
-                    spin_wait(8 * RETRIES, || {
-                        self.locals
-                            .can_get(local, frame.map(FrameId::as_tree), request.frames())
-                    });
-                }
             }
         }
 
-        // Global search
+        // Try global first for a specific frame
         if let Some(frame) = frame {
             // Do not reserve trees if a specific frame is allocated
             if let Some(demoted) =
@@ -411,7 +404,7 @@ impl LLFree<'_> {
         // Try reserve new tree
         let reserve = |i: TreeId, range: Range<usize>| {
             let range = (1 << order).max(range.start)..range.end;
-            if let Some(free) = self.trees.reserve(i, range.clone(), tier) {
+            if let Some(free) = self.trees.reserve(i, range.clone(), tier, self.policy) {
                 match self.lower.get(i.as_row(), order, None) {
                     Ok(new) => {
                         if let Some((row, free)) =
@@ -443,7 +436,7 @@ impl LLFree<'_> {
             let range = 0..TREE_FRAMES;
             match self
                 .trees
-                .search_best::<2>(start, 1, near, tier, self.policy, |i| {
+                .search_best::<2>(start, 1, near, tier, 1 << order, self.policy, |i| {
                     reserve(i, range.clone())
                 }) {
                 Err(Error::Memory) => {}
@@ -538,7 +531,6 @@ impl fmt::Debug for LLFree<'_> {
             free_huge,
             free_trees: _,
         } = self.stats();
-
         f.debug_struct(Self::name())
             .field(
                 "managed",

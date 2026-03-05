@@ -237,9 +237,11 @@ impl fmt::Debug for MetaData<'_> {
 
 #[derive(Debug)]
 /// Defines the tiers and policy for the allocator.
-pub struct Tiering<'a> {
+pub struct Tiering {
     /// Specifies the tiers and number of local reservations for each tier.
-    pub tiers: &'a [(Tier, usize)],
+    tiers_raw: [(Tier, usize); 1 << Tier::BITS],
+    /// Number of tiers in use, i.e. the length of the `tiers` array.
+    tiers_len: usize,
     /// Default tier for initialization or if a tree becomes completely free.
     pub default: Tier,
     /// Policy for accessing a `target` tree with `free` frames.
@@ -247,11 +249,26 @@ pub struct Tiering<'a> {
 }
 pub type PolicyFn = fn(requested: Tier, target: Tier, free: usize) -> Policy;
 
-impl<'a> Tiering<'a> {
+impl Tiering {
+    pub fn new(tiers: &[(Tier, usize)], default: Tier, policy: PolicyFn) -> Self {
+        assert!(tiers.len() <= 1 << Tier::BITS);
+        let mut tiers_raw = [const { (Tier(0), 0) }; 1 << Tier::BITS];
+        tiers_raw[..tiers.len()].copy_from_slice(&tiers);
+        Self {
+            tiers_raw,
+            tiers_len: tiers.len(),
+            default,
+            policy,
+        }
+    }
+
+    pub fn tiers(&self) -> &[(Tier, usize)] {
+        &self.tiers_raw[..self.tiers_len]
+    }
+
     /// Simple policy with two tiers, `0` for small and `1` for huge frames, and local reservations for each core.
-    #[cfg(feature = "std")]
     pub fn simple(cores: usize) -> (Self, impl Fn(usize, usize) -> Request) {
-        let tiers = vec![
+        let tiers = [
             (Tier(0), cores), // small frames
             (Tier(1), cores), // huge frames
         ];
@@ -277,22 +294,16 @@ impl<'a> Tiering<'a> {
             }
         }
 
-        (
-            Self {
-                tiers: tiers.leak(),
-                default: Tier(0),
-                policy,
-            },
-            move |order, core| request(order, core, cores),
-        )
+        (Self::new(&tiers, Tier(1), policy), move |order, core| {
+            request(order, core, cores)
+        })
     }
 
     /// Policy with three tiers, `0` for small immovable frames,
     /// `1` for small movable frames and `2` for huge frames,
     /// and local reservations for each core and tier.
-    #[cfg(feature = "std")]
     pub fn movable(cores: usize) -> (Self, impl Fn(usize, usize, bool) -> Request) {
-        let tiers = vec![
+        let tiers = [
             (Tier(0), cores), // immovable frames
             (Tier(1), cores), // movable frames
             (Tier(2), cores), // huge frames
@@ -322,11 +333,7 @@ impl<'a> Tiering<'a> {
         }
 
         (
-            Self {
-                tiers: tiers.leak(),
-                default: Tier(0),
-                policy,
-            },
+            Self::new(&tiers, Tier(2), policy),
             move |order, core, movable| request(order, core, cores, movable),
         )
     }
