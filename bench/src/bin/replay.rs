@@ -72,18 +72,18 @@ fn tiering(cores: usize, pids: usize) -> (Tiering, impl Fn(usize, u32, usize, us
         pids: usize,
     ) -> Request {
         if order >= HUGE_ORDER {
-            Request::new(order, Tier(2), Some(core % cores + cores + pids + pids))
+            Request::new(order, Tier(3), Some(core % cores))
         } else if gfp == GFP::MOVABLE && gfp == GFP::PAGE_CACHE {
-            Request::new(order, Tier(1), Some(pid % pids + cores + pids))
+            Request::new(order, Tier(2), Some(pid % pids))
         } else if gfp == GFP::MOVABLE {
-            Request::new(order, Tier(1), Some(pid % pids + cores))
+            Request::new(order, Tier(1), Some(pid % pids))
         } else {
             Request::new(order, Tier(0), Some(core % cores))
         }
     }
 
     (
-        Tiering::new(&tiers, Tier(0), policy),
+        Tiering::new(&tiers, Tier(3), policy),
         move |order, gfp, core, pid| request(order, gfp, core, cores, pid, pids),
     )
 }

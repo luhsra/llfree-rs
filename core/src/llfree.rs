@@ -360,10 +360,6 @@ impl LLFree<'_> {
                         self.locals
                             .swap(target_tier, local, frame.as_tree(), free - (1 << order))
                     {
-                        if free > 0 {
-                            warn!("reserved tree idx={row} tier={target_tier:?} free={free}");
-                        }
-
                         self.trees
                             .unreserve(row.as_tree(), free, target_tier, self.policy);
                     }
@@ -504,9 +500,6 @@ impl LLFree<'_> {
                     Ok((tier, frame))
                 }
                 Err(e) => {
-                    warn!(
-                        "lower alloc failed for local tree idx={row} tier={tier:?} free={order}: {e:?}"
-                    );
                     self.trees.put(row.as_tree(), 1 << order);
                     *start_idx = row.as_tree();
                     Err(e)
@@ -550,8 +543,8 @@ impl LLFree<'_> {
                     Policy::Match(_) => Some(tier),
                     // allow demotion if tree is empty
                     Policy::Demote if f == TREE_FRAMES => Some(tier),
-                    p => {
-                        warn!("reservation denied {p:?} {i} {t:?} {f} in {range:?}");
+                    _p => {
+                        // warn!("reservation denied {_p:?} {i} {t:?} {f} in {range:?}");
                         None
                     }
                 }
@@ -569,7 +562,7 @@ impl LLFree<'_> {
         // Find best fit in fragmented trees
         if order < HUGE_ORDER {
             let range = 0..TREE_FRAMES;
-            match self.trees.search_best::<2, _>(
+            match self.trees.search_best::<3, _>(
                 start,
                 1,
                 near,

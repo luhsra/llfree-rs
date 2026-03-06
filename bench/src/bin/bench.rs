@@ -174,17 +174,23 @@ fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAllo
 
     #[cfg(feature = "llc")]
     if LLC::name() == name {
-        let m = NvmAlloc::<LLC>::metadata_size(&kinds, zone.len());
+        let m = NvmAlloc::<LLC>::metadata_size(&tiering, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
-        return Box::new(NvmAlloc::<LLC>::create(&kinds, zone, false, local, trees).unwrap());
+        return Box::new(BenchAlloc::new(
+            NvmAlloc::<LLC>::create(zone, false, &tiering, local, trees).unwrap(),
+            request,
+        ));
     }
     #[cfg(feature = "llzig")]
     if LLZig::name() == name {
-        let m = NvmAlloc::<LLZig>::metadata_size(&kinds, zone.len());
+        let m = NvmAlloc::<LLZig>::metadata_size(&tiering, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
-        return Box::new(NvmAlloc::<LLZig>::create(&kinds, zone, false, local, trees).unwrap());
+        return Box::new(BenchAlloc::new(
+            NvmAlloc::<LLZig>::create(zone, false, &tiering, local, trees).unwrap(),
+            request,
+        ));
     }
     if LLFree::name() == name {
         let m = NvmAlloc::<LLFree>::metadata_size(&tiering, zone.len());

@@ -1,12 +1,50 @@
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char, c_void};
 use core::mem::align_of;
+use core::sync::atomic::{AtomicPtr, Ordering};
 use core::{fmt, slice};
 
 use crate::util::Align;
 use crate::{
-    Alloc, Flags, FrameId, HUGE_ORDER, Init, KindDesc, Result, Stats, TREE_FRAMES, TREE_HUGE,
+    Alloc, FrameId, HUGE_ORDER, Init, Policy, Request, Result, Stats, TREE_FRAMES, TREE_HUGE,
+    Tier, Tiering, TreeStats, TierStats,
 };
+
+/// Global storage for the Rust policy function pointer.
+/// This is safe because PolicyFn is a plain fn pointer (no closure state).
+static POLICY_FN: AtomicPtr<()> =
+    AtomicPtr::new(core::ptr::null_mut());
+
+/// C-compatible policy trampoline that calls the stored Rust PolicyFn.
+extern "C" fn policy_trampoline(
+    requested: u8,
+    target: u8,
+    free: usize,
+) -> bindings::llfree_policy_t {
+    let ptr = POLICY_FN.load(Ordering::Relaxed);
+    assert!(!ptr.is_null(), "policy function not set");
+    let policy_fn: crate::PolicyFn =
+        unsafe { core::mem::transmute(ptr) };
+    let result = policy_fn(Tier(requested), Tier(target), free);
+    match result {
+        Policy::Match(prio) => bindings::llfree_policy_t {
+            type_: bindings::llfree_policy_type_t_LLFREE_POLICY_MATCH,
+            priority: prio,
+        },
+        Policy::Steal => bindings::llfree_policy_t {
+            type_: bindings::llfree_policy_type_t_LLFREE_POLICY_STEAL,
+            priority: 0,
+        },
+        Policy::Demote => bindings::llfree_policy_t {
+            type_: bindings::llfree_policy_type_t_LLFREE_POLICY_DEMOTE,
+            priority: 0,
+        },
+        Policy::Invalid => bindings::llfree_policy_t {
+            type_: bindings::llfree_policy_type_t_LLFREE_POLICY_INVALID,
+            priority: 0,
+        },
+    }
+}
 
 const SIZE: usize = 2 * align_of::<Align>();
 /// C implementation of LLFree
@@ -25,12 +63,9 @@ impl<'a> Alloc<'a> for LLC {
         "LLC"
     }
 
-    fn metadata_size(kinds: &[KindDesc], frames: usize) -> crate::MetaSize {
-        assert!(kinds.len() > 0);
-
-        let c_kinds = bindings::convert_kinds(kinds);
-
-        let m = unsafe { bindings::llfree_metadata_size(c_kinds.as_ptr(), frames as _) };
+    fn metadata_size(tiering: &Tiering, frames: usize) -> crate::MetaSize {
+        let c_tiering = bindings::convert_tiering(tiering);
+        let m = unsafe { bindings::llfree_metadata_size(&c_tiering, frames as _) };
         assert!(m.llfree as usize <= SIZE);
         crate::MetaSize {
             local: m.local,
@@ -52,28 +87,28 @@ impl<'a> Alloc<'a> for LLC {
     }
 
     fn new(
-        kinds: &[KindDesc],
         frames: usize,
         init: Init,
+        tiering: &Tiering,
         meta: super::MetaData<'a>,
     ) -> Result<Self> {
         let raw = UnsafeCell::new([0u8; SIZE]);
-        assert!(kinds.len() > 0);
 
         let init = match init {
             Init::FreeAll => 0,
             Init::AllocAll => 1,
-            Init::Recover(false) => 2,
-            Init::Recover(true) => 3,
+            Init::Recover => 2,
             Init::None => 4,
         };
 
-        let c_kinds = bindings::convert_kinds(kinds);
+        let c_tiering = bindings::convert_tiering(tiering);
 
-        let m = unsafe { bindings::llfree_metadata_size(c_kinds.as_ptr(), frames as _) };
+        let m = unsafe { bindings::llfree_metadata_size(&c_tiering, frames as _) };
         assert!(SIZE >= m.llfree);
 
-        assert!(meta.valid(Self::metadata_size(kinds, frames)));
+        assert!(meta.local.len() >= m.local);
+        assert!(meta.trees.len() >= m.trees);
+        assert!(meta.lower.len() >= m.lower);
         let meta = bindings::llfree_meta {
             local: meta.local.as_mut_ptr(),
             trees: meta.trees.as_mut_ptr(),
@@ -81,40 +116,39 @@ impl<'a> Alloc<'a> for LLC {
         };
 
         let ret = unsafe {
-            bindings::llfree_init(raw.get().cast(), c_kinds.as_ptr(), frames, init, meta)
+            bindings::llfree_init(raw.get().cast(), frames, init, meta, &c_tiering)
         };
         ret.ok().map(|_| LLC { raw, ms: m })
     }
 
-    fn get(&self, frame: Option<FrameId>, flags: Flags) -> Result<FrameId> {
+    fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(Tier, FrameId)> {
         let frame = match frame {
             Some(f) => bindings::ll_some(f.0 as _),
             None => bindings::ll_none(),
         };
-        let ret = unsafe { bindings::llfree_get(self.raw.get().cast(), frame, flags.into()) };
-        Ok(FrameId(ret.ok()? as _))
+        let ret = unsafe { bindings::llfree_get(self.raw.get().cast(), frame, request.into()) };
+        let f = ret.ok()?;
+        Ok((Tier(ret.tier()), FrameId(f as _)))
     }
 
-    fn put(&self, frame: FrameId, flags: Flags) -> Result<()> {
+    fn put(&self, frame: FrameId, request: Request) -> Result<()> {
         let ret =
-            unsafe { bindings::llfree_put(self.raw.get().cast(), frame.0 as _, flags.into()) };
+            unsafe { bindings::llfree_put(self.raw.get().cast(), frame.0 as _, request.into()) };
         ret.ok().map(|_| ())
     }
 
     fn is_free(&self, frame: FrameId, order: usize) -> bool {
         let stats = unsafe {
-            bindings::llfree_full_stats_at(self.raw.get().cast(), frame.0 as _, order as _)
+            bindings::llfree_stats_at(self.raw.get().cast(), frame.0 as _, order as _)
         };
         order == 0 && stats.free_frames == 1
             || order == HUGE_ORDER && stats.free_huge == 1
             || order == TREE_FRAMES.ilog2() as usize && stats.free_huge == TREE_HUGE
     }
 
-    fn drain(&self, core: usize) -> Result<()> {
+    fn drain(&self) {
         unsafe {
-            bindings::llfree_drain(self.raw.get().cast(), core as _)
-                .ok()
-                .map(|_| ())
+            bindings::llfree_drain(self.raw.get().cast());
         }
     }
 
@@ -122,21 +156,29 @@ impl<'a> Alloc<'a> for LLC {
         unsafe { bindings::llfree_frames(self.raw.get().cast()) as _ }
     }
 
-    fn fast_stats(&self) -> crate::Stats {
-        unsafe { bindings::llfree_stats(self.raw.get().cast()).into() }
-    }
-
-    fn fast_stats_at(&self, frame: FrameId, order: usize) -> crate::Stats {
-        unsafe { bindings::llfree_stats_at(self.raw.get().cast(), frame.0 as _, order as _).into() }
+    fn tree_stats(&self) -> TreeStats {
+        let s = unsafe { bindings::llfree_tree_stats(self.raw.get().cast()) };
+        let mut tiers = [const { TierStats { free_frames: 0, alloc_frames: 0 } }; Tier::LEN];
+        for (i, t) in s.tiers.iter().enumerate() {
+            tiers[i] = TierStats {
+                free_frames: t.free_frames,
+                alloc_frames: t.alloc_frames,
+            };
+        }
+        TreeStats {
+            free_frames: s.free_frames,
+            free_trees: s.free_trees,
+            tiers,
+        }
     }
 
     fn stats(&self) -> crate::Stats {
-        unsafe { bindings::llfree_full_stats(self.raw.get().cast()).into() }
+        unsafe { bindings::llfree_stats(self.raw.get().cast()).into() }
     }
 
     fn stats_at(&self, frame: FrameId, order: usize) -> crate::Stats {
         unsafe {
-            bindings::llfree_full_stats_at(self.raw.get().cast(), frame.0 as _, order as _).into()
+            bindings::llfree_stats_at(self.raw.get().cast(), frame.0 as _, order as _).into()
         }
     }
 
@@ -177,17 +219,19 @@ mod bindings {
     #![allow(clippy::unnecessary_cast)]
     #![allow(clippy::transmute_int_to_bool)]
 
-    use std::vec::Vec;
-
-    use crate::KindDesc;
+    use core::sync::atomic::Ordering;
 
     include!(concat!(env!("OUT_DIR"), "/llc.rs"));
 
-    impl From<super::Flags> for llflags_t {
-        fn from(flags: super::Flags) -> Self {
-            llflags_t {
-                _bitfield_align_1: [0; 0],
-                _bitfield_1: llflags_t::new_bitfield_1(flags.order() as _, flags.local() as _),
+    impl From<super::Request> for llfree_request {
+        fn from(req: super::Request) -> Self {
+            llfree_request {
+                order: req.order as _,
+                tier: req.tier.0,
+                local: match req.local {
+                    Some(l) => l,
+                    None => LLFREE_LOCAL_NONE as _,
+                },
             }
         }
     }
@@ -215,26 +259,23 @@ mod bindings {
         }
     }
 
-    pub fn convert_kinds(kinds: &[super::KindDesc]) -> Vec<llkind_desc> {
-        let mut c_kinds = Vec::with_capacity(kinds.len() + 1);
-        for KindDesc(kind, count) in kinds {
-            c_kinds.push(llkind_desc {
-                kind: llkind {
-                    _bitfield_align_1: [0; 0],
-                    _bitfield_1: llkind::new_bitfield_1(kind.0),
-                },
-                count: *count as _,
-            });
+    pub fn convert_tiering(tiering: &super::Tiering) -> llfree_tiering {
+        // Store the Rust policy fn in the global so the trampoline can call it.
+        super::POLICY_FN.store(tiering.policy as *mut (), Ordering::Relaxed);
+
+        let mut c = llfree_tiering {
+            tiers: [llfree_tier_conf { tier: 0, count: 0 }; LLFREE_MAX_TIERS as _],
+            num_tiers: tiering.tiers().len() as _,
+            default_tier: tiering.default.0,
+            policy: Some(super::policy_trampoline),
+        };
+        for (i, &(tier, count)) in tiering.tiers().iter().enumerate() {
+            c.tiers[i] = llfree_tier_conf {
+                tier: tier.0,
+                count: count as _,
+            };
         }
-        // Sentinel for the end of the array
-        c_kinds.push(llkind_desc {
-            kind: llkind {
-                _bitfield_align_1: [0; 0],
-                _bitfield_1: llkind::new_bitfield_1(0),
-            },
-            count: 0,
-        });
-        c_kinds
+        c
     }
 
     pub fn ll_none() -> ll_optional {
@@ -253,13 +294,14 @@ mod bindings {
 
 #[cfg(all(test, feature = "std", feature = "llc"))]
 mod test {
-    use super::super::alloc_test::TestAlloc;
     use super::LLC;
-    use crate::Init;
+    use crate::{Alloc, Init, MetaData, Tiering};
 
     #[test]
     fn test_debug() {
-        let alloc = TestAlloc::<LLC>::create(1, 1024, Init::FreeAll).unwrap();
+        let (tiering, _request) = Tiering::simple(1);
+        let meta = MetaData::alloc(LLC::metadata_size(&tiering, 1024));
+        let alloc = LLC::new(1024, Init::FreeAll, &tiering, meta).unwrap();
         println!("{alloc:?}");
     }
 }
