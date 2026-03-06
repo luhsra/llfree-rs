@@ -200,7 +200,7 @@ fn monitor(
     warn!("recovered {}", alloc.frames());
 
     let expected = allocs * threads - threads;
-    let actual = alloc.frames() - alloc.tree_stats(&mut []).free_frames;
+    let actual = alloc.frames() - alloc.tree_stats().free_frames;
     warn!("expected={expected} actual={actual}");
     assert!(expected <= actual && actual <= expected + threads);
 
@@ -227,7 +227,7 @@ fn monitor(
     }
     // Check if the remaining pages, that were allocated/freed during the crash,
     // is less equal to the number of concurrent threads (upper bound).
-    assert!(alloc.frames() - alloc.tree_stats(&mut []).free_frames <= threads);
+    assert!(alloc.frames() - alloc.tree_stats().free_frames <= threads);
     warn!("Ok");
 }
 

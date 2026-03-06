@@ -123,7 +123,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     fn frames(&self) -> usize;
 
     /// Quickly retrieve tree statistics.
-    fn tree_stats(&self, tiers: &mut [TierStats]) -> TreeStats;
+    fn tree_stats(&self) -> TreeStats;
 
     /// Retrieve detailed allocator statistics.
     /// Takes more time than `tree_stats`.
@@ -136,9 +136,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     fn is_free(&self, frame: FrameId, order: usize) -> bool;
 
     /// Unreserve a local tree
-    fn drain(&self, _local: usize) -> Result<()> {
-        Ok(())
-    }
+    fn drain(&self) {}
 
     /// Change the tree matching `matching` to `change`.
     /// This can be used for promotion/demotion or offlining.
@@ -235,7 +233,6 @@ impl fmt::Debug for MetaData<'_> {
     }
 }
 
-#[derive(Debug)]
 /// Defines the tiers and policy for the allocator.
 pub struct Tiering {
     /// Specifies the tiers and number of local reservations for each tier.
@@ -248,6 +245,15 @@ pub struct Tiering {
     pub policy: PolicyFn,
 }
 pub type PolicyFn = fn(requested: Tier, target: Tier, free: usize) -> Policy;
+
+impl fmt::Debug for Tiering {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tiering")
+            .field("tiers", &self.tiers())
+            .field("default", &self.default)
+            .finish()
+    }
+}
 
 impl Tiering {
     pub fn new(tiers: &[(Tier, usize)], default: Tier, policy: PolicyFn) -> Self {
@@ -287,11 +293,7 @@ impl Tiering {
         }
 
         fn request(order: usize, core: usize, cores: usize) -> Request {
-            if order >= HUGE_ORDER {
-                Request::new(order, Tier(1), Some(core % cores + cores))
-            } else {
-                Request::new(order, Tier(0), Some(core % cores))
-            }
+            Request::new(order, Tier((order >= HUGE_ORDER) as _), Some(core % cores))
         }
 
         (Self::new(&tiers, Tier(1), policy), move |order, core| {
@@ -324,9 +326,9 @@ impl Tiering {
 
         fn request(order: usize, core: usize, cores: usize, movable: bool) -> Request {
             if order >= HUGE_ORDER {
-                Request::new(order, Tier(2), Some(core % cores + 2 * cores))
+                Request::new(order, Tier(2), Some(core % cores))
             } else if movable {
-                Request::new(order, Tier(1), Some(core % cores + cores))
+                Request::new(order, Tier(1), Some(core % cores))
             } else {
                 Request::new(order, Tier(0), Some(core % cores))
             }
@@ -360,6 +362,7 @@ pub enum Policy {
 pub struct Tier(pub u8);
 impl Tier {
     pub const BITS: usize = 3;
+    pub const LEN: usize = 1 << Self::BITS;
     pub const fn from_bits(bits: u8) -> Self {
         Self(bits)
     }
@@ -389,7 +392,7 @@ pub struct Request {
     pub order: usize,
     /// The requested tier.
     pub tier: Tier,
-    /// The local reservation index or None for global allocation.
+    /// The local reservation index for this tier or None for global allocation.
     pub local: Option<usize>,
 }
 impl Request {
@@ -420,12 +423,15 @@ pub struct TreeStats {
     pub free_frames: usize,
     /// Number of free trees
     pub free_trees: usize,
+    /// Stats per tier
+    pub tiers: [TierStats; 1 << Tier::BITS],
 }
+#[derive(Debug, Default)]
 pub struct TierStats {
     /// Number of free frames
-    pub free: usize,
+    pub free_frames: usize,
     /// Number of allocated frames
-    pub alloc: usize,
+    pub alloc_frames: usize,
 }
 
 /// Match a tree for `change_tree`

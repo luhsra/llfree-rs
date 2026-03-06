@@ -156,7 +156,7 @@ fn main() {
 
     assert_eq!(
         allocated.into_iter().sum::<usize>(),
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames
+        alloc.frames() - alloc.tree_stats().free_frames
     );
     alloc.validate();
     warn!("{alloc:?}");

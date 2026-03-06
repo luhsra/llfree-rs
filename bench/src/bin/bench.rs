@@ -165,7 +165,7 @@ impl<'a, T: Alloc<'a>, F: RequestFn> DynAlloc for BenchAlloc<'a, T, F> {
         self.alloc.frames()
     }
     fn allocated_frames(&self) -> usize {
-        self.alloc.frames() - self.alloc.tree_stats(&mut []).free_frames
+        self.alloc.frames() - self.alloc.tree_stats().free_frames
     }
 }
 

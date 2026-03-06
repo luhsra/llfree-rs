@@ -120,7 +120,7 @@ fn main() {
             (get_buckets, put_buckets)
         });
 
-        assert_eq!(alloc.tree_stats(&mut []).free_frames, alloc.frames());
+        assert_eq!(alloc.tree_stats().free_frames, alloc.frames());
 
         for (get_b, put_b) in t_buckets {
             for i in 0..buckets {

@@ -1,4 +1,3 @@
-use core::mem::size_of;
 use core::sync::atomic::AtomicU64;
 use core::{fmt, slice};
 
@@ -8,17 +7,17 @@ use log::debug;
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
 use crate::util::size_of_slice;
-use crate::{Error, Policy, PolicyFn, Tier, TierStats, Tiering, TreeStats};
+use crate::{Error, Policy, PolicyFn, Tier, Tiering, TreeStats};
 use crate::{TREE_FRAMES, TreeId};
 
 pub struct Locals<'a> {
-    /// Local reservations for each [Tier]
-    local: &'a [Local],
+    /// Local reservations for each tier
+    tiers: [Option<&'a [Local]>; 1 << Tier::BITS],
 }
 
 impl fmt::Debug for Locals<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.local.fmt(f)
+        self.tiers.fmt(f)
     }
 }
 
@@ -27,154 +26,184 @@ impl<'a> Locals<'a> {
         size_of_slice::<Local>(tiering.tiers().iter().map(|&(_, count)| count).sum())
     }
     pub unsafe fn metadata(&mut self) -> &'a mut [u8] {
+        let Some(first) = self.tiers.iter().find_map(|local| *local) else {
+            return &mut [];
+        };
+        let Some(last) = self.tiers.iter().rev().find_map(|local| *local) else {
+            return &mut [];
+        };
+        let start = first.as_ptr();
+        let end = last.as_ptr_range().end;
         unsafe {
-            slice::from_raw_parts_mut(
-                self.local.as_ptr().cast_mut().cast(),
-                size_of_slice::<Local>(self.local.len()),
-            )
+            slice::from_raw_parts_mut(start.cast_mut().cast(), end.offset_from(start) as usize)
         }
     }
 
     pub fn new(buffer: &'a mut [u8], tiering: &Tiering) -> Result<Self, Error> {
-        let len = buffer.len() / size_of::<Local>().next_multiple_of(align_of::<Local>());
-        let tier_len = tiering.tiers().iter().map(|&(_, count)| count).sum::<usize>();
-        if len < tier_len {
+        if buffer.len() < Self::metadata_size(tiering) {
             return Err(Error::Initialization);
         }
-        let local: &mut [Local] =
-            unsafe { slice::from_raw_parts_mut(buffer.as_mut_ptr().cast(), tier_len) };
 
         let mut offset = 0;
-        for (tier, count) in tiering.tiers() {
-            for local in &mut local[offset..][..*count] {
-                *local = Local {
-                    tier: *tier,
-                    preferred: Atom::new(LocalTree::none()),
-                    #[cfg(feature = "free_reserve")]
-                    frees: Atom::new(FreeHistory::default()),
-                };
-            }
-            offset += *count;
+        let mut tiers = [None::<&'a [Local]>; 1 << Tier::BITS];
+        for &(tier, count) in tiering.tiers() {
+            let local = unsafe {
+                slice::from_raw_parts_mut(buffer.as_mut_ptr().cast::<Local>().add(offset), count)
+            };
+            offset += count;
+            tiers[tier.0 as usize] = Some(local);
         }
-        Ok(Self { local })
+        Ok(Self { tiers })
     }
 
-    pub fn len(&self) -> usize {
-        self.local.len()
-    }
-
-    pub fn tier(&self, index: usize) -> Tier {
-        self.local[index].tier
+    pub fn tier_locals(&self, tier: Tier) -> Option<usize> {
+        self.tiers[tier.0 as usize].map(|local| local.len())
     }
 
     pub fn get(
         &self,
-        index: usize,
+        tier: Tier,
+        local: usize,
         tree: Option<TreeId>,
         free: usize,
     ) -> Result<RowId, Option<(RowId, usize)>> {
-        let local = &self.local[index];
-        match local.preferred.fetch_update(|v| v.get(tree, free)) {
+        let Some(locals) = &self.tiers[tier.0 as usize] else {
+            return Err(None);
+        };
+        match locals[local].tree.fetch_update(|v| v.get(tree, free)) {
             Ok(old) => Ok(old.row()),
             Err(old) => Err(old.present().then_some((old.row(), old.free()))),
         }
     }
 
-    /// Steal from another compatible local tree (no downgrade necessary)
-    pub fn steal(
+    /// Steal without demoting the target, but the request might be downgraded to a lower tier
+    pub fn steal_any(
         &self,
         tier: Tier,
         index: Option<usize>,
         tree: Option<TreeId>,
         free: usize,
         policy: PolicyFn,
-    ) -> Option<(Tier, RowId)> {
-        // Sanity check
-        if let Some(index) = index {
-            assert!(tier == self.local[index].tier);
-        }
+    ) -> Option<(RowId, Tier)> {
+        for i in 0..self.tiers.len() {
+            let target_tier = Tier(((i as u8) + tier.0) % self.tiers.len() as u8);
 
-        // Steal from same tier first
-        for i in 0..self.local.len() {
-            let i = (index.unwrap_or(0) + i) % self.local.len();
-            let target = &self.local[i];
-            if let Policy::Match(_) = policy(tier, target.tier, free)
-                && let Ok(row) = self.get(i, tree, free)
-            {
-                return Some((target.tier, row));
+            let Some(target) = &self.tiers[target_tier.0 as usize] else {
+                continue;
+            };
+            if !matches!(
+                policy(tier, target_tier, free),
+                Policy::Steal | Policy::Match(_)
+            ) {
+                continue;
             }
-        }
-        // Fallback to locals that would not be demoted
-        for i in 1..self.local.len() {
-            let i = (index.unwrap_or(0) + i) % self.local.len();
-            let target = &self.local[i];
-            if let Policy::Steal = policy(tier, target.tier, TREE_FRAMES)
-                && let Ok(row) = self.get(i, tree, free)
-            {
-                return Some((target.tier, row));
+
+            for j in 0..target.len() {
+                // Start at same local index to improve cache locality
+                let j = (index.unwrap_or(0) + j) % target.len();
+
+                if let Ok(row) = self.get(target_tier, j, tree, free) {
+                    return Some((row, target_tier));
+                }
             }
         }
         None
     }
 
-    /// Steal from tier and demote it to the current tier
-    pub fn steal_demote(
+    /// Steal from another tier and demote it to the current tier
+    pub fn demote_any(
         &self,
         tier: Tier,
         index: Option<usize>,
         tree: Option<TreeId>,
         free: usize,
         policy: PolicyFn,
-    ) -> Option<(RowId, Option<(RowId, usize)>)> {
-        // Sanity check
-        if let Some(index) = index {
-            assert!(tier == self.local[index].tier);
-        }
+    ) -> Option<(RowId, Option<(RowId, Tier, usize)>)> {
+        let Some(locals) = &self.tiers[tier.0 as usize] else {
+            return None;
+        };
 
-        for i in 1..self.local.len() {
-            let i = (index.unwrap_or(0) + i) % self.local.len();
-            let target = &self.local[i];
-            if let Policy::Demote = policy(tier, target.tier, free)
-                && let Ok(old) = target
-                    .preferred
+        for i in 1..self.tiers.len() {
+            let target_tier = Tier(((i as u8) + tier.0) % self.tiers.len() as u8);
+
+            let Some(target) = &self.tiers[target_tier.0 as usize] else {
+                continue;
+            };
+            if policy(tier, target_tier, free) != Policy::Demote {
+                continue;
+            }
+
+            for j in 0..target.len() {
+                // Start at same local index to improve cache locality
+                let j = (index.unwrap_or(0) + j) % target.len();
+
+                if let Ok(old) = target[j]
+                    .tree
                     .fetch_update(|v| v.get(tree, free).map(|_| LocalTree::none()))
-            {
-                let new = old.get(tree, free).unwrap();
+                {
+                    let new = old.get(tree, free).unwrap();
 
-                let old = if let Some(index) = index {
-                    // Replace local tree and return its free count for unreservation
-                    let old = self.local[index].preferred.swap(new);
-                    old.present().then_some((old.row(), old.free()))
-                } else {
-                    // Just return the new tree, without replacing any local tree
-                    None
-                };
-                return Some((new.row(), old));
+                    let old = if let Some(index) = index {
+                        // Replace local tree and return its free count for unreservation
+                        let old = locals[index].tree.swap(new);
+                        old.present()
+                            .then_some((old.row(), target_tier, old.free()))
+                    } else {
+                        // Just return the new tree, without replacing any local tree
+                        None
+                    };
+                    return Some((new.row(), old));
+                }
             }
         }
         None
     }
 
-    pub fn put(&self, index: usize, tree: TreeId, free: usize) -> bool {
-        let local = &self.local[index];
-        local.preferred.fetch_update(|v| v.put(tree, free)).is_ok()
+    pub fn put(&self, tier: Tier, local: usize, tree: TreeId, free: usize) -> bool {
+        let Some(locals) = &self.tiers[tier.0 as usize] else {
+            return false;
+        };
+
+        let local = &locals[local];
+        local.tree.fetch_update(|v| v.put(tree, free)).is_ok()
     }
 
-    pub fn swap(&self, index: usize, tree: TreeId, free: usize) -> Option<(RowId, usize)> {
-        let local = &self.local[index];
-        let old = local.preferred.swap(LocalTree::with(tree.as_row(), free));
+    pub fn swap(
+        &self,
+        tier: Tier,
+        local: usize,
+        tree: TreeId,
+        free: usize,
+    ) -> Option<(RowId, usize)> {
+        let Some(locals) = &self.tiers[tier.0 as usize] else {
+            panic!("Invalid tier");
+        };
+
+        let local = &locals[local];
+        let old = local.tree.swap(LocalTree::with(tree.as_row(), free));
         old.present().then_some((old.row(), old.free()))
     }
 
-    pub fn drain(&self, index: usize) -> Option<(RowId, usize)> {
-        let local = &self.local[index];
-        let old = local.preferred.swap(LocalTree::none());
-        old.present().then_some((old.row(), old.free()))
+    pub fn drain(&self, unreserve: impl Fn(RowId, Tier, usize)) {
+        for (i, locals) in self.tiers.iter().copied().enumerate() {
+            if let Some(locals) = locals {
+                let tier = Tier(i as u8);
+                for local in locals {
+                    let old = local.tree.swap(LocalTree::none());
+                    if old.present() {
+                        unreserve(old.row(), tier, old.free());
+                    }
+                }
+            }
+        }
     }
 
-    pub fn set_start(&self, index: usize, row: RowId) {
-        let local = &self.local[index];
-        let _ = local.preferred.fetch_update(|v| v.set_start(row, false));
+    pub fn set_start(&self, tier: Tier, index: usize, row: RowId) {
+        let Some(locals) = &self.tiers[tier.0 as usize] else {
+            return;
+        };
+        let local = &locals[index];
+        let _ = local.tree.fetch_update(|v| v.set_start(row));
     }
 
     #[allow(dead_code)]
@@ -183,29 +212,30 @@ impl<'a> Locals<'a> {
         self.local[index].frees_push(tree_idx)
     }
 
-    pub fn stats(&self, tiers: &mut [TierStats]) -> TreeStats {
+    pub fn stats(&self) -> TreeStats {
         let mut s = TreeStats::default();
-        for local in self.local {
-            let preferred = local.preferred.load();
-            if preferred.present() {
-                s.free_frames += preferred.free();
-                if preferred.free() != TREE_FRAMES
-                    && let Some(stats) = tiers.get_mut(local.tier.0 as usize)
-                {
-                    stats.free += preferred.free();
-                    stats.alloc += TREE_FRAMES - preferred.free();
+        for (i, locals) in self.tiers.iter().copied().enumerate() {
+            if let Some(locals) = locals {
+                let tier = Tier(i as u8);
+                for local in locals {
+                    let tree = local.tree.load();
+                    if tree.present() {
+                        s.free_frames += tree.free();
+                        s.free_trees += tree.free() / TREE_FRAMES;
+                        s.tiers[tier.0 as usize].free_frames += tree.free();
+                    }
                 }
-                s.free_trees += preferred.free() / TREE_FRAMES;
             }
         }
         s
     }
 
-    pub fn load(&self, local: usize) -> Option<(RowId, usize)> {
-        let preferred = self.local[local].preferred.load();
-        preferred
-            .present()
-            .then_some((preferred.row(), preferred.free()))
+    pub fn load(&self, tier: Tier, local: usize) -> Option<(RowId, usize)> {
+        let Some(locals) = &self.tiers[tier.0 as usize] else {
+            return None;
+        };
+        let tree = locals[local].tree.load();
+        tree.present().then_some((tree.row(), tree.free()))
     }
 }
 
@@ -213,10 +243,8 @@ impl<'a> Locals<'a> {
 #[derive(Debug)]
 #[repr(align(64))]
 struct Local {
-    /// Tier of the local tree
-    tier: Tier,
     /// Reserved trees for each [Tier]
-    preferred: Atom<LocalTree>,
+    tree: Atom<LocalTree>,
     #[cfg(feature = "free_reserve")]
     /// Recent frees
     frees: Atom<FreeHistory>,
@@ -271,8 +299,8 @@ impl LocalTree {
             None
         }
     }
-    fn set_start(self, row: RowId, force: bool) -> Option<Self> {
-        if force || (self.present() && self.row().as_tree() == row.as_tree()) {
+    fn set_start(self, row: RowId) -> Option<Self> {
+        if self.present() && self.row().as_tree() == row.as_tree() && self.row() != row {
             Some(self.with_row(row))
         } else {
             None

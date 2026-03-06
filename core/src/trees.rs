@@ -1,5 +1,4 @@
 use core::mem::align_of;
-use core::ops::RangeBounds;
 use core::sync::atomic::AtomicU32;
 use core::{fmt, slice};
 
@@ -115,21 +114,18 @@ impl<'a> Trees<'a> {
         self.entries.len()
     }
 
-    pub fn stats(&self, tiers: &mut [TierStats]) -> TreeStats {
-        self.entries
-            .iter()
-            .fold(TreeStats::default(), |mut acc, e| {
-                let tree = e.load();
-                acc.free_frames += tree.free();
-                if tree.free() != TREE_FRAMES
-                    && let Some(tier) = tiers.get_mut(tree.tier().0 as usize)
-                {
-                    tier.free += tree.free();
-                    tier.alloc += TREE_FRAMES - tree.free();
-                }
-                acc.free_trees += tree.free() / TREE_FRAMES;
-                acc
-            })
+    pub fn stats(&self) -> TreeStats {
+        let mut stats = TreeStats::default();
+        for entry in self.entries {
+            let tree = entry.load();
+            stats.free_frames += tree.free();
+            stats.free_trees += tree.free() / TREE_FRAMES;
+
+            let tier = &mut stats.tiers[tree.tier().0 as usize];
+            tier.free_frames += tree.free();
+            tier.alloc_frames += TREE_FRAMES - tree.free();
+        }
+        stats
     }
 
     pub fn stats_at(&self, i: TreeId) -> (Tier, usize, bool) {
@@ -156,17 +152,22 @@ impl<'a> Trees<'a> {
             .ok()
     }
 
-    pub fn get_demote(&self, i: TreeId, free: usize, tier: Tier, policy: PolicyFn) -> Option<Tier> {
+    pub fn get(
+        &self,
+        i: TreeId,
+        free: usize,
+        check: impl Fn(Tier, usize) -> Option<Tier>,
+    ) -> Option<Tier> {
+        let mut tier = None;
         self.entries[i.0]
-            .fetch_update(|e| e.get_demote(free, tier, policy))
-            .ok()
-            .map(|e| {
-                if policy(tier, e.tier(), e.free()) == Policy::Demote {
+            .fetch_update(|e| {
+                e.get(free, |t, f| {
+                    tier = check(t, f);
                     tier
-                } else {
-                    e.tier()
-                }
+                })
             })
+            .ok()
+            .map(|_| tier.unwrap())
     }
 
     pub fn put(&self, i: TreeId, free: usize) {
@@ -204,25 +205,29 @@ impl<'a> Trees<'a> {
     pub fn reserve(
         &self,
         i: TreeId,
-        free: impl RangeBounds<usize> + Clone,
-        tier: Tier,
-        policy: PolicyFn,
-    ) -> Option<usize> {
+        check: impl Fn(Tier, usize) -> Option<Tier>,
+    ) -> Option<(usize, Tier)> {
+        let mut tier = None;
         self.entries[i.0]
-            .fetch_update(|v| v.reserve(free.clone(), tier, policy))
-            .map(|v| v.free())
+            .fetch_update(|v| {
+                v.reserve(|t, f| {
+                    tier = check(t, f);
+                    tier
+                })
+            })
+            .map(|v| (v.free(), tier.unwrap()))
             .ok()
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: TreeId, free: usize, tier: Tier, reserve: PolicyFn) {
+    pub fn unreserve(&self, i: TreeId, free: usize, tier: Tier, policy: PolicyFn) {
         self.entries[i.0]
-            .fetch_update(|v| v.unreserve_add(free, tier, reserve, self.default))
+            .fetch_update(|v| v.unreserve_add(free, tier, policy, self.default))
             .expect("Unreserve failed");
     }
 
     /// Iterate through all trees, trying to find the best N fits, then trying to `access` them
-    pub fn search_best<const N: usize>(
+    pub fn search_best<const N: usize, R>(
         &self,
         start: TreeId,
         offset: usize,
@@ -230,8 +235,8 @@ impl<'a> Trees<'a> {
         tier: Tier,
         min: usize,
         policy: PolicyFn,
-        access: impl Fn(TreeId) -> Result<FrameId>,
-    ) -> Result<FrameId> {
+        access: impl Fn(TreeId) -> Result<R>,
+    ) -> Result<R> {
         #[derive(Clone, Copy)]
         struct Best {
             i: TreeId,
@@ -380,25 +385,20 @@ impl Tree {
         }
         self.with_free(free)
     }
-    /// Decrements the free frames counter if it is large enough, and optionally demotes the tier.
-    fn get_demote(mut self, free: usize, tier: Tier, policy: PolicyFn) -> Option<Self> {
-        let policy = policy(tier, self.tier(), self.free());
-        if self.free() >= free && policy != Policy::Invalid {
-            if policy == Policy::Demote {
-                self.set_tier(tier);
-            }
-            Some(self.with_free(self.free() - free))
+    /// Decrements the free frames counter if it is large enough
+    fn get(self, free: usize, mut check: impl FnMut(Tier, usize) -> Option<Tier>) -> Option<Self> {
+        if self.free() >= free
+            && let Some(tier) = check(self.tier(), self.free())
+        {
+            Some(self.with_free(self.free() - free).with_tier(tier))
         } else {
             None
         }
     }
     /// Reserves this entry if its frame count is in `range`.
-    fn reserve(self, free: impl RangeBounds<usize>, tier: Tier, policy: PolicyFn) -> Option<Self> {
+    fn reserve(self, mut check: impl FnMut(Tier, usize) -> Option<Tier>) -> Option<Self> {
         if !self.reserved()
-            && free.contains(&self.free())
-            && (tier == self.tier()
-                || (self.free() == TREE_FRAMES
-                    && policy(tier, self.tier(), self.free()) != Policy::Invalid))
+            && let Some(tier) = check(self.tier(), self.free())
         {
             Some(Self::with(0, true, tier))
         } else {
@@ -411,13 +411,13 @@ impl Tree {
         self,
         free: usize,
         tier: Tier,
-        reserve: PolicyFn,
+        policy: PolicyFn,
         default: Tier,
     ) -> Option<Self> {
         if self.reserved() {
             Some(
                 self.with_reserved(false)
-                    .with_tier(if reserve(tier, self.tier(), free) == Policy::Demote {
+                    .with_tier(if policy(tier, self.tier(), free) == Policy::Demote {
                         tier
                     } else {
                         self.tier()

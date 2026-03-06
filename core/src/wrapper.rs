@@ -55,8 +55,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn frames(&self) -> usize {
         self.alloc.frames()
     }
-    fn tree_stats(&self, tiers: &mut [crate::TierStats]) -> crate::TreeStats {
-        self.alloc.tree_stats(tiers)
+    fn tree_stats(&self) -> crate::TreeStats {
+        self.alloc.tree_stats()
     }
     fn stats(&self) -> Stats {
         self.alloc.stats()
@@ -73,8 +73,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
         };
         self.alloc.is_free(frame, order)
     }
-    fn drain(&self, local: usize) -> Result<()> {
-        self.alloc.drain(local)
+    fn drain(&self) {
+        self.alloc.drain()
     }
 }
 
@@ -195,8 +195,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn frames(&self) -> usize {
         self.alloc.frames()
     }
-    fn tree_stats(&self, tiers: &mut [crate::TierStats]) -> crate::TreeStats {
-        self.alloc.tree_stats(tiers)
+    fn tree_stats(&self) -> crate::TreeStats {
+        self.alloc.tree_stats()
     }
     fn stats(&self) -> Stats {
         self.alloc.stats()
@@ -207,8 +207,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn is_free(&self, frame: FrameId, order: usize) -> bool {
         self.alloc.is_free(frame, order)
     }
-    fn drain(&self, local: usize) -> Result<()> {
-        self.alloc.drain(local)
+    fn drain(&self) {
+        self.alloc.drain()
     }
 }
 

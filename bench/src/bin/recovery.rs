@@ -127,7 +127,7 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
         }
     });
     assert!(!crash);
-    let num_allocated = alloc.frames() - alloc.tree_stats(&mut []).free_frames;
+    let num_allocated = alloc.frames() - alloc.tree_stats().free_frames;
     warn!("Allocated: {num_allocated}");
     assert!(0 < num_allocated && num_allocated < alloc.frames());
 }
@@ -144,7 +144,7 @@ fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
     let alloc = Allocator::create(&mut mapping, true, &tiering, local, trees).unwrap();
     let time = timer.elapsed().as_nanos();
 
-    let num_alloc = alloc.frames() - alloc.tree_stats(&mut []).free_frames;
+    let num_alloc = alloc.frames() - alloc.tree_stats().free_frames;
     warn!("Recovered {num_alloc} allocations in {time} ns");
     let expected = alloc.frames() / 2;
     assert!(expected - threads <= num_alloc && num_alloc <= expected + threads);

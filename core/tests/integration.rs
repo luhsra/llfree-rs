@@ -7,10 +7,10 @@ use std::vec::Vec;
 
 use log::{error, warn};
 
-use llfree::*;
 use llfree::frame::Frame;
-use llfree::util::{aligned_buf, logging, WyRand};
+use llfree::util::{WyRand, aligned_buf, logging};
 use llfree::wrapper::NvmAlloc;
+use llfree::*;
 
 #[cfg(all(feature = "llc", not(feature = "llzig")))]
 type Allocator = TestAlloc<LLC>;
@@ -84,7 +84,7 @@ fn minimal() {
     let (alloc, request) = Allocator::create(1, frames, Init::FreeAll).unwrap();
     warn!("finit");
 
-    assert_eq!(alloc.tree_stats(&mut []).free_frames, alloc.frames());
+    assert_eq!(alloc.tree_stats().free_frames, alloc.frames());
 
     warn!("get >>>");
     let (_, frame1) = alloc.get(None, request(0, 0)).unwrap();
@@ -110,14 +110,15 @@ fn simple() {
     const FRAMES: usize = MEM_SIZE / Frame::SIZE;
 
     let (alloc, request) = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
+    warn!("{alloc:?}");
 
-    assert_eq!(alloc.tree_stats(&mut []).free_frames, alloc.frames());
+    assert_eq!(alloc.tree_stats().free_frames, alloc.frames());
 
     warn!("start alloc...");
     let (_, small) = alloc.get(None, request(0, 0)).unwrap();
 
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         1,
         "{alloc:?}"
     );
@@ -138,11 +139,11 @@ fn simple() {
     alloc.validate();
 
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         1 + frames.len()
     );
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         alloc.frames()
     );
     frames.sort_unstable();
@@ -162,7 +163,7 @@ fn simple() {
     }
 
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         1 + frames.len() - FREE_NUM,
         "{alloc:?}"
     );
@@ -181,7 +182,7 @@ fn simple() {
         alloc.put(*frame, request(0, 0)).unwrap();
     }
 
-    assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
+    assert_eq!(alloc.frames() - alloc.tree_stats().free_frames, 0);
     alloc.validate();
 }
 
@@ -193,7 +194,7 @@ fn alloc_at() {
 
     let (alloc, request) = Allocator::create(1, frames, Init::FreeAll).unwrap();
 
-    assert_eq!(alloc.tree_stats(&mut []).free_frames, alloc.frames());
+    assert_eq!(alloc.tree_stats().free_frames, alloc.frames());
 
     alloc.get(Some(FrameId(1)), request(0, 0)).unwrap();
     alloc.get(Some(FrameId(2)), request(0, 0)).unwrap();
@@ -206,7 +207,7 @@ fn alloc_at() {
     assert!(frame != FrameId(1) && frame != FrameId(2) && frame != FrameId(HUGE_FRAMES));
 
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         3 + HUGE_FRAMES
     );
     alloc.validate();
@@ -218,7 +219,7 @@ fn alloc_at() {
     alloc.put(FrameId(1), request(0, 0)).unwrap();
     alloc.put(frame, request(0, 0)).unwrap();
 
-    assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
+    assert_eq!(alloc.frames() - alloc.tree_stats().free_frames, 0);
     alloc.validate();
 }
 
@@ -241,7 +242,7 @@ fn rand() {
 
     warn!("check...");
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         frames.len()
     );
     alloc.validate();
@@ -265,7 +266,7 @@ fn rand() {
 
     warn!("check...");
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         frames.len()
     );
     alloc.validate();
@@ -281,7 +282,7 @@ fn rand() {
     for frame in &frames {
         alloc.put(*frame, request(0, 0)).unwrap();
     }
-    assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
+    assert_eq!(alloc.frames() - alloc.tree_stats().free_frames, 0);
     alloc.validate()
 }
 
@@ -347,7 +348,7 @@ fn multirand() {
     });
 
     assert_eq!(alloc.stats().free_huge, FRAMES / HUGE_FRAMES);
-    assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
+    assert_eq!(alloc.frames() - alloc.tree_stats().free_frames, 0);
     alloc.validate();
 }
 
@@ -380,7 +381,7 @@ fn parallel_alloc() {
     warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         frames.len()
     );
     warn!("allocated frames: {}", frames.len());
@@ -417,10 +418,10 @@ fn alloc_all() {
     warn!("{alloc:?}");
 
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         frames.len()
     );
-    assert_eq!(alloc.tree_stats(&mut []).free_frames, 0);
+    assert_eq!(alloc.tree_stats().free_frames, 0);
     assert_eq!(alloc.stats().free_huge, 0);
     warn!("allocated frames: {}", frames.len());
     alloc.validate();
@@ -465,7 +466,7 @@ fn parallel_alloc_all() {
     let mut frames = frames.into_iter().flatten().collect::<Vec<_>>();
 
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         frames.len()
     );
     warn!("allocated frames: {}/{}", frames.len(), alloc.frames());
@@ -513,7 +514,7 @@ fn less_mem() {
     warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         frames.len()
     );
     warn!("allocated frames: {}", frames.len());
@@ -538,7 +539,7 @@ fn less_mem() {
         },
     );
 
-    assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
+    assert_eq!(alloc.frames() - alloc.tree_stats().free_frames, 0);
     alloc.validate();
 }
 
@@ -572,7 +573,7 @@ fn parallel_huge_alloc() {
     warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
 
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         frames.len() * HUGE_FRAMES
     );
     warn!(
@@ -623,7 +624,7 @@ fn parallel_free() {
     });
 
     warn!("check");
-    assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
+    assert_eq!(alloc.frames() - alloc.tree_stats().free_frames, 0);
     alloc.validate();
 }
 
@@ -668,7 +669,7 @@ fn alloc_free() {
 
     warn!("check {alloc:?}");
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         ALLOC_PER_THREAD
     );
     alloc.validate();
@@ -701,13 +702,13 @@ fn recover() {
         let mut _allocated_frames = 0;
         for _ in 0..128 {
             alloc.get(None, request(0, 0)).unwrap();
-            _allocated_frames = alloc.frames() - alloc.tree_stats(&mut []).free_frames;
+            _allocated_frames = alloc.frames() - alloc.tree_stats().free_frames;
             alloc.get(None, request(HUGE_ORDER, 0)).unwrap();
-            _allocated_frames = alloc.frames() - alloc.tree_stats(&mut []).free_frames;
+            _allocated_frames = alloc.frames() - alloc.tree_stats().free_frames;
         }
 
         assert_eq!(
-            alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+            alloc.frames() - alloc.tree_stats().free_frames,
             expected_frames
         );
         alloc.validate();
@@ -720,7 +721,7 @@ fn recover() {
     let trees = aligned_buf(m.trees);
     let alloc = Allocator::create(&mut zone, true, &tiering, local, trees).unwrap();
     assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
+        alloc.frames() - alloc.tree_stats().free_frames,
         expected_frames
     );
     alloc.validate();
@@ -772,7 +773,7 @@ fn different_orders() {
         }
     });
 
-    assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
+    assert_eq!(alloc.frames() - alloc.tree_stats().free_frames, 0);
     alloc.validate();
 }
 
@@ -785,15 +786,12 @@ fn init_reserved() {
 
     let (alloc, request) = Allocator::create(THREADS, FRAMES, Init::AllocAll).unwrap();
     assert_eq!(alloc.frames(), FRAMES);
-    assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
-        FRAMES
-    );
+    assert_eq!(alloc.frames() - alloc.tree_stats().free_frames, FRAMES);
 
     for frame in (0..FRAMES).step_by(1 << HUGE_ORDER) {
         alloc.put(FrameId(frame), request(HUGE_ORDER, 0)).unwrap();
     }
-    assert_eq!(alloc.frames() - alloc.tree_stats(&mut []).free_frames, 0);
+    assert_eq!(alloc.frames() - alloc.tree_stats().free_frames, 0);
 
     thread::parallel(0..THREADS, |core| {
         thread::pin(core);
@@ -801,10 +799,7 @@ fn init_reserved() {
             alloc.get(None, request(HUGE_ORDER, core)).unwrap();
         }
     });
-    assert_eq!(
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames,
-        FRAMES
-    );
+    assert_eq!(alloc.frames() - alloc.tree_stats().free_frames, FRAMES);
     alloc.validate();
 }
 
@@ -842,8 +837,7 @@ fn drain() {
     const FRAMES: usize = TREE_FRAMES * 8;
     let (alloc, request) = Allocator::create(2, FRAMES, Init::FreeAll).unwrap();
     // should not change anything
-    alloc.drain(0).unwrap();
-    alloc.drain(1).unwrap();
+    alloc.drain();
 
     // allocate on second core => reserve a subtree
     alloc.get(None, request(0, 1)).unwrap();
@@ -896,7 +890,7 @@ fn stress() {
 
     assert_eq!(
         allocated.into_iter().sum::<usize>(),
-        alloc.frames() - alloc.tree_stats(&mut []).free_frames
+        alloc.frames() - alloc.tree_stats().free_frames
     );
     alloc.validate();
 }
