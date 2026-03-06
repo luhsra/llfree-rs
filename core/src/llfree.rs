@@ -128,9 +128,8 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             return self.get_at(frame, request);
         }
 
-        let mut start_idx = if let Some(len) = self.locals.tier_locals(request.tier)
-            && len > 0
-        {
+        let len = self.locals.tier_locals(request.tier).unwrap_or_default();
+        let mut start_idx = if len > 0 {
             TreeId(self.trees.len() / len * request.local.unwrap_or_default())
         } else {
             TreeId(0)
@@ -150,6 +149,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
 
         // -- Out of memory handling ---
+        warn!("OOM");
 
         // Downgrade request until successful
         for t in 1..Tier::LEN {
@@ -335,6 +335,70 @@ impl LLFree<'_> {
         Ok(())
     }
 
+    fn get_reserve(
+        &self,
+        order: usize,
+        i: TreeId,
+        local: usize,
+        check: impl Fn(Tier, usize) -> Option<Tier>,
+    ) -> Result<(Tier, FrameId)> {
+        if let Some((free, target_tier)) = self.trees.reserve(i, check) {
+            let tier_len = self.locals.tier_locals(target_tier).expect("Invalid tier");
+            // Target might have less locals or no
+            if tier_len == 0 {
+                self.trees.unreserve(i, free, target_tier, self.policy);
+                warn!("no locals for tier {target_tier:?}");
+                return Err(Error::Memory);
+            }
+            let local = local % tier_len;
+
+            // Perform lower alloc, if it fails undo reservation
+            match self.lower.get(i.as_row(), order, None) {
+                Ok(frame) => {
+                    // Swap and unreserve old tree
+                    if let Some((row, free)) =
+                        self.locals
+                            .swap(target_tier, local, frame.as_tree(), free - (1 << order))
+                    {
+                        if free > 0 {
+                            warn!("reserved tree idx={row} tier={target_tier:?} free={free}");
+                        }
+
+                        self.trees
+                            .unreserve(row.as_tree(), free, target_tier, self.policy);
+                    }
+                    Ok((target_tier, frame))
+                }
+                Err(e) => {
+                    self.trees.unreserve(i, free, target_tier, self.policy);
+                    Err(e)
+                }
+            }
+        } else {
+            Err(Error::Memory)
+        }
+    }
+
+    fn get_global(
+        &self,
+        i: TreeId,
+        order: usize,
+        frame: Option<FrameId>,
+        check: impl Fn(Tier, usize) -> Option<Tier>,
+    ) -> Result<(Tier, FrameId)> {
+        if let Some(tier) = self.trees.get(i, 1 << order, check) {
+            match self.lower.get(i.as_row(), order, frame) {
+                Ok(frame) => Ok((tier, frame)),
+                Err(e) => {
+                    self.trees.put(i, 1 << order);
+                    Err(e)
+                }
+            }
+        } else {
+            Err(Error::Memory)
+        }
+    }
+
     fn get_at(&self, frame: FrameId, request: Request) -> Result<(Tier, FrameId)> {
         // Try local reservation first
         if let Some(local) = request.local {
@@ -405,9 +469,14 @@ impl LLFree<'_> {
         tier: Tier,
         start_idx: &mut TreeId,
     ) -> Result<(Tier, FrameId)> {
-        let check = |t: Tier, f: usize| match (self.policy)(tier, t, f) {
-            Policy::Match(_) => Some(t),
-            _ => None,
+        let check = |t: Tier, f: usize| {
+            if f < (1 << order) {
+                return None;
+            }
+            match (self.policy)(tier, t, f) {
+                Policy::Match(_) => Some(t),
+                _ => None,
+            }
         };
         // Any frame
         self.trees.search(*start_idx, 0, self.trees.len(), |i| {
@@ -435,107 +504,30 @@ impl LLFree<'_> {
                     Ok((tier, frame))
                 }
                 Err(e) => {
+                    warn!(
+                        "lower alloc failed for local tree idx={row} tier={tier:?} free={order}: {e:?}"
+                    );
                     self.trees.put(row.as_tree(), 1 << order);
                     *start_idx = row.as_tree();
                     Err(e)
                 }
             },
             Err(Some((row, free))) => {
-                let e = if self.sync_with_global(order, tier, local, row.as_tree(), free) {
-                    Error::Retry
-                } else {
-                    Error::Memory
-                };
                 *start_idx = row.as_tree();
-                Err(e)
+                // Sync with global tree
+                let min = (1 << order) - free;
+                if let Some(free) = self.trees.sync(row.as_tree(), min) {
+                    if self.locals.put(tier, local, row.as_tree(), free) {
+                        Err(Error::Retry)
+                    } else {
+                        self.trees.put(row.as_tree(), free);
+                        Err(Error::Memory)
+                    }
+                } else {
+                    Err(Error::Memory)
+                }
             }
             Err(None) => Err(Error::Memory),
-        }
-    }
-
-    /// Frees from other CPUs update the global entry -> sync free counters.
-    ///
-    /// Returns if the global counter was large enough
-    fn sync_with_global(
-        &self,
-        order: usize,
-        tier: Tier,
-        local: usize,
-        tree: TreeId,
-        free: usize,
-    ) -> bool {
-        let min = (1 << order) - free;
-
-        if let Some(free) = self.trees.sync(tree, min) {
-            if self.locals.put(tier, local, tree, free) {
-                debug!("sync success {tree} {tier:?} free={}", free + free);
-                true
-            } else {
-                self.trees.put(tree, free);
-                false
-            }
-        } else {
-            false
-        }
-    }
-
-    fn get_reserve(
-        &self,
-        order: usize,
-        i: TreeId,
-        local: usize,
-        check: impl Fn(Tier, usize) -> Option<Tier>,
-    ) -> Result<(Tier, FrameId)> {
-        if let Some((free, target_tier)) = self.trees.reserve(i, check) {
-            let tier_len = self.locals.tier_locals(target_tier).expect("Invalid tier");
-            // Target might have less locals or no
-            if tier_len == 0 {
-                self.trees.unreserve(i, free, target_tier, self.policy);
-                warn!("no locals for tier {target_tier:?}");
-                return Err(Error::Memory);
-            }
-            let local = local % tier_len;
-
-            // Perform lower alloc, if it fails undo reservation
-            match self.lower.get(i.as_row(), order, None) {
-                Ok(frame) => {
-                    // Swap and unreserve old tree
-                    if let Some((row, free)) =
-                        self.locals
-                            .swap(target_tier, local, frame.as_tree(), free - (1 << order))
-                    {
-                        self.trees
-                            .unreserve(row.as_tree(), free, target_tier, self.policy);
-                    }
-                    Ok((target_tier, frame))
-                }
-                Err(e) => {
-                    self.trees.unreserve(i, free, target_tier, self.policy);
-                    Err(e)
-                }
-            }
-        } else {
-            Err(Error::Memory)
-        }
-    }
-
-    fn get_global(
-        &self,
-        i: TreeId,
-        order: usize,
-        frame: Option<FrameId>,
-        check: impl Fn(Tier, usize) -> Option<Tier>,
-    ) -> Result<(Tier, FrameId)> {
-        if let Some(tier) = self.trees.get(i, 1 << order, check) {
-            match self.lower.get(i.as_row(), order, frame) {
-                Ok(frame) => Ok((tier, frame)),
-                Err(e) => {
-                    self.trees.put(i, 1 << order);
-                    Err(e)
-                }
-            }
-        } else {
-            Err(Error::Memory)
         }
     }
 
@@ -555,10 +547,13 @@ impl LLFree<'_> {
                     return None;
                 }
                 match (self.policy)(tier, t, f) {
-                    Policy::Match(_) => Some(t),
+                    Policy::Match(_) => Some(tier),
                     // allow demotion if tree is empty
-                    Policy::Demote if f == TREE_FRAMES => Some(t),
-                    _ => None,
+                    Policy::Demote if f == TREE_FRAMES => Some(tier),
+                    p => {
+                        warn!("reservation denied {p:?} {i} {t:?} {f} in {range:?}");
+                        None
+                    }
                 }
             };
             self.get_reserve(order, i, local, check)
@@ -586,13 +581,6 @@ impl LLFree<'_> {
                 Err(Error::Memory) => {}
                 r => return r,
             }
-            // Not free
-            match self.trees.search(start, near, self.trees.len(), |i| {
-                reserve(i, 0..TREE_FRAMES)
-            }) {
-                Err(Error::Memory) => {}
-                r => return r,
-            }
         }
 
         // Any
@@ -607,7 +595,7 @@ impl LLFree<'_> {
                 return None;
             }
             match (self.policy)(request.tier, tier, free) {
-                Policy::Demote | Policy::Match(_) => Some(request.tier),
+                Policy::Demote => Some(request.tier),
                 _ => None,
             }
         };
