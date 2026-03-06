@@ -147,7 +147,7 @@ impl<'a> Locals<'a> {
                         // Replace local tree and return its free count for unreservation
                         let old = locals[index].tree.swap(new);
                         old.present()
-                            .then_some((old.row(), target_tier, old.free()))
+                            .then_some((old.row(), tier, old.free()))
                     } else {
                         // Just return the new tree, without replacing any local tree
                         None
