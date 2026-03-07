@@ -170,9 +170,9 @@ impl<'a> Trees<'a> {
             .map(|_| tier.unwrap())
     }
 
-    pub fn put(&self, i: TreeId, free: usize) {
+    pub fn put(&self, i: TreeId, free: usize, policy: PolicyFn) {
         self.entries[i.0]
-            .fetch_update(|v| Some(v.put(free, self.default)))
+            .fetch_update(|v| Some(v.put(free, policy, self.default)))
             .expect("Put failed");
     }
 
@@ -183,11 +183,12 @@ impl<'a> Trees<'a> {
         free: usize,
         tier: Tier,
         may_reserve: bool,
+        policy: PolicyFn,
     ) -> Option<usize> {
         let mut reserved = false;
         let tree = self.entries[i.0]
             .fetch_update(|v| {
-                let v = v.put(free, self.default);
+                let v = v.put(free, policy, self.default);
                 if may_reserve && !v.reserved() && v.tier() == tier && v.free() > Self::MIN_FREE {
                     // Reserve the tree that was targeted by the last N frees
                     reserved = true;
@@ -377,10 +378,12 @@ impl Tree {
             .with_tier(tier)
     }
     /// Increments the free frames counter.
-    fn put(mut self, free: usize, default: Tier) -> Self {
+    fn put(mut self, free: usize, policy: PolicyFn, default: Tier) -> Self {
         let free = self.free() + free;
         assert!(free <= TREE_FRAMES, "{free}");
-        if free == TREE_FRAMES {
+
+        // Check if transition is allowed by policy
+        if free == TREE_FRAMES && policy(self.tier(), self.tier(), free) != Policy::Invalid {
             self.set_tier(default);
         }
         self.with_free(free)
@@ -422,7 +425,7 @@ impl Tree {
                     } else {
                         self.tier()
                     })
-                    .put(free, default),
+                    .put(free, policy, default),
             )
         } else {
             None

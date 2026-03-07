@@ -135,8 +135,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             TreeId(0)
         };
 
-        // Try local reservation first (if enough trees to prevent high contention)
-        // Retry allocation up to n times if it fails due to a concurrent update
+        // Try local reservation first
         match self.get_matching(&request, &mut start_idx) {
             Err(Error::Memory) => {} // continue
             r => return r,
@@ -198,9 +197,9 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             }
 
             // Increment or reserve globally
-            if let Some(free) = self
-                .trees
-                .put_or_reserve(i, request.frames(), tier, may_reserve)
+            if let Some(free) =
+                self.trees
+                    .put_or_reserve(i, request.frames(), tier, may_reserve, self.policy)
             {
                 warn!("free reserved tree idx={i} tier={tier:?} free={free}");
                 // Change preferred tree to speedup future frees
@@ -212,7 +211,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
                 }
             }
         } else {
-            self.trees.put(i, request.frames());
+            self.trees.put(i, request.frames(), self.policy);
         }
 
         Ok(())
@@ -386,7 +385,7 @@ impl LLFree<'_> {
             match self.lower.get(i.as_row(), order, frame) {
                 Ok(frame) => Ok((tier, frame)),
                 Err(e) => {
-                    self.trees.put(i, 1 << order);
+                    self.trees.put(i, 1 << order, self.policy);
                     Err(e)
                 }
             }
@@ -453,7 +452,7 @@ impl LLFree<'_> {
                 }
             }
             // Try reserve new tree if no specific frame is requested
-            self.get_reserve_matching(request.order, request.tier, local, *start_idx)
+            self.get_matching_reserve(request.order, request.tier, local, *start_idx)
         } else {
             self.get_matching_global(request.order, request.tier, start_idx)
         }
@@ -500,7 +499,7 @@ impl LLFree<'_> {
                     Ok((tier, frame))
                 }
                 Err(e) => {
-                    self.trees.put(row.as_tree(), 1 << order);
+                    self.trees.put(row.as_tree(), 1 << order, self.policy);
                     *start_idx = row.as_tree();
                     Err(e)
                 }
@@ -513,7 +512,7 @@ impl LLFree<'_> {
                     if self.locals.put(tier, local, row.as_tree(), free) {
                         Err(Error::Retry)
                     } else {
-                        self.trees.put(row.as_tree(), free);
+                        self.trees.put(row.as_tree(), free, self.policy);
                         Err(Error::Memory)
                     }
                 } else {
@@ -525,7 +524,7 @@ impl LLFree<'_> {
     }
 
     /// Reserve a new tree and allocate the frame in it
-    fn get_reserve_matching(
+    fn get_matching_reserve(
         &self,
         order: usize,
         tier: Tier,
@@ -633,7 +632,7 @@ impl LLFree<'_> {
             match self.lower.get(row, request.order, frame) {
                 Err(Error::Memory) => {
                     // undo counter decrement
-                    self.trees.put(row.as_tree(), request.frames());
+                    self.trees.put(row.as_tree(), request.frames(), self.policy);
                 }
                 r => return r.map(|frame| (request.tier, frame)),
             }
@@ -651,7 +650,8 @@ impl LLFree<'_> {
         ) {
             match self.lower.get(row, request.order, frame) {
                 Err(Error::Memory) => {
-                    self.trees.put(row.as_tree(), 1 << request.order);
+                    self.trees
+                        .put(row.as_tree(), 1 << request.order, self.policy);
                 }
                 r => return r.map(|frame| (tier, frame)),
             }

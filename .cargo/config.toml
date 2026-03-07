@@ -3,7 +3,7 @@ perf = ["run", "-pllfree-bench", "-r", "--bin"]
 perf-build = ["build", "-pllfree-bench", "-r", "--bin"]
 
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=skylake"]
+rustflags = ["-C", "target-cpu=skylake", "-C", "linker-plugin-lto"]
 
 [target.x86_64-unknown-none]
 rustflags = ["-C", "target-cpu=skylake"]
