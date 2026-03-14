@@ -10,7 +10,7 @@ use std::fs::File;
 use std::os::unix::prelude::AsRawFd;
 use std::path::Path;
 
-use crate::frame::Frame;
+use llfree::frame::Frame;
 
 #[derive(Debug)]
 pub struct AllocError;
@@ -47,6 +47,8 @@ impl<T> Mapping<T> {
         if populate {
             populate_f = libc::MAP_POPULATE
         };
+        #[cfg(not(target_os = "linux"))]
+        let _ = populate; // discard
 
         let addr = unsafe {
             libc::mmap(
@@ -86,6 +88,8 @@ impl<T> Mapping<T> {
         if dax {
             flags = libc::MAP_SHARED_VALIDATE | libc::MAP_SYNC;
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = dax; // discard
 
         let file = File::options()
             .read(true)
@@ -242,20 +246,21 @@ pub fn test_mapping(begin: usize, length: usize) -> Mapping<Frame> {
     Mapping::anon(begin, length, false, true).unwrap()
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod test {
     use std::thread;
 
+    use llfree::util::logging;
     use log::info;
 
     use super::Mapping;
-    use crate::frame::Frame;
-    use crate::util::logging;
 
     #[ignore]
     #[cfg(target_family = "unix")]
     #[test]
     fn file() {
+        use llfree::frame::Frame;
+
         let f = std::fs::OpenOptions::new()
             .create(true)
             .read(true)

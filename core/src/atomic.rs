@@ -7,7 +7,7 @@ use core::sync::atomic::*;
 
 use log::debug;
 
-/// Atomic value
+/// Atomic wrapper for types that can be converted into atomics
 ///
 /// See [core::sync::atomic::AtomicU64] for the documentation.
 #[repr(transparent)]

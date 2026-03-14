@@ -2,7 +2,20 @@
 
 use core::fmt;
 use core::mem::{align_of, size_of};
-use core::ops::{Add, Deref, DerefMut, Div, Range};
+use core::ops::{Deref, DerefMut, Range};
+
+/// Retries the condition n times and returns if it was successfull.
+/// This pauses the CPU between retries if possible.
+#[inline(always)]
+pub fn spin_wait(n: usize, mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..n {
+        if cond() {
+            return true;
+        }
+        core::hint::spin_loop()
+    }
+    false
+}
 
 /// Align v up to next `align`
 #[inline(always)]
@@ -48,15 +61,13 @@ impl<T: fmt::Debug> fmt::Debug for Align<T> {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(any(test, feature = "std"))]
 pub fn logging() {
     use core::mem::transmute;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::boxed::Box;
     use std::io::Write;
     use std::thread::ThreadId;
-
-    use crate::thread::pinned;
 
     static MAX_LOC_WIDTH: AtomicUsize = AtomicUsize::new(0);
 
@@ -79,8 +90,6 @@ pub fn logging() {
                 log::Level::Trace => DIM,
             };
 
-            let pin = pinned().map_or(-1, |p| p as isize);
-
             let loc = format_args!(
                 "{}:{:<4}",
                 record.file().unwrap_or_default(),
@@ -93,7 +102,7 @@ pub fn logging() {
             let tid = unsafe { transmute::<ThreadId, u64>(std::thread::current().id()) };
             writeln!(
                 buf,
-                "{color}{:<5}{RST}{DIM} {tid:02?}@{pin:02?} {loc}{padding} >{RST}{color} {}{RST}",
+                "{color}{:<5}{RST}{DIM} {tid:02?} {loc}{padding} >{RST}{color} {}{RST}",
                 record.level(),
                 record.args()
             )
@@ -103,19 +112,42 @@ pub fn logging() {
     std::panic::set_hook(Box::new(panic_handler));
 }
 
-#[cfg(feature = "std")]
+#[cfg(any(test, feature = "std"))]
 fn panic_handler(info: &std::panic::PanicHookInfo) {
     use std::backtrace::Backtrace;
     log::error!("{info}\n{}", Backtrace::capture());
 }
 
+#[cfg(any(test, feature = "std"))]
+/// Executed `f` in parallel for each element in `iter`.
+pub fn parallel<I, T, F>(iter: I, f: F) -> std::vec::Vec<T>
+where
+    I: IntoIterator,
+    I::Item: Send,
+    T: Send,
+    F: FnOnce(I::Item) -> T + Clone + Send,
+{
+    std::thread::scope(|scope| {
+        let handles = iter
+            .into_iter()
+            .map(|t| {
+                let f = f.clone();
+                scope.spawn(move || f(t))
+            })
+            .collect::<std::vec::Vec<_>>();
+        handles.into_iter().map(|t| t.join().unwrap()).collect()
+    })
+}
+
 /// Simple bare bones random number generator based on wyhash.
 ///
 /// - See <https://github.com/wangyi-fudan/wyhash>
+#[cfg(any(test, feature = "std"))]
 pub struct WyRand {
     pub seed: u64,
 }
 
+#[cfg(any(test, feature = "std"))]
 impl WyRand {
     pub fn new(seed: u64) -> Self {
         Self { seed }
@@ -143,54 +175,14 @@ impl WyRand {
     }
 }
 
-/// Retries the condition n times and returns if it was successfull.
-/// This pauses the CPU between retries if possible.
-#[inline(always)]
-pub fn spin_wait(n: usize, mut cond: impl FnMut() -> bool) -> bool {
-    for _ in 0..n {
-        if cond() {
-            return true;
-        }
-        core::hint::spin_loop()
-    }
-    false
-}
-
-pub fn avg_bounds<T>(iter: impl IntoIterator<Item = T>) -> Option<(T, T, T)>
-where
-    T: Ord + Add<T, Output = T> + Div<T, Output = T> + TryFrom<usize> + Copy,
-{
-    let mut iter = iter.into_iter();
-    if let Some(first) = iter.next() {
-        let mut min = first;
-        let mut max = first;
-        let mut mean = first;
-        let mut count = 1;
-
-        for x in iter {
-            min = min.min(x);
-            max = max.max(x);
-            mean = mean + x;
-            count += 1;
-        }
-        let Ok(count) = T::try_from(count) else {
-            unreachable!("overflow")
-        };
-
-        Some((min, mean / count, max))
-    } else {
-        None
-    }
-}
-
-#[cfg(feature = "std")]
+#[cfg(any(test, feature = "std"))]
 pub fn aligned_buf(size: usize) -> &'static mut [u8] {
     use std::alloc::{Layout, alloc_zeroed};
     let ptr = unsafe { alloc_zeroed(Layout::from_size_align(size, align_of::<Align>()).unwrap()) };
     unsafe { std::slice::from_raw_parts_mut(ptr, size) }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod test {
     use super::{WyRand, align_down, align_up};
 

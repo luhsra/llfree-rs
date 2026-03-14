@@ -2,9 +2,9 @@ use std::time::Instant;
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::mmap::{MAdvise, Mapping, madvise};
-use llfree::thread;
-use llfree::util::{WyRand, avg_bounds, logging};
+use llfree::util::{WyRand, logging};
+use llfree_eval::mmap::{MAdvise, Mapping, madvise};
+use llfree_eval::{avg_bounds, thread};
 
 /// Benchmarking the page-fault performance of a mapped memory region.
 #[derive(Parser, Debug)]
@@ -72,6 +72,8 @@ fn main() {
             MAdvise::NoHugepage
         },
     );
+    #[cfg(not(target_os = "linux"))]
+    let _ = huge; // discard
 
     let chunk_size = mapping.len().div_ceil(threads);
 

@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, LLFree, Tiering, thread};
+use llfree::{Alloc, LLFree, Tiering};
+use llfree_eval::mmap::Mapping;
+use llfree_eval::thread;
 use log::warn;
 
 /// Benchmarking the (crashed) recovery.

@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "bench"]
+members = ["core", "eval"]
 resolver = "2"
 
 [profile.release]

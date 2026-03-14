@@ -7,9 +7,10 @@ use std::time::Instant;
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::mmap::Mapping;
 use llfree::util::{aligned_buf, logging};
-use llfree::{Alloc, HUGE_FRAMES, Init, LLFree, MetaData, Tiering, thread};
+use llfree::{Alloc, HUGE_FRAMES, Init, LLFree, MetaData, Tiering};
+use llfree_eval::mmap::Mapping;
+use llfree_eval::thread;
 use log::warn;
 
 type Allocator<'a> = LLFree<'a>;

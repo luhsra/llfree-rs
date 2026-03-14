@@ -4,16 +4,15 @@ use core::mem::align_of;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use core::{fmt, slice};
 
-use crate::util::Align;
-use crate::{
-    Alloc, FrameId, HUGE_ORDER, Init, Policy, Request, Result, Stats, TREE_FRAMES, TREE_HUGE,
-    Tier, Tiering, TreeStats, TierStats,
+use llfree::util::Align;
+use llfree::{
+    Alloc, FrameId, HUGE_ORDER, Init, MetaData, MetaSize, Policy, PolicyFn, Request, Result, Stats,
+    TREE_FRAMES, TREE_HUGE, Tier, TierStats, Tiering, TreeStats,
 };
 
 /// Global storage for the Rust policy function pointer.
 /// This is safe because PolicyFn is a plain fn pointer (no closure state).
-static POLICY_FN: AtomicPtr<()> =
-    AtomicPtr::new(core::ptr::null_mut());
+static POLICY_FN: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 
 /// C-compatible policy trampoline that calls the stored Rust PolicyFn.
 extern "C" fn policy_trampoline(
@@ -23,8 +22,7 @@ extern "C" fn policy_trampoline(
 ) -> bindings::llfree_policy_t {
     let ptr = POLICY_FN.load(Ordering::Relaxed);
     assert!(!ptr.is_null(), "policy function not set");
-    let policy_fn: crate::PolicyFn =
-        unsafe { core::mem::transmute(ptr) };
+    let policy_fn: PolicyFn = unsafe { core::mem::transmute(ptr) };
     let result = policy_fn(Tier(requested), Tier(target), free);
     match result {
         Policy::Match(prio) => bindings::llfree_policy_t {
@@ -63,22 +61,22 @@ impl<'a> Alloc<'a> for LLC {
         "LLC"
     }
 
-    fn metadata_size(tiering: &Tiering, frames: usize) -> crate::MetaSize {
+    fn metadata_size(tiering: &Tiering, frames: usize) -> MetaSize {
         let c_tiering = bindings::convert_tiering(tiering);
         let m = unsafe { bindings::llfree_metadata_size(&c_tiering, frames as _) };
         assert!(m.llfree as usize <= SIZE);
-        crate::MetaSize {
+        MetaSize {
             local: m.local,
             trees: m.trees,
             lower: m.lower,
         }
     }
 
-    unsafe fn metadata(&mut self) -> super::MetaData<'a> {
+    unsafe fn metadata(&mut self) -> MetaData<'a> {
         unsafe {
             let m = bindings::llfree_metadata(self.raw.get().cast());
             let ms = &self.ms;
-            super::MetaData {
+            MetaData {
                 local: slice::from_raw_parts_mut(m.local, ms.local),
                 trees: slice::from_raw_parts_mut(m.trees, ms.trees),
                 lower: slice::from_raw_parts_mut(m.lower, ms.lower),
@@ -86,12 +84,7 @@ impl<'a> Alloc<'a> for LLC {
         }
     }
 
-    fn new(
-        frames: usize,
-        init: Init,
-        tiering: &Tiering,
-        meta: super::MetaData<'a>,
-    ) -> Result<Self> {
+    fn new(frames: usize, init: Init, tiering: &Tiering, meta: MetaData<'a>) -> Result<Self> {
         let raw = UnsafeCell::new([0u8; SIZE]);
 
         let init = match init {
@@ -115,9 +108,8 @@ impl<'a> Alloc<'a> for LLC {
             lower: meta.lower.as_mut_ptr(),
         };
 
-        let ret = unsafe {
-            bindings::llfree_init(raw.get().cast(), frames, init, meta, &c_tiering)
-        };
+        let ret =
+            unsafe { bindings::llfree_init(raw.get().cast(), frames, init, meta, &c_tiering) };
         ret.ok().map(|_| LLC { raw, ms: m })
     }
 
@@ -138,9 +130,8 @@ impl<'a> Alloc<'a> for LLC {
     }
 
     fn is_free(&self, frame: FrameId, order: usize) -> bool {
-        let stats = unsafe {
-            bindings::llfree_stats_at(self.raw.get().cast(), frame.0 as _, order as _)
-        };
+        let stats =
+            unsafe { bindings::llfree_stats_at(self.raw.get().cast(), frame.0 as _, order as _) };
         order == 0 && stats.free_frames == 1
             || order == HUGE_ORDER && stats.free_huge == 1
             || order == TREE_FRAMES.ilog2() as usize && stats.free_huge == TREE_HUGE
@@ -158,7 +149,12 @@ impl<'a> Alloc<'a> for LLC {
 
     fn tree_stats(&self) -> TreeStats {
         let s = unsafe { bindings::llfree_tree_stats(self.raw.get().cast()) };
-        let mut tiers = [const { TierStats { free_frames: 0, alloc_frames: 0 } }; Tier::LEN];
+        let mut tiers = [const {
+            TierStats {
+                free_frames: 0,
+                alloc_frames: 0,
+            }
+        }; Tier::LEN];
         for (i, t) in s.tiers.iter().enumerate() {
             tiers[i] = TierStats {
                 free_frames: t.free_frames,
@@ -172,14 +168,12 @@ impl<'a> Alloc<'a> for LLC {
         }
     }
 
-    fn stats(&self) -> crate::Stats {
+    fn stats(&self) -> Stats {
         unsafe { bindings::llfree_stats(self.raw.get().cast()).into() }
     }
 
-    fn stats_at(&self, frame: FrameId, order: usize) -> crate::Stats {
-        unsafe {
-            bindings::llfree_stats_at(self.raw.get().cast(), frame.0 as _, order as _).into()
-        }
+    fn stats_at(&self, frame: FrameId, order: usize) -> Stats {
+        unsafe { bindings::llfree_stats_at(self.raw.get().cast(), frame.0 as _, order as _).into() }
     }
 
     fn validate(&self) {
@@ -221,6 +215,8 @@ mod bindings {
 
     use core::sync::atomic::Ordering;
 
+    use ::llfree::Error;
+
     include!(concat!(env!("OUT_DIR"), "/llc.rs"));
 
     impl From<super::Request> for llfree_request {
@@ -240,10 +236,10 @@ mod bindings {
         pub fn ok(self) -> super::Result<u64> {
             match self.error() {
                 LLFREE_ERR_OK => Ok(self.frame()),
-                LLFREE_ERR_MEMORY => Err(crate::Error::Memory),
-                LLFREE_ERR_RETRY => Err(crate::Error::Retry),
-                LLFREE_ERR_ADDRESS => Err(crate::Error::Address),
-                LLFREE_ERR_INIT => Err(crate::Error::Initialization),
+                LLFREE_ERR_MEMORY => Err(Error::Memory),
+                LLFREE_ERR_RETRY => Err(Error::Retry),
+                LLFREE_ERR_ADDRESS => Err(Error::Address),
+                LLFREE_ERR_INIT => Err(Error::Initialization),
                 _ => unreachable!("invalid return code"),
             }
         }
@@ -292,10 +288,10 @@ mod bindings {
     }
 }
 
-#[cfg(all(test, feature = "std", feature = "llc"))]
+#[cfg(all(test, feature = "llc"))]
 mod test {
     use super::LLC;
-    use crate::{Alloc, Init, MetaData, Tiering};
+    use llfree::{Alloc, Init, MetaData, Tiering};
 
     #[test]
     fn test_debug() {

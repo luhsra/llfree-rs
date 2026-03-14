@@ -37,16 +37,11 @@
           buildInputs = with pkgs;
             [
               rustToolchain
-              ruff
-              pyright
-              python313
-              cargo-deny
-              cargo-edit
-              cargo-watch
               lldb
               curl
               zig
               typst
+              python313
             ] ++ (with pkgs.python313Packages; [
               numpy
               seaborn
@@ -55,7 +50,6 @@
               qemu
               ipykernel
               scipy
-              nbconvert
             ]);
           env = {
             # Rust-analyzer

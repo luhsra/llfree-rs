@@ -7,15 +7,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
-#[cfg(feature = "llc")]
-use llfree::LLC;
-#[cfg(feature = "llzig")]
-use llfree::LLZig;
 use llfree::frame::Frame;
-use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, FrameId, LLFree, MAX_ORDER, Request, Result, Tiering, thread};
+use llfree::{Alloc, FrameId, LLFree, MAX_ORDER, Request, Result, Tiering};
+#[cfg(feature = "llc")]
+use llfree_eval::LLC;
+#[cfg(feature = "llzig")]
+use llfree_eval::LLZig;
+use llfree_eval::mmap::Mapping;
+use llfree_eval::thread;
 use log::warn;
 
 /// Number of allocations per block

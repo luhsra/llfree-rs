@@ -325,7 +325,7 @@ fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod test {
     use super::{FrameId, RowId};
 

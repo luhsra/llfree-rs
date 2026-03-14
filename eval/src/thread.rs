@@ -2,6 +2,9 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+// Reimport for backwards compatibility
+pub use llfree::util::parallel;
+
 /// Changes the order in which cores are selected for pinning.
 ///
 /// The `core` argument of [pin] is multiplied with stride to get the actual core:
@@ -75,7 +78,7 @@ pub fn pin(core: usize) {
     const THREAD_AFFINITY_POLICY: thread_policy_flavor_t = 4;
 
     #[link(name = "System", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn thread_policy_set(
             thread: thread_t,
             flavor: thread_policy_flavor_t,
@@ -85,10 +88,10 @@ pub fn pin(core: usize) {
     }
 
     let max = cores();
-    assert!(core < max as usize, "not enough cores");
+    assert!(core < max, "not enough cores");
 
     let core = core * STRIDE.load(Ordering::Relaxed);
-    let core = (core / max as usize) + (core % max as usize); // wrap around
+    let core = (core / max) + (core % max); // wrap around
 
     let thread_affinity_policy_count: mach_msg_type_number_t =
         size_of::<thread_affinity_policy_data_t>() as mach_msg_type_number_t
@@ -112,28 +115,7 @@ pub fn pin(core: usize) {
     });
 }
 
-/// Executed `f` in parallel for each element in `iter`.
-#[cfg(feature = "std")]
-pub fn parallel<I, T, F>(iter: I, f: F) -> std::vec::Vec<T>
-where
-    I: IntoIterator,
-    I::Item: Send,
-    T: Send,
-    F: FnOnce(I::Item) -> T + Clone + Send,
-{
-    std::thread::scope(|scope| {
-        let handles = iter
-            .into_iter()
-            .map(|t| {
-                let f = f.clone();
-                scope.spawn(move || f(t))
-            })
-            .collect::<std::vec::Vec<_>>();
-        handles.into_iter().map(|t| t.join().unwrap()).collect()
-    })
-}
-
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod test {
     use core::sync::atomic::Ordering;
 

@@ -11,6 +11,7 @@ use bitfield_struct::bitfield;
 use clap::Parser;
 use llfree::util::align_down;
 use llfree::*;
+use llfree_eval::{mmap, thread};
 use log::{error, info, warn};
 
 /// Benchmarking the allocators against each other.
@@ -28,6 +29,9 @@ struct Args {
     #[arg(long, default_value_t = 1000)]
     interval: u64,
 }
+
+#[cfg(feature = "llc")]
+use llfree_eval::LLC;
 
 #[cfg(feature = "llc")]
 type Allocator = LLC;

@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use clap::Parser;
 use llfree::frame::Frame;
-use llfree::mmap::Mapping;
 use llfree::util::{self, WyRand, align_up, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, FrameId, LLFree, Tiering, thread};
+use llfree::{Alloc, FrameId, LLFree, Tiering};
+use llfree_eval::mmap::Mapping;
+use llfree_eval::thread;
 use log::{error, warn};
 
 /// Crash testing an allocator.

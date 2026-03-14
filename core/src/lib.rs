@@ -6,14 +6,9 @@
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
 
-#[cfg(feature = "std")]
+#[cfg(any(test, feature = "std"))]
 #[macro_use]
 extern crate std;
-
-#[cfg(feature = "std")]
-pub mod mmap;
-#[cfg(feature = "std")]
-pub mod thread;
 
 mod atomic;
 pub mod frame;
@@ -24,15 +19,6 @@ mod bitfield;
 use bitfield::RowId;
 mod llfree;
 pub use llfree::LLFree;
-
-#[cfg(feature = "llc")]
-mod llc;
-#[cfg(feature = "llc")]
-pub use llc::LLC;
-#[cfg(feature = "llzig")]
-mod llzig;
-#[cfg(feature = "llzig")]
-pub use llzig::LLZig;
 
 mod local;
 mod lower;
@@ -65,7 +51,7 @@ pub const MAX_ORDER: usize = HUGE_ORDER + 1;
 pub const BITFIELD_ROW: usize = 64;
 
 /// Number of retries if an atomic operation fails.
-pub const RETRIES: usize = 4;
+const RETRIES: usize = 4;
 
 /// Allocation error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,7 +198,7 @@ pub struct MetaData<'a> {
     pub lower: &'a mut [u8],
 }
 
-#[cfg(feature = "std")]
+#[cfg(any(test, feature = "std"))]
 impl MetaData<'_> {
     pub fn alloc(m: MetaSize) -> Self {
         Self {
@@ -259,7 +245,7 @@ impl Tiering {
     pub fn new(tiers: &[(Tier, usize)], default: Tier, policy: PolicyFn) -> Self {
         assert!(tiers.len() <= 1 << Tier::BITS);
         let mut tiers_raw = [const { (Tier(0), 0) }; 1 << Tier::BITS];
-        tiers_raw[..tiers.len()].copy_from_slice(&tiers);
+        tiers_raw[..tiers.len()].copy_from_slice(tiers);
         Self {
             tiers_raw,
             tiers_len: tiers.len(),
@@ -459,4 +445,50 @@ pub enum TreeOperation {
     Online,
     /// Online the tree, i.e. make it available for allocation.
     Offline,
+}
+
+#[cfg(test)]
+mod test {
+    use log::warn;
+
+    use crate::frame::Frame;
+    use crate::util::logging;
+    use crate::{Alloc, Init, LLFree, MetaData, Tiering};
+
+    #[test]
+    fn minimal() {
+        logging();
+        // 8GiB
+        const MEM_SIZE: usize = 1 << 30;
+        let frames = MEM_SIZE / Frame::SIZE;
+
+        warn!("init");
+        // Specify tiers and policy
+        let (tiering, request) = Tiering::simple(1);
+        // Allocate the metadata buffers
+        let ms = LLFree::metadata_size(&tiering, frames);
+        let meta = MetaData::alloc(ms);
+        // Initialize the allocator
+        let alloc = LLFree::new(frames, Init::FreeAll, &tiering, meta).unwrap();
+        warn!("finit");
+        assert_eq!(alloc.tree_stats().free_frames, alloc.frames());
+
+        warn!("get >>>");
+        let (_, frame1) = alloc.get(None, request(0, 0)).unwrap();
+        warn!("get <<<");
+        warn!("get >>>");
+        let (_, frame2) = alloc.get(None, request(0, 0)).unwrap();
+        warn!("get <<<");
+
+        assert_eq!(alloc.stats().free_frames, alloc.frames() - 2);
+        alloc.validate();
+
+        warn!("put >>>");
+        alloc.put(frame2, request(0, 0)).unwrap();
+        warn!("put <<<");
+        warn!("put >>>");
+        alloc.put(frame1, request(0, 0)).unwrap();
+        warn!("put <<<");
+        alloc.validate();
+    }
 }

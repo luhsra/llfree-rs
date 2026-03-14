@@ -1,5 +1,5 @@
 [package]
-name = "llfree-bench"
+name = "llfree-eval"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88.0"
@@ -12,12 +12,16 @@ clap = { version = "4.4", features = ["derive"] }
 bitfield-struct = "0.12"
 spin = "0.10"
 
+[build-dependencies]
+build-rs = "0.3"
+bindgen = { version = "0.72", optional = true }
+
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 raw-cpuid = { version = "11.0" }
 
 [features]
-llc = ["llfree/llc"]
-llzig = ["llfree/llzig"]
+llc = ["bindgen"]
+llzig = ["bindgen"]
 16K = ["llfree/16K"]
 
 # binaries

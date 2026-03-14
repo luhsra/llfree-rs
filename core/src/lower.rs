@@ -518,7 +518,7 @@ impl<'a> Lower<'a> {
         self.put_small(frame, order)
     }
 
-    #[cfg(feature = "std")]
+    #[cfg(any(test, feature = "std"))]
     #[allow(dead_code)]
     pub fn dump(&self, start: TreeId) {
         use std::fmt::Write;
@@ -633,7 +633,7 @@ impl From<HugePair> for u32 {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod test {
     use core::mem::ManuallyDrop;
     use core::ops::Deref;
@@ -644,10 +644,10 @@ mod test {
 
     use super::Bitfield;
     use crate::lower::Lower;
-    use crate::util::{WyRand, aligned_buf, logging};
+    use crate::util::{WyRand, aligned_buf, logging, parallel};
     use crate::{
         Error, FrameId, HUGE_FRAMES, HugeId, Init, MAX_ORDER, Result, TREE_FRAMES, TREE_HUGE,
-        TreeId, thread,
+        TreeId,
     };
 
     struct LowerTest<'a>(ManuallyDrop<Lower<'a>>);
@@ -681,9 +681,7 @@ mod test {
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
         lower.get(FrameId(0).as_row(), 0, None).unwrap();
 
-        thread::parallel(0..2, |t| {
-            thread::pin(t);
-
+        parallel(0..2, |_| {
             let frame = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
             assert!(frame < lower.frames());
         });
@@ -701,9 +699,7 @@ mod test {
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
-        thread::parallel(0..2, |t| {
-            thread::pin(t);
-
+        parallel(0..2, |_| {
             lower.get(FrameId(0).as_row(), 0, None).unwrap();
         });
 
@@ -722,9 +718,7 @@ mod test {
             lower.get(FrameId(0).as_row(), 0, None).unwrap();
         }
 
-        thread::parallel(0..2, |t| {
-            thread::pin(t);
-
+        parallel(0..2, |_| {
             lower.get(FrameId(0).as_row(), 0, None).unwrap();
         });
 
@@ -745,9 +739,7 @@ mod test {
         frames[0] = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
         frames[1] = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
 
-        thread::parallel(0..2, |t| {
-            thread::pin(t);
-
+        parallel(0..2, |t| {
             lower.put(FrameId(frames[t]), 0).unwrap();
         });
 
@@ -766,9 +758,7 @@ mod test {
             *frame = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
         }
 
-        thread::parallel(0..2, |t| {
-            thread::pin(t);
-
+        parallel(0..2, |t| {
             lower.put(FrameId(frames[t]), 0).unwrap();
         });
 
@@ -791,11 +781,8 @@ mod test {
 
         std::thread::scope(|s| {
             s.spawn(|| {
-                thread::pin(0);
-
                 lower.get(FrameId(0).as_row(), 0, None).unwrap();
             });
-            thread::pin(1);
 
             lower.put(FrameId(frames[0]), 0).unwrap();
         });
@@ -819,9 +806,7 @@ mod test {
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
         lower.get(FrameId(0).as_row(), 0, None).unwrap();
 
-        thread::parallel(0..2, |t| {
-            thread::pin(t);
-
+        parallel(0..2, |t| {
             let order = t + 1; // order 1 and 2
             let frame = lower.get(FrameId(0).as_row(), order, None).unwrap().0;
             assert!(frame < lower.frames());
@@ -854,9 +839,7 @@ mod test {
             Bitfield::LEN - 2 - 4
         );
 
-        thread::parallel(0..2, |t| {
-            thread::pin(t);
-
+        parallel(0..2, |t| {
             lower.put(FrameId(frames[t]), t + 1).unwrap();
         });
 
@@ -964,8 +947,7 @@ mod test {
             assert_eq!(lower.stats().free_frames, FRAMES);
 
             let barrier = Barrier::new(THREADS);
-            thread::parallel(0..THREADS, |t| {
-                thread::pin(t);
+            parallel(0..THREADS, |_| {
                 barrier.wait();
 
                 let mut frames = [FrameId(0); 4];
@@ -1000,8 +982,7 @@ mod test {
             }
 
             let barrier = Barrier::new(THREADS);
-            thread::parallel(0..THREADS, |t| {
-                thread::pin(t);
+            parallel(0..THREADS, |t| {
                 barrier.wait();
 
                 if t < THREADS / 2 {
@@ -1019,20 +1000,22 @@ mod test {
     fn alloc_stress_huge() {
         logging();
 
-        let rand = unsafe { libc::rand() as u64 };
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         const ITER: usize = 50;
         const THREADS: usize = 4;
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
         let barrier = Barrier::new(THREADS);
 
-        thread::parallel(0..THREADS, |t| {
-            thread::pin(t);
+        parallel(0..THREADS, |t| {
             let mut frames = Vec::with_capacity(TREE_FRAMES);
 
             barrier.wait();
 
-            let mut rng = WyRand::new(rand + t as u64);
+            let mut rng = WyRand::new(seed + t as u64);
 
             for _ in 0..ITER {
                 let target = rng.range(0..(2 * TREE_FRAMES / THREADS) as _) as usize;

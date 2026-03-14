@@ -5,6 +5,11 @@ use std::sync::Barrier;
 use std::time::Instant;
 use std::vec::Vec;
 
+#[cfg(all(feature = "llc", not(feature = "llzig")))]
+use llfree_eval::LLC;
+#[cfg(all(feature = "llzig", not(feature = "llc")))]
+use llfree_eval::LLZig;
+use llfree_eval::{mmap, thread};
 use log::{error, warn};
 
 use llfree::frame::Frame;

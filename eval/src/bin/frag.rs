@@ -8,6 +8,7 @@ use clap::Parser;
 use llfree::frame::Frame;
 use llfree::util::WyRand;
 use llfree::*;
+use llfree_eval::thread;
 use log::warn;
 
 /// Benchmarking the allocators against each other.
@@ -36,6 +37,9 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     stride: usize,
 }
+
+#[cfg(feature = "llc")]
+use llfree_eval::LLC;
 
 #[cfg(feature = "llc")]
 type Allocator = LLC;

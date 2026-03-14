@@ -1,6 +1,6 @@
 [alias]
-perf = ["run", "-pllfree-bench", "-r", "--bin"]
-perf-build = ["build", "-pllfree-bench", "-r", "--bin"]
+perf = ["run", "-pllfree-eval", "-r", "--bin"]
+perf-build = ["build", "-pllfree-eval", "-r", "--bin"]
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "target-cpu=skylake", "-C", "linker-plugin-lto"]

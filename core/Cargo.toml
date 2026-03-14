@@ -1,27 +1,24 @@
 [package]
 name = "llfree"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.88.0"
+rust-version = "1.93.0"
 
 [dependencies]
-libc = { version = "0.2", optional = true }
 bitfield-struct = "0.12"
 log = { version = "0.4", default-features = false }
 env_logger = { version = "0.11", default-features = false, optional = true }
 
-[build-dependencies]
-build-rs = "0.3"
-bindgen = { version = "0.72", optional = true }
+[dev-dependencies]
+env_logger = { version = "0.11", default-features = false }
 
 [features]
-default = ["std"]
-std = ["log/std", "libc", "env_logger"]
+default = []
+std = ["log/std", "env_logger"]
 log_debug = ["log/max_level_debug"]
 log_info = ["log/max_level_info"]
 log_warn = ["log/max_level_warn"]
 log_error = ["log/max_level_error"]
-llc = ["bindgen"]
-llzig = ["bindgen"]
+
 16K = []
 free_reserve = []

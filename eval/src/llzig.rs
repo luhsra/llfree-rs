@@ -3,9 +3,9 @@ use core::ffi::{CStr, c_char, c_void};
 use core::mem::{align_of, size_of};
 use core::{fmt, slice};
 
-use super::{Alloc, Init};
-use crate::util::Align;
-use crate::{Flags, FrameId, HUGE_ORDER, KindDesc, Result, Stats, TREE_FRAMES, TREE_HUGE};
+use llfree::util::Align;
+use llfree::{Alloc, Init};
+use llfree::{Flags, FrameId, HUGE_ORDER, KindDesc, Result, Stats, TREE_FRAMES, TREE_HUGE};
 
 /// Zig implementation of LLFree
 ///
@@ -23,19 +23,19 @@ impl<'a> Alloc<'a> for LLZig {
         "LLZig"
     }
 
-    fn metadata_size(kinds: &[KindDesc], frames: usize) -> crate::MetaSize {
+    fn metadata_size(kinds: &[KindDesc], frames: usize) -> llfree::MetaSize {
         assert!(kinds.len() > 0);
         let cores = kinds[0].1 as usize;
         let m = unsafe { bindings::llzig_metadata_size(cores as _, frames as _) };
         assert!(m.llfree as usize <= size_of::<Self>());
-        crate::MetaSize {
+        llfree::MetaSize {
             local: m.local,
             trees: m.trees,
             lower: m.lower,
         }
     }
 
-    unsafe fn metadata(&mut self) -> super::MetaData<'a> {
+    unsafe fn metadata(&mut self) -> llfree::MetaData<'a> {
         unsafe {
             let cores = bindings::llzig_cores(self.raw.get().cast());
             let ms =
@@ -47,7 +47,7 @@ impl<'a> Alloc<'a> for LLZig {
                         .map_or(&mut [], |p| slice::from_raw_parts_mut(p, len))
                 }
             }
-            super::MetaData {
+            llfree::MetaData {
                 local: to_slice(m.local, ms.local),
                 trees: to_slice(m.trees, ms.trees),
                 lower: to_slice(m.lower, ms.lower),
@@ -59,7 +59,7 @@ impl<'a> Alloc<'a> for LLZig {
         kinds: &[KindDesc],
         frames: usize,
         init: Init,
-        meta: super::MetaData<'a>,
+        meta: llfree::MetaData<'a>,
     ) -> Result<Self> {
         let raw = UnsafeCell::new([0u8; size_of::<Self>()]);
         assert!(kinds.len() > 0);
@@ -130,19 +130,19 @@ impl<'a> Alloc<'a> for LLZig {
         unsafe { bindings::llzig_frames(self.raw.get().cast()) as _ }
     }
 
-    fn fast_stats(&self) -> crate::Stats {
+    fn fast_stats(&self) -> llfree::Stats {
         unsafe { bindings::llzig_stats(self.raw.get().cast()).into() }
     }
 
-    fn fast_stats_at(&self, frame: FrameId, order: usize) -> crate::Stats {
+    fn fast_stats_at(&self, frame: FrameId, order: usize) -> llfree::Stats {
         unsafe { bindings::llzig_stats_at(self.raw.get().cast(), frame.0 as _, order as _).into() }
     }
 
-    fn stats(&self) -> crate::Stats {
+    fn stats(&self) -> llfree::Stats {
         unsafe { bindings::llzig_full_stats(self.raw.get().cast()).into() }
     }
 
-    fn stats_at(&self, frame: FrameId, order: usize) -> crate::Stats {
+    fn stats_at(&self, frame: FrameId, order: usize) -> llfree::Stats {
         unsafe {
             bindings::llzig_full_stats_at(self.raw.get().cast(), frame.0 as _, order as _).into()
         }
@@ -183,8 +183,8 @@ mod bindings {
 
     include!(concat!(env!("OUT_DIR"), "/llzig.rs"));
 
-    impl From<super::Flags> for llflags_t {
-        fn from(flags: super::Flags) -> Self {
+    impl From<llfree::Flags> for llflags_t {
+        fn from(flags: llfree::Flags) -> Self {
             llflags_t {
                 order: flags.order() as _,
                 movable: false,
@@ -195,21 +195,21 @@ mod bindings {
     }
 
     impl llzig_result_t {
-        pub fn ok(self) -> super::Result<u64> {
+        pub fn ok(self) -> llfree::Result<u64> {
             match self.err {
                 LLZIG_ERR_OK => Ok(self.frame),
-                LLZIG_ERR_MEMORY => Err(crate::Error::Memory),
-                LLZIG_ERR_RETRY => Err(crate::Error::Retry),
-                LLZIG_ERR_ADDRESS => Err(crate::Error::Address),
-                LLZIG_ERR_INIT => Err(crate::Error::Initialization),
+                LLZIG_ERR_MEMORY => Err(llfree::Error::Memory),
+                LLZIG_ERR_RETRY => Err(llfree::Error::Retry),
+                LLZIG_ERR_ADDRESS => Err(llfree::Error::Address),
+                LLZIG_ERR_INIT => Err(llfree::Error::Initialization),
                 _ => unreachable!("invalid return code"),
             }
         }
     }
 
-    impl From<ll_stats> for super::Stats {
+    impl From<ll_stats> for llfree::Stats {
         fn from(val: ll_stats) -> Self {
-            super::Stats {
+            llfree::Stats {
                 free_frames: val.free_frames,
                 free_huge: val.free_huge,
                 free_trees: 0,
@@ -218,11 +218,11 @@ mod bindings {
     }
 }
 
-#[cfg(all(test, feature = "std", feature = "llzig"))]
+#[cfg(all(test, feature = "llzig"))]
 mod test {
-    use super::super::alloc_test::TestAlloc;
-    use super::LLZig;
-    use crate::Init;
+    use llfree::Init;
+    use llfree::LLZig;
+    use llfree::llfree::alloc_test::TestAlloc;
 
     #[test]
     fn test_debug() {

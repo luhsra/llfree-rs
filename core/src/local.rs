@@ -146,8 +146,7 @@ impl<'a> Locals<'a> {
                     let old = if let Some(index) = index {
                         // Replace local tree and return its free count for unreservation
                         let old = locals[index].tree.swap(new);
-                        old.present()
-                            .then_some((old.row(), tier, old.free()))
+                        old.present().then_some((old.row(), tier, old.free()))
                     } else {
                         // Just return the new tree, without replacing any local tree
                         None
@@ -340,7 +339,7 @@ impl Atomic for FreeHistory {
     type I = AtomicU64;
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod test {
     use crate::{FrameId, util};
 

@@ -7,7 +7,6 @@ Cargo.lock
 memfile
 .vscode
 .devcontainer
-/test/
 .cache/
 .direnv/
 .gdb_history
