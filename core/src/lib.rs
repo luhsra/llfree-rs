@@ -69,7 +69,7 @@ pub enum Error {
 /// Allocation result
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// The general interface of the allocator implementations.
+/// The general interface of the allocator implementation.
 pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// Return the name of the allocator.
     #[cold]
@@ -95,13 +95,13 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// Returns the metadata buffers.
     ///
     /// # Safety
-    /// These buffers must must not be freed or used for other purposes.
+    /// These buffers must not be freed or used for other purposes.
     #[cold]
     unsafe fn metadata(&mut self) -> MetaData<'a>;
 
     /// Allocate a new frame of `order` on the given `local`.
     /// If specified try allocating the given `frame`.
-    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(Tier, FrameId)>;
+    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(FrameId, Tier)>;
     /// Free the `frame` of `order` on the given `local`.
     fn put(&self, frame: FrameId, flags: Request) -> Result<()>;
 
@@ -357,8 +357,8 @@ impl Tier {
     }
 }
 
-/// Defines if the allocator should be allocated persistently
-/// and if it in that case should try to recover from the persistent memory.
+/// Defines whether the allocator should use persistent memory
+/// and, in that case, whether it should try to recover prior state.
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Init {
     /// Clear the allocator marking all frames as free
@@ -392,7 +392,7 @@ impl Request {
     }
 }
 
-/// Statistics about the allocator's state
+/// Allocation statistics of allocator
 #[derive(Debug, Default)]
 pub struct Stats {
     /// Number of free frames
@@ -403,6 +403,7 @@ pub struct Stats {
     pub free_trees: usize,
 }
 
+/// Statistics about the trees of the allocator
 #[derive(Debug, Default)]
 pub struct TreeStats {
     /// Number of total free frames
@@ -412,6 +413,7 @@ pub struct TreeStats {
     /// Stats per tier
     pub tiers: [TierStats; 1 << Tier::BITS],
 }
+/// Statistics about a tier of the allocator
 #[derive(Debug, Default)]
 pub struct TierStats {
     /// Number of free frames
@@ -441,9 +443,9 @@ pub struct TreeChange {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeOperation {
-    /// Offline the tree, i.e. make it unavailable for allocation.
-    Online,
     /// Online the tree, i.e. make it available for allocation.
+    Online,
+    /// Offline the tree, i.e. make it unavailable for allocation.
     Offline,
 }
 
@@ -474,10 +476,10 @@ mod test {
         assert_eq!(alloc.tree_stats().free_frames, alloc.frames());
 
         warn!("get >>>");
-        let (_, frame1) = alloc.get(None, request(0, 0)).unwrap();
+        let (frame1, _) = alloc.get(None, request(0, 0)).unwrap();
         warn!("get <<<");
         warn!("get >>>");
-        let (_, frame2) = alloc.get(None, request(0, 0)).unwrap();
+        let (frame2, _) = alloc.get(None, request(0, 0)).unwrap();
         warn!("get <<<");
 
         assert_eq!(alloc.stats().free_frames, alloc.frames() - 2);

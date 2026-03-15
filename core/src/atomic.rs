@@ -81,7 +81,9 @@ pub trait Atomic:
     type I: AtomicImpl;
 }
 
-/// Implementation of the atomic values
+/// Implementation of the atomic values.
+///
+/// This is implemented for all atomic types in the standard library.
 pub trait AtomicImpl: Sized {
     type V: Sized + Eq + Copy;
     fn new(v: Self::V) -> Self;

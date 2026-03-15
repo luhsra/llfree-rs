@@ -37,7 +37,7 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     unsafe fn metadata(&mut self) -> MetaData<'a> {
         unsafe { self.alloc.metadata() }
     }
-    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(Tier, FrameId)> {
+    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(FrameId, Tier)> {
         let frame = frame
             .map(|f| {
                 f.0.checked_sub(self.offset)
@@ -45,8 +45,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
                     .ok_or(Error::Address)
             })
             .transpose()?;
-        let (tier, frame_id) = self.alloc.get(frame, flags)?;
-        Ok((tier, FrameId(frame_id.0 + self.offset)))
+        let (frame_id, tier) = self.alloc.get(frame, flags)?;
+        Ok((FrameId(frame_id.0 + self.offset), tier))
     }
     fn put(&self, frame: FrameId, flags: Request) -> Result<()> {
         let frame = FrameId(frame.0.checked_sub(self.offset).ok_or(Error::Address)?);
@@ -103,7 +103,7 @@ impl<'a, A: Alloc<'a>> fmt::Debug for ZoneAlloc<'a, A> {
     }
 }
 
-/// Non-Volatile metadata that is used to recover the allocator at reboot
+/// Non-volatile metadata used to recover the allocator after reboot.
 #[repr(align(0x1000))]
 struct Meta {
     /// A magic number used to check if the persistent memory contains the allocator state
@@ -186,7 +186,7 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     unsafe fn metadata(&mut self) -> MetaData<'a> {
         unsafe { self.alloc.metadata() }
     }
-    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(Tier, FrameId)> {
+    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(FrameId, Tier)> {
         self.alloc.get(frame, flags)
     }
     fn put(&self, frame: FrameId, flags: Request) -> Result<()> {

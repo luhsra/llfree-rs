@@ -4,11 +4,11 @@ This repository contains the LLFree page frame allocator.
 It is designed for multicore scalability and fragmentation avoidance and outperforms the Linux kernel page allocator in both regards.
 
 **Related Projects**
+
 - C Implementation: https://github.com/luhsra/llfree-c
 - Benchmarks: https://github.com/luhsra/llfree-bench
 - Modified Linux: https://github.com/luhsra/llfree-linux
 - Benchmark Module: https://github.com/luhsra/linux-alloc-bench
-
 
 ## Publications
 
@@ -20,10 +20,9 @@ In: 2023 USENIX Annual Technical Conference (USENIX '23); USENIX Association
 Lars Wrenger, Kenny Albes, Marco Wurps, Christian Dietrich, Daniel Lohmann
 In: Proceedings of the Twentieth European Conference on Computer Systems (EuroSys '25); ACM 2025
 
-
 ## Usage
 
-To compile and test the allocator, you have to [install rust](https://www.rust-lang.org/learn/get-started).
+To compile and test the allocator, you have to [install Rust](https://www.rust-lang.org/learn/get-started).
 
 The `stable` version `1.93.0` (or newer) is required.
 
@@ -39,10 +38,10 @@ cargo test -p llfree
 
 ### As Library
 
-Add the crate as dependency to the Cargo.toml.
+Add the crate as a dependency to `Cargo.toml`.
 
 ```toml
-[dependency]
+[dependencies]
 llfree = { git = "https://github.com/luhsra/llfree-rs.git" }
 ```
 
@@ -51,7 +50,8 @@ The following example shows how to use the allocator to allocate and free page f
 ```rust
 use llfree::{Alloc, LLFree, Tiering, MetaData, Init};
 
-let frames = 8 * 1024 * 1024;
+// Assuming a 4K page size and 1 GiB of memory
+let frames = 1 << 30 / 4096;
 
 // Specify tiers and policy
 let (tiering, request) = Tiering::simple(1);
@@ -62,11 +62,10 @@ let meta = MetaData::alloc(ms);
 let alloc = LLFree::new(frames, Init::FreeAll, &tiering, meta).unwrap();
 
 // Allocate and free page frames
-let (tier, frame) = alloc.get(None, request(0, 0)).unwrap();
+let (frame, _tier) = alloc.get(None, request(0, 0)).unwrap();
 // ...
-alloc.put(frame, request(0, 0));
+alloc.put(frame, request(0, 0)).unwrap();
 ```
-
 
 ## Project Structure
 
@@ -86,23 +85,22 @@ Its interface is defined in [lib.rs](core/src/lib.rs), along with various unit a
 The upper allocator depends on the lower allocator for the actual allocations and only manages the higher-level trees.
 Its purpose is to improve performance by preventing memory sharing and fragmentation.
 
-
 ## Integration Tests
 
-The [llfree-eval](eval) crate contains a lot of [integration](eval/tests/integration.rs) tests.
+The [llfree-eval](eval) crate contains many [integration](eval/tests/integration.rs) tests.
 
 ```sh
-cargo test --test integration
+cargo test -p llfree-eval --test integration
 ```
 
 These integration tests can also be used to validate the C reimplementation ([llfree-c](https://github.com/luhsra/llfree-c)) in [llc](eval/src/llc.rs).
-The unit tests can be executed for the C by using the `--features llc` argument:
+They can be run against the C implementation by enabling the `llc` feature:
 
 ```sh
-# C Repo is included as git submodules
-git submodules update --init --checkout llc
+# C repo is included as a git submodule
+git submodule update --init --checkout llc
 # build & test the C implementation
-cargo test -F llc --test integration
+cargo test -p llfree-eval -F llc --test integration
 ```
 
 ## Benchmarks
@@ -115,14 +113,13 @@ These benchmarks can be executed with:
 cargo perf bench -- bulk -x1 -x2 -x4 -t4 -m8 -o results/bench.csv LLFree
 ```
 
-This runs the `bulk` benchmark for 1, 2, and 4 threads (`-t4` max 4 threads) on 24G DRAM and stores the result in `results/bench.csv`.
+This runs the `bulk` benchmark for 1, 2, and 4 threads (`-t4` max 4 threads) on 8 GiB DRAM (`-m8`) and stores the result in `results/bench.csv`.
 
 To execute the benchmark on NVM, use the `--dax` flag to specify a DAX file to be mapped.
 
 > For more info on the CLI arguments run `cargo perf bench -- -h`.
 >
 > The debug output can be suppressed with setting `RUST_LOG=error`.
-
 
 ## Profiling
 

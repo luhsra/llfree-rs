@@ -98,7 +98,7 @@ fn main() {
 
             for _ in 0..allocs {
                 let timer = Instant::now();
-                let (_, page) = alloc.get(None, request(order, t)).unwrap();
+                let (page, _) = alloc.get(None, request(order, t)).unwrap();
                 let t = timer.elapsed().as_nanos() as usize;
 
                 let n = ((t.saturating_sub(start)) / bucket_size).min(buckets - 1);

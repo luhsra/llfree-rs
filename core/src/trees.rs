@@ -233,9 +233,7 @@ impl<'a> Trees<'a> {
         start: TreeId,
         offset: usize,
         len: usize,
-        tier: Tier,
-        min: usize,
-        policy: PolicyFn,
+        rate: impl Fn(Tier, usize) -> Policy,
         access: impl Fn(TreeId) -> Result<R>,
     ) -> Result<R> {
         #[derive(Clone, Copy)]
@@ -256,10 +254,10 @@ impl<'a> Trees<'a> {
             let i = TreeId((s + off) as usize % self.entries.len());
 
             let tree = self.entries[i.0].load();
-            if tree.reserved() || tree.free() < min || tree.free() == TREE_FRAMES {
+            if tree.reserved() {
                 continue;
             }
-            match policy(tier, tree.tier(), tree.free()) {
+            match rate(tree.tier(), tree.free()) {
                 Policy::Match(u8::MAX) => match access(i) {
                     Err(Error::Memory) => {}
                     r => return r,

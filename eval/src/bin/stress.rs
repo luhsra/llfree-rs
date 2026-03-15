@@ -127,7 +127,7 @@ fn main() {
 
             barrier.wait();
 
-            while let Ok((_, page)) = alloc.get(None, request(order, t)) {
+            while let Ok((page, _)) = alloc.get(None, request(order, t)) {
                 pages.push(page);
             }
 
@@ -142,7 +142,7 @@ fn main() {
                         alloc.put(page, request(order, t)).unwrap();
                     } else {
                         match alloc.get(None, request(order, t)) {
-                            Ok((_, page)) => pages.push(page),
+                            Ok((page, _)) => pages.push(page),
                             Err(Error::Memory) => break,
                             Err(e) => panic!("{e:?}"),
                         }

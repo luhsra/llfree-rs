@@ -157,7 +157,7 @@ impl<'a, T: Alloc<'a>, F: RequestFn> DynAlloc for BenchAlloc<'a, T, F> {
     fn get(&self, core: usize, order: usize) -> Result<FrameId> {
         self.alloc
             .get(None, (self.request)(order, core))
-            .map(|(_, f)| f)
+            .map(|(f, _)| f)
     }
     fn put(&self, core: usize, frame: FrameId, order: usize) -> Result<()> {
         self.alloc.put(frame, (self.request)(order, core))

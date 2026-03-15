@@ -113,14 +113,14 @@ impl<'a> Alloc<'a> for LLC {
         ret.ok().map(|_| LLC { raw, ms: m })
     }
 
-    fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(Tier, FrameId)> {
+    fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(FrameId, Tier)> {
         let frame = match frame {
             Some(f) => bindings::ll_some(f.0 as _),
             None => bindings::ll_none(),
         };
         let ret = unsafe { bindings::llfree_get(self.raw.get().cast(), frame, request.into()) };
         let f = ret.ok()?;
-        Ok((Tier(ret.tier()), FrameId(f as _)))
+        Ok((FrameId(f as _), Tier(ret.tier())))
     }
 
     fn put(&self, frame: FrameId, request: Request) -> Result<()> {

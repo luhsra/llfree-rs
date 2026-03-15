@@ -30,18 +30,23 @@ macro_rules! ensure {
 
 /// This allocator splits its memory range into chunks.
 /// These chunks are reserved by CPUs to reduce sharing.
-/// Allocations/frees within the chunk are handed over to the
+/// Allocations/frees within a chunk are handed over to the
 /// lower allocator.
-/// These chunks are, due to the inner workins of the lower allocator,
+/// These chunks are, due to the inner workings of the lower allocator,
 /// called *trees*.
+/// This allocator stores these tree entries in a [packed array][Trees].
 ///
-/// This allocator stores the tree entries in a packed array.
-/// For reservations, the allocator simply scans the array for free entries,
-/// while prioritizing partially empty already fragmented chunks to avoid
-/// further fragmentation.
+/// Additionally, the allocator manages user-provided [tiers][Tier].
+/// Tiers are used to separate trees into different groups.
+/// The users also has to provide a [policy function][PolicyFn] that defines
+/// how to access the tiers.
 ///
-/// This volatile shared metadata is rebuild on boot from
-/// the persistent metadata of the lower allocator.
+/// Each tier can have a different number of [local reservations][Locals],
+/// which are used to reduce contention on the tree array.
+///
+/// If an allocation for a certain tier cannot be fulfilled,
+/// the allocator falls back on stealing from other tiers or
+/// demoting the request to a lower tier, depending on the [policy][Policy].
 #[repr(align(64))]
 pub struct LLFree<'a> {
     /// CPU local data
@@ -51,7 +56,7 @@ pub struct LLFree<'a> {
     locals: Locals<'a>,
     /// Metadata of the lower alloc
     pub lower: Lower<'a>,
-    /// Manages the allocators trees
+    /// Manages the allocator's trees.
     pub trees: Trees<'a>,
     /// Policy for accessing tree tiers
     policy: PolicyFn,
@@ -83,7 +88,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         // Create lower allocator
         let lower = Lower::new(frames, init, meta.lower)?;
 
-        // Init per-cpu data
+        // Initialize per-CPU data
         let locals = Locals::new(meta.local, tiering)?;
 
         // Init tree array
@@ -120,7 +125,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
     }
 
-    fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(Tier, FrameId)> {
+    fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(FrameId, Tier)> {
         self.check(frame.unwrap_or(FrameId(0)), &request)?;
         // Different starting points for each core
 
@@ -340,7 +345,7 @@ impl LLFree<'_> {
         i: TreeId,
         local: usize,
         check: impl Fn(Tier, usize) -> Option<Tier>,
-    ) -> Result<(Tier, FrameId)> {
+    ) -> Result<(FrameId, Tier)> {
         if let Some((free, target_tier)) = self.trees.reserve(i, check) {
             let tier_len = self.locals.tier_locals(target_tier).expect("Invalid tier");
             // Target might have less locals or no
@@ -362,7 +367,7 @@ impl LLFree<'_> {
                         self.trees
                             .unreserve(row.as_tree(), free, target_tier, self.policy);
                     }
-                    Ok((target_tier, frame))
+                    Ok((frame, target_tier))
                 }
                 Err(e) => {
                     self.trees.unreserve(i, free, target_tier, self.policy);
@@ -380,10 +385,10 @@ impl LLFree<'_> {
         order: usize,
         frame: Option<FrameId>,
         check: impl Fn(Tier, usize) -> Option<Tier>,
-    ) -> Result<(Tier, FrameId)> {
+    ) -> Result<(FrameId, Tier)> {
         if let Some(tier) = self.trees.get(i, 1 << order, check) {
             match self.lower.get(i.as_row(), order, frame) {
-                Ok(frame) => Ok((tier, frame)),
+                Ok(frame) => Ok((frame, tier)),
                 Err(e) => {
                     self.trees.put(i, 1 << order, self.policy);
                     Err(e)
@@ -394,7 +399,7 @@ impl LLFree<'_> {
         }
     }
 
-    fn get_at(&self, frame: FrameId, request: Request) -> Result<(Tier, FrameId)> {
+    fn get_at(&self, frame: FrameId, request: Request) -> Result<(FrameId, Tier)> {
         // Try local reservation first
         if let Some(local) = request.local {
             let mut start_idx = TreeId(0);
@@ -437,7 +442,7 @@ impl LLFree<'_> {
         self.demote_local(&request, Some(frame))
     }
 
-    fn get_matching(&self, request: &Request, start_idx: &mut TreeId) -> Result<(Tier, FrameId)> {
+    fn get_matching(&self, request: &Request, start_idx: &mut TreeId) -> Result<(FrameId, Tier)> {
         if let Some(local) = request.local
             && self
                 .locals
@@ -463,7 +468,7 @@ impl LLFree<'_> {
         order: usize,
         tier: Tier,
         start_idx: &mut TreeId,
-    ) -> Result<(Tier, FrameId)> {
+    ) -> Result<(FrameId, Tier)> {
         let check = |t: Tier, f: usize| {
             if f < (1 << order) {
                 return None;
@@ -486,7 +491,7 @@ impl LLFree<'_> {
         local: usize,
         frame: Option<FrameId>,
         start_idx: &mut TreeId,
-    ) -> core::result::Result<(Tier, FrameId), Error> {
+    ) -> core::result::Result<(FrameId, Tier), Error> {
         match self
             .locals
             .get(tier, local, frame.map(FrameId::as_tree), 1 << order)
@@ -496,7 +501,7 @@ impl LLFree<'_> {
                     if row != frame.as_row() {
                         self.locals.set_start(tier, local, frame.as_row());
                     }
-                    Ok((tier, frame))
+                    Ok((frame, tier))
                 }
                 Err(e) => {
                     self.trees.put(row.as_tree(), 1 << order, self.policy);
@@ -530,44 +535,48 @@ impl LLFree<'_> {
         tier: Tier,
         local: usize,
         start: TreeId,
-    ) -> Result<(Tier, FrameId)> {
-        // Try reserve new tree
+    ) -> Result<(FrameId, Tier)> {
+        // Rate how if and how good the tree fulfills the allocation
+        let rate = |t, free, range: Range<usize>| {
+            if range.contains(&free) {
+                (self.policy)(tier, t, free)
+            } else {
+                Policy::Invalid
+            }
+        };
+
+        // Try to reserve a new tree
         let reserve = |i: TreeId, range: Range<usize>| {
             let range = (1 << order).max(range.start)..range.end;
             let check = |t: Tier, f: usize| {
-                if !range.contains(&f) {
-                    return None;
-                }
-                match (self.policy)(tier, t, f) {
+                match rate(t, f, range.clone()) {
                     Policy::Match(_) => Some(tier),
                     // allow demotion if tree is empty
                     Policy::Demote if f == TREE_FRAMES => Some(tier),
-                    _p => {
-                        // warn!("reservation denied {_p:?} {i} {t:?} {f} in {range:?}");
-                        None
-                    }
+                    _p => None,
                 }
             };
             self.get_reserve(order, i, local, check)
         };
 
         const CL: usize = align_of::<Align>() / 4;
+
         // Why does 16 work so well? Are there better values?
         let near = (self.trees.len() / 16).max(CL / 4);
+
         // Why does align twice near help?
-        // This leaves some space between starting points...
+        // It leaves some space between starting points...
         let start = TreeId(align_down(start.0, (2 * near).next_power_of_two()));
 
         // Find best fit in fragmented trees
         if order < HUGE_ORDER {
-            let range = 0..TREE_FRAMES;
+            let range = 1..TREE_FRAMES;
+
             match self.trees.search_best::<3, _>(
                 start,
                 1,
                 near,
-                tier,
-                1 << order,
-                self.policy,
+                |t, f| rate(t, f, range.clone()),
                 |i| reserve(i, range.clone()),
             ) {
                 Err(Error::Memory) => {}
@@ -577,11 +586,11 @@ impl LLFree<'_> {
 
         // Any
         self.trees
-            .search(start, 0, self.trees.len(), |i| reserve(i, 0..usize::MAX))
+            .search(start, 0, self.trees.len(), |i| reserve(i, 1..usize::MAX))
     }
 
     /// Allocate with demotion if needed, but without downgrading the request
-    fn get_demoting(&self, request: &Request, start_idx: &mut TreeId) -> Result<(Tier, FrameId)> {
+    fn get_demoting(&self, request: &Request, start_idx: &mut TreeId) -> Result<(FrameId, Tier)> {
         let check = |tier, free| {
             if free < request.frames() {
                 return None;
@@ -617,7 +626,7 @@ impl LLFree<'_> {
     }
 
     /// Steal from a local reservation and possibly demote or drain it
-    fn demote_local(&self, request: &Request, frame: Option<FrameId>) -> Result<(Tier, FrameId)> {
+    fn demote_local(&self, request: &Request, frame: Option<FrameId>) -> Result<(FrameId, Tier)> {
         if let Some((row, old)) = self.locals.demote_any(
             request.tier,
             request.local,
@@ -634,13 +643,13 @@ impl LLFree<'_> {
                     // undo counter decrement
                     self.trees.put(row.as_tree(), request.frames(), self.policy);
                 }
-                r => return r.map(|frame| (request.tier, frame)),
+                r => return r.map(|frame| (frame, request.tier)),
             }
         }
         Err(Error::Memory)
     }
 
-    fn steal_local(&self, request: &Request, frame: Option<FrameId>) -> Result<(Tier, FrameId)> {
+    fn steal_local(&self, request: &Request, frame: Option<FrameId>) -> Result<(FrameId, Tier)> {
         if let Some((row, tier)) = self.locals.steal_any(
             request.tier,
             request.local,
@@ -653,7 +662,7 @@ impl LLFree<'_> {
                     self.trees
                         .put(row.as_tree(), 1 << request.order, self.policy);
                 }
-                r => return r.map(|frame| (tier, frame)),
+                r => return r.map(|frame| (frame, tier)),
             }
         }
         Err(Error::Memory)

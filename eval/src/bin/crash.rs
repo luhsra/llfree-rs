@@ -116,7 +116,7 @@ fn execute(
 
         for (i, page) in data.iter_mut().enumerate() {
             *idx = FrameId(i);
-            *page = alloc.get(None, request(order, t)).unwrap().1;
+            *page = alloc.get(None, request(order, t)).unwrap().0;
         }
 
         warn!("repeat");
@@ -128,7 +128,7 @@ fn execute(
             *idx = FrameId(i);
 
             alloc.put(data[i], request(order, t)).unwrap();
-            data[i] = alloc.get(None, request(order, t)).unwrap().1;
+            data[i] = alloc.get(None, request(order, t)).unwrap().0;
         }
     });
 }

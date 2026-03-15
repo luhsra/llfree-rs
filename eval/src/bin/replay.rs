@@ -263,7 +263,7 @@ fn main() {
                             t,
                             entry.pid() as usize,
                         );
-                        let (_, frame) = alloc.get(None, flags).unwrap();
+                        let (frame, _) = alloc.get(None, flags).unwrap();
                         allocated[entry.pfn() as usize] =
                             Allocation::with(frame, entry.order() as _);
                         continue;

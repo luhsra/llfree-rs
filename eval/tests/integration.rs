@@ -7,7 +7,7 @@ use std::vec::Vec;
 
 #[cfg(all(feature = "llc", not(feature = "llzig")))]
 use llfree_eval::LLC;
-#[cfg(all(feature = "llzig", not(feature = "llc")))]
+#[cfg(all(feature = "llzig"))]
 use llfree_eval::LLZig;
 use llfree_eval::{mmap, thread};
 use log::{error, warn};
@@ -92,10 +92,10 @@ fn minimal() {
     assert_eq!(alloc.tree_stats().free_frames, alloc.frames());
 
     warn!("get >>>");
-    let (_, frame1) = alloc.get(None, request(0, 0)).unwrap();
+    let (frame1, _) = alloc.get(None, request(0, 0)).unwrap();
     warn!("get <<<");
     warn!("get >>>");
-    let (_, frame2) = alloc.get(None, request(0, 0)).unwrap();
+    let (frame2, _) = alloc.get(None, request(0, 0)).unwrap();
     warn!("get <<<");
 
     warn!("put >>>");
@@ -120,7 +120,7 @@ fn simple() {
     assert_eq!(alloc.tree_stats().free_frames, alloc.frames());
 
     warn!("start alloc...");
-    let (_, small) = alloc.get(None, request(0, 0)).unwrap();
+    let (small, _) = alloc.get(None, request(0, 0)).unwrap();
 
     assert_eq!(
         alloc.frames() - alloc.tree_stats().free_frames,
@@ -133,7 +133,7 @@ fn simple() {
     let mut frames = Vec::new();
     loop {
         match alloc.get(None, request(0, 0)) {
-            Ok((_, frame)) => frames.push(frame),
+            Ok((frame, _)) => frames.push(frame),
             Err(Error::Memory) => break,
             Err(e) => panic!("{e:?}"),
         }
@@ -176,7 +176,7 @@ fn simple() {
 
     // Realloc
     for frame in &mut frames[..FREE_NUM] {
-        *frame = alloc.get(None, request(0, 0)).unwrap().1;
+        *frame = alloc.get(None, request(0, 0)).unwrap().0;
     }
 
     warn!("free...");
@@ -208,7 +208,7 @@ fn alloc_at() {
         .unwrap();
 
     // Test normal allocation
-    let (_, frame) = alloc.get(None, request(0, 0)).unwrap();
+    let (frame, _) = alloc.get(None, request(0, 0)).unwrap();
     assert!(frame != FrameId(1) && frame != FrameId(2) && frame != FrameId(HUGE_FRAMES));
 
     assert_eq!(
@@ -241,7 +241,7 @@ fn rand() {
     const ALLOCS: usize = MEM_SIZE / Frame::SIZE / 2;
     let mut frames = Vec::with_capacity(ALLOCS);
     for _ in 0..ALLOCS {
-        frames.push(alloc.get(None, request(0, 0)).unwrap().1);
+        frames.push(alloc.get(None, request(0, 0)).unwrap().0);
     }
     warn!("allocated {}", frames.len());
 
@@ -266,7 +266,7 @@ fn rand() {
     for _ in 0..frames.len() {
         let i = rng.range(0..frames.len() as _) as usize;
         alloc.put(frames[i], request(0, 0)).unwrap();
-        frames[i] = alloc.get(None, request(0, 0)).unwrap().1;
+        frames[i] = alloc.get(None, request(0, 0)).unwrap().0;
     }
 
     warn!("check...");
@@ -309,7 +309,7 @@ fn multirand() {
         warn!("start alloc...");
         let mut frames = Vec::with_capacity(ALLOCS);
         for _ in 0..ALLOCS {
-            frames.push(alloc.get(None, request(0, t)).unwrap().1);
+            frames.push(alloc.get(None, request(0, t)).unwrap().0);
         }
         warn!("allocated {}", frames.len());
 
@@ -329,7 +329,7 @@ fn multirand() {
         for _ in 0..frames.len() {
             let i = rng.range(0..frames.len() as _) as usize;
             alloc.put(frames[i], request(0, t)).unwrap();
-            frames[i] = alloc.get(None, request(0, t)).unwrap().1;
+            frames[i] = alloc.get(None, request(0, t)).unwrap().0;
         }
 
         warn!("check...");
@@ -379,7 +379,7 @@ fn parallel_alloc() {
             barrier.wait();
 
             for frame in frames {
-                *frame = alloc.get(None, request(0, t)).unwrap().1;
+                *frame = alloc.get(None, request(0, t)).unwrap().0;
             }
         },
     );
@@ -414,7 +414,7 @@ fn alloc_all() {
 
     loop {
         match alloc.get(None, request(0, 0)) {
-            Ok((_, frame)) => frames.push(frame),
+            Ok((frame, _)) => frames.push(frame),
             Err(Error::Memory) => break,
             Err(e) => panic!("{e:?}"),
         }
@@ -459,7 +459,7 @@ fn parallel_alloc_all() {
 
         loop {
             match alloc.get(None, request(0, t)) {
-                Ok((_, frame)) => frames.push(frame),
+                Ok((frame, _)) => frames.push(frame),
                 Err(Error::Memory) => break,
                 Err(e) => panic!("{e:?}"),
             }
@@ -507,7 +507,7 @@ fn less_mem() {
             barrier.wait();
 
             for (i, frame) in frames.iter_mut().enumerate() {
-                if let Ok((_, f)) = alloc.get(None, request(0, t)) {
+                if let Ok((f, _)) = alloc.get(None, request(0, t)) {
                     *frame = f;
                 } else {
                     error!("OOM: {i}: {alloc:#?}");
@@ -571,7 +571,7 @@ fn parallel_huge_alloc() {
             barrier.wait();
 
             for frame in frames {
-                *frame = alloc.get(None, request(HUGE_ORDER, t)).unwrap().1;
+                *frame = alloc.get(None, request(HUGE_ORDER, t)).unwrap().0;
             }
         },
     );
@@ -617,7 +617,7 @@ fn parallel_free() {
         let mut frames = vec![FrameId(0); ALLOC_PER_THREAD];
 
         for frame in &mut frames {
-            *frame = alloc.get(None, request(0, t)).unwrap().1;
+            *frame = alloc.get(None, request(0, t)).unwrap().0;
         }
 
         let mut rng = WyRand::new(t as _);
@@ -647,7 +647,7 @@ fn alloc_free() {
     thread::pin(0);
     let mut frames = vec![FrameId(0); ALLOC_PER_THREAD];
     for frame in &mut frames {
-        *frame = alloc.get(None, request(0, 0)).unwrap().1;
+        *frame = alloc.get(None, request(0, 0)).unwrap().0;
     }
     alloc.validate();
 
@@ -668,7 +668,7 @@ fn alloc_free() {
 
         // Simultaneously alloc on first thread
         for frame in &mut frames {
-            *frame = alloc.get(None, request(0, 0)).unwrap().1;
+            *frame = alloc.get(None, request(0, 0)).unwrap().0;
         }
     });
 
@@ -763,7 +763,7 @@ fn different_orders() {
         let mut errors = 0;
         for (order, frame) in &mut frames {
             *frame = match alloc.get(None, request(*order, t)) {
-                Ok((_, frame)) => frame,
+                Ok((frame, _)) => frame,
                 Err(e) => {
                     // Due to race conditions one might fail, but no more!
                     error!("{e:?} o={order} on core {t}");
@@ -830,9 +830,9 @@ fn fragmentation_retry() {
     let mut frames = Vec::with_capacity(TREE_FRAMES / 2);
     for i in 0..TREE_FRAMES {
         if i % 2 == 0 {
-            frames.push(alloc.get(None, request(0, 0)).unwrap().1);
+            frames.push(alloc.get(None, request(0, 0)).unwrap().0);
         } else {
-            alloc.get(None, request(0, 0)).unwrap().1;
+            alloc.get(None, request(0, 0)).unwrap().0;
         }
     }
     // Free every second one -> fragmentation
@@ -892,7 +892,7 @@ fn stress() {
             while frames.len() != target {
                 if frames.len() < target {
                     match alloc.get(None, request(0, t)) {
-                        Ok((_, frame)) => frames.push(frame),
+                        Ok((frame, _)) => frames.push(frame),
                         Err(Error::Memory) => break,
                         Err(e) => panic!("{e:?}"),
                     }
