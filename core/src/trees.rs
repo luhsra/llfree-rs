@@ -381,7 +381,7 @@ impl Tree {
         assert!(free <= TREE_FRAMES, "{free}");
 
         // Check if transition is allowed by policy
-        if free == TREE_FRAMES && policy(self.tier(), self.tier(), free) != Policy::Invalid {
+        if free == TREE_FRAMES && policy(self.tier(), default, free) != Policy::Invalid {
             self.set_tier(default);
         }
         self.with_free(free)
