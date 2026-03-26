@@ -18,11 +18,13 @@ use llfree::wrapper::NvmAlloc;
 use llfree::*;
 
 #[cfg(all(feature = "llc", not(feature = "llzig")))]
-type Allocator = TestAlloc<LLC>;
+type AllocImpl = LLC;
 #[cfg(feature = "llzig")]
-type Allocator = TestAlloc<LLZig>;
+type AllocImpl = LLZig;
 #[cfg(not(any(feature = "llc", feature = "llzig")))]
-type Allocator = TestAlloc<LLFree<'static>>;
+type AllocImpl = LLFree<'static>;
+
+type Allocator = TestAlloc<AllocImpl>;
 
 pub struct TestAlloc<A: Alloc<'static>>(ManuallyDrop<A>);
 
@@ -33,16 +35,8 @@ impl<A: Alloc<'static>> TestAlloc<A> {
         init: Init,
     ) -> Result<(Self, impl Fn(usize, usize) -> Request)> {
         let (tiering, request) = Tiering::simple(cores);
-        let MetaSize {
-            local,
-            trees,
-            lower,
-        } = A::metadata_size(&tiering, frames);
-        let meta = MetaData {
-            local: aligned_buf(local),
-            trees: aligned_buf(trees),
-            lower: aligned_buf(lower),
-        };
+        let ms = A::metadata_size(&tiering, frames);
+        let meta = MetaData::alloc(ms);
         Ok((
             Self(ManuallyDrop::new(A::new(frames, init, &tiering, meta)?)),
             request,
@@ -907,6 +901,34 @@ fn stress() {
     assert_eq!(
         allocated.into_iter().sum::<usize>(),
         alloc.frames() - alloc.tree_stats().free_frames
+    );
+    alloc.validate();
+}
+
+#[test]
+fn movable_tiers() {
+    logging();
+
+    let cores = 1;
+    let frames = 16 * TREE_FRAMES;
+    let (tiering, request) = Tiering::movable(cores);
+    let ms = AllocImpl::metadata_size(&tiering, frames);
+    let meta = MetaData::alloc(ms);
+    let alloc = AllocImpl::new(frames, Init::FreeAll, &tiering, meta).unwrap();
+
+    let mut pages = Vec::with_capacity(frames);
+    for i in 0..frames {
+        let movable = i % 3 == 0;
+        let (frame, _tier) = alloc.get(None, request(0, 0, movable)).unwrap();
+        pages.push(frame);
+    }
+
+    assert!(alloc.get(None, request(0, 0, false)).is_err());
+
+    assert_eq!(
+        alloc.frames() - alloc.tree_stats().free_frames,
+        frames,
+        "{alloc:?}"
     );
     alloc.validate();
 }

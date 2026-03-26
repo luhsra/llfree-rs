@@ -39,6 +39,7 @@ impl<'a> Locals<'a> {
         }
     }
 
+    /// Initialize the locals from a buffer
     pub fn new(buffer: &'a mut [u8], tiering: &Tiering) -> Result<Self, Error> {
         if buffer.len() < Self::metadata_size(tiering) {
             return Err(Error::Initialization);
@@ -56,10 +57,12 @@ impl<'a> Locals<'a> {
         Ok(Self { tiers })
     }
 
+    /// Get the number of locals for a tier, or None if the tier is not configured
     pub fn tier_locals(&self, tier: Tier) -> Option<usize> {
         self.tiers[tier.0 as usize].map(|local| local.len())
     }
 
+    /// Try allocating from a local, returning the row id if successful, or the current reservation if not
     pub fn get(
         &self,
         tier: Tier,

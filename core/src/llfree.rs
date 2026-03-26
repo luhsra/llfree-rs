@@ -420,14 +420,14 @@ impl LLFree<'_> {
 
         // Fallback to global reservation
         match self.get_global(frame.as_tree(), request.order, Some(frame), |t, f| {
-            if f < request.frames() {
-                return None;
+            if f >= request.frames() {
+                return match (self.policy)(request.tier, t, f) {
+                    Policy::Match(_) | Policy::Steal => Some(t),
+                    Policy::Demote => Some(request.tier),
+                    Policy::Invalid => None,
+                };
             }
-            match (self.policy)(request.tier, t, f) {
-                Policy::Match(_) | Policy::Steal => Some(t),
-                Policy::Demote => Some(request.tier),
-                Policy::Invalid => None,
-            }
+            None
         }) {
             Err(Error::Memory) => {} // continue
             r => return r,
@@ -459,29 +459,16 @@ impl LLFree<'_> {
             // Try reserve new tree if no specific frame is requested
             self.get_matching_reserve(request.order, request.tier, local, *start_idx)
         } else {
-            self.get_matching_global(request.order, request.tier, start_idx)
+            let check = |t: Tier, f: usize| {
+                (f >= request.frames()
+                    && matches!((self.policy)(request.tier, t, f), Policy::Match(_)))
+                .then_some(t)
+            };
+            // Any frame
+            self.trees.search(*start_idx, 0, self.trees.len(), |i| {
+                self.get_global(i, request.order, None, check)
+            })
         }
-    }
-
-    fn get_matching_global(
-        &self,
-        order: usize,
-        tier: Tier,
-        start_idx: &mut TreeId,
-    ) -> Result<(FrameId, Tier)> {
-        let check = |t: Tier, f: usize| {
-            if f < (1 << order) {
-                return None;
-            }
-            match (self.policy)(tier, t, f) {
-                Policy::Match(_) => Some(t),
-                _ => None,
-            }
-        };
-        // Any frame
-        self.trees.search(*start_idx, 0, self.trees.len(), |i| {
-            self.get_global(i, order, None, check)
-        })
     }
 
     fn get_matching_local(
