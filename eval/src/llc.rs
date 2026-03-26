@@ -1,13 +1,13 @@
 use core::cell::UnsafeCell;
-use core::ffi::{CStr, c_char, c_void};
+use core::ffi::{c_char, c_void, CStr};
 use core::mem::align_of;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use core::{fmt, slice};
 
 use llfree::util::Align;
 use llfree::{
-    Alloc, FrameId, HUGE_ORDER, Init, MetaData, MetaSize, Policy, PolicyFn, Request, Result, Stats,
-    TREE_FRAMES, TREE_HUGE, Tier, TierStats, Tiering, TreeStats,
+    Alloc, FrameId, Init, MetaData, MetaSize, Policy, PolicyFn, Request, Result, Stats, Tier,
+    TierStats, Tiering, TreeStats, HUGE_ORDER, TREE_FRAMES, TREE_HUGE,
 };
 
 /// Global storage for the Rust policy function pointer.
@@ -115,23 +115,33 @@ impl<'a> Alloc<'a> for LLC {
 
     fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(FrameId, Tier)> {
         let frame = match frame {
-            Some(f) => bindings::ll_some(f.0 as _),
-            None => bindings::ll_none(),
+            Some(f) => bindings::frame_id_some(bindings::frame_id(f.0 as _)),
+            None => bindings::frame_id_none(),
         };
         let ret = unsafe { bindings::llfree_get(self.raw.get().cast(), frame, request.into()) };
-        let f = ret.ok()?;
-        Ok((FrameId(f as _), Tier(ret.tier())))
+        let f = ret.ok()?.value;
+        Ok((FrameId(f as _), Tier(ret.tier)))
     }
 
     fn put(&self, frame: FrameId, request: Request) -> Result<()> {
-        let ret =
-            unsafe { bindings::llfree_put(self.raw.get().cast(), frame.0 as _, request.into()) };
+        let ret = unsafe {
+            bindings::llfree_put(
+                self.raw.get().cast(),
+                bindings::frame_id(frame.0 as _),
+                request.into(),
+            )
+        };
         ret.ok().map(|_| ())
     }
 
     fn is_free(&self, frame: FrameId, order: usize) -> bool {
-        let stats =
-            unsafe { bindings::llfree_stats_at(self.raw.get().cast(), frame.0 as _, order as _) };
+        let stats = unsafe {
+            bindings::llfree_stats_at(
+                self.raw.get().cast(),
+                bindings::frame_id(frame.0 as _),
+                order as _,
+            )
+        };
         order == 0 && stats.free_frames == 1
             || order == HUGE_ORDER && stats.free_huge == 1
             || order == TREE_FRAMES.ilog2() as usize && stats.free_huge == TREE_HUGE
@@ -173,7 +183,14 @@ impl<'a> Alloc<'a> for LLC {
     }
 
     fn stats_at(&self, frame: FrameId, order: usize) -> Stats {
-        unsafe { bindings::llfree_stats_at(self.raw.get().cast(), frame.0 as _, order as _).into() }
+        unsafe {
+            bindings::llfree_stats_at(
+                self.raw.get().cast(),
+                bindings::frame_id(frame.0 as _),
+                order as _,
+            )
+            .into()
+        }
     }
 
     fn validate(&self) {
@@ -233,9 +250,9 @@ mod bindings {
     }
 
     impl llfree_result_t {
-        pub fn ok(self) -> super::Result<u64> {
-            match self.error() {
-                LLFREE_ERR_OK => Ok(self.frame()),
+        pub fn ok(self) -> super::Result<frame_id_t> {
+            match self.error {
+                LLFREE_ERR_OK => Ok(self.frame),
                 LLFREE_ERR_MEMORY => Err(Error::Memory),
                 LLFREE_ERR_RETRY => Err(Error::Retry),
                 LLFREE_ERR_ADDRESS => Err(Error::Address),
@@ -274,16 +291,21 @@ mod bindings {
         c
     }
 
-    pub fn ll_none() -> ll_optional {
-        ll_optional {
-            _bitfield_align_1: [0; 0],
-            _bitfield_1: ll_optional::new_bitfield_1(false, 0),
+    pub fn frame_id(value: u64) -> frame_id_t {
+        frame_id_t { value }
+    }
+
+    pub fn frame_id_none() -> frame_id_optional_t {
+        frame_id_optional_t {
+            present: false,
+            value: frame_id(0),
         }
     }
-    pub fn ll_some(value: usize) -> ll_optional {
-        ll_optional {
-            _bitfield_align_1: [0; 0],
-            _bitfield_1: ll_optional::new_bitfield_1(true, value as _),
+
+    pub fn frame_id_some(value: frame_id_t) -> frame_id_optional_t {
+        frame_id_optional_t {
+            present: true,
+            value,
         }
     }
 }
