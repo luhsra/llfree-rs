@@ -263,6 +263,7 @@ mod test {
 
         let f = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open("memfile")

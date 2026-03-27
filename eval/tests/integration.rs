@@ -7,7 +7,7 @@ use std::vec::Vec;
 
 #[cfg(all(feature = "llc", not(feature = "llzig")))]
 use llfree_eval::LLC;
-#[cfg(all(feature = "llzig"))]
+#[cfg(feature = "llzig")]
 use llfree_eval::LLZig;
 use llfree_eval::{mmap, thread};
 use log::{error, warn};
@@ -828,7 +828,7 @@ fn fragmentation_retry() {
         if i % 2 == 0 {
             frames.push(alloc.get(None, request(0, 0)).unwrap().0);
         } else {
-            alloc.get(None, request(0, 0)).unwrap().0;
+            alloc.get(None, request(0, 0)).unwrap();
         }
     }
     // Free every second one -> fragmentation
