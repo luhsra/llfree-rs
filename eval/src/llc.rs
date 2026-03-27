@@ -1,13 +1,13 @@
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_void, CStr};
+use core::ffi::{CStr, c_char, c_void};
 use core::mem::align_of;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use core::{fmt, slice};
 
 use llfree::util::Align;
 use llfree::{
-    Alloc, FrameId, Init, MetaData, MetaSize, Policy, PolicyFn, Request, Result, Stats, Tier,
-    TierStats, Tiering, TreeStats, HUGE_ORDER, TREE_FRAMES, TREE_HUGE,
+    Alloc, FrameId, HUGE_ORDER, Init, MetaData, MetaSize, Policy, PolicyFn, Request, Result, Stats,
+    TREE_FRAMES, TREE_HUGE, Tier, TierStats, Tiering, TreeStats,
 };
 
 /// Global storage for the Rust policy function pointer.
@@ -114,34 +114,21 @@ impl<'a> Alloc<'a> for LLC {
     }
 
     fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(FrameId, Tier)> {
-        let frame = match frame {
-            Some(f) => bindings::frame_id_some(bindings::frame_id(f.0 as _)),
-            None => bindings::frame_id_none(),
-        };
-        let ret = unsafe { bindings::llfree_get(self.raw.get().cast(), frame, request.into()) };
+        let ret =
+            unsafe { bindings::llfree_get(self.raw.get().cast(), frame.into(), request.into()) };
         let f = ret.ok()?.value;
         Ok((FrameId(f as _), Tier(ret.tier)))
     }
 
     fn put(&self, frame: FrameId, request: Request) -> Result<()> {
-        let ret = unsafe {
-            bindings::llfree_put(
-                self.raw.get().cast(),
-                bindings::frame_id(frame.0 as _),
-                request.into(),
-            )
-        };
+        let ret =
+            unsafe { bindings::llfree_put(self.raw.get().cast(), frame.into(), request.into()) };
         ret.ok().map(|_| ())
     }
 
     fn is_free(&self, frame: FrameId, order: usize) -> bool {
-        let stats = unsafe {
-            bindings::llfree_stats_at(
-                self.raw.get().cast(),
-                bindings::frame_id(frame.0 as _),
-                order as _,
-            )
-        };
+        let stats =
+            unsafe { bindings::llfree_stats_at(self.raw.get().cast(), frame.into(), order as _) };
         order == 0 && stats.free_frames == 1
             || order == HUGE_ORDER && stats.free_huge == 1
             || order == TREE_FRAMES.ilog2() as usize && stats.free_huge == TREE_HUGE
@@ -183,13 +170,14 @@ impl<'a> Alloc<'a> for LLC {
     }
 
     fn stats_at(&self, frame: FrameId, order: usize) -> Stats {
+        unsafe { bindings::llfree_stats_at(self.raw.get().cast(), frame.into(), order as _).into() }
+    }
+
+    fn change_tree(&self, matcher: llfree::TreeMatch, change: llfree::TreeChange) -> Result<()> {
         unsafe {
-            bindings::llfree_stats_at(
-                self.raw.get().cast(),
-                bindings::frame_id(frame.0 as _),
-                order as _,
-            )
-            .into()
+            bindings::llfree_change_tree(self.raw.get().cast(), matcher.into(), change.into())
+                .ok()
+                .map(|_| ())
         }
     }
 
@@ -232,7 +220,7 @@ mod bindings {
 
     use core::sync::atomic::Ordering;
 
-    use ::llfree::Error;
+    use ::llfree::{Error, FrameId, TreeChange, TreeId, TreeMatch, TreeOperation};
 
     include!(concat!(env!("OUT_DIR"), "/llc.rs"));
 
@@ -242,15 +230,21 @@ mod bindings {
                 order: req.order as _,
                 tier: req.tier.0,
                 local: match req.local {
-                    Some(l) => l,
-                    None => LLFREE_LOCAL_NONE as _,
+                    Some(l) => ll_optional {
+                        present: true,
+                        value: l,
+                    },
+                    None => ll_optional {
+                        present: false,
+                        value: 0,
+                    },
                 },
             }
         }
     }
 
-    impl llfree_result_t {
-        pub fn ok(self) -> super::Result<frame_id_t> {
+    impl llfree_result {
+        pub fn ok(self) -> super::Result<frame_id> {
             match self.error {
                 LLFREE_ERR_OK => Ok(self.frame),
                 LLFREE_ERR_MEMORY => Err(Error::Memory),
@@ -291,21 +285,81 @@ mod bindings {
         c
     }
 
-    pub fn frame_id(value: u64) -> frame_id_t {
-        frame_id_t { value }
+    impl From<FrameId> for frame_id {
+        fn from(value: FrameId) -> Self {
+            frame_id {
+                value: value.0 as _,
+            }
+        }
     }
-
-    pub fn frame_id_none() -> frame_id_optional_t {
-        frame_id_optional_t {
-            present: false,
-            value: frame_id(0),
+    impl From<frame_id> for FrameId {
+        fn from(value: frame_id) -> Self {
+            FrameId(value.value as _)
         }
     }
 
-    pub fn frame_id_some(value: frame_id_t) -> frame_id_optional_t {
-        frame_id_optional_t {
-            present: true,
-            value,
+    impl From<frame_id_optional> for Option<FrameId> {
+        fn from(value: frame_id_optional) -> Self {
+            value.present.then_some(value.value.into())
+        }
+    }
+    impl From<Option<FrameId>> for frame_id_optional {
+        fn from(value: Option<FrameId>) -> Self {
+            match value {
+                Some(f) => frame_id_optional {
+                    present: true,
+                    value: f.into(),
+                },
+                None => frame_id_optional {
+                    present: false,
+                    value: FrameId(0).into(),
+                },
+            }
+        }
+    }
+
+    impl From<TreeId> for tree_id {
+        fn from(value: TreeId) -> Self {
+            tree_id {
+                value: value.0 as _,
+            }
+        }
+    }
+    impl From<Option<TreeId>> for tree_id_optional {
+        fn from(value: Option<TreeId>) -> Self {
+            match value {
+                Some(t) => tree_id_optional {
+                    present: true,
+                    value: t.into(),
+                },
+                None => tree_id_optional {
+                    present: false,
+                    value: TreeId(0).into(),
+                },
+            }
+        }
+    }
+
+    impl From<TreeMatch> for llfree_tree_match {
+        fn from(value: TreeMatch) -> Self {
+            Self {
+                id: value.id.into(),
+                tier: value.tier.map_or(LLFREE_TIER_NONE, |t| t.0),
+                free: value.free,
+            }
+        }
+    }
+
+    impl From<TreeChange> for llfree_tree_change {
+        fn from(value: TreeChange) -> Self {
+            Self {
+                tier: value.tier.map_or(LLFREE_TIER_NONE, |t| t.0),
+                operation: match value.operation {
+                    Some(TreeOperation::Online) => llfree_tree_operation_LLFREE_TREE_OP_ONLINE,
+                    Some(TreeOperation::Offline) => llfree_tree_operation_LLFREE_TREE_OP_OFFLINE,
+                    None => llfree_tree_operation_LLFREE_TREE_OP_NONE,
+                },
+            }
         }
     }
 }

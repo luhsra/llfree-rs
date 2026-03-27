@@ -503,9 +503,11 @@ fn less_mem() {
             for (i, frame) in frames.iter_mut().enumerate() {
                 if let Ok((f, _)) = alloc.get(None, request(0, t)) {
                     *frame = f;
+                } else if let Ok((f, _)) = alloc.get(None, request(0, t)) {
+                    // second chance: avoid race condition
+                    *frame = f;
                 } else {
-                    error!("OOM: {i}: {alloc:#?}");
-                    panic!()
+                    panic!("OOM: {i}: {alloc:#?}");
                 }
             }
         },

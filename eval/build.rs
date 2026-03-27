@@ -27,7 +27,7 @@ fn main() {
             .clang_arg(format!("-I{}", llc_dir.join("include").display()))
             .clang_arg(format!("-I{}", llc_dir.join("std").display()))
             .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-            .allowlist_item("(llf|LLF).*")
+            .allowlist_item("(llf|ll_|LLF).*")
             .generate_cstr(true)
             .fit_macro_constants(true)
             .generate()
