@@ -9,7 +9,7 @@ use log::debug;
 
 /// Atomic wrapper for types that can be converted into atomics
 ///
-/// See [core::sync::atomic::AtomicU64] for the documentation.
+/// See [`core::sync::atomic::AtomicU64`] for the documentation.
 #[repr(transparent)]
 pub struct Atom<T: Atomic>(pub T::I);
 
@@ -25,7 +25,7 @@ impl<T: Atomic> Atom<T> {
     #[cfg_attr(feature = "log_debug", track_caller)]
     pub fn store(&self, v: T) {
         debug!("{} store", core::panic::Location::caller());
-        self.0.store(v.into())
+        self.0.store(v.into());
     }
     #[cfg_attr(feature = "log_debug", track_caller)]
     pub fn swap(&self, v: T) -> T {
@@ -51,7 +51,7 @@ impl<T: Atomic> Atom<T> {
     #[cfg_attr(feature = "log_debug", track_caller)]
     pub fn fetch_update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
         debug!("{} update", core::panic::Location::caller());
-        match self.0.fetch_update(|v| f(v.into()).map(|v| v.into())) {
+        match self.0.fetch_update(|v| f(v.into()).map(Into::into)) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
@@ -71,7 +71,7 @@ impl<T: Atomic + fmt::Debug> fmt::Debug for Atom<T> {
 /// Types that can be converted from/into atomics
 ///
 /// # Note
-/// For compare_exchange and fetch_update, equality on this type has to be
+/// For `compare_exchange` and `fetch_update`, equality on this type has to be
 /// the same as when they are converted into the underlying integers.
 ///
 /// `a == b <-> a.into() == b.into()`

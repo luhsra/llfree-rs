@@ -246,12 +246,12 @@ impl<'a> Trees<'a> {
         for i in offset..len {
             // Alternating between before and after start
             let off = if i.is_multiple_of(2) {
-                (i / 2) as isize
+                (i / 2).cast_signed()
             } else {
-                -(i.div_ceil(2) as isize)
+                -i.div_ceil(2).cast_signed()
             };
-            let s = (start.0 + self.entries.len()) as isize;
-            let i = TreeId((s + off) as usize % self.entries.len());
+            let s = (start.0 + self.entries.len()).cast_signed();
+            let i = TreeId((s + off).cast_unsigned() % self.entries.len());
 
             let tree = self.entries[i.0].load();
             if tree.reserved() {
@@ -268,9 +268,7 @@ impl<'a> Trees<'a> {
                         Some(best) => p > best.prio,
                     });
                     if let Some(pos) = pos {
-                        for j in pos..N - 1 {
-                            best[j + 1] = best[j];
-                        }
+                        best.copy_within(pos..N - 1, pos + 1);
                         best[pos] = Some(Best { i, prio: p });
                     }
                 }

@@ -74,7 +74,7 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
         self.alloc.is_free(frame, order)
     }
     fn drain(&self) {
-        self.alloc.drain()
+        self.alloc.drain();
     }
 }
 
@@ -208,7 +208,7 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
         self.alloc.is_free(frame, order)
     }
     fn drain(&self) {
-        self.alloc.drain()
+        self.alloc.drain();
     }
 }
 

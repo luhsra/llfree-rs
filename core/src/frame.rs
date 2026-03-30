@@ -1,6 +1,6 @@
 //! Page frame utilities
 
-use core::mem::{align_of, size_of, transmute};
+use core::mem::{align_of, size_of};
 
 use crate::FRAME_SIZE;
 
@@ -32,10 +32,10 @@ impl Frame {
     }
     pub fn cast<T>(&self) -> &T {
         debug_assert!(size_of::<T>() <= size_of::<Self>());
-        unsafe { transmute(self) }
+        unsafe { &*(self as *const Self).cast() }
     }
     pub fn cast_mut<T>(&mut self) -> &mut T {
         debug_assert!(size_of::<T>() <= size_of::<Self>());
-        unsafe { transmute(self) }
+        unsafe { &mut *(self as *mut Self).cast() }
     }
 }

@@ -6,13 +6,12 @@ use core::ops::{Deref, DerefMut, Range};
 
 /// Retries the condition n times and returns if it was successfull.
 /// This pauses the CPU between retries if possible.
-#[inline(always)]
 pub fn spin_wait(n: usize, mut cond: impl FnMut() -> bool) -> bool {
     for _ in 0..n {
         if cond() {
             return true;
         }
-        core::hint::spin_loop()
+        core::hint::spin_loop();
     }
     false
 }
@@ -95,7 +94,7 @@ pub fn logging() {
                 record.file().unwrap_or_default(),
                 record.line().unwrap_or_default()
             );
-            let loc_len = record.file().map_or(0, |f| f.len()) + 1 + 4;
+            let loc_len = record.file().map_or(0, str::len) + 1 + 4;
             let max = MAX_LOC_WIDTH.fetch_max(loc_len, Ordering::Relaxed);
             let padding = Padding(max.max(loc_len) - loc_len);
 

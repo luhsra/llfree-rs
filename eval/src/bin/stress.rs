@@ -67,7 +67,7 @@ fn main() {
     let (tiering, request) = Tiering::simple(threads);
     let pages = (memory << 30) / Frame::SIZE;
     let ms = Allocator::metadata_size(&tiering, pages);
-    let meta = MetaData::alloc(ms);
+    let meta = MetaData::alloc(&ms);
     let alloc = Allocator::new(pages, Init::FreeAll, &tiering, meta).unwrap();
     alloc.validate();
 

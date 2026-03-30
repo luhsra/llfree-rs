@@ -115,7 +115,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// Takes more time than `tree_stats`.
     fn stats(&self) -> Stats;
     /// Retrieve detailed allocator statistics.
-    /// Only TREE_ORDER, HUGE_ORDER and 0 are supported.
+    /// Only [`TREE_ORDER`], [`HUGE_ORDER`] and 0 are supported.
     fn stats_at(&self, frame: FrameId, order: usize) -> Stats;
 
     /// Returns if `frame` is free. This might be racy!
@@ -200,7 +200,8 @@ pub struct MetaData<'a> {
 
 #[cfg(any(test, feature = "std"))]
 impl MetaData<'_> {
-    pub fn alloc(m: MetaSize) -> Self {
+    #[must_use]
+    pub fn alloc(m: &MetaSize) -> Self {
         Self {
             local: util::aligned_buf(m.local),
             trees: util::aligned_buf(m.trees),
@@ -348,7 +349,7 @@ pub enum Policy {
 pub struct Tier(pub u8);
 impl Tier {
     pub const BITS: usize = 3;
-    pub const LEN: usize = 1 << Self::BITS;
+    pub const LEN: u8 = 1 << Self::BITS;
     pub const fn from_bits(bits: u8) -> Self {
         Self(bits)
     }
@@ -474,7 +475,7 @@ mod test {
         let (tiering, request) = Tiering::simple(1);
         // Allocate the metadata buffers
         let ms = LLFree::metadata_size(&tiering, frames);
-        let meta = MetaData::alloc(ms);
+        let meta = MetaData::alloc(&ms);
         // Initialize the allocator
         let alloc = LLFree::new(frames, Init::FreeAll, &tiering, meta).unwrap();
         warn!("finit");

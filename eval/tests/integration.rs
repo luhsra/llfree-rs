@@ -36,7 +36,7 @@ impl<A: Alloc<'static>> TestAlloc<A> {
     ) -> Result<(Self, impl Fn(usize, usize) -> Request)> {
         let (tiering, request) = Tiering::simple(cores);
         let ms = A::metadata_size(&tiering, frames);
-        let meta = MetaData::alloc(ms);
+        let meta = MetaData::alloc(&ms);
         Ok((
             Self(ManuallyDrop::new(A::new(frames, init, &tiering, meta)?)),
             request,
@@ -715,7 +715,6 @@ fn recover() {
         alloc.validate();
 
         // leak (crash)
-        std::mem::forget(alloc);
     }
 
     let local = aligned_buf(m.local);
@@ -944,7 +943,7 @@ fn movable_tiers() {
     let frames = 16 * TREE_FRAMES;
     let (tiering, request) = Tiering::movable(cores);
     let ms = AllocImpl::metadata_size(&tiering, frames);
-    let meta = MetaData::alloc(ms);
+    let meta = MetaData::alloc(&ms);
     let alloc = AllocImpl::new(frames, Init::FreeAll, &tiering, meta).unwrap();
 
     let mut pages = Vec::with_capacity(frames);

@@ -176,7 +176,7 @@ impl Bitfield {
 
     /// Toggle multiple bits with a single correctly sized compare exchange operation
     ///
-    /// Note: This only seems to make a difference between a 64 bit fetch_update on Intel Optane
+    /// Note: This only seems to make a difference between a 64 bit `fetch_update` on Intel Optane
     fn toggle_int<I: Atomic + Default + Not<Output = I>>(&self, i: FrameId, e: bool) -> Result<()> {
         debug_assert!(size_of::<I>() <= Self::ROW_BITS / 8);
         let i = i.0 % Self::LEN;
@@ -370,13 +370,13 @@ mod test {
 
         assert!(bitfield.is_zero(FrameId(16), 2));
         bitfield.toggle(FrameId(16), 2, false).unwrap();
-        assert_eq!(bitfield.get_row(RowId(0)), 0xfff00);
+        assert_eq!(bitfield.get_row(RowId(0)), 0xf_ff00);
         assert_eq!(bitfield.get_row(RowId(1)), 0);
         assert!(!bitfield.is_zero(FrameId(16), 2));
 
         assert!(bitfield.is_zero(FrameId(20), 2));
         bitfield.toggle(FrameId(20), 2, false).unwrap();
-        assert_eq!(bitfield.get_row(RowId(0)), 0xffff00);
+        assert_eq!(bitfield.get_row(RowId(0)), 0xff_ff00);
         assert_eq!(bitfield.get_row(RowId(1)), 0);
         assert!(!bitfield.is_zero(FrameId(16), 2));
 
@@ -408,54 +408,75 @@ mod test {
         assert_eq!(fza(0b0, 2), Some((0b1111, 0)));
         assert_eq!(fza(0b0, 3), Some((0xff, 0)));
         assert_eq!(fza(0b0, 4), Some((0xffff, 0)));
-        assert_eq!(fza(0b0, 5), Some((0xffffffff, 0)));
-        assert_eq!(fza(0b0, 6), Some((0xffffffffffffffff, 0)));
+        assert_eq!(fza(0b0, 5), Some((0xffff_ffff, 0)));
+        assert_eq!(fza(0b0, 6), Some((0xffff_ffff_ffff_ffff, 0)));
 
         assert_eq!(fza(0b1, 0), Some((0b11, 1)));
         assert_eq!(fza(0b1, 1), Some((0b1101, 2)));
         assert_eq!(fza(0b1, 2), Some((0xf1, 4)));
         assert_eq!(fza(0b1, 3), Some((0xff01, 8)));
-        assert_eq!(fza(0b1, 4), Some((0xffff0001, 16)));
-        assert_eq!(fza(0b1, 5), Some((0xffffffff00000001, 32)));
+        assert_eq!(fza(0b1, 4), Some((0xffff_0001, 16)));
+        assert_eq!(fza(0b1, 5), Some((0xffff_ffff_0000_0001, 32)));
         assert_eq!(fza(0b1, 6), None);
 
         assert_eq!(fza(0b101, 0), Some((0b111, 1)));
-        assert_eq!(fza(0b10011, 1), Some((0b11111, 2)));
+        assert_eq!(fza(0b10011, 1), Some((0b1_1111, 2)));
         assert_eq!(fza(0x10f, 2), Some((0x1ff, 4)));
-        assert_eq!(fza(0x100ff, 3), Some((0x1ffff, 8)));
-        assert_eq!(fza(0x10000ffff, 4), Some((0x1ffffffff, 16)));
-        assert_eq!(fza(0x00000000ff00ff0f, 5), Some((0xffffffffff00ff0f, 32)));
+        assert_eq!(fza(0x100ff, 3), Some((0x1_ffff, 8)));
+        assert_eq!(fza(0x0001_0000_ffff, 4), Some((0x0001_ffff_ffff, 16)));
+        assert_eq!(
+            fza(0x0000_0000_ff00_ff0f, 5),
+            Some((0xffff_ffff_ff00_ff0f, 32))
+        );
         assert_eq!(
             fza(0b1111_0000_1100_0011_1000_1111, 2),
             Some((0b1111_1111_1100_0011_1000_1111, 16))
         );
 
         // Upper bound
-        assert_eq!(fza(0x7fffffffffffffff, 0), Some((0xffffffffffffffff, 63)));
-        assert_eq!(fza(0xffffffffffffffff, 0), None);
+        assert_eq!(
+            fza(0x7fff_ffff_ffff_ffff, 0),
+            Some((0xffff_ffff_ffff_ffff, 63))
+        );
+        assert_eq!(fza(0xffff_ffff_ffff_ffff, 0), None);
 
-        assert_eq!(fza(0x3fffffffffffffff, 1), Some((0xffffffffffffffff, 62)));
-        assert_eq!(fza(0x7fffffffffffffff, 1), None);
+        assert_eq!(
+            fza(0x3fff_ffff_ffff_ffff, 1),
+            Some((0xffff_ffff_ffff_ffff, 62))
+        );
+        assert_eq!(fza(0x7fff_ffff_ffff_ffff, 1), None);
 
-        assert_eq!(fza(0x0fffffffffffffff, 2), Some((0xffffffffffffffff, 60)));
-        assert_eq!(fza(0x1fffffffffffffff, 2), None);
-        assert_eq!(fza(0x3fffffffffffffff, 2), None);
+        assert_eq!(
+            fza(0x0fff_ffff_ffff_ffff, 2),
+            Some((0xffff_ffff_ffff_ffff, 60))
+        );
+        assert_eq!(fza(0x1fff_ffff_ffff_ffff, 2), None);
+        assert_eq!(fza(0x3fff_ffff_ffff_ffff, 2), None);
 
-        assert_eq!(fza(0x00ffffffffffffff, 3), Some((0xffffffffffffffff, 56)));
-        assert_eq!(fza(0x0fffffffffffffff, 3), None);
-        assert_eq!(fza(0x1fffffffffffffff, 3), None);
+        assert_eq!(
+            fza(0x00ff_ffff_ffff_ffff, 3),
+            Some((0xffff_ffff_ffff_ffff, 56))
+        );
+        assert_eq!(fza(0x0fff_ffff_ffff_ffff, 3), None);
+        assert_eq!(fza(0x1fff_ffff_ffff_ffff, 3), None);
 
-        assert_eq!(fza(0x0000ffffffffffff, 4), Some((0xffffffffffffffff, 48)));
-        assert_eq!(fza(0x0001ffffffffffff, 4), None);
-        assert_eq!(fza(0x00ffffffffffffff, 4), None);
+        assert_eq!(
+            fza(0x0000_ffff_ffff_ffff, 4),
+            Some((0xffff_ffff_ffff_ffff, 48))
+        );
+        assert_eq!(fza(0x0001_ffff_ffff_ffff, 4), None);
+        assert_eq!(fza(0x00ff_ffff_ffff_ffff, 4), None);
 
-        assert_eq!(fza(0x00000000ffffffff, 5), Some((0xffffffffffffffff, 32)));
-        assert_eq!(fza(0x00000001ffffffff, 5), None);
-        assert_eq!(fza(0x0000ffffffffffff, 5), None);
+        assert_eq!(
+            fza(0x0000_0000_ffff_ffff, 5),
+            Some((0xffff_ffff_ffff_ffff, 32))
+        );
+        assert_eq!(fza(0x0000_0001_ffff_ffff, 5), None);
+        assert_eq!(fza(0x0000_ffff_ffff_ffff, 5), None);
 
-        assert_eq!(fza(0, 6), Some((0xffffffffffffffff, 0)));
+        assert_eq!(fza(0, 6), Some((0xffff_ffff_ffff_ffff, 0)));
         assert_eq!(fza(1, 6), None);
-        assert_eq!(fza(0xa000000000000000, 6), None);
+        assert_eq!(fza(0xa000_0000_0000_0000, 6), None);
     }
 
     #[test]

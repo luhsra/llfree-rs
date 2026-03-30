@@ -41,13 +41,18 @@ impl<'a> Locals<'a> {
         let start = first.as_ptr();
         let end = last.as_ptr_range().end;
         unsafe {
-            slice::from_raw_parts_mut(start.cast_mut().cast(), end.offset_from(start) as usize)
+            slice::from_raw_parts_mut(
+                start.cast_mut().cast(),
+                end.offset_from(start).cast_unsigned(),
+            )
         }
     }
 
     /// Initialize the locals from a buffer
     pub fn new(buffer: &'a mut [u8], tiering: &Tiering) -> Result<Self, Error> {
-        if buffer.len() < Self::metadata_size(tiering) {
+        if buffer.len() < Self::metadata_size(tiering)
+            || buffer.as_ptr().align_offset(align_of::<Local>()) != 0
+        {
             return Err(Error::Initialization);
         }
 
@@ -75,13 +80,13 @@ impl<'a> Locals<'a> {
         local: usize,
         tree: Option<TreeId>,
         free: usize,
-    ) -> Result<RowId, Option<(RowId, usize)>> {
+    ) -> Result<RowId, Option<Reservation>> {
         let Some(locals) = &self.tiers[tier.0 as usize] else {
             return Err(None);
         };
         match locals[local].tree.fetch_update(|v| v.get(tree, free)) {
             Ok(old) => Ok(old.row()),
-            Err(old) => Err(old.present().then_some((old.row(), old.free()))),
+            Err(old) => Err(old.present().then_some(old.as_reservation(tier))),
         }
     }
 
@@ -93,7 +98,7 @@ impl<'a> Locals<'a> {
         tree: Option<TreeId>,
         free: usize,
         policy: PolicyFn,
-    ) -> Option<(RowId, Tier)> {
+    ) -> Option<Reservation> {
         let index = index.unwrap_or(0);
         for i in 0..self.tiers.len() {
             let target_tier = Tier(((i as u8) + tier.0) % self.tiers.len() as u8);
@@ -113,7 +118,7 @@ impl<'a> Locals<'a> {
                 let j = (index + j) % target.len();
 
                 if let Ok(row) = self.get(target_tier, j, tree, free) {
-                    return Some((row, target_tier));
+                    return Some(Reservation::new(row, target_tier, 0));
                 }
             }
         }
@@ -128,7 +133,7 @@ impl<'a> Locals<'a> {
         tree: Option<TreeId>,
         free: usize,
         policy: PolicyFn,
-    ) -> Option<(RowId, Option<(RowId, Tier, usize)>)> {
+    ) -> Option<(RowId, Option<Reservation>)> {
         let Some(locals) = &self.tiers[tier.0 as usize] else {
             return None;
         };
@@ -156,10 +161,10 @@ impl<'a> Locals<'a> {
                     let old = if let Some(local) = local {
                         // Replace local tree and return the old tree for unreservation
                         let old = locals[local].tree.swap(new);
-                        old.present().then_some((old.row(), tier, old.free()))
+                        old.present().then_some(old.as_reservation(tier))
                     } else {
                         // Or return (and unreserve) the demoted tree
-                        Some((new.row(), tier, new.free()))
+                        Some(new.as_reservation(tier))
                     };
                     return Some((new.row(), old));
                 }
@@ -177,20 +182,14 @@ impl<'a> Locals<'a> {
         local.tree.fetch_update(|v| v.put(tree, free)).is_ok()
     }
 
-    pub fn swap(
-        &self,
-        tier: Tier,
-        local: usize,
-        tree: TreeId,
-        free: usize,
-    ) -> Option<(RowId, usize)> {
+    pub fn swap(&self, tier: Tier, local: usize, tree: TreeId, free: usize) -> Option<Reservation> {
         let Some(locals) = &self.tiers[tier.0 as usize] else {
             panic!("Invalid tier");
         };
 
         let local = &locals[local];
         let old = local.tree.swap(LocalTree::with(tree.as_row(), free));
-        old.present().then_some((old.row(), old.free()))
+        old.present().then_some(old.as_reservation(tier))
     }
 
     pub fn drain(&self, unreserve: impl Fn(RowId, Tier, usize)) {
@@ -239,12 +238,24 @@ impl<'a> Locals<'a> {
         s
     }
 
-    pub fn load(&self, tier: Tier, local: usize) -> Option<(RowId, usize)> {
+    pub fn load(&self, tier: Tier, local: usize) -> Option<Reservation> {
         let Some(locals) = &self.tiers[tier.0 as usize] else {
             return None;
         };
         let tree = locals[local].tree.load();
-        tree.present().then_some((tree.row(), tree.free()))
+        tree.present().then_some(tree.as_reservation(tier))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Reservation {
+    pub row: RowId,
+    pub tier: Tier,
+    pub free: usize,
+}
+impl Reservation {
+    pub fn new(row: RowId, tier: Tier, free: usize) -> Self {
+        Self { row, tier, free }
     }
 }
 
@@ -314,6 +325,10 @@ impl LocalTree {
         } else {
             None
         }
+    }
+
+    fn as_reservation(self, tier: Tier) -> Reservation {
+        Reservation::new(self.row(), tier, self.free())
     }
 }
 

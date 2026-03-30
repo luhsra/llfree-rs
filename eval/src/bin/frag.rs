@@ -71,7 +71,7 @@ fn main() {
     let pages = (memory << 30) / Frame::SIZE;
     let (tiering, request) = Tiering::simple(threads);
     let ms = Allocator::metadata_size(&tiering, pages);
-    let meta = MetaData::alloc(ms);
+    let meta = MetaData::alloc(&ms);
     let alloc = Allocator::new(pages, Init::FreeAll, &tiering, meta).unwrap();
 
     let out = Mutex::new(BufWriter::new(File::create(outfile).unwrap()));

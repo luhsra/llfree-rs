@@ -140,7 +140,7 @@ fn main() {
     let pids = 8;
 
     let (tiering, request) = tiering(cores, pids);
-    let meta = MetaData::alloc(Allocator::metadata_size(&tiering, frames));
+    let meta = MetaData::alloc(&Allocator::metadata_size(&tiering, frames));
     let alloc = Allocator::new(frames, Init::FreeAll, &tiering, meta).unwrap();
     alloc.validate();
 
@@ -163,21 +163,7 @@ fn main() {
             let mut count = 0;
             let mut score = 0.0;
             while running.load(Ordering::Relaxed) > 0 {
-                if let Some(frag) = frag.as_mut() {
-                    for i in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
-                        let free = alloc.stats_at(HugeId(i).as_frame(), HUGE_ORDER).free_frames;
-                        let level = if free == 0 { 0 } else { 1 + free / 64 };
-                        write!(frag, "{level:?}").unwrap();
-                    }
-                    writeln!(frag).unwrap();
-                }
-
-                let stats = alloc.stats();
-                let huge = stats.free_huge;
-                let optimal = stats.free_frames >> HUGE_ORDER;
-                let fraction = 100.0 * huge as f32 / optimal as f32;
-                warn!("free-huge {huge}/{optimal} = {fraction:.1}");
-                score += fraction;
+                score += measure(frag.as_mut(), &alloc);
                 count += 1;
 
                 let elapsed_ms = start.elapsed().as_millis();
@@ -186,6 +172,10 @@ fn main() {
                     sleep(Duration::from_millis((next_ms - elapsed_ms) as u64));
                 }
             }
+            // Final measurement after all threads are done
+            score += measure(frag.as_mut(), &alloc);
+            count += 1;
+
             score / count as f32
         });
 
@@ -317,6 +307,24 @@ fn main() {
     let huge = alloc.frames() >> HUGE_ORDER;
     info!("huge = {} / {huge}", stats.free_huge);
     warn!("score = {score:.1}")
+}
+
+fn measure(frag: Option<&mut BufWriter<File>>, alloc: &Allocator) -> f32 {
+    if let Some(frag) = frag {
+        for i in 0..alloc.frames().div_ceil(1 << HUGE_ORDER) {
+            let free = alloc.stats_at(HugeId(i).as_frame(), HUGE_ORDER).free_frames;
+            let level = if free == 0 { 0 } else { 1 + free / 64 };
+            write!(frag, "{level}").unwrap();
+        }
+        writeln!(frag).unwrap();
+    }
+
+    let stats = alloc.stats();
+    let huge = stats.free_huge;
+    let optimal = stats.free_frames >> HUGE_ORDER;
+    let fraction = 100.0 * huge as f32 / optimal as f32;
+    warn!("free-huge {huge}/{optimal} = {fraction:.1}");
+    fraction
 }
 
 #[repr(align(4096))]

@@ -55,12 +55,12 @@ impl fmt::Debug for HugeId {
 /// Lower-level frame allocator.
 ///
 /// This level implements the actual allocation/free operations.
-/// Each allocation/free is limited to a chunk of [LowerAlloc::N] frames.
+/// Each allocation/free is limited to a chunk of [`MAX_ORDER`] frames.
 ///
-/// Here the bitfields are 512 bit large -> strong focus on huge frames.
+/// Here the bitfields are [`HUGE_FRAMES`] bit large -> strong focus on huge frames.
 /// Upon that is a table for each tree, with an entry per bitfield.
 ///
-/// The parameter `HP` configures the number of table entries (huge frames per tree).
+/// The parameter [`TREE_HUGE`] configures the number of table entries (huge frames per tree).
 /// It has to be a multiple of 2!
 ///
 /// ## Memory Layout
@@ -163,8 +163,7 @@ impl<'a> Lower<'a> {
         unsafe { slice::from_raw_parts_mut(self.bitfields.as_ptr().cast_mut().cast(), len) }
     }
 
-    /// Recovers the data structures for the [LowerAlloc::N] sized chunk at `start`.
-    /// This corrects any data corrupted by a crash.
+    /// Recovers the huge entries from the bitfields and fixes inconsistencies.
     pub fn recover(&self) {
         for (i, table) in self.children.iter().enumerate() {
             for (j, a_entry) in table.iter().enumerate() {
@@ -193,14 +192,14 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Try allocating a new `frame` in the [LowerAlloc::N] sized chunk at `start`.
+    /// Try allocating a new `frame` in the [`TREE_FRAMES`] sized chunk at `start`.
     ///
     /// Returns the allocated frame and whether a new huge frame was fragmented.
     pub fn get(&self, start: RowId, order: usize, frame: Option<FrameId>) -> Result<FrameId> {
         debug_assert!(start.0 < self.frames());
 
         if let Some(frame) = frame {
-            return self.get_at(frame, order).map(|_| frame);
+            return self.get_at(frame, order).map(|()| frame);
         }
 
         let tree_start = start.as_tree().as_frame();
@@ -228,11 +227,9 @@ impl<'a> Lower<'a> {
             for j in 0..TREE_HUGE {
                 let i = (child_off + j) % TREE_HUGE;
                 if let Ok(_) = children[i].fetch_update(|v| v.dec(1 << order)) {
-                    // start with the bitfield row from the last allocation
-                    let row = if j == 0 { start } else { RowId(0) };
-
                     let bf_i = first_child + HugeId(i);
-                    if let Ok(offset) = self.bitfield(bf_i).set_first_zeros(row, order) {
+                    // start with the bitfield row from the last allocation
+                    if let Ok(offset) = self.bitfield(bf_i).set_first_zeros(start, order) {
                         return Ok(bf_i.as_frame() + offset);
                     }
                     children[i]
@@ -267,7 +264,7 @@ impl<'a> Lower<'a> {
             }
         } else if order <= Bitfield::ORDER {
             if let Ok(_) = children.fetch_update(|v| v.dec(1 << order)) {
-                if let Ok(_) = self.bitfield(frame.as_huge()).toggle(frame, order, false) {
+                if let Ok(()) = self.bitfield(frame.as_huge()).toggle(frame, order, false) {
                     return Ok(());
                 }
                 // Undo decrement
@@ -547,7 +544,7 @@ impl<'a> Lower<'a> {
 #[bitfield(u16)]
 #[derive(PartialEq, Eq)]
 struct HugeEntry {
-    /// Number of free 4K frames or u16::MAX for a huge frame.
+    /// Number of free 4K frames or [`u16::MAX`] for a huge frame.
     count: u16,
 }
 impl Atomic for HugeEntry {
@@ -568,7 +565,7 @@ impl HugeEntry {
     }
     /// Returns the free frames counter
     fn free(self) -> usize {
-        if !self.huge() { self.count() as _ } else { 0 }
+        if self.huge() { 0 } else { self.count() as _ }
     }
     /// Try to allocate this entry as huge frame.
     fn mark_huge(self) -> Option<Self> {

@@ -151,7 +151,7 @@ impl<'a> Alloc<'a> for LLC {
                 free_frames: 0,
                 alloc_frames: 0,
             }
-        }; Tier::LEN];
+        }; Tier::LEN as usize];
         for (i, t) in s.tiers.iter().enumerate() {
             tiers[i] = TierStats {
                 free_frames: t.free_frames,
@@ -372,7 +372,7 @@ mod test {
     #[test]
     fn test_debug() {
         let (tiering, _request) = Tiering::simple(1);
-        let meta = MetaData::alloc(LLC::metadata_size(&tiering, 1024));
+        let meta = MetaData::alloc(&LLC::metadata_size(&tiering, 1024));
         let alloc = LLC::new(1024, Init::FreeAll, &tiering, meta).unwrap();
         println!("{alloc:?}");
     }
