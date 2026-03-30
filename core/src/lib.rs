@@ -72,7 +72,6 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// The general interface of the allocator implementation.
 pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// Return the name of the allocator.
-    #[cold]
     fn name() -> &'static str;
 
     /// Initialize the allocator for `frames`.
@@ -86,17 +85,14 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     ///
     /// The `meta` data contains buffers for the data structures of the allocator.
     /// It has to outlive the allocator and must be properly aligned and sized (`metadata_size`).
-    #[cold]
     fn new(frames: usize, init: Init, tiering: &Tiering, meta: MetaData<'a>) -> Result<Self>;
 
     /// Returns the size of the metadata buffers required for initialization.
-    #[cold]
     fn metadata_size(tiering: &Tiering, frames: usize) -> MetaSize;
     /// Returns the metadata buffers.
     ///
     /// # Safety
     /// These buffers must not be freed or used for other purposes.
-    #[cold]
     unsafe fn metadata(&mut self) -> MetaData<'a>;
 
     /// Allocate a new frame of `order` on the given `local`.
