@@ -10,7 +10,7 @@ use llfree_eval::LLC;
 #[cfg(feature = "llzig")]
 use llfree_eval::LLZig;
 use llfree_eval::{mmap, thread};
-use log::{error, warn};
+use log::{error, info, warn};
 
 use llfree::frame::Frame;
 use llfree::util::{WyRand, aligned_buf, logging};
@@ -839,6 +839,35 @@ fn fragmentation_retry() {
     let huge = alloc.get(None, request(9, 0)).unwrap();
     warn!("huge = {:?}", huge);
     warn!("{alloc:?}");
+    alloc.validate();
+}
+
+#[test]
+fn demote_local() {
+    logging();
+
+    const FRAMES: usize = TREE_FRAMES * 2;
+
+    let (alloc, _request) = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
+
+    // Create a tier-1 local reservation first.
+    let req_huge_local = Request::new(HUGE_ORDER, Tier(1), Some(0));
+    let _huge = alloc.get(None, req_huge_local).unwrap();
+
+    // Trigger demotion with no local slot on the requester side.
+    // This only happes when all other trees are exhausted, so we need to reserve all other trees first.
+    for _ in 0..(FRAMES - HUGE_FRAMES) {
+        let req_small_global = Request::new(0, Tier(0), None);
+        let Ok((_small, _tier)) = alloc.get(None, req_small_global) else {
+            panic!("Failed to allocate small frame: {alloc:#?}");
+        };
+    }
+
+    info!("Final state: {alloc:?}");
+
+    // If demoted-tree unreserve is missed, fast stats drift from lower stats
+    // and validation fails due to leaked reserved trees.
+    assert_eq!(alloc.tree_stats().free_frames, 0);
     alloc.validate();
 }
 

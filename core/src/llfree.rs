@@ -352,12 +352,8 @@ impl LLFree<'_> {
     ) -> Result<(FrameId, Tier)> {
         if let Some((free, target_tier)) = self.trees.reserve(i, check) {
             let tier_len = self.locals.tier_locals(target_tier).expect("Invalid tier");
-            // Target might have less locals or no
-            if tier_len == 0 {
-                self.trees.unreserve(i, free, target_tier, self.policy);
-                warn!("no locals for tier {target_tier:?}");
-                return Err(Error::Memory);
-            }
+            // Target might have less locals or none
+            assert!(tier_len > 0, "No locals for tier {target_tier:?}");
             let local = local % tier_len;
 
             // Perform lower alloc, if it fails undo reservation
@@ -592,28 +588,30 @@ impl LLFree<'_> {
             }
         };
 
-        if self
-            .locals
-            .tier_locals(request.tier)
-            .is_some_and(|len| len > 0 && len < self.trees.len())
+        if let Some(local) = request.local
+            && self
+                .locals
+                .tier_locals(request.tier)
+                .is_some_and(|len| len > 0 && len < self.trees.len())
         {
-            // Try reserve new tree if no specific frame is requested
-            if let Some(local) = request.local {
-                let res = self.trees.search(*start_idx, 0, self.trees.len(), |i| {
-                    self.get_reserve(request.order, i, local, check)
-                });
-                match res {
-                    Err(Error::Memory) => {}
-                    r => return r,
-                }
+            // Try reserving new tree
+            match self.trees.search(*start_idx, 0, self.trees.len(), |i| {
+                self.get_reserve(request.order, i, local, check)
+            }) {
+                Err(Error::Memory) => {}
+                r => return r,
             }
-
-            self.demote_local(request, None)
         } else {
-            self.trees.search(*start_idx, 0, self.trees.len(), |i| {
+            // Try global allocation
+            match self.trees.search(*start_idx, 0, self.trees.len(), |i| {
                 self.get_global(i, request.order, None, check)
-            })
+            }) {
+                Err(Error::Memory) => {}
+                r => return r,
+            }
         }
+        // Fallback to demoting local reservations
+        self.demote_local(request, None)
     }
 
     /// Steal from a local reservation and possibly demote or drain it

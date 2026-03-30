@@ -17,7 +17,13 @@ pub struct Locals<'a> {
 
 impl fmt::Debug for Locals<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.tiers.fmt(f)
+        let mut f = f.debug_map();
+        for (i, locals) in self.tiers.iter().copied().enumerate() {
+            if let Some(locals) = locals {
+                f.entry(&Tier(i as u8), &locals);
+            }
+        }
+        f.finish()
     }
 }
 

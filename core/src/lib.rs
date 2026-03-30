@@ -344,7 +344,7 @@ pub enum Policy {
 }
 
 /// Opaque tier of a tree
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Tier(pub u8);
 impl Tier {
     pub const BITS: usize = 3;
@@ -354,6 +354,11 @@ impl Tier {
     }
     pub const fn into_bits(self) -> u8 {
         self.0
+    }
+}
+impl fmt::Debug for Tier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "T{}", self.0)
     }
 }
 
