@@ -88,6 +88,7 @@ impl<'a> Locals<'a> {
         free: usize,
         policy: PolicyFn,
     ) -> Option<(RowId, Tier)> {
+        let index = index.unwrap_or(0);
         for i in 0..self.tiers.len() {
             let target_tier = Tier(((i as u8) + tier.0) % self.tiers.len() as u8);
 
@@ -103,7 +104,7 @@ impl<'a> Locals<'a> {
 
             for j in 0..target.len() {
                 // Start at same local index to improve cache locality
-                let j = (index.unwrap_or(0) + j) % target.len();
+                let j = (index + j) % target.len();
 
                 if let Ok(row) = self.get(target_tier, j, tree, free) {
                     return Some((row, target_tier));

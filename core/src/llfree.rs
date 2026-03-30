@@ -159,8 +159,12 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         for t in 1..Tier::LEN {
             // Go downwards
             let tier = Tier((Tier::LEN as u8 + request.tier.0 - t as u8) % Tier::LEN as u8);
-            if self.locals.tier_locals(tier).is_some() {
-                let request = Request { tier, ..request };
+            if let Some(locals) = self.locals.tier_locals(tier) {
+                let request = Request {
+                    tier,
+                    order: request.order,
+                    local: request.local.map(|v| v % locals), // adjust to fit
+                };
                 match self.get_matching(&request, &mut start_idx) {
                     Err(Error::Memory) => {} // try next tier
                     r => return r,
