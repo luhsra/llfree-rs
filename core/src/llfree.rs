@@ -625,6 +625,7 @@ impl LLFree<'_> {
             request.frames(),
             self.policy,
         ) {
+            // Unreserve the old reservation (or the demoted tree if request.local is None)
             if let Some((row, tier, free)) = old {
                 self.trees.unreserve(row.as_tree(), free, tier, self.policy);
             }

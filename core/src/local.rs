@@ -118,7 +118,7 @@ impl<'a> Locals<'a> {
     pub fn demote_any(
         &self,
         tier: Tier,
-        index: Option<usize>,
+        local: Option<usize>,
         tree: Option<TreeId>,
         free: usize,
         policy: PolicyFn,
@@ -139,7 +139,7 @@ impl<'a> Locals<'a> {
 
             for j in 0..target.len() {
                 // Start at same local index to improve cache locality
-                let j = (index.unwrap_or(0) + j) % target.len();
+                let j = (local.unwrap_or(0) + j) % target.len();
 
                 if let Ok(old) = target[j]
                     .tree
@@ -147,13 +147,13 @@ impl<'a> Locals<'a> {
                 {
                     let new = old.get(tree, free).unwrap();
 
-                    let old = if let Some(index) = index {
-                        // Replace local tree and return its free count for unreservation
-                        let old = locals[index].tree.swap(new);
+                    let old = if let Some(local) = local {
+                        // Replace local tree and return the old tree for unreservation
+                        let old = locals[local].tree.swap(new);
                         old.present().then_some((old.row(), tier, old.free()))
                     } else {
-                        // Just return the new tree, without replacing any local tree
-                        None
+                        // Or return (and unreserve) the demoted tree
+                        Some((new.row(), tier, new.free()))
                     };
                     return Some((new.row(), old));
                 }
