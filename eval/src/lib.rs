@@ -7,10 +7,6 @@ pub mod thread;
 mod llc;
 #[cfg(feature = "llc")]
 pub use llc::LLC;
-#[cfg(feature = "llzig")]
-mod llzig;
-#[cfg(feature = "llzig")]
-pub use llzig::LLZig;
 
 pub fn avg_bounds<T>(iter: impl IntoIterator<Item = T>) -> Option<(T, T, T)>
 where

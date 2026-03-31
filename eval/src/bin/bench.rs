@@ -13,8 +13,6 @@ use llfree::wrapper::NvmAlloc;
 use llfree::{Alloc, FrameId, LLFree, MAX_ORDER, Request, Result, Tiering};
 #[cfg(feature = "llc")]
 use llfree_eval::LLC;
-#[cfg(feature = "llzig")]
-use llfree_eval::LLZig;
 use llfree_eval::mmap::Mapping;
 use llfree_eval::thread;
 use log::warn;
@@ -180,16 +178,6 @@ fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAllo
         let trees = aligned_buf(m.trees);
         return Box::new(BenchAlloc::new(
             NvmAlloc::<LLC>::create(zone, false, &tiering, local, trees).unwrap(),
-            request,
-        ));
-    }
-    #[cfg(feature = "llzig")]
-    if LLZig::name() == name {
-        let m = NvmAlloc::<LLZig>::metadata_size(&tiering, zone.len());
-        let local = aligned_buf(m.local);
-        let trees = aligned_buf(m.trees);
-        return Box::new(BenchAlloc::new(
-            NvmAlloc::<LLZig>::create(zone, false, &tiering, local, trees).unwrap(),
             request,
         ));
     }

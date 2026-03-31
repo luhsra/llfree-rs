@@ -21,7 +21,6 @@ raw-cpuid = { version = "11.0" }
 
 [features]
 llc = ["bindgen"]
-llzig = ["bindgen"]
 16K = ["llfree/16K"]
 
 # binaries

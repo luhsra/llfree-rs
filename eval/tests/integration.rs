@@ -5,10 +5,8 @@ use std::sync::Barrier;
 use std::time::Instant;
 use std::vec::Vec;
 
-#[cfg(all(feature = "llc", not(feature = "llzig")))]
+#[cfg(feature = "llc")]
 use llfree_eval::LLC;
-#[cfg(feature = "llzig")]
-use llfree_eval::LLZig;
 use llfree_eval::{mmap, thread};
 use log::{error, info, warn};
 
@@ -17,11 +15,9 @@ use llfree::util::{WyRand, aligned_buf, logging};
 use llfree::wrapper::NvmAlloc;
 use llfree::*;
 
-#[cfg(all(feature = "llc", not(feature = "llzig")))]
+#[cfg(feature = "llc")]
 type AllocImpl = LLC;
-#[cfg(feature = "llzig")]
-type AllocImpl = LLZig;
-#[cfg(not(any(feature = "llc", feature = "llzig")))]
+#[cfg(not(feature = "llc"))]
 type AllocImpl = LLFree<'static>;
 
 type Allocator = TestAlloc<AllocImpl>;
