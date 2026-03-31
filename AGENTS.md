@@ -39,6 +39,11 @@ LLFree is a two-level allocator optimized for scalability and fragmentation cont
 
 ## 1) Build, Lint, Test Commands
 
+### Nix Dev Shell & Direnv
+
+- Direnv should auto-activate the Nix shell when you `cd` into the repo.
+- Run `direnv reload` if you update `flake.nix` or the shell environment.
+
 ### Rust workspace
 
 - Build all crates (debug):
