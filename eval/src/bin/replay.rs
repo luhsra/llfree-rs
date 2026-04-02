@@ -48,10 +48,11 @@ enum Count {
 
 fn tiering(cores: usize, pids: usize) -> (Tiering, impl Fn(usize, u32, usize, usize) -> Request) {
     let tiers = [
-        (Tier(0), cores), // immovable frames
+        (Tier(0), pids),  // immovable frames
         (Tier(1), pids),  // movable frames
         (Tier(2), pids),  // page cache frames
-        (Tier(3), cores), // huge frames
+        (Tier(3), pids),  // long-living
+        (Tier(4), cores), // huge frames
     ];
 
     fn policy(requested: Tier, target: Tier, free: usize) -> Policy {
@@ -76,18 +77,22 @@ fn tiering(cores: usize, pids: usize) -> (Tiering, impl Fn(usize, u32, usize, us
         pids: usize,
     ) -> Request {
         if order >= HUGE_ORDER {
-            Request::new(order, Tier(3), Some(core % cores))
+            Request::new(order, Tier(4), Some(core % cores))
+        } else if gfp == GFP::MOVABLE
+            && (gfp != GFP::HIGHMEM || gfp == GFP::NOFAIL || gfp != GFP::FS || gfp == GFP::NORETRY)
+        {
+            Request::new(order, Tier(3), Some(pid % pids))
         } else if gfp == GFP::MOVABLE && gfp == GFP::PAGE_CACHE {
             Request::new(order, Tier(2), Some(pid % pids))
         } else if gfp == GFP::MOVABLE {
             Request::new(order, Tier(1), Some(pid % pids))
         } else {
-            Request::new(order, Tier(0), Some(core % cores))
+            Request::new(order, Tier(0), Some(pid % pids))
         }
     }
 
     (
-        Tiering::new(&tiers, Tier(3), policy),
+        Tiering::new(&tiers, Tier(4), policy),
         move |order, gfp, core, pid| request(order, gfp, core, cores, pid, pids),
     )
 }
