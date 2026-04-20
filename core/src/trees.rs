@@ -243,6 +243,17 @@ impl<'a> Trees<'a> {
         }
         let mut best: [Option<Best>; N] = [None; N];
 
+        fn insert<const N: usize>(best: &mut [Option<Best>; N], candidate: Best) {
+            let pos = best.iter().position(|e| match e {
+                None => true,
+                Some(best) => candidate.prio > best.prio,
+            });
+            if let Some(pos) = pos {
+                best.copy_within(pos..N - 1, pos + 1);
+                best[pos] = Some(candidate);
+            }
+        }
+
         for i in offset..len {
             // Alternating between before and after start
             let off = if i.is_multiple_of(2) {
@@ -262,16 +273,8 @@ impl<'a> Trees<'a> {
                     Err(Error::Memory) => {}
                     r => return r,
                 },
-                Policy::Match(p) => {
-                    let pos = best.iter().position(|e| match e {
-                        None => true,
-                        Some(best) => p > best.prio,
-                    });
-                    if let Some(pos) = pos {
-                        best.copy_within(pos..N - 1, pos + 1);
-                        best[pos] = Some(Best { i, prio: p });
-                    }
-                }
+                Policy::Match(p) => insert(&mut best, Best { i, prio: p + 1 }),
+                Policy::Demote => insert(&mut best, Best { i, prio: 0 }),
                 _ => {}
             }
         }
@@ -449,12 +452,10 @@ impl Tree {
             }
             match change.operation {
                 Some(TreeOperation::Offline) => self.set_free(0),
+                Some(TreeOperation::Online) if self.free() == 0 => self.set_free(fetch_free()),
                 Some(TreeOperation::Online) => {
-                    if self.free() != 0 {
-                        warn!("Online non-empty tree: tier={:?}", self.tier());
-                        return None;
-                    }
-                    self.set_free(fetch_free());
+                    warn!("Online non-empty tree: tier={:?}", self.tier());
+                    return None;
                 }
                 None => {}
             }

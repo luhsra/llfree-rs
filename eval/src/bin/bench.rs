@@ -2,6 +2,7 @@ use core::{fmt, slice};
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -11,12 +12,8 @@ use llfree::frame::Frame;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
 use llfree::{Alloc, FrameId, LLFree, MAX_ORDER, Request, Result, Tiering};
-#[cfg(feature = "llc")]
-use llfree_eval::LLC;
-#[cfg(feature = "llzig")]
-use llfree_eval::LLZig;
 use llfree_eval::mmap::Mapping;
-use llfree_eval::thread;
+use llfree_eval::{TieringConfig, thread};
 use log::warn;
 
 /// Number of allocations per block
@@ -57,6 +54,9 @@ struct Args {
 
     #[arg(long, default_value_t = 0)]
     offset: usize,
+    /// Optional path to a tiering configuration file (JSON)
+    #[arg(long)]
+    tiering: Option<PathBuf>,
 }
 
 static CORES: AtomicUsize = AtomicUsize::new(0);
@@ -74,6 +74,7 @@ fn main() {
         memory,
         stride,
         offset,
+        tiering,
     } = Args::parse();
 
     CORES.store(threads, Ordering::Relaxed);
@@ -97,12 +98,33 @@ fn main() {
 
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
 
+    let (tiering, request): (Tiering, Box<dyn RequestFn>) = if let Some(tiering) = tiering {
+        let tiering = std::fs::read_to_string(tiering).expect("Failed to read tiering config");
+        let config =
+            facet_json::from_str::<TieringConfig>(&tiering).expect("Failed to read tiering config");
+
+        let tiering = config.tiering(threads);
+
+        (
+            tiering,
+            Box::new(move |order, core| config.request(order, core, threads, core, 0)),
+        )
+    } else {
+        let (tiering, request) = Tiering::movable(threads);
+        (
+            tiering,
+            Box::new(move |order, core| request(order, core, false)),
+        )
+    };
+
     for x in x {
         for o in order.iter().copied() {
             assert!(o <= MAX_ORDER);
             for name in &allocs {
                 for i in 0..iterations {
-                    let perf = bench.run(name, &mut mapping, o, threads, x);
+                    warn!(">>> bench {bench:?} x={x} o={o} {name}\n");
+                    let alloc = alloc(name, &mut mapping, &tiering, request.as_ref());
+                    let perf = bench.run(&*alloc, o, threads, x);
                     writeln!(out, "{name},{x},{o},{i},{memory},{perf}").unwrap();
                 }
             }
@@ -170,35 +192,38 @@ impl<'a, T: Alloc<'a>, F: RequestFn> DynAlloc for BenchAlloc<'a, T, F> {
     }
 }
 
-fn alloc<'a>(name: &str, cores: usize, zone: &'a mut [Frame]) -> Box<dyn DynAlloc + 'a> {
-    let (tiering, request) = Tiering::simple(cores);
-
+fn alloc<'a>(
+    name: &str,
+    zone: &'a mut [Frame],
+    tiering: &Tiering,
+    request: impl RequestFn + 'a,
+) -> Box<dyn DynAlloc + 'a> {
     #[cfg(feature = "llc")]
-    if LLC::name() == name {
-        let m = NvmAlloc::<LLC>::metadata_size(&tiering, zone.len());
+    if llfree_eval::LLC::name() == name {
+        let m = NvmAlloc::<llfree_eval::LLC>::metadata_size(tiering, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
         return Box::new(BenchAlloc::new(
-            NvmAlloc::<LLC>::create(zone, false, &tiering, local, trees).unwrap(),
+            NvmAlloc::<llfree_eval::LLC>::create(zone, false, tiering, local, trees).unwrap(),
             request,
         ));
     }
     #[cfg(feature = "llzig")]
-    if LLZig::name() == name {
-        let m = NvmAlloc::<LLZig>::metadata_size(&tiering, zone.len());
+    if llfree_eval::LLZig::name() == name {
+        let m = NvmAlloc::<llfree_eval::LLZig>::metadata_size(tiering, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
         return Box::new(BenchAlloc::new(
-            NvmAlloc::<LLZig>::create(zone, false, &tiering, local, trees).unwrap(),
+            NvmAlloc::<llfree_eval::LLZig>::create(zone, false, tiering, local, trees).unwrap(),
             request,
         ));
     }
     if LLFree::name() == name {
-        let m = NvmAlloc::<LLFree>::metadata_size(&tiering, zone.len());
+        let m = NvmAlloc::<LLFree>::metadata_size(tiering, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
         return Box::new(BenchAlloc::new(
-            NvmAlloc::<LLFree>::create(zone, false, &tiering, local, trees).unwrap(),
+            NvmAlloc::<LLFree>::create(zone, false, tiering, local, trees).unwrap(),
             request,
         ));
     }
@@ -221,28 +246,18 @@ enum Benchmark {
 }
 
 impl Benchmark {
-    fn run(
-        self,
-        name: &str,
-        mapping: &mut [Frame],
-        order: usize,
-        threads: usize,
-        x: usize,
-    ) -> Perf {
-        warn!(">>> bench {self:?} x={x} o={order} {name}\n");
-        let mut alloc = alloc(name, threads, mapping);
-
+    fn run(self, alloc: &dyn DynAlloc, order: usize, threads: usize, x: usize) -> Perf {
         match self {
-            Benchmark::Bulk => bulk(alloc.as_mut(), order, threads, x),
-            Benchmark::Repeat => repeat(alloc.as_mut(), order, threads, x),
-            Benchmark::Rand => rand(alloc.as_mut(), order, threads, x),
-            Benchmark::RandBlock => rand_block(alloc.as_mut(), order, threads, x),
-            Benchmark::Filling => filling(alloc.as_mut(), order, threads, x),
+            Benchmark::Bulk => bulk(alloc, order, threads, x),
+            Benchmark::Repeat => repeat(alloc, order, threads, x),
+            Benchmark::Rand => rand(alloc, order, threads, x),
+            Benchmark::RandBlock => rand_block(alloc, order, threads, x),
+            Benchmark::Filling => filling(alloc, order, threads, x),
         }
     }
 }
 
-fn bulk(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
+fn bulk(alloc: &dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
     assert!(threads <= max_threads);
     let timer = Instant::now();
     let init = timer.elapsed().as_millis();
@@ -296,7 +311,7 @@ fn bulk(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usi
     perf
 }
 
-fn repeat(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
+fn repeat(alloc: &dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
     assert!(threads <= max_threads);
     let timer = Instant::now();
     let init = timer.elapsed().as_millis();
@@ -339,7 +354,7 @@ fn repeat(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: u
     perf
 }
 
-fn rand(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
+fn rand(alloc: &dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
     assert!(threads <= max_threads);
     let timer = Instant::now();
     let init = timer.elapsed().as_millis();
@@ -406,7 +421,7 @@ fn rand(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usi
 }
 
 /// reallocate multiple in close proximity at once
-fn rand_block(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
+fn rand_block(alloc: &dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
     assert!(threads <= max_threads);
     let timer = Instant::now();
     let init = timer.elapsed().as_millis();
@@ -470,7 +485,7 @@ fn rand_block(alloc: &mut dyn DynAlloc, order: usize, max_threads: usize, thread
     perf
 }
 
-fn filling(alloc: &mut dyn DynAlloc, order: usize, threads: usize, level: usize) -> Perf {
+fn filling(alloc: &dyn DynAlloc, order: usize, threads: usize, level: usize) -> Perf {
     let timer = Instant::now();
     let init = timer.elapsed().as_millis();
 

@@ -2,27 +2,40 @@
 name = "llfree-eval"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88.0"
+rust-version = "1.95.0"
 
 [dependencies]
 llfree = { path = "../core", features = ["std", "log_info"] }
 libc = "0.2"
 log = { version = "0.4", default-features = false }
-clap = { version = "4.4", features = ["derive"] }
-bitfield-struct = "0.12"
+clap = { version = "4.6", features = ["derive"] }
+bitfield-struct = "0.13"
 spin = "0.10"
+facet = "0.46"
+facet-json = "0.46"
 
 [build-dependencies]
 build-rs = "0.3"
 bindgen = { version = "0.72", optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-raw-cpuid = { version = "11.0" }
+raw-cpuid = { version = "11.6" }
 
 [features]
 llc = ["bindgen"]
 llzig = ["bindgen"]
 16K = ["llfree/16K"]
+
+# tree_huge_1 = ["llfree/tree_huge_1"]
+tree_huge_2 = ["llfree/tree_huge_2"]
+tree_huge_4 = ["llfree/tree_huge_4"]
+tree_huge_8 = ["llfree/tree_huge_8"]
+tree_huge_16 = ["llfree/tree_huge_16"]
+tree_huge_32 = ["llfree/tree_huge_32"]
+tree_huge_64 = ["llfree/tree_huge_64"]
+tree_huge_128 = ["llfree/tree_huge_128"]
+tree_huge_256 = ["llfree/tree_huge_256"]
+tree_huge_512 = ["llfree/tree_huge_512"]
 
 # binaries
 

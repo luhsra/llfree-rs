@@ -38,13 +38,15 @@ struct Args {
     stride: usize,
 }
 
-#[cfg(feature = "llc")]
-use llfree_eval::LLC;
-
-#[cfg(feature = "llc")]
-type Allocator = LLC;
-#[cfg(not(feature = "llc"))]
-type Allocator<'a> = LLFree<'a>;
+cfg_select! {
+    feature = "llc" => {
+        use llfree_eval::LLC;
+        type Allocator = LLC;
+    }
+    _ => {
+        type Allocator<'a> = LLFree<'a>;
+    }
+}
 
 fn main() {
     let Args {

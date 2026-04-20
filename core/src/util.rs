@@ -42,6 +42,7 @@ pub struct Align<T = ()>(pub T);
 
 const _: () = assert!(align_of::<Align>() == 64);
 const _: () = assert!(align_of::<Align<usize>>() == 64);
+const _: () = assert!(size_of::<Align<usize>>() == 64);
 
 impl<T> Deref for Align<T> {
     type Target = T;

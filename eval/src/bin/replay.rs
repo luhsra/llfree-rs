@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::slice;
@@ -11,7 +11,8 @@ use bitfield_struct::bitfield;
 use clap::Parser;
 use llfree::util::align_down;
 use llfree::*;
-use llfree_eval::{mmap, thread};
+use llfree_eval::gfp::GFP;
+use llfree_eval::{TieringConfig, mmap, thread};
 use log::{error, info, warn};
 
 /// Benchmarking the allocators against each other.
@@ -28,74 +29,21 @@ struct Args {
     /// Time interval is ms for monitoring fragmentation
     #[arg(long, default_value_t = 1000)]
     interval: u64,
+    /// Optional path to a tiering configuration file (JSON)
+    #[arg(long)]
+    tiering: Option<PathBuf>,
 }
 
-#[cfg(feature = "llc")]
-use llfree_eval::LLC;
-
-#[cfg(feature = "llc")]
-type Allocator = LLC;
-#[cfg(not(feature = "llc"))]
-type Allocator<'a> = LLFree<'a>;
-
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-enum Count {
-    One,
-    Core,
-    Pid,
-}
-
-fn tiering(cores: usize, pids: usize) -> (Tiering, impl Fn(usize, u32, usize, usize) -> Request) {
-    let tiers = [
-        (Tier(0), pids),  // immovable frames
-        (Tier(1), pids),  // movable frames
-        (Tier(2), pids),  // page cache frames
-        (Tier(3), pids),  // long-living
-        (Tier(4), cores), // huge frames
-    ];
-
-    fn policy(requested: Tier, target: Tier, free: usize) -> Policy {
-        if requested.0 > target.0 {
-            return Policy::Steal;
-        } else if requested.0 < target.0 {
-            return Policy::Demote;
-        }
-        match free {
-            f if f >= TREE_FRAMES / 2 => Policy::Match(1), // half free
-            f if f >= TREE_FRAMES / 64 => Policy::Match(u8::MAX), // almost allocated
-            _ => Policy::Match(2), // low free count -> causes frequent reservations
-        }
+cfg_select! {
+    feature = "llc" => {
+        use llfree_eval::LLC;
+        type Allocator = LLC;
     }
-
-    fn request(
-        order: usize,
-        gfp: u32,
-        core: usize,
-        cores: usize,
-        pid: usize,
-        pids: usize,
-    ) -> Request {
-        if order >= HUGE_ORDER {
-            Request::new(order, Tier(4), Some(core % cores))
-        } else if gfp == GFP::MOVABLE
-            && (gfp != GFP::HIGHMEM || gfp == GFP::NOFAIL || gfp != GFP::FS || gfp == GFP::NORETRY)
-        {
-            Request::new(order, Tier(3), Some(pid % pids))
-        } else if gfp == GFP::MOVABLE && gfp == GFP::PAGE_CACHE {
-            Request::new(order, Tier(2), Some(pid % pids))
-        } else if gfp == GFP::MOVABLE {
-            Request::new(order, Tier(1), Some(pid % pids))
-        } else {
-            Request::new(order, Tier(0), Some(pid % pids))
-        }
+    _ => {
+        type Allocator<'a> = LLFree<'a>;
     }
-
-    (
-        Tiering::new(&tiers, Tier(4), policy),
-        move |order, gfp, core, pid| request(order, gfp, core, cores, pid, pids),
-    )
 }
+
 
 fn main() {
     util::logging();
@@ -105,6 +53,7 @@ fn main() {
         stride,
         frag,
         interval,
+        tiering,
     } = Args::parse();
 
     let size = std::fs::metadata(&trace)
@@ -142,9 +91,26 @@ fn main() {
         .count();
     info!("page cache allocs = {page_cache_allocs}");
 
-    let pids = 8;
-
-    let (tiering, request) = tiering(cores, pids);
+    #[allow(clippy::type_complexity)]
+    let (tiering, request): (
+        Tiering,
+        Box<dyn Fn(usize, u32, usize, usize) -> Request + Send>,
+    ) = if let Some(tiering) = tiering {
+        let s = fs::read_to_string(tiering).unwrap();
+        let tiering_config: TieringConfig = facet_json::from_str(&s).unwrap();
+        (
+            tiering_config.tiering(cores),
+            Box::new(move |order, gfp, core, pid| {
+                tiering_config.request(order, core, cores, pid, gfp)
+            }),
+        )
+    } else {
+        let (tiering, request) = Tiering::movable(cores);
+        (
+            tiering,
+            Box::new(move |order, gfp, core, _pid| request(order, core, GFP::MOVABLE == gfp)),
+        )
+    };
     let meta = MetaData::alloc(&Allocator::metadata_size(&tiering, frames));
     let alloc = Allocator::new(frames, Init::FreeAll, &tiering, meta).unwrap();
     alloc.validate();
@@ -184,7 +150,10 @@ fn main() {
             score / count as f32
         });
 
-        s.spawn(|| {
+        let running = &running;
+        let barrier = &barrier;
+        let alloc = &alloc;
+        s.spawn(move || {
             #[derive(Clone)]
             enum State {
                 Init,
@@ -399,43 +368,3 @@ struct TracePage {
     entries: [TraceEntry; (FRAME_SIZE - size_of::<u32>()) / size_of::<TraceEntry>()],
 }
 const _: () = assert!(size_of::<TracePage>() == FRAME_SIZE);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(clippy::upper_case_acronyms, non_camel_case_types, dead_code)]
-enum GFP {
-    DMA = 0x01,
-    HIGHMEM = 0x02,
-    DMA32 = 0x04,
-    MOVABLE = 0x08,
-    RECLAIMABLE = 0x10,
-    HIGH = 0x20,
-    IO = 0x40,
-    FS = 0x80,
-    ZERO = 0x100,
-    ATOMIC = 0x200,
-    DIRECT_RECLAIM = 0x400,
-    KSWAPD_RECLAIM = 0x800,
-    WRITE = 0x1000,
-    NOWARN = 0x2000,
-    RETRY_MAYFAIL = 0x4000,
-    NOFAIL = 0x8000,
-    NORETRY = 0x10000,
-    MEMALLOC = 0x20000,
-    COMP = 0x40000,
-    NOMEMALLOC = 0x80000,
-    HARDWALL = 0x100000,
-    THISNODE = 0x200000,
-    ACCOUNT = 0x400000,
-    ZEROTAGS = 0x800000,
-    PAGE_CACHE = 0x10000000,
-}
-impl PartialEq<u32> for GFP {
-    fn eq(&self, other: &u32) -> bool {
-        (*self as u32) & *other != 0
-    }
-}
-impl PartialEq<GFP> for u32 {
-    fn eq(&self, other: &GFP) -> bool {
-        *self & (*other as u32) != 0
-    }
-}

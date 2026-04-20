@@ -134,11 +134,9 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
 
         let len = self.locals.tier_locals(request.tier).unwrap_or_default();
-        let mut start_idx = if len > 0 {
-            TreeId(self.trees.len() / len * request.local.unwrap_or_default())
-        } else {
-            TreeId(0)
-        };
+        let mut start_idx = TreeId(
+            self.trees.len().checked_div(len).unwrap_or(0) * request.local.unwrap_or_default(),
+        );
 
         // Try local reservation first
         match self.get_matching(&request, &mut start_idx) {
@@ -198,10 +196,10 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         // Try update own trees first
         if let Some(local) = request.local {
             // Update the put-reserve heuristic
-            #[cfg(feature = "free_reserve")]
-            let may_reserve = self.locals.frees_push(local, i);
-            #[cfg(not(feature = "free_reserve"))]
-            let may_reserve = false;
+            let may_reserve = cfg_select! {
+                feature = "free_reserve" => self.locals.frees_push(local, i),
+                _ => false,
+            };
 
             let tier = request.tier;
             if self
@@ -229,24 +227,6 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
 
         Ok(())
-    }
-
-    fn is_free(&self, frame: FrameId, order: usize) -> bool {
-        if self
-            .check(
-                frame,
-                &Request {
-                    order,
-                    tier: Tier(0),
-                    local: None,
-                },
-            )
-            .is_ok()
-        {
-            self.lower.is_free(frame, order)
-        } else {
-            false
-        }
     }
 
     fn frames(&self) -> usize {
@@ -464,9 +444,14 @@ impl LLFree<'_> {
             self.get_matching_reserve(request.order, request.tier, local, *start_idx)
         } else {
             let check = |t: Tier, f: usize| {
-                (f >= request.frames()
-                    && matches!((self.policy)(request.tier, t, f), Policy::Match(_)))
-                .then_some(t)
+                if f < request.frames() {
+                    return None;
+                }
+                match (self.policy)(request.tier, t, f) {
+                    Policy::Match(_) => Some(t),
+                    Policy::Demote if f == TREE_FRAMES => Some(request.tier),
+                    _ => None,
+                }
             };
             // Any frame
             self.trees.search(*start_idx, 0, self.trees.len(), |i| {

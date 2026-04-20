@@ -6,8 +6,8 @@ use core::{fmt, slice};
 
 use llfree::util::Align;
 use llfree::{
-    Alloc, FrameId, HUGE_ORDER, Init, MetaData, MetaSize, Policy, PolicyFn, Request, Result, Stats,
-    TREE_FRAMES, TREE_HUGE, Tier, TierStats, Tiering, TreeStats,
+    Alloc, FrameId, Init, MetaData, MetaSize, Policy, PolicyFn, Request, Result, Stats, Tier,
+    TierStats, Tiering, TreeStats,
 };
 
 /// Global storage for the Rust policy function pointer.
@@ -124,14 +124,6 @@ impl<'a> Alloc<'a> for LLC {
         let ret =
             unsafe { bindings::llfree_put(self.raw.get().cast(), frame.into(), request.into()) };
         ret.ok().map(|_| ())
-    }
-
-    fn is_free(&self, frame: FrameId, order: usize) -> bool {
-        let stats =
-            unsafe { bindings::llfree_stats_at(self.raw.get().cast(), frame.into(), order as _) };
-        order == 0 && stats.free_frames == 1
-            || order == HUGE_ORDER && stats.free_huge == 1
-            || order == TREE_FRAMES.ilog2() as usize && stats.free_huge == TREE_HUGE
     }
 
     fn drain(&self) {

@@ -57,7 +57,7 @@ let frames = 1 << 30 / 4096;
 let (tiering, request) = Tiering::simple(1);
 // Allocate the metadata buffers
 let ms = LLFree::metadata_size(&tiering, frames);
-let meta = MetaData::alloc(ms);
+let meta = MetaData::alloc(&ms);
 // Initialize the allocator
 let alloc = LLFree::new(frames, Init::FreeAll, &tiering, meta).unwrap();
 

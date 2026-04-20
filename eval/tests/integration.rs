@@ -5,10 +5,6 @@ use std::sync::Barrier;
 use std::time::Instant;
 use std::vec::Vec;
 
-#[cfg(all(feature = "llc", not(feature = "llzig")))]
-use llfree_eval::LLC;
-#[cfg(feature = "llzig")]
-use llfree_eval::LLZig;
 use llfree_eval::{mmap, thread};
 use log::{error, info, warn};
 
@@ -17,12 +13,19 @@ use llfree::util::{WyRand, aligned_buf, logging};
 use llfree::wrapper::NvmAlloc;
 use llfree::*;
 
-#[cfg(all(feature = "llc", not(feature = "llzig")))]
-type AllocImpl = LLC;
-#[cfg(feature = "llzig")]
-type AllocImpl = LLZig;
-#[cfg(not(any(feature = "llc", feature = "llzig")))]
-type AllocImpl = LLFree<'static>;
+cfg_select! {
+    feature = "llc" => {
+        use llfree_eval::LLC;
+        type AllocImpl = LLC;
+    }
+    feature = "llzig" => {
+        use llfree_eval::LLZig;
+        type AllocImpl = LLZig;
+    }
+    _ => {
+        type AllocImpl = LLFree<'static>;
+    }
+}
 
 type Allocator = TestAlloc<AllocImpl>;
 
@@ -678,10 +681,14 @@ fn alloc_free() {
 
 #[test]
 fn recover() {
-    #[cfg(feature = "llc")]
-    type Allocator<'a> = NvmAlloc<'a, LLC>;
-    #[cfg(not(feature = "llc"))]
-    type Allocator<'a> = NvmAlloc<'a, LLFree<'a>>;
+    cfg_select! {
+        any(feature = "llc", feature = "llzig") => {
+            type Allocator<'a> = NvmAlloc<'a, AllocImpl>;
+        }
+        _ => {
+            type Allocator<'a> = NvmAlloc<'a, LLFree<'a>>;
+        }
+    }
 
     logging();
 

@@ -41,21 +41,18 @@ impl<T> Mapping<T> {
             libc::MAP_PRIVATE
         };
 
-        #[allow(unused_mut)]
-        let mut populate_f = 0;
-        #[cfg(target_os = "linux")]
-        if populate {
-            populate_f = libc::MAP_POPULATE
+        let populate_f = cfg_select! {
+            target_os = "linux" => libc::MAP_POPULATE,
+            _ => 0,
         };
-        #[cfg(not(target_os = "linux"))]
-        let _ = populate; // discard
+        let populate = if populate { populate_f } else { 0 };
 
         let addr = unsafe {
             libc::mmap(
                 begin as _,
                 size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_ANONYMOUS | visibility | populate_f,
+                libc::MAP_ANONYMOUS | visibility | populate,
                 -1,
                 0,
             )
@@ -81,15 +78,15 @@ impl<T> Mapping<T> {
     ) -> Result<Self, AllocError> {
         let (begin, size) = calc_layout::<T>(begin, len)?;
 
-        #[allow(unused_mut)]
-        let mut flags = libc::MAP_SHARED;
+        let dax_flags = cfg_select! {
+            target_os = "linux" => libc::MAP_SHARED_VALIDATE | libc::MAP_SYNC,
+            _ => 0,
+        };
 
-        #[cfg(target_os = "linux")]
+        let mut flags = libc::MAP_SHARED;
         if dax {
-            flags = libc::MAP_SHARED_VALIDATE | libc::MAP_SYNC;
+            flags |= dax_flags;
         }
-        #[cfg(not(target_os = "linux"))]
-        let _ = dax; // discard
 
         let file = File::options()
             .read(true)

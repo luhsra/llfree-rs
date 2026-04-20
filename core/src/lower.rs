@@ -7,7 +7,7 @@ use core::{fmt, slice};
 use bitfield_struct::bitfield;
 use log::{debug, error, info, warn};
 
-use crate::atomic::{Atom, AtomArray, Atomic};
+use crate::atomic::{Atom, Atomic, AtomicSlice};
 use crate::bitfield::{Bitfield, RowId};
 use crate::trees::TreeId;
 use crate::util::{Align, size_of_slice, spin_wait};
@@ -81,8 +81,6 @@ pub struct Lower<'a> {
 
 unsafe impl Send for Lower<'_> {}
 unsafe impl Sync for Lower<'_> {}
-
-const _: () = assert!(TREE_HUGE < (1 << (u16::BITS as usize - HUGE_ORDER)));
 
 /// Size of the dynamic metadata
 struct Metadata {
@@ -415,7 +413,7 @@ impl<'a> Lower<'a> {
         let (last, tables) = self.children.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
-            table.atomic_fill(HugeEntry::new_with(Bitfield::LEN));
+            unsafe { table.non_atomic() }.fill(HugeEntry::new_with(Bitfield::LEN));
         }
         // Table is only partially included in the memory range
         for (i, entry) in last.iter().enumerate() {
@@ -450,7 +448,7 @@ impl<'a> Lower<'a> {
         let (last, tables) = self.children.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
-            table.atomic_fill(HugeEntry::new_huge());
+            unsafe { table.non_atomic() }.fill(HugeEntry::new_huge());
         }
         // Table is only partially included in the memory range
         let last_i = (self.frames() / Bitfield::LEN) - tables.len() * TREE_HUGE;

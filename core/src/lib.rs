@@ -36,7 +36,19 @@ pub const FRAME_SIZE: usize = if cfg!(feature = "16K") {
     0x1000
 };
 /// Number of huge frames in tree
-pub const TREE_HUGE: usize = 8;
+pub const TREE_HUGE: usize = cfg_select! {
+    // feature = "tree_huge_1" => 1,
+    feature = "tree_huge_2" => 2,
+    feature = "tree_huge_4" => 4,
+    feature = "tree_huge_8" => 8,
+    feature = "tree_huge_16" => 16,
+    feature = "tree_huge_32" => 32,
+    feature = "tree_huge_64" => 64,
+    feature = "tree_huge_128" => 128,
+    feature = "tree_huge_256" => 256,
+    feature = "tree_huge_512" => 512,
+    _ => 8,
+};
 /// Number of small frames in tree
 pub const TREE_FRAMES: usize = TREE_HUGE << HUGE_ORDER;
 /// Order of an entire tree
@@ -111,11 +123,8 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// Takes more time than `tree_stats`.
     fn stats(&self) -> Stats;
     /// Retrieve detailed allocator statistics.
-    /// Only [`TREE_ORDER`], [`HUGE_ORDER`] and 0 are supported.
+    /// Only [`TREE_ORDER`], [`HUGE_ORDER`] and `0` are supported.
     fn stats_at(&self, frame: FrameId, order: usize) -> Stats;
-
-    /// Returns if `frame` is free. This might be racy!
-    fn is_free(&self, frame: FrameId, order: usize) -> bool;
 
     /// Unreserve a local tree
     fn drain(&self) {}

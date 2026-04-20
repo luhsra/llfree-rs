@@ -155,13 +155,13 @@ fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
 
 #[allow(unused_variables)]
 pub fn mapping(begin: usize, length: usize, dax: &str) -> Mapping<Frame> {
-    #[cfg(not(target_os = "linux"))]
-    {
-        panic!("No NVRAM!")
-    }
-    #[cfg(target_os = "linux")]
-    {
-        warn!("MMap file {dax} l={}G", (length * Frame::SIZE) >> 30);
-        Mapping::file(begin, length, dax, true).unwrap()
+    cfg_select! {
+        target_os = "linux" => {
+            warn!("MMap file {dax} l={}G", (length * Frame::SIZE) >> 30);
+            Mapping::file(begin, length, dax, true).unwrap()
+        },
+        _ => {
+            panic!("No NVRAM!")
+        }
     }
 }

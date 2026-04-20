@@ -45,6 +45,7 @@ fn main() {
         dax,
         private,
         populate,
+        #[allow(unused)]
         huge,
         rand,
     } = Args::parse();
@@ -72,8 +73,6 @@ fn main() {
             MAdvise::NoHugepage
         },
     );
-    #[cfg(not(target_os = "linux"))]
-    let _ = huge; // discard
 
     let chunk_size = mapping.len().div_ceil(threads);
 

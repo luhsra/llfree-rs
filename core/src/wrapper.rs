@@ -67,12 +67,6 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
         };
         self.alloc.stats_at(frame, order)
     }
-    fn is_free(&self, frame: FrameId, order: usize) -> bool {
-        let Some(frame) = frame.0.checked_sub(self.offset).map(FrameId) else {
-            return false;
-        };
-        self.alloc.is_free(frame, order)
-    }
     fn drain(&self) {
         self.alloc.drain();
     }
@@ -203,9 +197,6 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     }
     fn stats_at(&self, frame: FrameId, order: usize) -> Stats {
         self.alloc.stats_at(frame, order)
-    }
-    fn is_free(&self, frame: FrameId, order: usize) -> bool {
-        self.alloc.is_free(frame, order)
     }
     fn drain(&self) {
         self.alloc.drain();

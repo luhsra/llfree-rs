@@ -287,13 +287,16 @@ impl Local {
 #[bitfield(u64)]
 #[derive(PartialEq, Eq)]
 struct LocalTree {
-    #[bits(48)]
+    #[bits(44)]
     row: RowId,
-    #[bits(15)]
+    #[bits(19)]
     free: usize,
     /// Reserved for present bit...
     present: bool,
 }
+
+const _: () = assert!(1usize << LocalTree::FREE_BITS > TREE_FRAMES);
+
 impl Atomic for LocalTree {
     type I = AtomicU64;
 }
