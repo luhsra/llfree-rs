@@ -11,13 +11,13 @@ use crate::trees::{TreeId, Trees};
 use crate::util::{Align, align_down};
 use crate::*;
 
-/// Return [`Error::Address`] if condition is not met.
+/// Return [`Error::Argument`] if condition is not met.
 #[allow(unused_macros)]
 macro_rules! ensure {
     ($cond:expr, $($args:expr),*) => {
         if !($cond) {
             log::error!($($args),*);
-            return Err(Error::Address);
+            return Err(Error::Argument);
         }
     };
     ($err:expr; $cond:expr, $($args:expr),*) => {

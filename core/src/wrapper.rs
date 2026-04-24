@@ -42,14 +42,14 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
             .map(|f| {
                 f.0.checked_sub(self.offset)
                     .map(FrameId)
-                    .ok_or(Error::Address)
+                    .ok_or(Error::Argument)
             })
             .transpose()?;
         let (frame_id, tier) = self.alloc.get(frame, flags)?;
         Ok((FrameId(frame_id.0 + self.offset), tier))
     }
     fn put(&self, frame: FrameId, flags: Request) -> Result<()> {
-        let frame = FrameId(frame.0.checked_sub(self.offset).ok_or(Error::Address)?);
+        let frame = FrameId(frame.0.checked_sub(self.offset).ok_or(Error::Argument)?);
         self.alloc.put(frame, flags)
     }
     fn frames(&self) -> usize {

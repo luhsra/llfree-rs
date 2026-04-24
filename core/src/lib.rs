@@ -72,8 +72,8 @@ pub enum Error {
     Memory = 1,
     /// Failed atomic operation, retry procedure
     Retry = 2,
-    /// Invalid address
-    Address = 3,
+    /// Invalid argument
+    Argument = 3,
     /// Allocator not initialized or initialization failed
     Initialization = 4,
 }

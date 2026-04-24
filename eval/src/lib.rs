@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ops::{Add, Div};
 use std::sync::OnceLock;
 
@@ -161,7 +162,7 @@ struct TierConfig {
     /// And-ed list of or-ed GFP flags.
     /// One of each inner list must match.
     #[facet(default)]
-    gfp: Vec<Vec<GfpFlag>>,
+    gfp: Vec<BTreeMap<GFP, bool>>,
 }
 
 impl TierConfig {
@@ -172,26 +173,13 @@ impl TierConfig {
             return false;
         }
         for group in &self.gfp {
-            if !group.iter().any(|flag| flag.matches(gfp)) {
-                return false;
+            if group.iter().all(|(flag, on)| (*flag == gfp) == *on) {
+                return true;
             }
         }
-        true
-    }
-}
-
-#[derive(Clone, Debug, Facet)]
-#[repr(u8)]
-#[facet(rename_all = "snake_case")]
-enum GfpFlag {
-    On(GFP),
-    Off(GFP),
-}
-impl GfpFlag {
-    fn matches(&self, gfp: u32) -> bool {
-        match self {
-            Self::On(flag) => *flag == gfp,
-            Self::Off(flag) => *flag != gfp,
+        if self.gfp.is_empty() {
+            return true;
         }
+        false
     }
 }

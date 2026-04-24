@@ -271,7 +271,7 @@ impl<'a> Lower<'a> {
         } else {
             unreachable!("Order {order} is not supported")
         }
-        Err(Error::Address)
+        Err(Error::Memory)
     }
 
     /// Free single frame, returning whether a whole huge page has become free.
@@ -292,7 +292,7 @@ impl<'a> Lower<'a> {
                 ),
             ) {
                 error!("Addr {frame:?} o={order} {old:?}");
-                Err(Error::Address)
+                Err(Error::Memory)
             } else {
                 Ok(())
             }
@@ -301,7 +301,7 @@ impl<'a> Lower<'a> {
                 .compare_exchange(HugeEntry::new_huge(), HugeEntry::new_with(Bitfield::LEN))
             {
                 error!("Addr {frame:?} o={order} {old:?}");
-                Err(Error::Address)
+                Err(Error::Memory)
             } else {
                 Ok(())
             }
@@ -313,7 +313,7 @@ impl<'a> Lower<'a> {
                 self.put_small(frame, order)
             } else {
                 error!("Addr {frame:?} o={order} {old:?}");
-                Err(Error::Address)
+                Err(Error::Memory)
             }
         } else {
             unreachable!("Order {order} is not supported")
@@ -483,7 +483,7 @@ impl<'a> Lower<'a> {
                 "L1 put failed o={order} i={} p={frame:?}",
                 frame.0 % Bitfield::LEN
             );
-            return Err(Error::Address);
+            return Err(Error::Memory);
         }
 
         let children = &self.children(frame.as_tree());

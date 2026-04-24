@@ -200,7 +200,7 @@ mod bindings {
                 LLZIG_ERR_OK => Ok(self.frame),
                 LLZIG_ERR_MEMORY => Err(llfree::Error::Memory),
                 LLZIG_ERR_RETRY => Err(llfree::Error::Retry),
-                LLZIG_ERR_ADDRESS => Err(llfree::Error::Address),
+                LLZIG_ERR_ARGUMENT => Err(llfree::Error::Argument),
                 LLZIG_ERR_INIT => Err(llfree::Error::Initialization),
                 _ => unreachable!("invalid return code"),
             }

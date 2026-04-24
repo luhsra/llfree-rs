@@ -241,7 +241,7 @@ mod bindings {
                 LLFREE_ERR_OK => Ok(self.frame),
                 LLFREE_ERR_MEMORY => Err(Error::Memory),
                 LLFREE_ERR_RETRY => Err(Error::Retry),
-                LLFREE_ERR_ADDRESS => Err(Error::Address),
+                LLFREE_ERR_ARGUMENT => Err(Error::Argument),
                 LLFREE_ERR_INIT => Err(Error::Initialization),
                 _ => unreachable!("invalid return code"),
             }

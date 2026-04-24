@@ -1,7 +1,7 @@
 use facet::Facet;
 
 /// Linux GFP flags for memory allocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet, Hash, PartialOrd, Ord)]
 #[allow(clippy::upper_case_acronyms, non_camel_case_types, dead_code)]
 #[repr(u32)]
 pub enum GFP {

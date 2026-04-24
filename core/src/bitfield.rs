@@ -144,7 +144,7 @@ impl Bitfield {
                     }
                 }) {
                     Ok(_) => Ok(()),
-                    Err(_) => Err(Error::Address),
+                    Err(_) => Err(Error::Memory),
                 }
             }
             3 => self.toggle_int::<u8>(i, expected),
@@ -166,7 +166,7 @@ impl Bitfield {
                                 .compare_exchange(!expected, expected)
                                 .expect("Failed undo toggle");
                         }
-                        return Err(Error::Address);
+                        return Err(Error::Memory);
                     }
                 }
                 Ok(())
