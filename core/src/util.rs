@@ -1,8 +1,9 @@
 //! General utility functions
 
-use core::fmt;
+use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 use core::ops::{Deref, DerefMut, Range};
+use core::{fmt, slice};
 
 /// Retries the condition n times and returns if it was successfull.
 /// This pauses the CPU between retries if possible.
@@ -58,6 +59,36 @@ impl<T> DerefMut for Align<T> {
 impl<T: fmt::Debug> fmt::Debug for Align<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+/// A slice of T stored at an offset in a byte buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct OffsetSlice<T> {
+    offset: usize,
+    length: usize,
+    _p: PhantomData<T>,
+}
+impl<T> OffsetSlice<T> {
+    pub fn new(offset: usize, length: usize) -> Self {
+        Self {
+            offset,
+            length,
+            _p: PhantomData,
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.length
+    }
+    pub fn as_slice<'a>(&self, buffer: &'a [u8]) -> &'a [T] {
+        assert!(self.offset + self.length * size_of::<T>() <= buffer.len());
+        unsafe { slice::from_raw_parts(buffer.as_ptr().add(self.offset).cast(), self.length) }
+    }
+    pub fn as_slice_mut<'a>(&self, buffer: &'a mut [u8]) -> &'a mut [T] {
+        assert!(self.offset + self.length * size_of::<T>() <= buffer.len());
+        unsafe {
+            slice::from_raw_parts_mut(buffer.as_mut_ptr().add(self.offset).cast(), self.length)
+        }
     }
 }
 
@@ -222,5 +253,23 @@ mod test {
         assert_eq!(align_up(63, 64), 64);
         assert_eq!(align_up(64, 64), 64);
         assert_eq!(align_up(65, 64), 128);
+    }
+
+    #[test]
+    fn aligned_buf() {
+        use super::aligned_buf;
+        let sizes = [0, 1, 63, 64, 65, 128, 256, 1024];
+        for &size in &sizes {
+            let buf = aligned_buf(size);
+            assert_eq!(buf.len(), size, "buffer length mismatch for size {size}");
+            assert!(
+                (buf.as_ptr() as usize).is_multiple_of(64),
+                "buffer not 64-byte aligned for size {size}"
+            );
+            assert!(
+                buf.iter().all(|&b| b == 0),
+                "buffer not zeroed for size {size}"
+            );
+        }
     }
 }

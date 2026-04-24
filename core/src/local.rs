@@ -6,21 +6,22 @@ use log::debug;
 
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
-use crate::util::size_of_slice;
+use crate::util::{OffsetSlice, size_of_slice};
 use crate::{Error, Policy, PolicyFn, Tier, Tiering, TreeStats};
 use crate::{TREE_FRAMES, TreeId};
 
 pub struct Locals<'a> {
+    buffer: &'a mut [u8],
     /// Local reservations for each tier
-    tiers: [Option<&'a [Local]>; 1 << Tier::BITS],
+    tiers: [Option<OffsetSlice<Local>>; 1 << Tier::BITS],
 }
 
 impl fmt::Debug for Locals<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut f = f.debug_map();
-        for (i, locals) in self.tiers.iter().copied().enumerate() {
+        for (i, locals) in self.tiers.iter().enumerate() {
             if let Some(locals) = locals {
-                f.entry(&Tier(i as u8), &locals);
+                f.entry(&Tier(i as u8), &locals.as_slice(self.buffer));
             }
         }
         f.finish()
@@ -32,20 +33,8 @@ impl<'a> Locals<'a> {
         size_of_slice::<Local>(tiering.tiers().iter().map(|&(_, count)| count).sum())
     }
     pub unsafe fn metadata(&mut self) -> &'a mut [u8] {
-        let Some(first) = self.tiers.iter().find_map(|local| *local) else {
-            return &mut [];
-        };
-        let Some(last) = self.tiers.iter().rev().find_map(|local| *local) else {
-            return &mut [];
-        };
-        let start = first.as_ptr();
-        let end = last.as_ptr_range().end;
-        unsafe {
-            slice::from_raw_parts_mut(
-                start.cast_mut().cast(),
-                end.offset_from(start).cast_unsigned(),
-            )
-        }
+        // Lifetime hack: internal buffer outlives instance!
+        unsafe { slice::from_raw_parts_mut(self.buffer.as_mut_ptr(), self.buffer.len()) }
     }
 
     /// Initialize the locals from a buffer
@@ -57,20 +46,20 @@ impl<'a> Locals<'a> {
         }
 
         let mut offset = 0;
-        let mut tiers = [None::<&'a [Local]>; 1 << Tier::BITS];
+        let mut tiers = [const { None }; 1 << Tier::BITS];
         for &(tier, count) in tiering.tiers() {
-            let local = unsafe {
-                slice::from_raw_parts_mut(buffer.as_mut_ptr().cast::<Local>().add(offset), count)
-            };
-            offset += count;
+            let local = OffsetSlice::new(offset, count);
+            offset += size_of_slice::<Local>(count);
             tiers[tier.0 as usize] = Some(local);
         }
-        Ok(Self { tiers })
+        Ok(Self { buffer, tiers })
     }
 
     /// Get the number of locals for a tier, or None if the tier is not configured
     pub fn tier_locals(&self, tier: Tier) -> Option<usize> {
-        self.tiers[tier.0 as usize].map(|local| local.len())
+        self.tiers[tier.0 as usize]
+            .as_ref()
+            .map(|local| local.len())
     }
 
     /// Try allocating from a local, returning the row id if successful, or the current reservation if not
@@ -81,7 +70,7 @@ impl<'a> Locals<'a> {
         tree: Option<TreeId>,
         free: usize,
     ) -> Result<RowId, Option<Reservation>> {
-        let Some(locals) = &self.tiers[tier.0 as usize] else {
+        let Some(locals) = &self.locals(tier) else {
             return Err(None);
         };
         match locals[local].tree.fetch_update(|v| v.get(tree, free)) {
@@ -134,14 +123,14 @@ impl<'a> Locals<'a> {
         free: usize,
         policy: PolicyFn,
     ) -> Option<(RowId, Option<Reservation>)> {
-        let Some(locals) = &self.tiers[tier.0 as usize] else {
+        let Some(locals) = &self.locals(tier) else {
             return None;
         };
 
         for i in 1..self.tiers.len() {
             let target_tier = Tier(((i as u8) + tier.0) % self.tiers.len() as u8);
 
-            let Some(target) = &self.tiers[target_tier.0 as usize] else {
+            let Some(target) = &self.locals(target_tier) else {
                 continue;
             };
             if policy(tier, target_tier, free) != Policy::Demote {
@@ -174,7 +163,7 @@ impl<'a> Locals<'a> {
     }
 
     pub fn put(&self, tier: Tier, local: usize, tree: TreeId, free: usize) -> bool {
-        let Some(locals) = &self.tiers[tier.0 as usize] else {
+        let Some(locals) = &self.locals(tier) else {
             return false;
         };
 
@@ -183,7 +172,7 @@ impl<'a> Locals<'a> {
     }
 
     pub fn swap(&self, tier: Tier, local: usize, tree: TreeId, free: usize) -> Option<Reservation> {
-        let Some(locals) = &self.tiers[tier.0 as usize] else {
+        let Some(locals) = &self.locals(tier) else {
             panic!("Invalid tier");
         };
 
@@ -193,8 +182,9 @@ impl<'a> Locals<'a> {
     }
 
     pub fn drain(&self, unreserve: impl Fn(RowId, Tier, usize)) {
-        for (i, locals) in self.tiers.iter().copied().enumerate() {
+        for (i, locals) in self.tiers.iter().enumerate() {
             if let Some(locals) = locals {
+                let locals = locals.as_slice(self.buffer);
                 let tier = Tier(i as u8);
                 for local in locals {
                     let old = local.tree.swap(LocalTree::none());
@@ -207,7 +197,7 @@ impl<'a> Locals<'a> {
     }
 
     pub fn set_start(&self, tier: Tier, index: usize, row: RowId) {
-        let Some(locals) = &self.tiers[tier.0 as usize] else {
+        let Some(locals) = &self.locals(tier) else {
             return;
         };
         let local = &locals[index];
@@ -222,8 +212,9 @@ impl<'a> Locals<'a> {
 
     pub fn stats(&self) -> TreeStats {
         let mut s = TreeStats::default();
-        for (i, locals) in self.tiers.iter().copied().enumerate() {
+        for (i, locals) in self.tiers.iter().enumerate() {
             if let Some(locals) = locals {
+                let locals = locals.as_slice(self.buffer);
                 let tier = Tier(i as u8);
                 for local in locals {
                     let tree = local.tree.load();
@@ -239,11 +230,17 @@ impl<'a> Locals<'a> {
     }
 
     pub fn load(&self, tier: Tier, local: usize) -> Option<Reservation> {
-        let Some(locals) = &self.tiers[tier.0 as usize] else {
+        let Some(locals) = &self.locals(tier) else {
             return None;
         };
         let tree = locals[local].tree.load();
         tree.present().then_some(tree.as_reservation(tier))
+    }
+
+    fn locals(&'a self, tier: Tier) -> Option<&'a [Local]> {
+        self.tiers[tier.0 as usize]
+            .as_ref()
+            .map(|locals| locals.as_slice(self.buffer))
     }
 }
 
