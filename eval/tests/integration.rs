@@ -18,10 +18,6 @@ cfg_select! {
         use llfree_eval::LLC;
         type AllocImpl = LLC;
     }
-    feature = "llzig" => {
-        use llfree_eval::LLZig;
-        type AllocImpl = LLZig;
-    }
     _ => {
         type AllocImpl = LLFree<'static>;
     }
@@ -682,7 +678,7 @@ fn alloc_free() {
 #[test]
 fn recover() {
     cfg_select! {
-        any(feature = "llc", feature = "llzig") => {
+        feature = "llc" => {
             type Allocator<'a> = NvmAlloc<'a, AllocImpl>;
         }
         _ => {

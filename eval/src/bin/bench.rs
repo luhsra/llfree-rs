@@ -208,16 +208,6 @@ fn alloc<'a>(
             request,
         ));
     }
-    #[cfg(feature = "llzig")]
-    if llfree_eval::LLZig::name() == name {
-        let m = NvmAlloc::<llfree_eval::LLZig>::metadata_size(tiering, zone.len());
-        let local = aligned_buf(m.local);
-        let trees = aligned_buf(m.trees);
-        return Box::new(BenchAlloc::new(
-            NvmAlloc::<llfree_eval::LLZig>::create(zone, false, tiering, local, trees).unwrap(),
-            request,
-        ));
-    }
     if LLFree::name() == name {
         let m = NvmAlloc::<LLFree>::metadata_size(tiering, zone.len());
         let local = aligned_buf(m.local);

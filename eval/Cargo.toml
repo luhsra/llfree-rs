@@ -23,7 +23,6 @@ raw-cpuid = { version = "11.6" }
 
 [features]
 llc = ["bindgen"]
-llzig = ["bindgen"]
 16K = ["llfree/16K"]
 
 # tree_huge_1 = ["llfree/tree_huge_1"]

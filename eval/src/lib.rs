@@ -10,10 +10,6 @@ pub mod thread;
 mod llc;
 #[cfg(feature = "llc")]
 pub use llc::LLC;
-#[cfg(feature = "llzig")]
-mod llzig;
-#[cfg(feature = "llzig")]
-pub use llzig::LLZig;
 
 use gfp::GFP;
 use llfree::{Policy, Request, Tier, Tiering};
