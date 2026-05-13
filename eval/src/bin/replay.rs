@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use bitfield_struct::bitfield;
 use clap::Parser;
+use facet::Facet;
 use llfree::util::align_down;
 use llfree::*;
 use llfree_eval::gfp::GFP;
@@ -43,7 +44,6 @@ cfg_select! {
         type Allocator<'a> = LLFree<'a>;
     }
 }
-
 
 fn main() {
     util::logging();
@@ -98,6 +98,7 @@ fn main() {
     ) = if let Some(tiering) = tiering {
         let s = fs::read_to_string(tiering).unwrap();
         let tiering_config: TieringConfig = facet_json::from_str(&s).unwrap();
+        info!("tiering = {tiering_config:#?}");
         (
             tiering_config.tiering(cores),
             Box::new(move |order, gfp, core, pid| {
@@ -275,12 +276,35 @@ fn main() {
         monitor.join().unwrap()
     });
 
+    info!("{alloc:#?}");
+
     alloc.validate();
     let stats = alloc.stats();
     info!("free = {} / {}", stats.free_frames, alloc.frames());
     let huge = alloc.frames() >> HUGE_ORDER;
     info!("huge = {} / {huge}", stats.free_huge);
-    warn!("score = {score:.1}")
+    warn!("score = {score:.1}");
+
+    println!(
+        "{}",
+        facet_json::to_string_pretty(&Output {
+            free_frames: stats.free_frames,
+            total_frames: alloc.frames(),
+            free_huge: stats.free_huge,
+            total_huge: huge,
+            score,
+        })
+        .unwrap()
+    );
+}
+
+#[derive(Facet, Debug, Default)]
+struct Output {
+    free_frames: usize,
+    total_frames: usize,
+    free_huge: usize,
+    total_huge: usize,
+    score: f32,
 }
 
 fn measure(frag: Option<&mut BufWriter<File>>, alloc: &Allocator) -> f32 {

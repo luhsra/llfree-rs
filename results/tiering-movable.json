@@ -1,0 +1,24 @@
+{
+  "tiers": [
+    {
+      "id": 0,
+      "count": "cores",
+      "order": [0, 8],
+      "gfp": { "off": "MOVABLE" }
+    },
+    {
+      "id": 1,
+      "count": "cores",
+      "order": [0, 8],
+      "gfp": { "on": "MOVABLE" }
+    },
+    {
+      "id": 2,
+      "count": "cores",
+      "order": [9, 10]
+    }
+  ],
+  "perfect": [64, 2047],
+  "good": [2048, 4095],
+  "default": 2
+}

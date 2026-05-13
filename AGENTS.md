@@ -7,9 +7,6 @@ Repo scope:
 - C allocator in `llc/`
 - Evaluation/integration harness in `eval/`
 
-No Cursor rules were found (`.cursor/rules/`, `.cursorrules`).
-No Copilot instructions file was found (`.github/copilot-instructions.md`).
-
 ## Architecture / Design (Short)
 
 LLFree is a two-level allocator optimized for scalability and fragmentation control.
@@ -85,7 +82,6 @@ LLFree is a two-level allocator optimized for scalability and fragmentation cont
 - Run a single C test (substring filter):
   - `make -C llc test T=<name_substring>`
   - Example: `make -C llc test T=zeroed`
-  - Example: `make -C llc test T=change_tree`
 - Clean C artifacts:
   - `make -C llc clean`
 

@@ -10,7 +10,7 @@
 #[macro_use]
 extern crate std;
 
-mod atomic;
+pub mod atomic;
 pub mod frame;
 pub mod util;
 pub mod wrapper;
