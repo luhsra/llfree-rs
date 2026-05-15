@@ -2,7 +2,7 @@
   description = "LLZero Benchmark Environment";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -37,6 +37,7 @@
           buildInputs = with pkgs;
             [
               rustToolchain
+              rust-analyzer
               lldb
               curl
               zig
