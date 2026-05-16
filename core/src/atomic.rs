@@ -49,12 +49,17 @@ impl<T: Atomic> Atom<T> {
         }
     }
     #[cfg_attr(feature = "log_debug", track_caller)]
-    pub fn fetch_update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
+    pub fn try_update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
         debug!("{} update", core::panic::Location::caller());
-        match self.0.fetch_update(|v| f(v.into()).map(Into::into)) {
+        match self.0.try_update(|v| f(v.into()).map(Into::into)) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
+    }
+    #[cfg_attr(feature = "log_debug", track_caller)]
+    pub fn update<F: FnMut(T) -> T>(&self, mut f: F) -> T {
+        debug!("{} update", core::panic::Location::caller());
+        self.0.update(|v| f(v.into()).into()).into()
     }
 }
 impl<T: Atomic + Default> Default for Atom<T> {
@@ -92,7 +97,8 @@ pub trait AtomicImpl: Sized {
     fn swap(&self, v: Self::V) -> Self::V;
     fn compare_exchange(&self, current: Self::V, new: Self::V) -> Result<Self::V, Self::V>;
     fn compare_exchange_weak(&self, current: Self::V, new: Self::V) -> Result<Self::V, Self::V>;
-    fn fetch_update<F: FnMut(Self::V) -> Option<Self::V>>(&self, f: F) -> Result<Self::V, Self::V>;
+    fn try_update<F: FnMut(Self::V) -> Option<Self::V>>(&self, f: F) -> Result<Self::V, Self::V>;
+    fn update<F: FnMut(Self::V) -> Self::V>(&self, f: F) -> Self::V;
 
     fn fetch_min(&self, v: Self::V) -> Self::V;
     fn fetch_max(&self, v: Self::V) -> Self::V;
@@ -150,12 +156,16 @@ macro_rules! atomic_impl {
             ) -> Result<Self::V, Self::V> {
                 self.compare_exchange_weak(current, new, AcqRel, Acquire)
             }
-            fn fetch_update<F: FnMut(Self::V) -> Option<Self::V>>(
+            fn try_update<F: FnMut(Self::V) -> Option<Self::V>>(
                 &self,
                 f: F,
             ) -> Result<Self::V, Self::V> {
-                self.fetch_update(AcqRel, Acquire, f)
+                self.try_update(AcqRel, Acquire, f)
             }
+            fn update<F: FnMut(Self::V) -> Self::V>(&self, f: F) -> Self::V {
+                self.update(AcqRel, Acquire, f)
+            }
+
             atomic_trivial![
                 swap, fetch_min, fetch_max, fetch_add, fetch_sub, fetch_and, fetch_or, fetch_xor, fetch_nand
             ];
@@ -184,6 +194,9 @@ pub trait AtomicSlice<T: Copy + Atomic> {
 
     /// Get a reference to the internal atomic values.
     fn inner_atomic(&self) -> &[T::I];
+
+    /// Compare and exchange all values in the slice.
+    fn compare_exchange_all(&self, current: T, new: T) -> Result<(), ()>;
 }
 
 impl<T: Atomic> AtomicSlice<T> for [Atom<T>] {
@@ -197,5 +210,18 @@ impl<T: Atomic> AtomicSlice<T> for [Atom<T>] {
     fn inner_atomic(&self) -> &[T::I] {
         // cast to raw memory to let the compiler use vector instructions
         unsafe { core::slice::from_raw_parts(self.as_ptr().cast(), self.len()) }
+    }
+    fn compare_exchange_all(&self, current: T, new: T) -> Result<(), ()> {
+        for i in 0..self.len() {
+            if self[i].compare_exchange(current, new).is_err() {
+                // undo
+                for j in (0..i).rev() {
+                    let r = self[j].compare_exchange(new, current);
+                    assert!(r.is_ok(), "undo failed");
+                }
+                return Err(());
+            }
+        }
+        Ok(())
     }
 }

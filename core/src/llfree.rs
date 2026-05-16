@@ -308,7 +308,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
 impl LLFree<'_> {
     fn check(&self, frame: FrameId, request: &Request) -> Result<()> {
-        ensure!(request.order <= MAX_ORDER, "Invalid order {request:?}");
+        ensure!(request.order <= TREE_ORDER, "Invalid order {request:?}");
         ensure!(
             frame.0 + (1 << request.order) <= self.lower.frames(),
             "Frame {} out of bounds",

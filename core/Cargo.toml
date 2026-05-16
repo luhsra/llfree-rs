@@ -23,7 +23,7 @@ log_error = ["log/max_level_error"]
 16K = []
 free_reserve = []
 
-# tree_huge_1 = []
+tree_huge_1 = []
 # 2 huge frames per tree -> 4MiB
 tree_huge_2 = []
 # 4 huge frames per tree -> 8MiB

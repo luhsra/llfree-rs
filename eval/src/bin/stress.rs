@@ -58,7 +58,7 @@ fn main() {
 
     util::logging();
 
-    assert!(order <= MAX_ORDER);
+    assert!(order <= TREE_ORDER);
 
     // `thread::pin` uses this to select every nth cpu
     if stride > 1 {

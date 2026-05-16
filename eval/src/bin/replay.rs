@@ -235,7 +235,7 @@ fn main() {
                     }
 
                     // free
-                    for order in entry.order() as usize..=MAX_ORDER {
+                    for order in entry.order() as usize..=TREE_ORDER {
                         let pfn = align_down(entry.pfn() as _, 1 << order);
 
                         let allocation = &mut allocated[pfn];

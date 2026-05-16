@@ -6,10 +6,10 @@ use core::{fmt, slice};
 
 use log::error;
 
+use crate::TREE_ORDER;
 use crate::frame::Frame;
 use crate::{
-    Alloc, Error, FrameId, Init, MAX_ORDER, MetaData, MetaSize, Request, Result, Stats, Tier,
-    Tiering,
+    Alloc, Error, FrameId, Init, MetaData, MetaSize, Request, Result, Stats, Tier, Tiering,
 };
 
 /// Zone allocator, managing a range of memory at a given page frame offset.
@@ -80,7 +80,7 @@ impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
         tiering: &Tiering,
         meta: MetaData<'a>,
     ) -> Result<Self> {
-        if !offset.is_multiple_of(1 << MAX_ORDER) {
+        if !offset.is_multiple_of(1 << TREE_ORDER) {
             error!("zone alignment");
             return Err(Error::Initialization);
         }
@@ -126,7 +126,7 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
     ) -> Result<Self> {
         let m = A::metadata_size(tiering, zone.len());
         if size_of_val(zone) < m.lower + Frame::SIZE
-            || !(zone.as_ptr() as usize).is_multiple_of(Frame::SIZE << MAX_ORDER)
+            || !(zone.as_ptr() as usize).is_multiple_of(Frame::SIZE << TREE_ORDER)
         {
             error!("invalid memory region");
             return Err(Error::Initialization);

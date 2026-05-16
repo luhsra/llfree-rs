@@ -147,7 +147,7 @@ impl<'a> Trees<'a> {
     /// Sync with the global tree, stealing its counters
     pub fn sync(&self, i: TreeId, min: usize) -> Option<usize> {
         self.entries[i.0]
-            .fetch_update(|e| e.sync_steal(min))
+            .try_update(|e| e.sync_steal(min))
             .map(|tree| tree.free())
             .ok()
     }
@@ -160,7 +160,7 @@ impl<'a> Trees<'a> {
     ) -> Option<Tier> {
         let mut tier = None;
         self.entries[i.0]
-            .fetch_update(|e| {
+            .try_update(|e| {
                 e.get(free, |t, f| {
                     tier = check(t, f);
                     tier
@@ -171,9 +171,7 @@ impl<'a> Trees<'a> {
     }
 
     pub fn put(&self, i: TreeId, free: usize, policy: PolicyFn) {
-        self.entries[i.0]
-            .fetch_update(|v| Some(v.put(free, policy, self.default)))
-            .expect("Put failed");
+        self.entries[i.0].update(|v| v.put(free, policy, self.default));
     }
 
     /// Increment or reserve the tree, returning the old free counter if it was reserved
@@ -186,19 +184,17 @@ impl<'a> Trees<'a> {
         policy: PolicyFn,
     ) -> Option<usize> {
         let mut reserved = false;
-        let tree = self.entries[i.0]
-            .fetch_update(|v| {
-                let v = v.put(free, policy, self.default);
-                if may_reserve && !v.reserved() && v.tier() == tier && v.free() > Self::MIN_FREE {
-                    // Reserve the tree that was targeted by the last N frees
-                    reserved = true;
-                    Some(v.with_free(0).with_reserved(true))
-                } else {
-                    reserved = false; // <- This one is very important if CAS fails!
-                    Some(v)
-                }
-            })
-            .unwrap();
+        let tree = self.entries[i.0].update(|v| {
+            let v = v.put(free, policy, self.default);
+            if may_reserve && !v.reserved() && v.tier() == tier && v.free() > Self::MIN_FREE {
+                // Reserve the tree that was targeted by the last N frees
+                reserved = true;
+                v.with_free(0).with_reserved(true)
+            } else {
+                reserved = false; // <- This one is very important if CAS fails!
+                v
+            }
+        });
 
         if reserved { Some(tree.free()) } else { None }
     }
@@ -210,7 +206,7 @@ impl<'a> Trees<'a> {
     ) -> Option<(usize, Tier)> {
         let mut tier = None;
         self.entries[i.0]
-            .fetch_update(|v| {
+            .try_update(|v| {
                 v.reserve(|t, f| {
                     tier = check(t, f);
                     tier
@@ -223,7 +219,7 @@ impl<'a> Trees<'a> {
     /// Unreserve an entry, adding the local entry counter to the global one
     pub fn unreserve(&self, i: TreeId, free: usize, tier: Tier, policy: PolicyFn) {
         self.entries[i.0]
-            .fetch_update(|v| v.unreserve_add(free, tier, policy, self.default))
+            .try_update(|v| v.unreserve_add(free, tier, policy, self.default))
             .expect("Unreserve failed");
     }
 
@@ -339,8 +335,7 @@ impl<'a> Trees<'a> {
         change: TreeChange,
         fetch_free: impl Fn() -> usize + Copy,
     ) -> Result<()> {
-        match self.entries[id.0].fetch_update(|e| e.change(tier, free, change.clone(), fetch_free))
-        {
+        match self.entries[id.0].try_update(|e| e.change(tier, free, change.clone(), fetch_free)) {
             Ok(_) => Ok(()),
             Err(_) => Err(Error::Memory),
         }

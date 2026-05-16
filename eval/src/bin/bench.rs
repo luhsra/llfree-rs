@@ -11,7 +11,7 @@ use clap::{Parser, ValueEnum};
 use llfree::frame::Frame;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, FrameId, LLFree, MAX_ORDER, Request, Result, Tiering};
+use llfree::{Alloc, FrameId, LLFree, Request, Result, TREE_ORDER, Tiering};
 use llfree_eval::mmap::Mapping;
 use llfree_eval::{TieringConfig, thread};
 use log::warn;
@@ -119,7 +119,7 @@ fn main() {
 
     for x in x {
         for o in order.iter().copied() {
-            assert!(o <= MAX_ORDER);
+            assert!(o <= TREE_ORDER);
             for name in &allocs {
                 for i in 0..iterations {
                     warn!(">>> bench {bench:?} x={x} o={o} {name}\n");

@@ -731,8 +731,10 @@ fn recover() {
 }
 
 #[test]
+#[cfg(not(feature = "tree_huge_1"))]
 fn different_orders() {
     const THREADS: usize = 4;
+    const MAX_ORDER: usize = HUGE_ORDER + 1;
     const FRAMES: usize = (1 << MAX_ORDER) * (MAX_ORDER + 2) * THREADS; // 6 GiB for 16K
 
     logging();

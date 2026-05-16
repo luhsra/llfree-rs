@@ -37,7 +37,7 @@ pub const FRAME_SIZE: usize = if cfg!(feature = "16K") {
 };
 /// Number of huge frames in tree
 pub const TREE_HUGE: usize = cfg_select! {
-    // feature = "tree_huge_1" => 1,
+    feature = "tree_huge_1" => 1,
     feature = "tree_huge_2" => 2,
     feature = "tree_huge_4" => 4,
     feature = "tree_huge_8" => 8,
@@ -57,8 +57,6 @@ pub const TREE_ORDER: usize = TREE_FRAMES.ilog2() as usize;
 pub const HUGE_ORDER: usize = if cfg!(feature = "16K") { 11 } else { 9 };
 /// Number of small frames in huge frame
 pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
-/// Maximum order the llfree supports
-pub const MAX_ORDER: usize = HUGE_ORDER + 1;
 /// Bit size of the atomic ints that comprise the bitfields
 pub const BITFIELD_ROW: usize = 64;
 

@@ -73,7 +73,7 @@ impl<'a> Locals<'a> {
         let Some(locals) = &self.locals(tier) else {
             return Err(None);
         };
-        match locals[local].tree.fetch_update(|v| v.get(tree, free)) {
+        match locals[local].tree.try_update(|v| v.get(tree, free)) {
             Ok(old) => Ok(old.row()),
             Err(old) => Err(old.present().then_some(old.as_reservation(tier))),
         }
@@ -143,7 +143,7 @@ impl<'a> Locals<'a> {
 
                 if let Ok(old) = target[j]
                     .tree
-                    .fetch_update(|v| v.get(tree, free).map(|_| LocalTree::none()))
+                    .try_update(|v| v.get(tree, free).map(|_| LocalTree::none()))
                 {
                     let new = old.get(tree, free).unwrap();
 
@@ -168,7 +168,7 @@ impl<'a> Locals<'a> {
         };
 
         let local = &locals[local];
-        local.tree.fetch_update(|v| v.put(tree, free)).is_ok()
+        local.tree.try_update(|v| v.put(tree, free)).is_ok()
     }
 
     pub fn swap(&self, tier: Tier, local: usize, tree: TreeId, free: usize) -> Option<Reservation> {
@@ -201,7 +201,7 @@ impl<'a> Locals<'a> {
             return;
         };
         let local = &locals[index];
-        let _ = local.tree.fetch_update(|v| v.set_start(row));
+        let _ = local.tree.try_update(|v| v.set_start(row));
     }
 
     #[allow(dead_code)]

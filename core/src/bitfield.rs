@@ -136,7 +136,7 @@ impl Bitfield {
             0..=2 => {
                 // Updates within a single row
                 let mask = (u64::MAX >> (Self::ROW_BITS - num_bits)) << i.row_bit_idx();
-                match self.row(i.as_row()).fetch_update(|e| {
+                match self.row(i.as_row()).try_update(|e| {
                     if expected {
                         (e & mask == mask).then_some(e & !mask)
                     } else {
@@ -222,7 +222,7 @@ impl Bitfield {
             let i = RowId(i + start_row.huge_idx()).huge_idx();
 
             let mut offset = FrameId(0);
-            if let Ok(_) = self.row(RowId(i)).fetch_update(|e| {
+            if let Ok(_) = self.row(RowId(i)).try_update(|e| {
                 let (val, o) = first_zeros_aligned(e, order)?;
                 offset = FrameId(o);
                 Some(val)
@@ -327,6 +327,8 @@ fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
 
 #[cfg(test)]
 mod test {
+    use crate::HUGE_ORDER;
+
     use super::{FrameId, RowId};
 
     #[test]
@@ -485,9 +487,12 @@ mod test {
 
         // 9
         assert!(bitfield.data.iter().all(|e| e.load() == 0));
-        assert_eq!(FrameId(0), bitfield.set_first_zeros(RowId(0), 9).unwrap());
+        assert_eq!(
+            FrameId(0),
+            bitfield.set_first_zeros(RowId(0), HUGE_ORDER).unwrap()
+        );
         assert!(bitfield.data.iter().all(|e| e.load() == u64::MAX));
-        bitfield.toggle(FrameId(0), 9, true).unwrap();
+        bitfield.toggle(FrameId(0), HUGE_ORDER, true).unwrap();
         assert!(bitfield.data.iter().all(|e| e.load() == 0));
 
         assert_eq!(FrameId(0), bitfield.set_first_zeros(RowId(0), 7).unwrap());
@@ -509,6 +514,11 @@ mod test {
             bitfield.set_first_zeros(RowId(0), 6).unwrap()
         );
         assert!(bitfield.get_row(RowId(3)) == u64::MAX);
+
+        // Allocate upper parts
+        for o in (9..HUGE_ORDER).rev() {
+            bitfield.set_first_zeros(RowId(0), o).unwrap();
+        }
 
         bitfield.set_first_zeros(RowId(0), 9).expect_err("no mem");
         bitfield.set_first_zeros(RowId(0), 8).expect_err("no mem");
