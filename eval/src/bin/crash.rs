@@ -2,7 +2,8 @@ use std::cmp::Ordering::*;
 use std::sync::Barrier;
 use std::time::Duration;
 
-use clap::Parser;
+use facet::Facet;
+use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::{self, WyRand, align_up, aligned_buf};
 use llfree::wrapper::NvmAlloc;
@@ -12,19 +13,21 @@ use llfree_eval::thread;
 use log::{error, warn};
 
 /// Crash testing an allocator.
-#[derive(Parser, Debug)]
-#[command(about, version, author)]
+#[derive(Facet, Debug)]
 struct Args {
     /// Max number of threads
-    #[arg(short, long, default_value_t = 6)]
+    #[facet(args::short, args::named, default = 6)]
     threads: usize,
-    #[arg(long)]
+    #[facet(args::named)]
     dax: Option<String>,
-    #[arg(short, long, default_value_t = 0)]
+    #[facet(args::short, args::named, default = 0)]
     order: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
-    #[arg(short, long, default_value_t = 16)]
+    #[facet(args::short, args::named, default = 16)]
     memory: usize,
+
+    #[facet(flatten)]
+    builtins: FigueBuiltins,
 }
 
 type Allocator<'a> = NvmAlloc<'a, LLFree<'a>>;
@@ -35,7 +38,8 @@ fn main() {
         dax,
         order,
         memory,
-    } = Args::parse();
+        builtins: _,
+    } = figue::from_std_args().unwrap();
 
     util::logging();
 

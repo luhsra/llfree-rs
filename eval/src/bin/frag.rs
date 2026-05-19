@@ -4,7 +4,8 @@ use std::ops::DerefMut;
 use std::sync::atomic::Ordering;
 use std::sync::{Barrier, Mutex};
 
-use clap::Parser;
+use facet::Facet;
+use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::WyRand;
 use llfree::*;
@@ -12,30 +13,32 @@ use llfree_eval::thread;
 use log::warn;
 
 /// Benchmarking the allocators against each other.
-#[derive(Parser, Debug)]
-#[command(about, version, author)]
+#[derive(Facet, Debug)]
 struct Args {
     /// Max number of threads
-    #[arg(short, long, default_value = "6")]
+    #[facet(args::short, args::named, default = 6)]
     threads: usize,
     /// Where to store the benchmark results in txt format.
-    #[arg(short, long, default_value = "results/frag.txt")]
+    #[facet(args::short, args::named, default = "results/frag.txt")]
     outfile: String,
     /// Specifies how many pages should be allocated: #pages = 2^order
-    #[arg(short = 's', long, default_value_t = 0)]
+    #[facet(args::short = 's', args::named, default = 0)]
     order: usize,
     /// Number of iterations
-    #[arg(short, long, default_value_t = 8)]
+    #[facet(args::short, args::named, default = 8)]
     iterations: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
-    #[arg(short, long, default_value_t = 16)]
+    #[facet(args::short, args::named, default = 16)]
     memory: usize,
     /// Percentage of free memory
-    #[arg(short, long, default_value_t = 50)]
+    #[facet(args::short, args::named, default = 50)]
     free: usize,
     /// Using only every n-th CPU
-    #[arg(long, default_value_t = 1)]
+    #[facet(args::named, default = 1)]
     stride: usize,
+
+    #[facet(flatten)]
+    builtins: FigueBuiltins,
 }
 
 cfg_select! {
@@ -57,7 +60,8 @@ fn main() {
         memory,
         free,
         stride,
-    } = Args::parse();
+        builtins: _,
+    } = figue::from_std_args().unwrap();
 
     util::logging();
 

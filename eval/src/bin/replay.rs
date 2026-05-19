@@ -8,31 +8,34 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use bitfield_struct::bitfield;
-use clap::Parser;
 use facet::Facet;
+use figue::{self as args, FigueBuiltins};
 use llfree::util::align_down;
 use llfree::*;
 use llfree_eval::gfp::GFP;
-use llfree_eval::{TieringConfig, mmap, thread};
+use llfree_eval::tiering::TieringConfig;
+use llfree_eval::{mmap, thread};
 use log::{error, info, warn};
 
 /// Benchmarking the allocators against each other.
-#[derive(Parser, Debug)]
-#[command(about, version, author)]
+#[derive(Facet, Debug)]
 struct Args {
     trace: PathBuf,
     /// Using only every n-th CPU
-    #[arg(long, default_value_t = 2)]
+    #[facet(args::named, default = 2)]
     stride: usize,
     /// Monitor and output fragmentation
-    #[arg(long)]
+    #[facet(args::named)]
     frag: Option<PathBuf>,
     /// Time interval is ms for monitoring fragmentation
-    #[arg(long, default_value_t = 1000)]
+    #[facet(args::named, default = 1000)]
     interval: u64,
     /// Optional path to a tiering configuration file (JSON)
-    #[arg(long)]
+    #[facet(args::named)]
     tiering: Option<PathBuf>,
+
+    #[facet(flatten)]
+    builtins: FigueBuiltins,
 }
 
 cfg_select! {
@@ -54,7 +57,8 @@ fn main() {
         frag,
         interval,
         tiering,
-    } = Args::parse();
+        builtins: _,
+    } = figue::from_std_args().unwrap();
 
     let size = std::fs::metadata(&trace)
         .expect("Failed accessing trace")

@@ -5,7 +5,7 @@ use core::fmt;
 use core::sync::atomic::Ordering::*;
 use core::sync::atomic::*;
 
-use log::debug;
+use log::trace;
 
 /// Atomic wrapper for types that can be converted into atomics
 ///
@@ -17,48 +17,48 @@ impl<T: Atomic> Atom<T> {
     pub fn new(v: T) -> Self {
         Self(T::I::new(v.into()))
     }
-    #[cfg_attr(feature = "log_debug", track_caller)]
+    #[cfg_attr(feature = "log_trace", track_caller)]
     pub fn load(&self) -> T {
-        debug!("{} load", core::panic::Location::caller());
+        trace!("{} load", core::panic::Location::caller());
         self.0.load().into()
     }
-    #[cfg_attr(feature = "log_debug", track_caller)]
+    #[cfg_attr(feature = "log_trace", track_caller)]
     pub fn store(&self, v: T) {
-        debug!("{} store", core::panic::Location::caller());
+        trace!("{} store", core::panic::Location::caller());
         self.0.store(v.into());
     }
-    #[cfg_attr(feature = "log_debug", track_caller)]
+    #[cfg_attr(feature = "log_trace", track_caller)]
     pub fn swap(&self, v: T) -> T {
-        debug!("{} swap", core::panic::Location::caller());
+        trace!("{} swap", core::panic::Location::caller());
         self.0.swap(v.into()).into()
     }
-    #[cfg_attr(feature = "log_debug", track_caller)]
+    #[cfg_attr(feature = "log_trace", track_caller)]
     pub fn compare_exchange(&self, current: T, new: T) -> Result<T, T> {
-        debug!("{} cmpxchg", core::panic::Location::caller());
+        trace!("{} cmpxchg", core::panic::Location::caller());
         match self.0.compare_exchange(current.into(), new.into()) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
     }
-    #[cfg_attr(feature = "log_debug", track_caller)]
+    #[cfg_attr(feature = "log_trace", track_caller)]
     pub fn compare_exchange_weak(&self, current: T, new: T) -> Result<T, T> {
-        debug!("{} cmpxchgw", core::panic::Location::caller());
+        trace!("{} cmpxchgw", core::panic::Location::caller());
         match self.0.compare_exchange_weak(current.into(), new.into()) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
     }
-    #[cfg_attr(feature = "log_debug", track_caller)]
+    #[cfg_attr(feature = "log_trace", track_caller)]
     pub fn try_update<F: FnMut(T) -> Option<T>>(&self, mut f: F) -> Result<T, T> {
-        debug!("{} update", core::panic::Location::caller());
+        trace!("{} update", core::panic::Location::caller());
         match self.0.try_update(|v| f(v.into()).map(Into::into)) {
             Ok(v) => Ok(v.into()),
             Err(v) => Err(v.into()),
         }
     }
-    #[cfg_attr(feature = "log_debug", track_caller)]
+    #[cfg_attr(feature = "log_trace", track_caller)]
     pub fn update<F: FnMut(T) -> T>(&self, mut f: F) -> T {
-        debug!("{} update", core::panic::Location::caller());
+        trace!("{} update", core::panic::Location::caller());
         self.0.update(|v| f(v.into()).into()).into()
     }
 }
@@ -188,6 +188,7 @@ atomic_impl!(usize, AtomicUsize);
 pub trait AtomicSlice<T: Copy + Atomic> {
     /// Get a mutable reference to the whole array non-atomically.
     ///
+    /// # Safety
     /// This can be faster than atomics but does not handle race conditions!
     #[allow(clippy::mut_from_ref)]
     unsafe fn non_atomic(&self) -> &mut [T];

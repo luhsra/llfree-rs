@@ -5,7 +5,8 @@ use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use clap::Parser;
+use facet::Facet;
+use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::WyRand;
 use llfree::*;
@@ -13,27 +14,29 @@ use llfree_eval::thread;
 use log::warn;
 
 /// Benchmarking the allocators against each other.
-#[derive(Parser, Debug)]
-#[command(about, version, author)]
+#[derive(Facet, Debug)]
 struct Args {
     /// Max number of threads
-    #[arg(short, long, default_value = "8")]
+    #[facet(args::short, args::named, default = 8)]
     threads: usize,
     /// Specifies how many pages should be allocated: #pages = 2^order
-    #[arg(short = 's', long, default_value_t = 0)]
+    #[facet(args::short = 's', args::named, default = 0)]
     order: usize,
     /// Runtime in seconds
-    #[arg(long, default_value_t = 20)]
+    #[facet(args::named, default = 20)]
     time: usize,
     /// Max amount of memory in GiB. Is by the max thread count.
-    #[arg(short, long, default_value_t = 8)]
+    #[facet(args::short, args::named, default = 8)]
     memory: usize,
     /// Using only every n-th CPU
-    #[arg(long, default_value_t = 2)]
+    #[facet(args::named, default = 2)]
     stride: usize,
     /// Monitor and output fragmentation
-    #[arg(long)]
+    #[facet(args::named)]
     frag: Option<PathBuf>,
+
+    #[facet(flatten)]
+    builtins: FigueBuiltins,
 }
 
 cfg_select! {
@@ -54,7 +57,8 @@ fn main() {
         memory,
         stride,
         frag,
-    } = Args::parse();
+        builtins: _,
+    } = figue::from_std_args().unwrap();
 
     util::logging();
 

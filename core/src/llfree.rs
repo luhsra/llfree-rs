@@ -161,7 +161,11 @@ impl<'a> Alloc<'a> for LLFree<'a> {
                 let request = Request {
                     tier,
                     order: request.order,
-                    local: request.local.map(|v| v % locals), // adjust to fit
+                    local: if locals == 0 {
+                        None
+                    } else {
+                        request.local.map(|l| l % locals) // resize to fit
+                    },
                 };
                 match self.get_matching(&request, &mut start_idx) {
                     Err(Error::Memory) => {} // try next tier

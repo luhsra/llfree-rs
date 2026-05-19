@@ -1,36 +1,39 @@
 use std::time::Instant;
 
-use clap::Parser;
+use facet::Facet;
+use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::{WyRand, logging};
 use llfree_eval::mmap::{MAdvise, Mapping, madvise};
 use llfree_eval::{avg_bounds, thread};
 
 /// Benchmarking the page-fault performance of a mapped memory region.
-#[derive(Parser, Debug)]
-#[command(about, version, author)]
+#[derive(Facet, Debug)]
 struct Args {
     /// Number of threads
-    #[arg(short, long, default_value_t = 6)]
+    #[facet(args::short, args::named, default = 6)]
     threads: usize,
     /// Max amount of memory in GiB. Is by the max thread count
-    #[arg(short, long, default_value_t = 16)]
+    #[facet(args::short, args::named, default = 16)]
     memory: usize,
     /// DAX file to be used for the allocator
-    #[arg(long)]
+    #[facet(args::named)]
     dax: Option<String>,
     /// Create a private mapping (incompatible with `--dax`)
-    #[arg(long)]
+    #[facet(args::named)]
     private: bool,
     /// Populate on mmap
-    #[arg(long)]
+    #[facet(args::named)]
     populate: bool,
     /// Use hugepages
-    #[arg(long)]
+    #[facet(args::named)]
     huge: bool,
     /// Allocate randomly
-    #[arg(long)]
+    #[facet(args::named)]
     rand: bool,
+
+    #[facet(flatten)]
+    builtins: FigueBuiltins,
 }
 
 /// Trust me, I really want to send this.
@@ -48,7 +51,8 @@ fn main() {
         #[allow(unused)]
         huge,
         rand,
-    } = Args::parse();
+        builtins: _,
+    } = figue::from_std_args().unwrap();
 
     logging();
 

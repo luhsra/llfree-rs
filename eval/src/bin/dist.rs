@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::Barrier;
 use std::time::Instant;
 
-use clap::Parser;
+use facet::Facet;
+use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::{aligned_buf, logging};
 use llfree::{Alloc, HUGE_FRAMES, Init, LLFree, MetaData, Tiering};
@@ -16,25 +17,27 @@ use log::warn;
 type Allocator<'a> = LLFree<'a>;
 
 /// Measuring the allocation times and collect them into time buckets for a time distribution analysis.
-#[derive(Parser, Debug)]
-#[command(about, version, author)]
+#[derive(Facet, Debug)]
 struct Args {
-    #[arg(short, long, default_value_t = 1)]
+    #[facet(args::short, args::named, default = 1)]
     threads: usize,
-    #[arg(short, long, default_value = "results/out/dist.csv")]
+    #[facet(args::short, args::named, default = "results/out/dist.csv")]
     outfile: PathBuf,
-    #[arg(long)]
+    #[facet(args::named)]
     dax: Option<String>,
-    #[arg(short, long, default_value_t = 1)]
+    #[facet(args::short, args::named, default = 1)]
     iterations: usize,
-    #[arg(short, long, default_value_t = 0)]
+    #[facet(args::short, args::named, default = 0)]
     order: usize,
-    #[arg(short, long, default_value_t = 500)]
+    #[facet(args::short, args::named, default = 500)]
     buckets: usize,
-    #[arg(short, long, default_value_t = 50)]
+    #[facet(args::short, args::named, default = 50)]
     start: usize,
-    #[arg(short, long, default_value_t = 1050)]
+    #[facet(args::short, args::named, default = 1050)]
     end: usize,
+
+    #[facet(flatten)]
+    builtins: FigueBuiltins,
 }
 
 fn main() {
@@ -47,7 +50,8 @@ fn main() {
         buckets,
         start,
         end,
-    } = Args::parse();
+        builtins: _,
+    } = figue::from_std_args().unwrap();
 
     logging();
 

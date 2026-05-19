@@ -146,11 +146,10 @@ fn simple() {
     );
     frames.sort_unstable();
 
+    assert!(frames.iter().all(|f| f.0 < FRAMES));
     // Check that the same frame was not allocated twice
-    for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-        assert_ne!(a, b);
-        assert!(a.0 < FRAMES && b.0 < FRAMES);
-    }
+    frames.sort_unstable();
+    assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
 
     warn!("realloc...");
 
@@ -245,12 +244,10 @@ fn rand() {
     );
     alloc.validate();
 
+    assert!(frames.iter().all(|f| f.0 < FRAMES));
     // Check that the same frame was not allocated twice
     frames.sort_unstable();
-    for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-        assert_ne!(a, b);
-        assert!(a.0 < FRAMES && b.0 < FRAMES);
-    }
+    assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
 
     warn!("reallocate rand...");
     let mut rng = WyRand::new(100);
@@ -268,12 +265,11 @@ fn rand() {
         frames.len()
     );
     alloc.validate();
+
+    assert!(frames.iter().all(|f| f.0 < FRAMES));
     // Check that the same frame was not allocated twice
     frames.sort_unstable();
-    for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-        assert_ne!(a, b);
-        assert!(a.0 < FRAMES && b.0 < FRAMES);
-    }
+    assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
 
     warn!("free...");
     rng.shuffle(&mut frames);
@@ -307,12 +303,11 @@ fn multirand() {
         warn!("allocated {}", frames.len());
 
         warn!("check...");
+
+        assert!(frames.iter().all(|f| f.0 < FRAMES));
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
-        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-            assert_ne!(a, b);
-            assert!(a.0 < FRAMES && b.0 < FRAMES);
-        }
+        assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
 
         barrier.wait();
         warn!("reallocate rand...");
@@ -326,12 +321,11 @@ fn multirand() {
         }
 
         warn!("check...");
+
+        assert!(frames.iter().all(|f| f.0 < FRAMES));
         // Check that the same frame was not allocated twice
         frames.sort_unstable();
-        for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-            assert_ne!(a, b);
-            assert!(a.0 < FRAMES && b.0 < FRAMES);
-        }
+        assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
 
         if barrier.wait().is_leader() {
             alloc.validate();
@@ -385,12 +379,10 @@ fn parallel_alloc() {
     warn!("allocated frames: {}", frames.len());
     alloc.validate();
 
+    assert!(frames.iter().all(|f| f.0 < FRAMES));
     // Check that the same frame was not allocated twice
     frames.sort_unstable();
-    for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-        assert_ne!(a, b);
-        assert!(a.0 < FRAMES && b.0 < FRAMES);
-    }
+    assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
 }
 
 #[test]
@@ -403,7 +395,6 @@ fn alloc_all() {
 
     // Stress test
     let mut frames = Vec::new();
-    let timer = Instant::now();
 
     loop {
         match alloc.get(None, request(0, 0)) {
@@ -412,24 +403,41 @@ fn alloc_all() {
             Err(e) => panic!("{e:?}"),
         }
     }
-    warn!("Allocation finished in {}ms", timer.elapsed().as_millis());
     warn!("{alloc:?}");
 
-    assert_eq!(
-        alloc.frames() - alloc.tree_stats().free_frames,
-        frames.len()
-    );
+    alloc.validate();
+    assert_eq!(alloc.frames(), frames.len());
     assert_eq!(alloc.tree_stats().free_frames, 0);
     assert_eq!(alloc.stats().free_huge, 0);
-    warn!("allocated frames: {}", frames.len());
-    alloc.validate();
 
+    assert!(frames.iter().all(|f| f.0 < FRAMES));
     // Check that the same frame was not allocated twice
     frames.sort_unstable();
-    for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-        assert_ne!(a, b);
-        assert!(a.0 < FRAMES && b.0 < FRAMES);
+    assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
+}
+
+#[test]
+fn alloc_tree_all() {
+    const FRAMES: usize = 1024 * TREE_FRAMES;
+    let (alloc, request) = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
+
+    let mut frames = Vec::new();
+    loop {
+        match alloc.get(None, request(TREE_ORDER, 0)) {
+            Ok((frame, _)) => frames.push(frame),
+            Err(Error::Memory) => break,
+            Err(e) => panic!("{e:?}"),
+        }
     }
+    assert_eq!(0, alloc.tree_stats().free_frames);
+    assert_eq!(alloc.frames(), frames.len() * TREE_FRAMES);
+
+    alloc.validate();
+
+    assert!(frames.iter().all(|f| f.0 < FRAMES));
+    // Check that the same frame was not allocated twice
+    frames.sort_unstable();
+    assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
 }
 
 #[test]
@@ -468,14 +476,13 @@ fn parallel_alloc_all() {
         frames.len()
     );
     warn!("allocated frames: {}/{}", frames.len(), alloc.frames());
+    assert!(alloc.tree_stats().free_frames < THREADS);
     alloc.validate();
 
+    assert!(frames.iter().all(|f| f.0 < FRAMES));
     // Check that the same frame was not allocated twice
     frames.sort_unstable();
-    for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-        assert_ne!(a, b);
-        assert!(a.0 < FRAMES && b.0 < FRAMES);
-    }
+    assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
 }
 
 #[test]
@@ -520,12 +527,10 @@ fn less_mem() {
     warn!("allocated frames: {}", frames.len());
     alloc.validate();
 
+    assert!(frames.iter().all(|f| f.0 < FRAMES));
     // Check that the same frame was not allocated twice
     frames.sort_unstable();
-    for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-        assert_ne!(a, b);
-        assert!(a.0 < FRAMES && b.0 < FRAMES);
-    }
+    assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
 
     thread::parallel(
         frames.chunks(ALLOC_PER_THREAD).enumerate(),
@@ -583,12 +588,10 @@ fn parallel_huge_alloc() {
     );
     alloc.validate();
 
+    assert!(frames.iter().all(|f| f.0 < FRAMES));
     // Check that the same frame was not allocated twice
     frames.sort_unstable();
-    for (a, b) in frames.windows(2).map(|p| (p[0], p[1])) {
-        assert_ne!(a, b);
-        assert!(a.0 < FRAMES && b.0 < FRAMES);
-    }
+    assert!(frames.array_windows::<2>().all(|[a, b]| a != b));
 }
 
 #[test]

@@ -7,56 +7,59 @@ use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use clap::{Parser, ValueEnum};
+use facet::Facet;
+use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
 use llfree::{Alloc, FrameId, LLFree, Request, Result, TREE_ORDER, Tiering};
 use llfree_eval::mmap::Mapping;
-use llfree_eval::{TieringConfig, thread};
+use llfree_eval::thread;
+use llfree_eval::tiering::TieringConfig;
 use log::warn;
 
-/// Number of allocations per block
-const RAND_BLOCK_SIZE: usize = 8;
-
 /// Benchmarking the allocators against each other.
-#[derive(Parser, Debug)]
-#[command(about, version, author)]
+#[derive(Facet, Debug)]
 struct Args {
-    #[arg(value_enum)]
+    /// The benchmark to be executed.
+    #[facet(args::positional)]
     bench: Benchmark,
     /// Names of the allocators to be benchmarked.
+    #[facet(args::positional)]
     allocs: Vec<String>,
-    /// Tested number of threads / allocations / filling levels, depending on benchmark.
-    #[arg(short, long, default_value = "1")]
+    /// Tested number of threads.
+    #[facet(args::short, args::named, default = vec![1usize])]
     x: Vec<usize>,
     /// Max number of threads.
-    #[arg(short, long, default_value = "6")]
+    #[facet(args::short, args::named, default = 6)]
     threads: usize,
     /// Where to store the benchmark results in csv format.
-    #[arg(short, long, default_value = "bench/out/bench.csv")]
+    #[facet(args::short, args::named, default = "bench/out/bench.csv")]
     outfile: String,
     /// DAX file to be used for the allocator.
-    #[arg(long)]
+    #[facet(args::named)]
     dax: Option<String>,
     /// Number of repetitions.
-    #[arg(short, long, default_value_t = 1)]
+    #[facet(args::short, args::named, default = 1)]
     iterations: usize,
     /// Specifies how many pages should be allocated: #pages = 2^order
-    #[arg(short = 's', long, default_value = "0")]
+    #[facet(args::short = 's', args::named, default = vec![0usize])]
     order: Vec<usize>,
     /// Max amount of memory in GiB.
-    #[arg(short, long, default_value_t = 16)]
+    #[facet(args::short, args::named, default = 16)]
     memory: usize,
     /// Use every n-th cpu.
-    #[arg(long, default_value_t = 1)]
+    #[facet(args::named, default = 1)]
     stride: usize,
-
-    #[arg(long, default_value_t = 0)]
+    /// Offset for the cpu selection.
+    #[facet(args::named, default = 0)]
     offset: usize,
     /// Optional path to a tiering configuration file (JSON)
-    #[arg(long)]
+    #[facet(args::named)]
     tiering: Option<PathBuf>,
+
+    #[facet(flatten)]
+    builtins: FigueBuiltins,
 }
 
 static CORES: AtomicUsize = AtomicUsize::new(0);
@@ -75,7 +78,8 @@ fn main() {
         stride,
         offset,
         tiering,
-    } = Args::parse();
+        builtins: _,
+    } = figue::from_std_args().unwrap();
 
     CORES.store(threads, Ordering::Relaxed);
 
@@ -84,7 +88,6 @@ fn main() {
     if stride > 1 {
         thread::STRIDE.store(stride, Ordering::Relaxed);
     }
-
     if offset > 0 {
         thread::OFFSET.store(offset, Ordering::Relaxed);
     }
@@ -103,18 +106,13 @@ fn main() {
         let config =
             facet_json::from_str::<TieringConfig>(&tiering).expect("Failed to read tiering config");
 
-        let tiering = config.tiering(threads);
-
         (
-            tiering,
+            config.tiering(threads),
             Box::new(move |order, core| config.request(order, core, threads, core, 0)),
         )
     } else {
-        let (tiering, request) = Tiering::movable(threads);
-        (
-            tiering,
-            Box::new(move |order, core| request(order, core, false)),
-        )
+        let (tiering, request) = Tiering::simple(threads);
+        (tiering, Box::new(request))
     };
 
     for x in x {
@@ -220,7 +218,9 @@ fn alloc<'a>(
     panic!("Unknown allocator");
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, Facet)]
+#[repr(u8)]
+#[facet(rename_all = "snake_case")]
 enum Benchmark {
     /// Allocate half the memory at once and free it afterwards
     Bulk,
@@ -229,10 +229,6 @@ enum Benchmark {
     /// Initially allocate half the memory and then repeatedly free an random page
     /// and replace it with a newly allocated one
     Rand,
-    /// Like `rand`, but reallocating multiple pages in close proximity
-    RandBlock,
-    /// Compute times for different filling levels
-    Filling,
 }
 
 impl Benchmark {
@@ -241,8 +237,6 @@ impl Benchmark {
             Benchmark::Bulk => bulk(alloc, order, threads, x),
             Benchmark::Repeat => repeat(alloc, order, threads, x),
             Benchmark::Rand => rand(alloc, order, threads, x),
-            Benchmark::RandBlock => rand_block(alloc, order, threads, x),
-            Benchmark::Filling => filling(alloc, order, threads, x),
         }
     }
 }
@@ -404,142 +398,6 @@ fn rand(alloc: &dyn DynAlloc, order: usize, max_threads: usize, threads: usize) 
         }
     }));
     assert_eq!(alloc.allocated_frames(), 0);
-
-    perf.init = init;
-    perf.allocs = allocs;
-    perf
-}
-
-/// reallocate multiple in close proximity at once
-fn rand_block(alloc: &dyn DynAlloc, order: usize, max_threads: usize, threads: usize) -> Perf {
-    assert!(threads <= max_threads);
-    let timer = Instant::now();
-    let init = timer.elapsed().as_millis();
-
-    let allocs = alloc.frames() / max_threads / 2 / (1 << order);
-    let barrier = Barrier::new(threads);
-
-    let mut all_pages = vec![FrameId(0); allocs * threads];
-    let all_pages_ptr = all_pages.as_mut_ptr() as usize;
-
-    let chunks = all_pages.chunks_mut(allocs).enumerate();
-    let mut perf = Perf::avg(thread::parallel(chunks, |(t, pages)| {
-        thread::pin(t);
-
-        for page in pages.iter_mut() {
-            *page = alloc.get(t, order).unwrap();
-        }
-
-        barrier.wait();
-        if t == 0 {
-            let blocks = allocs / RAND_BLOCK_SIZE;
-            assert!(blocks > 0);
-            // Shuffle blocks between all cores
-            let mut rng = WyRand::new(t as _);
-            let pages =
-                unsafe { slice::from_raw_parts_mut(all_pages_ptr as *mut u64, allocs * threads) };
-            for _ in 0..blocks {
-                let i = (rng.range(0..blocks as u64) as usize) * RAND_BLOCK_SIZE;
-                let j = (rng.range(0..blocks as u64) as usize) * RAND_BLOCK_SIZE;
-                if i != j {
-                    for k in 0..RAND_BLOCK_SIZE {
-                        pages.swap(i + k, j + k);
-                    }
-                }
-            }
-        }
-        barrier.wait();
-
-        let timer = Instant::now();
-        for page in pages {
-            alloc.put(t, *page, order).unwrap();
-        }
-        let put = timer.elapsed().as_nanos() / allocs as u128;
-
-        Perf {
-            get_min: 0,
-            get_avg: 0,
-            get_max: 0,
-            put_min: put,
-            put_avg: put,
-            put_max: put,
-            init: 0,
-            total: timer.elapsed().as_millis(),
-            allocs,
-        }
-    }));
-    assert_eq!(alloc.allocated_frames(), 0);
-
-    perf.init = init;
-    perf.allocs = allocs;
-    perf
-}
-
-fn filling(alloc: &dyn DynAlloc, order: usize, threads: usize, level: usize) -> Perf {
-    let timer = Instant::now();
-    let init = timer.elapsed().as_millis();
-
-    let allocs = alloc.frames() / threads / (1 << order);
-
-    // Allocate to filling level
-    let fill = (allocs * level) / 100;
-    let allocs = allocs / 100; // allocate 1%
-    warn!("fill={fill} allocs={allocs}");
-
-    assert!((fill + allocs) * threads < alloc.frames());
-
-    let barrier = Barrier::new(threads);
-    let mut perf = Perf::avg(thread::parallel(0..threads, |t| {
-        thread::pin(t);
-        for _ in 0..fill {
-            alloc.get(t, order).unwrap();
-        }
-        barrier.wait();
-
-        let mut pages = Vec::with_capacity(allocs);
-        barrier.wait();
-
-        let mut get = 0;
-        let mut put = 0;
-        const N: usize = 100;
-        for _ in 0..N {
-            // Operate on filling level.
-            let timer = Instant::now();
-            for _ in 0..allocs {
-                let Ok(page) = alloc.get(t, order) else {
-                    break;
-                };
-                pages.push(page);
-            }
-            let num_alloc = pages.len();
-            get += timer.elapsed().as_nanos() / num_alloc as u128;
-
-            if num_alloc < allocs {
-                warn!("Allocator completely full {num_alloc}");
-            }
-
-            let timer = Instant::now();
-            while let Some(page) = pages.pop() {
-                alloc.put(t, page, order).unwrap();
-            }
-            put += timer.elapsed().as_nanos() / num_alloc as u128;
-        }
-        get /= N as u128;
-        put /= N as u128;
-
-        Perf {
-            get_min: get,
-            get_avg: get,
-            get_max: get,
-            put_min: put,
-            put_avg: put,
-            put_max: put,
-            init: 0,
-            total: 0,
-            allocs,
-        }
-    }));
-    assert_eq!(alloc.allocated_frames(), fill * threads * (1 << order));
 
     perf.init = init;
     perf.allocs = allocs;

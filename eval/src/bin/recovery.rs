@@ -4,7 +4,8 @@ use std::io::Write;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use clap::Parser;
+use facet::Facet;
+use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
@@ -14,30 +15,32 @@ use llfree_eval::thread;
 use log::warn;
 
 /// Benchmarking the (crashed) recovery.
-#[derive(Parser, Debug)]
-#[command(about, version, author)]
+#[derive(Facet, Debug)]
 struct Args {
     /// DAX file to be used for the allocator.
-    #[arg(long)]
+    #[facet(args::named)]
     dax: String,
     /// Max amount of memory in GiB.
-    #[arg(short, long, default_value_t = 16)]
+    #[facet(args::short, args::named, default = 16)]
     memory: usize,
     /// Number of threads.
-    #[arg(short, long)]
+    #[facet(args::short, args::named)]
     threads: usize,
     /// Simulate a crash by killing the process after n seconds.
-    #[arg(short, long)]
+    #[facet(args::short, args::named)]
     crash: Option<u64>,
     /// Initialize and run the allocator
-    #[arg(long)]
+    #[facet(args::named)]
     init: bool,
     /// Where to store the benchmark results in csv format.
-    #[arg(short, long, default_value = "")]
+    #[facet(args::short, args::named, default = "")]
     outfile: String,
     /// Number of iterations
-    #[arg(short, long, default_value_t = 1)]
+    #[facet(args::short, args::named, default = 1)]
     iter: usize,
+
+    #[facet(flatten)]
+    builtins: FigueBuiltins,
 }
 
 type Allocator<'a> = NvmAlloc<'a, LLFree<'a>>;
@@ -53,7 +56,8 @@ fn main() {
         init,
         outfile,
         iter,
-    } = Args::parse();
+        builtins: _,
+    } = figue::from_std_args().unwrap();
 
     assert!(memory > 0 && threads > 0);
 
