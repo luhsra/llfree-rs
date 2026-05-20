@@ -1,12 +1,14 @@
-#import "@preview/lilaq:0.5.0" as lq
+#import "@preview/lilaq:0.6.0" as lq
 
 #import "util.typ": *
 
-#set page(width: auto, height: auto)
-#set text(font: "Rotis Sans Serif Std")
+#set page(width: auto, height: auto, margin: 0.5em)
+#set text(font: "Rotis Sans Serif Std", size: 12pt)
+
+#show: lq.set-diagram(width: 8cm, height: 5cm)
 
 #let data = (
-  read("frag-l.txt")
+  read("frag-r.txt")
     .trim()
     .split("\n")
     .map(row => (

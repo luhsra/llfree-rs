@@ -37,27 +37,27 @@
           buildInputs = with pkgs;
             [
               rustToolchain
+              cargo-edit
               rust-analyzer
               lldb
               curl
               zig
               typst
-              python313
-            ] ++ (with pkgs.python313Packages; [
-              numpy
-              seaborn
-              pandas
-              psutil
-              qemu
-              ipykernel
-              scipy
-            ]);
+              python3
+              uv
+              nodejs
+              nix-ld
+              libcxx
+              libgcc.lib
+              zlib
+            ];
           env = {
             # Rust-analyzer
             RUST_SRC_PATH =
               "${pkgs.rustToolchain}/lib/rustlib/src/rust/library";
             # Rust Bindgen
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib/libclang.so";
+            LD_LIBRARY_PATH = "${pkgs.libgcc.lib}/lib:${pkgs.zlib}/lib";
           };
         };
       });

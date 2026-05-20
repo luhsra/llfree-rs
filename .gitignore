@@ -12,10 +12,7 @@ memfile
 .direnv/
 .gdb_history
 
-/results/*
-!/results/remote_ma/
-!/results/keep/
-!/results/*.ipynb
-!/results/remote.sh
-!/results/*.typ
-!/results/tiering*.json
+/results/*.csv
+/results/*.txt
+/results/*.pdf
+/results/*/

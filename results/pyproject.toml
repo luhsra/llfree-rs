@@ -1,0 +1,13 @@
+[project]
+name = "results"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "marimo>=0.23.6",
+    "pandas>=3.0.3",
+    "ruff>=0.15.13",
+    "seaborn>=0.13.2",
+    "ty>=0.0.38",
+]

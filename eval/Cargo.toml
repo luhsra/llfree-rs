@@ -9,7 +9,7 @@ llfree = { path = "../core", features = ["std", "log_info"] }
 libc = "0.2"
 log = { version = "0.4", default-features = false }
 bitfield-struct = "0.13"
-spin = "0.11"
+spin = "0.12"
 facet = "0.46"
 facet-json = "0.46"
 figue = "4.0"
