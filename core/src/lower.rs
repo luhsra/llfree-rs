@@ -820,22 +820,19 @@ mod test {
     fn init_reserved_max_order() {
         logging();
 
-        const FRAMES: usize = (TREE_FRAMES - 1) / (1 << TREE_ORDER);
+        const FRAMES: usize = 24 * TREE_FRAMES;
 
-        let lower = LowerTest::create(TREE_FRAMES - 1, Init::AllocAll).unwrap();
+        let lower = LowerTest::create(FRAMES, Init::AllocAll).unwrap();
 
         assert_eq!(lower.stats().free_frames, 0);
 
-        for i in 0..FRAMES {
+        for i in 0..FRAMES / (1 << TREE_ORDER) {
             lower
                 .put(FrameId(i * (1 << TREE_ORDER)), TREE_ORDER)
                 .unwrap();
         }
 
-        assert_eq!(
-            lower.frames() - lower.stats().free_frames,
-            (1 << TREE_ORDER) - 1
-        );
+        assert_eq!(lower.stats().free_frames, FRAMES);
     }
 
     #[test]

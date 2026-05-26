@@ -80,6 +80,9 @@ impl<T> OffsetSlice<T> {
     pub fn len(&self) -> usize {
         self.length
     }
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
     pub fn as_slice<'a>(&self, buffer: &'a [u8]) -> &'a [T] {
         assert!(self.offset + self.length * size_of::<T>() <= buffer.len());
         unsafe { slice::from_raw_parts(buffer.as_ptr().add(self.offset).cast(), self.length) }
