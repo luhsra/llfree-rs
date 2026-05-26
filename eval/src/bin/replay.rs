@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,11 +15,12 @@ use llfree::*;
 use llfree_eval::gfp::GFP;
 use llfree_eval::tiering::TieringConfig;
 use llfree_eval::{mmap, thread};
-use log::{error, info, warn};
+use log::{error, info, trace, warn};
 
 /// Benchmarking the allocators against each other.
 #[derive(Facet, Debug)]
 struct Args {
+    #[facet(args::positional)]
     trace: PathBuf,
     /// Using only every n-th CPU
     #[facet(args::named, default = 2)]
@@ -60,38 +61,20 @@ fn main() {
         builtins: _,
     } = figue::from_std_args().unwrap();
 
-    let size = std::fs::metadata(&trace)
-        .expect("Failed accessing trace")
-        .len() as usize;
-    info!("Mapping {size} bytes from {trace:?}");
-    let data = mmap::Mapping::<Page>::file(0, size / size_of::<Page>(), &trace, false)
-        .expect("Failed opening trace");
-
     // `thread::pin` uses this to select every nth cpu
     if stride > 1 {
         thread::STRIDE.store(stride, Ordering::Relaxed);
     }
 
-    let (header, trace_pages) = {
-        let (header, trace_pages) = data.split_first().unwrap();
-        let header = TraceHeader::from_page(header);
+    let ParsedTrace {
+        max_pfn,
+        cores,
+        events,
+    } = ParsedTrace::parse(&trace);
 
-        let trace_pages: &[TracePage] =
-            unsafe { slice::from_raw_parts(trace_pages.as_ptr().cast(), trace_pages.len()) };
-        (header, trace_pages)
-    };
-
-    let frames = (header.max_pfn as usize + 1).next_multiple_of(1 << HUGE_ORDER);
-    let cores = header.cores as usize;
-    info!(
-        "frames = {frames} threads = {cores} trace pages = {}",
-        trace_pages.len()
-    );
-
-    let page_cache_allocs = trace_pages
+    let page_cache_allocs = events
         .iter()
-        .flat_map(|p| p.entries.iter())
-        .filter(|e| e.alloc() && e.flags() == GFP::PAGE_CACHE)
+        .filter(|e| e.alloc && e.flags == GFP::PAGE_CACHE)
         .count();
     info!("page cache allocs = {page_cache_allocs}");
 
@@ -102,7 +85,7 @@ fn main() {
     ) = if let Some(tiering) = tiering {
         let s = fs::read_to_string(tiering).unwrap();
         let tiering_config: TieringConfig = facet_json::from_str(&s).unwrap();
-        info!("tiering = {tiering_config:#?}");
+        info!("tiering = {tiering_config:?}");
         (
             tiering_config.tiering(cores),
             Box::new(move |order, gfp, core, pid| {
@@ -116,18 +99,20 @@ fn main() {
             Box::new(move |order, gfp, core, _pid| request(order, core, GFP::MOVABLE == gfp)),
         )
     };
-    let meta = MetaData::alloc(&Allocator::metadata_size(&tiering, frames));
-    let alloc = Allocator::new(frames, Init::FreeAll, &tiering, meta).unwrap();
+    let meta = MetaData::alloc(&Allocator::metadata_size(&tiering, max_pfn));
+    let alloc = Allocator::new(max_pfn, Init::FreeAll, &tiering, meta).unwrap();
     alloc.validate();
-
-    let barrier = Barrier::new(2);
-
-    let running = AtomicUsize::new(cores);
 
     info!("start");
 
-    let mut allocated = vec![Allocation::new(); frames];
+    let mut allocated = vec![Allocation::new(); max_pfn];
 
+    let ops = events.len();
+    let mut reallocs = 0;
+    let mut free_unkown = 0;
+
+    let barrier = Barrier::new(2);
+    let running = AtomicUsize::new(cores);
     let score = std::thread::scope(|s| {
         let monitor = s.spawn(|| {
             thread::pin(cores);
@@ -157,124 +142,72 @@ fn main() {
 
         let running = &running;
         let barrier = &barrier;
-        let alloc = &alloc;
+        let llfree = &alloc;
+        let reallocs = &mut reallocs;
+        let free_unkown = &mut free_unkown;
+
         s.spawn(move || {
-            #[derive(Clone)]
-            enum State {
-                Init,
-                Running { page: usize, index: usize },
-                Done,
-            }
-
-            let mut curr_pages = vec![State::Init; cores];
-
             barrier.wait();
 
-            loop {
-                let mut next: Option<(usize, TraceEntry)> = None;
-                for (t, page_idx) in curr_pages.iter_mut().enumerate() {
-                    let entry = match page_idx {
-                        State::Running { page, index }
-                            if *index < trace_pages[*page].entries.len() =>
-                        {
-                            trace_pages[*page].entries[*index]
-                        }
-                        State::Running { page, index } => {
-                            if *page < trace_pages.len()
-                                && let Some(next) = trace_pages[*page + 1..]
-                                    .iter()
-                                    .position(|p| p.cpuid as usize == t)
-                            {
-                                *index = 0;
-                                *page += 1 + next;
-                                trace_pages[*page].entries[*index]
-                            } else {
-                                *page_idx = State::Done;
-                                continue;
-                            }
-                        }
-                        State::Init => {
-                            if let Some(next) =
-                                trace_pages.iter().position(|p| p.cpuid as usize == t)
-                            {
-                                *page_idx = State::Running {
-                                    page: next,
-                                    index: 0,
-                                };
-                                trace_pages[next].entries[0]
-                            } else {
-                                *page_idx = State::Done;
-                                continue;
-                            }
-                        }
-                        State::Done => continue,
-                    };
-                    if next.is_none()
-                        || entry.time() < next.as_ref().unwrap().1.time()
-                        || (entry.alloc() && entry.time() <= next.as_ref().unwrap().1.time())
-                    {
-                        next = Some((t, entry));
+            for entry in events {
+                let pfn = entry.pfn as usize;
+                let flags = request(
+                    entry.order as usize,
+                    entry.flags,
+                    entry.cpuid as usize,
+                    entry.pid as usize,
+                );
+                if entry.alloc {
+                    let (frame, _) = llfree.get(None, flags).unwrap();
+                    if allocated[pfn].present() {
+                        trace!("Realloc pfn={pfn} order={}", flags.order);
+                        *reallocs += 1;
+                    }
+                    allocated[pfn] = Allocation::with(frame, entry.order as _);
+                    continue;
+                }
+
+                let mut found = None;
+                for order in entry.order as usize..=TREE_ORDER {
+                    let pfn = align_down(pfn, 1 << order);
+                    if allocated[pfn].present() && allocated[pfn].order() >= order {
+                        found = Some(pfn);
+                        break;
                     }
                 }
-                if let Some((t, entry)) = next {
-                    curr_pages[t] = match &curr_pages[t] {
-                        State::Running { page, index } => State::Running {
-                            page: *page,
-                            index: *index + 1,
-                        },
-                        _ => unreachable!(),
-                    };
 
-                    if entry.alloc() {
-                        let flags = request(
-                            entry.order() as usize,
-                            entry.flags(),
-                            t,
-                            entry.pid() as usize,
-                        );
-                        let (frame, _) = alloc.get(None, flags).unwrap();
-                        allocated[entry.pfn() as usize] =
-                            Allocation::with(frame, entry.order() as _);
-                        continue;
+                // free
+                if let Some(a_pfn) = found {
+                    let allocation = &mut allocated[a_pfn];
+                    assert!(allocation.present());
+                    let frame = allocation.frame();
+                    let order = allocation.order();
+                    assert!(order >= entry.order as usize);
+
+                    // Mark as free and split if alloc was larger
+                    for part in 0..(1 << (order - entry.order as usize)) {
+                        let part_pfn = a_pfn + part * (1 << entry.order as usize);
+                        let part_frame = FrameId(frame.0 + part * (1 << entry.order as usize));
+
+                        if pfn != part_pfn {
+                            info!("Split pfn={part_pfn}");
+                        }
+
+                        allocated[part_pfn] = Allocation::new()
+                            .with_present(pfn != part_pfn)
+                            .with_frame(part_frame)
+                            .with_order(entry.order as _);
                     }
 
-                    // free
-                    for order in entry.order() as usize..=TREE_ORDER {
-                        let pfn = align_down(entry.pfn() as _, 1 << order);
-
-                        let allocation = &mut allocated[pfn];
-                        if allocation.present() {
-                            allocation.set_present(false);
-                            let frame = allocation.frame();
-
-                            if allocation.order() < order {
-                                break;
-                            }
-                            let req = request(order, entry.flags(), t, entry.pid() as usize);
-                            if let Err(e) = alloc.put(frame, req) {
-                                error!(
-                                    "failed to free pfn={pfn} order={order} flags_o={} error={e:?}",
-                                    req.order
-                                );
-                            }
-
-                            for part in 0..(1 << (req.order - order)) {
-                                if frame.0 as usize % (1 << (req.order - order)) != part {
-                                    info!("split free pfn={pfn}+{part} order={order}");
-                                    allocated[pfn + part] = Allocation::with(
-                                        FrameId((pfn + part * (1 << req.order)) as _),
-                                        order,
-                                    );
-                                }
-                            }
-                            break;
-                        }
+                    if let Err(e) = llfree.put(frame, flags) {
+                        error!("Free failed pfn={a_pfn} order={} error={e:?}", flags.order);
                     }
                 } else {
-                    running.store(0, Ordering::Relaxed);
-                    break;
+                    trace!("Free unallocated pfn={pfn} order={}", flags.order);
+                    *free_unkown += 1;
                 }
             }
+            running.store(0, Ordering::Relaxed);
         });
 
         monitor.join().unwrap()
@@ -287,6 +220,18 @@ fn main() {
     info!("free = {} / {}", stats.free_frames, alloc.frames());
     let huge = alloc.frames() >> HUGE_ORDER;
     info!("huge = {} / {huge}", stats.free_huge);
+
+    info!(
+        "reallocs = {} ({:.2}%)",
+        reallocs,
+        reallocs as f64 * 100.0 / ops as f64
+    );
+    info!(
+        "free_unkown = {} ({:.2}%)",
+        free_unkown,
+        free_unkown as f64 * 100.0 / ops as f64
+    );
+
     warn!("score = {score:.1}");
 
     println!(
@@ -346,25 +291,6 @@ impl TraceHeader {
     }
 }
 
-#[bitfield(u32)]
-struct Allocation {
-    present: bool,
-    /// Allocated frame number
-    #[bits(27)]
-    frame: FrameId,
-    /// Allocation size order (0..=10)
-    #[bits(4)]
-    order: usize,
-}
-impl Allocation {
-    fn with(frame: FrameId, order: usize) -> Self {
-        Self::new()
-            .with_present(true)
-            .with_frame(frame)
-            .with_order(order)
-    }
-}
-
 #[bitfield(u128)]
 struct TraceEntry {
     /// Time in microseconds -> max ~4500 hours
@@ -393,6 +319,104 @@ impl TraceEntry {
 #[repr(C, align(4096))]
 struct TracePage {
     cpuid: u32,
-    entries: [TraceEntry; (FRAME_SIZE - size_of::<u32>()) / size_of::<TraceEntry>()],
+    entries: [TraceEntry; Self::ENTRIES],
+}
+impl TracePage {
+    const ENTRIES: usize = (FRAME_SIZE - size_of::<u32>()) / size_of::<TraceEntry>();
 }
 const _: () = assert!(size_of::<TracePage>() == FRAME_SIZE);
+
+struct ParsedTrace {
+    max_pfn: usize,
+    cores: usize,
+    events: Vec<ParsedEntry>,
+}
+
+impl ParsedTrace {
+    fn parse(path: &Path) -> ParsedTrace {
+        let size = std::fs::metadata(path)
+            .expect("Failed accessing trace")
+            .len() as usize;
+        info!("Mapping {size} bytes from {path:?}");
+        let data = mmap::Mapping::<Page>::file(0, size / size_of::<Page>(), path, false)
+            .expect("Failed opening trace");
+
+        let (header, t_pages) = {
+            let (header, t_pages) = data.split_first().unwrap();
+            let header = TraceHeader::from_page(header);
+
+            let t_pages: &[TracePage] =
+                unsafe { slice::from_raw_parts(t_pages.as_ptr().cast(), t_pages.len()) };
+            (header, t_pages)
+        };
+
+        let max_pfn = (header.max_pfn as usize + 1).next_multiple_of(1 << HUGE_ORDER);
+        let cores = header.cores as usize;
+        info!(
+            "max_pfn = {max_pfn} threads = {cores} trace pages = {}",
+            t_pages.len()
+        );
+
+        let events = events_from_trace(t_pages);
+        drop(data);
+        ParsedTrace {
+            max_pfn,
+            cores,
+            events,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParsedEntry {
+    alloc: bool,
+    pfn: u32,
+    cpuid: u8,
+    order: u8,
+    flags: u32,
+    time: f32,
+    pid: u32,
+}
+
+/// Parses a trace buffer into a sorted list of events.
+fn events_from_trace(buffer: &[TracePage]) -> Vec<ParsedEntry> {
+    let mut events = Vec::with_capacity(buffer.len() * TracePage::ENTRIES);
+    events.clear();
+    for page in buffer {
+        for entry in page.entries {
+            if entry.pfn() == 0 {
+                break;
+            }
+            events.push(ParsedEntry {
+                alloc: entry.alloc(),
+                pfn: entry.pfn(),
+                cpuid: page.cpuid as _,
+                order: entry.order(),
+                flags: entry.flags(),
+                time: entry.time(),
+                pid: entry.pid(),
+            });
+        }
+    }
+    events.sort_by(|a, b| a.time.total_cmp(&b.time));
+    events
+}
+
+#[bitfield(u32)]
+struct Allocation {
+    present: bool,
+    /// Allocated frame number
+    #[bits(27)]
+    frame: FrameId,
+    /// Allocation size order (0..=10)
+    #[bits(4)]
+    order: usize,
+}
+impl Allocation {
+    fn with(frame: FrameId, order: usize) -> Self {
+        Self::new()
+            .with_present(true)
+            .with_frame(frame)
+            .with_order(order)
+    }
+}

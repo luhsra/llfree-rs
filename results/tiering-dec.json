@@ -1,0 +1,53 @@
+{
+  "tiers": [
+    {
+      "id": 0,
+      "count": "pids",
+      "order": [0, 8],
+      "gfp": { "off": "MOVABLE" }
+    },
+    {
+      "id": 1,
+      "count": "pids",
+      "order": [0, 8],
+      "gfp": {
+        "all": [
+          { "on": "MOVABLE" },
+          { "off": "PAGE_CACHE" },
+          { "not": { "any": [{ "on": "RECLAIMABLE" }, { "off": "FS" }] } }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "count": "pids",
+      "order": [0, 8],
+      "gfp": {
+        "all": [
+          { "on": "MOVABLE" },
+          { "on": "PAGE_CACHE" },
+          { "not": { "any": [{ "on": "RECLAIMABLE" }, { "off": "FS" }] } }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "count": "pids",
+      "order": [0, 8],
+      "gfp": {
+        "all": [
+          { "on": "MOVABLE" },
+          { "any": [{ "on": "RECLAIMABLE" }, { "off": "FS" }] }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "count": "cores_half",
+      "order": [9, 10]
+    }
+  ],
+  "perfect": [64, 2047],
+  "good": [2048, 4095],
+  "default": 4
+}
