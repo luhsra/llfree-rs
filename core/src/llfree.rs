@@ -133,10 +133,9 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             return self.get_at(frame, request);
         }
 
-        let len = self.locals.tier_locals(request.tier).unwrap_or_default();
-        let mut start_idx = TreeId(
-            self.trees.len().checked_div(len).unwrap_or(0) * request.local.unwrap_or_default(),
-        );
+        let len = self.locals.tier_locals(request.tier).unwrap_or(0);
+        let mut start_idx =
+            TreeId(self.trees.len().checked_div(len).unwrap_or(0) * request.local.unwrap_or(0));
 
         // Try local reservation first
         match self.get_matching(&request, &mut start_idx) {
@@ -150,14 +149,17 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             r => return r,
         }
 
-        // -- Out of memory handling ---
-        warn!("OOM");
-
-        // Downgrade request until successful
+        // Stealing: Downgrade request until successful
+        debug!("Stealing");
         for t in 1..Tier::LEN {
             // Go downwards
             let tier = Tier((Tier::LEN + request.tier.0 - t) % Tier::LEN);
             if let Some(locals) = self.locals.tier_locals(tier) {
+                // Check if stealing is allowed
+                if (self.policy)(request.tier, tier, TREE_FRAMES) != Policy::Steal {
+                    continue;
+                }
+
                 let request = Request {
                     tier,
                     order: request.order,
@@ -173,7 +175,11 @@ impl<'a> Alloc<'a> for LLFree<'a> {
                 }
             }
         }
-        // Try stealing from local reservations
+
+        // -- Out of memory handling ---
+        warn!("OOM");
+
+        // Try stealing from other local reservations
         match self.steal_local(&request, None) {
             Err(Error::Memory) => {} // continue
             r => return r,
@@ -471,7 +477,7 @@ impl LLFree<'_> {
         local: usize,
         frame: Option<FrameId>,
         start_idx: &mut TreeId,
-    ) -> core::result::Result<(FrameId, Tier), Error> {
+    ) -> Result<(FrameId, Tier)> {
         match self
             .locals
             .get(tier, local, frame.map(FrameId::as_tree), 1 << order)
@@ -495,14 +501,12 @@ impl LLFree<'_> {
                 let min = (1 << order) - free;
                 if let Some(free) = self.trees.sync(row.as_tree(), min) {
                     if self.locals.put(tier, local, row.as_tree(), free) {
-                        Err(Error::Retry)
+                        return Err(Error::Retry);
                     } else {
                         self.trees.put(row.as_tree(), free, self.policy);
-                        Err(Error::Memory)
                     }
-                } else {
-                    Err(Error::Memory)
                 }
+                Err(Error::Memory)
             }
             Err(None) => Err(Error::Memory),
         }
