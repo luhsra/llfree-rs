@@ -189,7 +189,7 @@ impl Bitfield {
         let atom = unsafe { &*self.data.as_ptr().cast::<Atom<I>>().add(idx) };
         match atom.compare_exchange(val, !val) {
             Ok(_) => Ok(()),
-            Err(_) => Err(Error::Retry),
+            Err(_) => Err(Error::Memory),
         }
     }
 

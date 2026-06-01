@@ -397,18 +397,16 @@ impl LLFree<'_> {
         // Try local reservation first
         if let Some(local) = request.local {
             let mut start_idx = TreeId(0);
-            for _ in 0..RETRIES {
-                match self.get_matching_local(
-                    request.order,
-                    request.tier,
-                    local,
-                    Some(frame),
-                    &mut start_idx,
-                ) {
-                    Err(Error::Retry) => {}
-                    Err(Error::Memory) => break, // continue with global
-                    r => return r,
-                }
+            match self.get_matching_local(
+                request.order,
+                request.tier,
+                local,
+                Some(frame),
+                &mut start_idx,
+                true,
+            ) {
+                Err(Error::Memory) => {} // continue with global
+                r => return r,
             }
         }
 
@@ -443,12 +441,10 @@ impl LLFree<'_> {
                 .tier_locals(request.tier)
                 .is_some_and(|len| len > 0 && len < self.trees.len())
         {
-            for _ in 0..RETRIES {
-                match self.get_matching_local(request.order, request.tier, local, None, start_idx) {
-                    Err(Error::Retry) => {}
-                    Err(Error::Memory) => break, // continue with global
-                    r => return r,
-                }
+            match self.get_matching_local(request.order, request.tier, local, None, start_idx, true)
+            {
+                Err(Error::Memory) => {} // continue with global
+                r => return r,
             }
             // Try reserve new tree if no specific frame is requested
             self.get_matching_reserve(request.order, request.tier, local, *start_idx)
@@ -477,6 +473,7 @@ impl LLFree<'_> {
         local: usize,
         frame: Option<FrameId>,
         start_idx: &mut TreeId,
+        sync: bool,
     ) -> Result<(FrameId, Tier)> {
         match self
             .locals
@@ -499,10 +496,13 @@ impl LLFree<'_> {
                 *start_idx = row.as_tree();
                 // Sync with global tree
                 let min = (1 << order) - free;
-                if let Some(free) = self.trees.sync(row.as_tree(), min) {
+                if sync && let Some(free) = self.trees.sync(row.as_tree(), min) {
                     if self.locals.put(tier, local, row.as_tree(), free) {
-                        return Err(Error::Retry);
+                        // retry
+                        return self
+                            .get_matching_local(order, tier, local, frame, start_idx, false);
                     } else {
+                        // undo tree change
                         self.trees.put(row.as_tree(), free, self.policy);
                     }
                 }
