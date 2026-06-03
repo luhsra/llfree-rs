@@ -34,14 +34,12 @@ LLFree is a two-level allocator optimized for scalability and fragmentation cont
   - Tier stats (`TreeStats`) reflect tree transitions.
   - Keep lock-free retry/CAS semantics intact.
 
-## 1) Build, Lint, Test Commands
+## Build, Lint, Test Commands
 
 ### Rust workspace
 
 - Build all crates (debug):
   - `cargo build`
-- Build release:
-  - `cargo build -r`
 - Build core crate only:
   - `cargo build -p llfree`
 - Build eval crate only:
@@ -50,26 +48,19 @@ LLFree is a two-level allocator optimized for scalability and fragmentation cont
 ### Rust tests
 
 - Run all core tests:
-  - `cargo test -p llfree`
-- Run one Rust test (substring):
   - `cargo test -p llfree <test_name_substring>`
-  - Example: `cargo test -p llfree change_tree`
 - Run one Rust test with logs:
   - `cargo test -p llfree <test_name_substring> -- --nocapture`
 
 ### Eval integration tests
 
 - Run integration suite:
-  - `cargo test -p llfree-eval --test integration`
-- Run one integration test:
   - `cargo test -p llfree-eval --test integration <test_name_substring>`
 
 ### Eval with C backend
 
 - Init/update C submodule (if needed):
   - `git submodule update --init --checkout llc`
-- Run eval tests against C impl:
-  - `cargo test -p llfree-eval -F llc --test integration`
 - Run one eval test against C impl:
   - `cargo test -p llfree-eval -F llc --test integration <test_name_substring>`
 
@@ -81,7 +72,6 @@ LLFree is a two-level allocator optimized for scalability and fragmentation cont
   - `make -C llc test`
 - Run a single C test (substring filter):
   - `make -C llc test T=<name_substring>`
-  - Example: `make -C llc test T=zeroed`
 - Clean C artifacts:
   - `make -C llc clean`
 
@@ -98,7 +88,8 @@ C:
 - If available, format changed C files before finalizing:
   - `clang-format -i llc/src/*.c llc/src/*.h llc/tests/*.c llc/include/*.h`
 
-## 2) Code Style and Conventions
+
+## Code Style and Conventions
 
 ### General
 
@@ -155,11 +146,3 @@ C:
   - Run single tests via `make -C llc test T=<pattern>`.
 - For tier/tree changes:
   - Validate both operation results and stats (`llfree_tree_stats`, `trees_stats_at`).
-
-## Agent workflow (recommended)
-
-1. Identify which layer is affected (lower, trees, locals, upper API, eval).
-2. Implement minimally and preserve invariants.
-3. Run the narrowest relevant single test first.
-4. Run broader crate/suite tests if scope warrants.
-5. Report commands executed and any known unrelated failures.

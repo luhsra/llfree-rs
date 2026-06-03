@@ -14,5 +14,6 @@ memfile
 
 /results/*.csv
 /results/*.txt
+/results/*.bin
 /results/*.pdf
 /results/*/

@@ -970,3 +970,101 @@ fn movable_tiers() {
     );
     alloc.validate();
 }
+
+#[test]
+fn zeroed_steals_from_huge() {
+    logging();
+
+    // Custom 3-tier setup: small=0, huge=1, zeroed=2.
+    // Huge is the default tier.
+    // Zeroed > Huge so requesting zeroed from a huge tree -> Steal.
+    fn zeroed_policy(requested: Tier, target: Tier, free: usize) -> Policy {
+        if requested.0 > target.0 {
+            return Policy::Steal;
+        } else if requested.0 < target.0 {
+            return Policy::Demote;
+        }
+        match free {
+            f if f >= TREE_FRAMES / 2 => Policy::Match(1),
+            f if f >= TREE_FRAMES / 64 => Policy::Match(u8::MAX),
+            _ => Policy::Match(0),
+        }
+    }
+
+    let cores = 1;
+    let tree_count = 12;
+    let frames = tree_count * TREE_FRAMES;
+
+    let tiering = Tiering::new(
+        &[(Tier(0), cores), (Tier(1), cores), (Tier(2), cores)],
+        Tier(1), // default = huge
+        zeroed_policy,
+    );
+
+    let ms = AllocImpl::metadata_size(&tiering, frames);
+    let meta = MetaData::alloc(&ms);
+    let alloc = AllocImpl::new(frames, Init::FreeAll, &tiering, meta).unwrap();
+
+    alloc.validate();
+    assert_eq!(alloc.tree_stats().free_frames, frames);
+
+    // Convert one fully-free huge tree to zeroed tier
+    alloc
+        .change_tree(
+            TreeMatch {
+                id: None,
+                tier: Some(Tier(1)),
+                free: TREE_FRAMES,
+            },
+            TreeChange {
+                tier: None,
+                operation: Some(TreeOperation::Offline),
+            },
+        )
+        .unwrap();
+
+    // OS performs the zeroing...
+
+    alloc
+        .change_tree(
+            TreeMatch {
+                id: None,
+                tier: Some(Tier(1)),
+                free: 0,
+            },
+            TreeChange {
+                tier: Some(Tier(2)),
+                operation: Some(TreeOperation::Online),
+            },
+        )
+        .unwrap();
+
+    alloc.validate();
+
+    let stats_before = alloc.tree_stats();
+    assert_eq!(
+        stats_before.tiers[2].free_frames, TREE_FRAMES,
+        "zeroed tier should have one full tree"
+    );
+
+    // Exhaust the zeroed tree by allocating all huge frames from it
+    let zeroed_capacity = TREE_FRAMES / HUGE_FRAMES;
+    for _ in 0..zeroed_capacity {
+        let (_frame, tier) = alloc
+            .get(None, Request::new(HUGE_ORDER, Tier(2), Some(0)))
+            .unwrap();
+        assert_eq!(tier, Tier(2), "expected zeroed tier");
+    }
+
+    // Zeroed tree exhausted; next request should steal from huge tier
+    let (frame, tier) = alloc
+        .get(None, Request::new(HUGE_ORDER, Tier(2), Some(0)))
+        .unwrap();
+    assert_eq!(tier, Tier(1), "steal from huge should return tier 1");
+
+    alloc
+        .put(frame, Request::new(HUGE_ORDER, Tier(2), Some(0)))
+        .unwrap();
+
+    alloc.validate();
+}

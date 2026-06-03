@@ -358,13 +358,22 @@ mod bindings {
 #[cfg(all(test, feature = "llc"))]
 mod test {
     use super::LLC;
-    use llfree::{Alloc, Init, MetaData, Tiering};
+    use llfree::{Alloc, Init, MetaData, TREE_FRAMES, Tiering, util::logging};
+    use log::warn;
 
     #[test]
     fn test_debug() {
+        logging();
         let (tiering, _request) = Tiering::simple(1);
-        let meta = MetaData::alloc(&LLC::metadata_size(&tiering, 1024));
-        let alloc = LLC::new(1024, Init::FreeAll, &tiering, meta).unwrap();
-        println!("{alloc:?}");
+        let frames = TREE_FRAMES * 4;
+        let meta = MetaData::alloc(&LLC::metadata_size(&tiering, TREE_FRAMES));
+        warn!("frames: {frames}");
+        let alloc = LLC::new(TREE_FRAMES, Init::FreeAll, &tiering, meta).unwrap();
+        warn!("{alloc:?}");
+        alloc.validate();
+        assert_eq!(alloc.frames(), frames);
+        let stats = alloc.stats();
+        assert_eq!(stats.free_frames, frames);
+        assert_eq!(stats.free_trees, frames / TREE_FRAMES);
     }
 }

@@ -22,7 +22,6 @@ log_warn = ["log/max_level_warn"]
 log_error = ["log/max_level_error"]
 
 16K = []
-free_reserve = []
 
 tree_huge_1 = []
 # 2 huge frames per tree -> 4MiB

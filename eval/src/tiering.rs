@@ -2,10 +2,8 @@ use std::sync::atomic::AtomicU64;
 
 use bitfield_struct::bitfield;
 use facet::Facet;
-use llfree::{
-    Policy, Request, Tier, Tiering,
-    atomic::{Atom, Atomic},
-};
+use llfree::atomic::{Atom, Atomic};
+use llfree::{Policy, Request, Tier, Tiering};
 
 use crate::gfp::GFP;
 

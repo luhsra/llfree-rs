@@ -1,8 +1,9 @@
 //! General utility functions
 
+use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
-use core::ops::{Deref, DerefMut, Range};
+use core::ops::{Deref, DerefMut};
 use core::{fmt, slice};
 
 /// Retries the condition n times and returns if it was successfull.
@@ -94,6 +95,56 @@ impl<T> OffsetSlice<T> {
         }
     }
 }
+
+/// A buffer that keeps its elements sorted.
+pub struct SortedBuffer<const N: usize, T: Ord> {
+    buffer: [Option<T>; N],
+}
+impl<const N: usize, T: Ord> SortedBuffer<N, T> {
+    #[allow(clippy::new_without_default)]
+    pub const fn new() -> Self {
+        Self {
+            buffer: [const { None }; N],
+        }
+    }
+    /// Adds a value to the buffer, keeping it sorted.
+    pub fn add(&mut self, value: T) {
+        let pos = self.buffer.iter().position(|e| match e {
+            None => true,
+            Some(v) => &value <= v,
+        });
+        let len = self.buffer.iter().position(|e| e.is_none()).unwrap_or(N);
+        if let Some(pos) = pos {
+            if pos < len {
+                // Move remaining elements to make space.
+                self.buffer[pos..len].rotate_right(1);
+            }
+            self.buffer[pos] = Some(value);
+        }
+    }
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
+        self.buffer.iter().flatten()
+    }
+}
+
+/// A wrapper that sorts by the first element.
+pub struct OrdBy<K: Ord, V>(pub K, pub V);
+impl<K: Ord, V> Ord for OrdBy<K, V> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+impl<K: Ord, V> PartialOrd for OrdBy<K, V> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<K: Ord, V> PartialEq for OrdBy<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<K: Ord, V> Eq for OrdBy<K, V> {}
 
 #[cfg(any(test, feature = "std"))]
 pub fn logging() {
@@ -191,7 +242,7 @@ impl WyRand {
         let t: u128 = (self.seed as u128).wrapping_mul((self.seed ^ 0xe703_7ed1_a0b4_28db) as u128);
         (t.wrapping_shr(64) ^ t) as u64
     }
-    pub fn range(&mut self, range: Range<u64>) -> u64 {
+    pub fn range(&mut self, range: core::ops::Range<u64>) -> u64 {
         let mut val = self.generate();
         if range.start < range.end {
             val %= range.end - range.start;

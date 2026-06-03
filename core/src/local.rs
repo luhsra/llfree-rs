@@ -2,7 +2,6 @@ use core::sync::atomic::AtomicU64;
 use core::{fmt, slice};
 
 use bitfield_struct::bitfield;
-use log::debug;
 
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
@@ -204,12 +203,6 @@ impl<'a> Locals<'a> {
         let _ = local.tree.try_update(|v| v.set_start(row));
     }
 
-    #[allow(dead_code)]
-    #[cfg(feature = "free_reserve")]
-    pub fn frees_push(&self, index: usize, tree_idx: TreeId) -> bool {
-        self.local[index].frees_push(tree_idx)
-    }
-
     pub fn stats(&self) -> TreeStats {
         let mut s = TreeStats::default();
         for (i, locals) in self.tiers.iter().enumerate() {
@@ -262,22 +255,6 @@ impl Reservation {
 struct Local {
     /// Reserved trees for each [Tier]
     tree: Atom<LocalTree>,
-    #[cfg(feature = "free_reserve")]
-    /// Recent frees
-    frees: Atom<FreeHistory>,
-}
-
-impl Local {
-    /// Add a tree index to the history, returning if there are enough frees
-    #[cfg(feature = "free_reserve")]
-    fn frees_push(&self, tree_idx: TreeId) -> bool {
-        let mut success = false;
-        let _ = self.frees.fetch_update(|mut v| {
-            success = v.push(tree_idx);
-            (!success).then_some(v)
-        });
-        success
-    }
 }
 
 /// Local tree copy
@@ -329,65 +306,5 @@ impl LocalTree {
 
     fn as_reservation(self, tier: Tier) -> Reservation {
         Reservation::new(self.row(), tier, self.free())
-    }
-}
-
-#[bitfield(u64)]
-struct FreeHistory {
-    #[bits(48)]
-    idx: TreeId,
-    #[bits(16)]
-    counter: usize,
-}
-
-#[allow(dead_code)]
-impl FreeHistory {
-    /// Threshold for the number of frees after which a tree is reserved
-    const F: usize = 4;
-
-    /// Add a tree index to the history, returing if there are enough frees
-    fn push(&mut self, tree_idx: TreeId) -> bool {
-        debug!("Pushing {tree_idx:?} to {self:?}");
-        if self.idx() == tree_idx {
-            if self.counter() >= Self::F {
-                return true;
-            }
-            self.set_counter(self.counter() + 1);
-        } else {
-            self.set_idx(tree_idx);
-            self.set_counter(0);
-        }
-        false
-    }
-}
-impl Atomic for FreeHistory {
-    type I = AtomicU64;
-}
-
-#[cfg(test)]
-mod test {
-    use crate::{FrameId, util};
-
-    use super::FreeHistory;
-
-    /// Testing the related frames heuristic for frees
-    #[test]
-    fn last_frees() {
-        util::logging();
-        let mut history = FreeHistory::default();
-        let frame1 = FrameId(43);
-        let i1 = frame1.as_tree();
-        assert!(!history.push(i1), "{history:?}");
-        assert!(!history.push(i1), "{history:?}");
-        assert!(!history.push(i1), "{history:?}");
-        assert!(!history.push(i1), "{history:?}");
-        assert!(history.push(i1), "{history:?}");
-        assert!(history.push(i1), "{history:?}");
-        let frame2 = FrameId(512 * 512 + 43);
-        let i2 = frame2.as_tree();
-        assert_ne!(i1, i2);
-        assert!(!history.push(i2), "{history:?}");
-        assert!(!history.push(i2), "{history:?}");
-        assert!(!history.push(i1), "{history:?}");
     }
 }

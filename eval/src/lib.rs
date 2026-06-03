@@ -10,8 +10,6 @@ mod llc;
 #[cfg(feature = "llc")]
 pub use llc::LLC;
 
-
-
 pub fn avg_bounds<T>(iter: impl IntoIterator<Item = T>) -> Option<(T, T, T)>
 where
     T: Ord + Add<T, Output = T> + Div<T, Output = T> + TryFrom<usize> + Copy,

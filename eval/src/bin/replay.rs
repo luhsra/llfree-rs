@@ -2,10 +2,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::slice;
-use std::sync::Barrier;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::sync::atomic::Ordering;
 
 use bitfield_struct::bitfield;
 use facet::Facet;
@@ -29,8 +26,8 @@ struct Args {
     #[facet(args::named)]
     frag: Option<PathBuf>,
     /// Time interval is ms for monitoring fragmentation
-    #[facet(args::named, default = 1000)]
-    interval: u64,
+    #[facet(args::named, default = 100000)]
+    interval: usize,
     /// Optional path to a tiering configuration file (JSON)
     #[facet(args::named)]
     tiering: Option<PathBuf>,
@@ -100,8 +97,8 @@ fn main() {
         )
     };
     let meta = MetaData::alloc(&Allocator::metadata_size(&tiering, max_pfn));
-    let alloc = Allocator::new(max_pfn, Init::FreeAll, &tiering, meta).unwrap();
-    alloc.validate();
+    let llfree = Allocator::new(max_pfn, Init::FreeAll, &tiering, meta).unwrap();
+    llfree.validate();
 
     info!("start");
 
@@ -111,114 +108,87 @@ fn main() {
     let mut reallocs = 0;
     let mut free_unkown = 0;
 
-    let barrier = Barrier::new(2);
-    let running = AtomicUsize::new(cores);
-    let score = std::thread::scope(|s| {
-        let monitor = s.spawn(|| {
-            thread::pin(cores);
-            let mut frag = frag.map(|path| BufWriter::new(File::create(path).unwrap()));
+    let score = {
+        let mut frag = frag.map(|path| BufWriter::new(File::create(path).unwrap()));
+        let mut score = 0.0;
+        let mut count = 0;
 
-            barrier.wait();
-
-            let start = Instant::now();
-            let mut count = 0;
-            let mut score = 0.0;
-            while running.load(Ordering::Relaxed) > 0 {
-                score += measure(frag.as_mut(), &alloc);
+        for (i, entry) in events.into_iter().enumerate() {
+            if i % interval == 0 {
+                score += measure(frag.as_mut(), &llfree);
                 count += 1;
+            }
 
-                let elapsed_ms = start.elapsed().as_millis();
-                let next_ms = count as u128 * interval as u128;
-                if next_ms > elapsed_ms {
-                    sleep(Duration::from_millis((next_ms - elapsed_ms) as u64));
+            let pfn = entry.pfn as usize;
+            let flags = request(
+                entry.order as usize,
+                entry.flags,
+                entry.cpuid as usize,
+                entry.pid as usize,
+            );
+            if entry.alloc {
+                let (frame, _) = llfree.get(None, flags).unwrap();
+                if allocated[pfn].present() {
+                    trace!("Realloc pfn={pfn} order={}", flags.order);
+                    reallocs += 1;
+                }
+                allocated[pfn] = Allocation::with(frame, entry.order as _);
+                continue;
+            }
+
+            let mut found = None;
+            for order in entry.order as usize..=TREE_ORDER {
+                let pfn = align_down(pfn, 1 << order);
+                if allocated[pfn].present() && allocated[pfn].order() >= order {
+                    found = Some(pfn);
+                    break;
                 }
             }
-            // Final measurement after all threads are done
-            score += measure(frag.as_mut(), &alloc);
-            count += 1;
 
-            score / count as f32
-        });
+            // free
+            if let Some(a_pfn) = found {
+                let allocation = &mut allocated[a_pfn];
+                assert!(allocation.present());
+                let frame = allocation.frame();
+                let order = allocation.order();
+                assert!(order >= entry.order as usize);
 
-        let running = &running;
-        let barrier = &barrier;
-        let llfree = &alloc;
-        let reallocs = &mut reallocs;
-        let free_unkown = &mut free_unkown;
+                // Mark as free and split if alloc was larger
+                for part in 0..(1 << (order - entry.order as usize)) {
+                    let part_pfn = a_pfn + part * (1 << entry.order as usize);
+                    let part_frame = FrameId(frame.0 + part * (1 << entry.order as usize));
 
-        s.spawn(move || {
-            barrier.wait();
-
-            for entry in events {
-                let pfn = entry.pfn as usize;
-                let flags = request(
-                    entry.order as usize,
-                    entry.flags,
-                    entry.cpuid as usize,
-                    entry.pid as usize,
-                );
-                if entry.alloc {
-                    let (frame, _) = llfree.get(None, flags).unwrap();
-                    if allocated[pfn].present() {
-                        trace!("Realloc pfn={pfn} order={}", flags.order);
-                        *reallocs += 1;
+                    if pfn != part_pfn {
+                        info!("Split pfn={part_pfn}");
                     }
-                    allocated[pfn] = Allocation::with(frame, entry.order as _);
-                    continue;
+
+                    allocated[part_pfn] = Allocation::new()
+                        .with_present(pfn != part_pfn)
+                        .with_frame(part_frame)
+                        .with_order(entry.order as _);
                 }
 
-                let mut found = None;
-                for order in entry.order as usize..=TREE_ORDER {
-                    let pfn = align_down(pfn, 1 << order);
-                    if allocated[pfn].present() && allocated[pfn].order() >= order {
-                        found = Some(pfn);
-                        break;
-                    }
+                if let Err(e) = llfree.put(frame, flags) {
+                    error!("Free failed pfn={a_pfn} order={} error={e:?}", flags.order);
                 }
-
-                // free
-                if let Some(a_pfn) = found {
-                    let allocation = &mut allocated[a_pfn];
-                    assert!(allocation.present());
-                    let frame = allocation.frame();
-                    let order = allocation.order();
-                    assert!(order >= entry.order as usize);
-
-                    // Mark as free and split if alloc was larger
-                    for part in 0..(1 << (order - entry.order as usize)) {
-                        let part_pfn = a_pfn + part * (1 << entry.order as usize);
-                        let part_frame = FrameId(frame.0 + part * (1 << entry.order as usize));
-
-                        if pfn != part_pfn {
-                            info!("Split pfn={part_pfn}");
-                        }
-
-                        allocated[part_pfn] = Allocation::new()
-                            .with_present(pfn != part_pfn)
-                            .with_frame(part_frame)
-                            .with_order(entry.order as _);
-                    }
-
-                    if let Err(e) = llfree.put(frame, flags) {
-                        error!("Free failed pfn={a_pfn} order={} error={e:?}", flags.order);
-                    }
-                } else {
-                    trace!("Free unallocated pfn={pfn} order={}", flags.order);
-                    *free_unkown += 1;
-                }
+            } else {
+                trace!("Free unallocated pfn={pfn} order={}", flags.order);
+                free_unkown += 1;
             }
-            running.store(0, Ordering::Relaxed);
-        });
+        }
 
-        monitor.join().unwrap()
-    });
+        score += measure(frag.as_mut(), &llfree);
+        count += 1;
 
-    info!("{alloc:#?}");
+        score / count as f32
+    };
 
-    alloc.validate();
-    let stats = alloc.stats();
-    info!("free = {} / {}", stats.free_frames, alloc.frames());
-    let huge = alloc.frames() >> HUGE_ORDER;
+    info!("{llfree:#?}");
+
+    llfree.validate();
+    let stats = llfree.stats();
+    info!("free = {} / {}", stats.free_frames, llfree.frames());
+    let huge = llfree.frames() >> HUGE_ORDER;
     info!("huge = {} / {huge}", stats.free_huge);
 
     info!(
@@ -238,7 +208,7 @@ fn main() {
         "{}",
         facet_json::to_string_pretty(&Output {
             free_frames: stats.free_frames,
-            total_frames: alloc.frames(),
+            total_frames: llfree.frames(),
             free_huge: stats.free_huge,
             total_huge: huge,
             score,

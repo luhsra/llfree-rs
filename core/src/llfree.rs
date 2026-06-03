@@ -127,52 +127,53 @@ impl<'a> Alloc<'a> for LLFree<'a> {
 
     fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(FrameId, Tier)> {
         self.check(frame.unwrap_or(FrameId(0)), &request)?;
-        // Different starting points for each core
 
+        // Try reserving a specific frame
         if let Some(frame) = frame {
             return self.get_at(frame, request);
         }
 
         let len = self.locals.tier_locals(request.tier).unwrap_or(0);
+        // Different starting points for each core
         let mut start_idx =
             TreeId(self.trees.len().checked_div(len).unwrap_or(0) * request.local.unwrap_or(0));
 
-        // Try local reservation first
-        match self.get_matching(&request, &mut start_idx) {
-            Err(Error::Memory) => {} // continue
-            r => return r,
-        }
-
-        // Demote local / global
-        match self.get_demoting(&request, &mut start_idx) {
-            Err(Error::Memory) => {} // continue
-            r => return r,
-        }
-
-        // Stealing: Downgrade request until successful
-        debug!("Stealing");
-        for t in 1..Tier::LEN {
-            // Go downwards
-            let tier = Tier((Tier::LEN + request.tier.0 - t) % Tier::LEN);
-            if let Some(locals) = self.locals.tier_locals(tier) {
-                // Check if stealing is allowed
-                if (self.policy)(request.tier, tier, TREE_FRAMES) != Policy::Steal {
-                    continue;
+        // Use local reservation if possible
+        if let Some(local) = request.local
+            && self
+                .locals
+                .tier_locals(request.tier)
+                .is_some_and(|len| len > 0 && len < self.trees.len())
+        {
+            match self.get_local(request.order, request.tier, local, None, true) {
+                Err((Error::Memory, Some(start))) => start_idx = start,
+                Err((Error::Memory, _)) => {}
+                Err((e, _)) => return Err(e),
+                Ok(r) => return Ok(r),
+            }
+            // Try reserving new tree
+            match self.search_and_reserve(request.order, request.tier, local, start_idx) {
+                Err(Error::Memory) => {}
+                r => return r,
+            }
+        } else {
+            // Global search
+            // Rate how good the tree fulfills the allocation
+            let rate = |t, free| {
+                if free < request.frames() {
+                    return Policy::Invalid;
                 }
-
-                let request = Request {
-                    tier,
-                    order: request.order,
-                    local: if locals == 0 {
-                        None
-                    } else {
-                        request.local.map(|l| l % locals) // resize to fit
-                    },
-                };
-                match self.get_matching(&request, &mut start_idx) {
-                    Err(Error::Memory) => {} // try next tier
-                    r => return r,
-                }
+                (self.policy)(request.tier, t, free)
+            };
+            let check = |t: Tier, f: usize| Self::policy_to_tier(rate(t, f), request.tier, t);
+            // Any frame
+            match self
+                .trees
+                .search_best::<8, _>(start_idx, 0, self.trees.len(), rate, |i| {
+                    self.get_global(i, request.order, None, check)
+                }) {
+                Err(Error::Memory) => {} // continue
+                r => return r,
             }
         }
 
@@ -184,7 +185,6 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             Err(Error::Memory) => {} // continue
             r => return r,
         }
-
         // Fallback to demoting local reservations
         match self.demote_local(&request, None) {
             Err(Error::Memory) => {} // continue
@@ -203,38 +203,16 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         // Then update local / global counters
         let i = frame.as_tree();
 
-        // Try update own trees first
-        if let Some(local) = request.local {
-            // Update the put-reserve heuristic
-            let may_reserve = cfg_select! {
-                feature = "free_reserve" => self.locals.frees_push(local, i),
-                _ => false,
-            };
-
-            let tier = request.tier;
-            if self
-                .locals
-                .put(tier, local, frame.as_tree(), request.frames())
-            {
-                return Ok(());
-            }
-
-            // Increment or reserve globally
-            if let Some(free) =
-                self.trees
-                    .put_or_reserve(i, request.frames(), tier, may_reserve, self.policy)
-            {
-                warn!("free reserved tree idx={i} tier={tier:?} free={free}");
-                // Change preferred tree to speedup future frees
-                if let Some(Reservation { row, free, .. }) =
-                    self.locals.swap(tier, local, i, free + request.frames())
-                {
-                    self.trees.unreserve(row.as_tree(), free, tier, self.policy);
-                }
-            }
-        } else {
-            self.trees.put(i, request.frames(), self.policy);
+        // Try updating own trees first
+        let t = request.tier;
+        if let Some(local) = request.local
+            && self.locals.put(t, local, frame.as_tree(), request.frames())
+        {
+            return Ok(());
         }
+
+        // Increment globally
+        self.trees.put(i, request.frames(), self.policy);
 
         Ok(())
     }
@@ -337,14 +315,17 @@ impl LLFree<'_> {
         Ok(())
     }
 
-    fn get_reserve(
+    fn reserve_or_steal(
         &self,
-        order: usize,
         i: TreeId,
+        order: usize,
+        tier: Tier,
         local: usize,
-        check: impl Fn(Tier, usize) -> Option<Tier>,
     ) -> Result<(FrameId, Tier)> {
-        if let Some((free, target_tier)) = self.trees.reserve(i, check) {
+        if let Some((reserved, free, target_tier)) =
+            self.trees
+                .reserve_or_steal(i, 1 << order, self.policy, tier)
+        {
             let tier_len = self.locals.tier_locals(target_tier).expect("Invalid tier");
             // Target might have less locals or none
             assert!(tier_len > 0, "No locals for tier {target_tier:?}");
@@ -354,9 +335,13 @@ impl LLFree<'_> {
             match self.lower.get(i.as_row(), order, None) {
                 Ok(frame) => {
                     // Swap and unreserve old tree
-                    if let Some(Reservation { row, free, .. }) =
-                        self.locals
-                            .swap(target_tier, local, frame.as_tree(), free - (1 << order))
+                    if reserved
+                        && let Some(Reservation { row, free, .. }) = self.locals.swap(
+                            target_tier,
+                            local,
+                            frame.as_tree(),
+                            free - (1 << order),
+                        )
                     {
                         self.trees
                             .unreserve(row.as_tree(), free, target_tier, self.policy);
@@ -364,7 +349,11 @@ impl LLFree<'_> {
                     Ok((frame, target_tier))
                 }
                 Err(e) => {
-                    self.trees.unreserve(i, free, target_tier, self.policy);
+                    if reserved {
+                        self.trees.unreserve(i, free, target_tier, self.policy);
+                    } else {
+                        self.trees.put(i, 1 << order, self.policy);
+                    }
                     Err(e)
                 }
             }
@@ -396,30 +385,19 @@ impl LLFree<'_> {
     fn get_at(&self, frame: FrameId, request: Request) -> Result<(FrameId, Tier)> {
         // Try local reservation first
         if let Some(local) = request.local {
-            let mut start_idx = TreeId(0);
-            match self.get_matching_local(
-                request.order,
-                request.tier,
-                local,
-                Some(frame),
-                &mut start_idx,
-                true,
-            ) {
-                Err(Error::Memory) => {} // continue with global
-                r => return r,
+            match self.get_local(request.order, request.tier, local, Some(frame), true) {
+                Err((Error::Memory, _)) => {} // continue with global
+                Err((e, _)) => return Err(e),
+                Ok(r) => return Ok(r),
             }
         }
 
         // Fallback to global reservation
         match self.get_global(frame.as_tree(), request.order, Some(frame), |t, f| {
-            if f >= request.frames() {
-                return match (self.policy)(request.tier, t, f) {
-                    Policy::Match(_) | Policy::Steal => Some(t),
-                    Policy::Demote => Some(request.tier),
-                    Policy::Invalid => None,
-                };
+            if f < request.frames() {
+                return None;
             }
-            None
+            Self::policy_to_tier((self.policy)(request.tier, t, f), request.tier, t)
         }) {
             Err(Error::Memory) => {} // continue
             r => return r,
@@ -434,53 +412,22 @@ impl LLFree<'_> {
         self.demote_local(&request, Some(frame))
     }
 
-    fn get_matching(&self, request: &Request, start_idx: &mut TreeId) -> Result<(FrameId, Tier)> {
-        if let Some(local) = request.local
-            && self
-                .locals
-                .tier_locals(request.tier)
-                .is_some_and(|len| len > 0 && len < self.trees.len())
-        {
-            match self.get_matching_local(request.order, request.tier, local, None, start_idx, true)
-            {
-                Err(Error::Memory) => {} // continue with global
-                r => return r,
-            }
-            // Try reserve new tree if no specific frame is requested
-            self.get_matching_reserve(request.order, request.tier, local, *start_idx)
-        } else {
-            let check = |t: Tier, f: usize| {
-                if f < request.frames() {
-                    return None;
-                }
-                match (self.policy)(request.tier, t, f) {
-                    Policy::Match(_) => Some(t),
-                    Policy::Demote if f == TREE_FRAMES => Some(request.tier),
-                    _ => None,
-                }
-            };
-            // Any frame
-            self.trees.search(*start_idx, 0, self.trees.len(), |i| {
-                self.get_global(i, request.order, None, check)
-            })
-        }
-    }
-
-    fn get_matching_local(
+    /// Try decrementing the local reservation for the given tier and local index.
+    fn get_local(
         &self,
         order: usize,
         tier: Tier,
         local: usize,
         frame: Option<FrameId>,
-        start_idx: &mut TreeId,
         sync: bool,
-    ) -> Result<(FrameId, Tier)> {
+    ) -> core::result::Result<(FrameId, Tier), (Error, Option<TreeId>)> {
         match self
             .locals
             .get(tier, local, frame.map(FrameId::as_tree), 1 << order)
         {
             Ok(row) => match self.lower.get(row, order, frame) {
                 Ok(frame) => {
+                    // Update current bitfield row if it changed
                     if row != frame.as_row() {
                         self.locals.set_start(tier, local, frame.as_row());
                     }
@@ -488,32 +435,29 @@ impl LLFree<'_> {
                 }
                 Err(e) => {
                     self.trees.put(row.as_tree(), 1 << order, self.policy);
-                    *start_idx = row.as_tree();
-                    Err(e)
+                    Err((e, Some(row.as_tree())))
                 }
             },
             Err(Some(Reservation { row, free, .. })) => {
-                *start_idx = row.as_tree();
                 // Sync with global tree
                 let min = (1 << order) - free;
                 if sync && let Some(free) = self.trees.sync(row.as_tree(), min) {
                     if self.locals.put(tier, local, row.as_tree(), free) {
                         // retry
-                        return self
-                            .get_matching_local(order, tier, local, frame, start_idx, false);
+                        return self.get_local(order, tier, local, frame, false);
                     } else {
                         // undo tree change
                         self.trees.put(row.as_tree(), free, self.policy);
                     }
                 }
-                Err(Error::Memory)
+                Err((Error::Memory, Some(row.as_tree())))
             }
-            Err(None) => Err(Error::Memory),
+            Err(None) => Err((Error::Memory, None)),
         }
     }
 
     /// Reserve a new tree and allocate the frame in it
-    fn get_matching_reserve(
+    fn search_and_reserve(
         &self,
         order: usize,
         tier: Tier,
@@ -521,8 +465,8 @@ impl LLFree<'_> {
         start: TreeId,
     ) -> Result<(FrameId, Tier)> {
         // Rate how if and how good the tree fulfills the allocation
-        let rate = |t, free, range: Range<usize>| {
-            if range.contains(&free) {
+        let rate = |t, free| {
+            if free >= (1 << order) {
                 (self.policy)(tier, t, free)
             } else {
                 // Skip if not in range
@@ -531,17 +475,7 @@ impl LLFree<'_> {
         };
 
         // Try to reserve a new tree
-        let reserve = |i: TreeId, range: Range<usize>| {
-            let check = |t: Tier, f: usize| {
-                match rate(t, f, range.clone()) {
-                    Policy::Match(_) => Some(tier),
-                    // allow demotion if tree is empty
-                    Policy::Demote if f == TREE_FRAMES => Some(tier),
-                    _ => None,
-                }
-            };
-            self.get_reserve(order, i, local, check)
-        };
+        let reserve_or_steal = |i| self.reserve_or_steal(i, order, tier, local);
 
         const CL: usize = align_of::<Align>() / 4;
 
@@ -552,55 +486,46 @@ impl LLFree<'_> {
         // It leaves some space between starting points...
         let start = TreeId(align_down(start.0, (2 * near).next_power_of_two()));
 
-        // Find best fit in fragmented trees
+        // Find best fit in neighborhood
         if order < HUGE_ORDER {
-            let range = 1 << order..TREE_FRAMES;
-
             match self.trees.search_best::<3, _>(
                 start,
                 1,
                 near,
-                |t, f| rate(t, f, range.clone()),
-                |i| reserve(i, range.clone()),
+                |t, f| match rate(t, f) {
+                    // Only match or empty
+                    p @ Policy::Match(_) => p,
+                    p @ Policy::Demote if f == TREE_FRAMES => p,
+                    _ => Policy::Invalid,
+                },
+                reserve_or_steal,
             ) {
                 Err(Error::Memory) => {}
                 r => return r,
             }
         }
 
-        // Any
-        self.trees.search(start, 0, self.trees.len(), |i| {
-            reserve(i, 1 << order..usize::MAX)
-        })
+        // Global search
+        self.trees.search_best::<8, _>(
+            start,
+            0,
+            self.trees.len(),
+            |t, f| match rate(t, f) {
+                // Direct allocation of matching or empty
+                Policy::Match(_) => Policy::Match(u8::MAX),
+                Policy::Demote if f == TREE_FRAMES => Policy::Match(u8::MAX),
+                p => p,
+            },
+            reserve_or_steal,
+        )
     }
 
-    /// Allocate with demotion if needed, but without downgrading the request
-    fn get_demoting(&self, request: &Request, start_idx: &mut TreeId) -> Result<(FrameId, Tier)> {
-        let check = |tier, free| {
-            if free < request.frames() {
-                return None;
-            }
-            match (self.policy)(request.tier, tier, free) {
-                Policy::Demote => Some(request.tier),
-                _ => None,
-            }
-        };
-
-        if let Some(local) = request.local
-            && self
-                .locals
-                .tier_locals(request.tier)
-                .is_some_and(|len| len > 0 && len < self.trees.len())
-        {
-            // Try reserving new tree
-            self.trees.search(*start_idx, 0, self.trees.len(), |i| {
-                self.get_reserve(request.order, i, local, check)
-            })
-        } else {
-            // Try global allocation
-            self.trees.search(*start_idx, 0, self.trees.len(), |i| {
-                self.get_global(i, request.order, None, check)
-            })
+    /// Return the resulting tier when `request` accesses a `target` tree with the given `policy`
+    fn policy_to_tier(policy: Policy, request: Tier, target: Tier) -> Option<Tier> {
+        match policy {
+            Policy::Match(_) | Policy::Demote => Some(request),
+            Policy::Steal => Some(target),
+            Policy::Invalid => None,
         }
     }
 

@@ -8,7 +8,7 @@ use log::warn;
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
 use crate::lower::HugeId;
-use crate::util::{Align, size_of_slice};
+use crate::util::{Align, OrdBy, SortedBuffer, size_of_slice};
 use crate::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -199,20 +199,17 @@ impl<'a> Trees<'a> {
         if reserved { Some(tree.free()) } else { None }
     }
 
-    pub fn reserve(
+    pub fn reserve_or_steal(
         &self,
         i: TreeId,
-        check: impl Fn(Tier, usize) -> Option<Tier>,
-    ) -> Option<(usize, Tier)> {
-        let mut tier = None;
+        free: usize,
+        policy: PolicyFn,
+        tier: Tier,
+    ) -> Option<(bool, usize, Tier)> {
+        let mut reserved = false;
         self.entries[i.0]
-            .try_update(|v| {
-                v.reserve(|t, f| {
-                    tier = check(t, f);
-                    tier
-                })
-            })
-            .map(|v| (v.free(), tier.unwrap()))
+            .try_update(|v| v.reserve_or_steal(free, policy, tier, &mut reserved))
+            .map(|v| (reserved, v.free(), if reserved { tier } else { v.tier() }))
             .ok()
     }
 
@@ -232,23 +229,7 @@ impl<'a> Trees<'a> {
         rate: impl Fn(Tier, usize) -> Policy,
         access: impl Fn(TreeId) -> Result<R>,
     ) -> Result<R> {
-        #[derive(Clone, Copy)]
-        struct Best {
-            i: TreeId,
-            prio: u8,
-        }
-        let mut best: [Option<Best>; N] = [None; N];
-
-        fn insert<const N: usize>(best: &mut [Option<Best>; N], candidate: Best) {
-            let pos = best.iter().position(|e| match e {
-                None => true,
-                Some(best) => candidate.prio > best.prio,
-            });
-            if let Some(pos) = pos {
-                best.copy_within(pos..N - 1, pos + 1);
-                best[pos] = Some(candidate);
-            }
-        }
+        let mut best = SortedBuffer::<N, OrdBy<(Policy, bool), TreeId>>::new();
 
         for i in offset..len {
             // Alternating between before and after start
@@ -265,18 +246,21 @@ impl<'a> Trees<'a> {
                 continue;
             }
             match rate(tree.tier(), tree.free()) {
+                // Try accessing perfect matches directly
                 Policy::Match(u8::MAX) => match access(i) {
                     Err(Error::Memory) => {}
                     r => return r,
                 },
-                Policy::Match(p) => insert(&mut best, Best { i, prio: p + 1 }),
-                Policy::Demote => insert(&mut best, Best { i, prio: 0 }),
-                _ => {}
+                // Skip invalid matches
+                Policy::Invalid => {}
+                // Cache the best matches
+                p => best.add(OrdBy((p, tree.free() == TREE_FRAMES), i)),
             }
         }
 
-        for Best { i, .. } in best.into_iter().flatten() {
-            match access(i) {
+        // Try accessing the best matches
+        for OrdBy(_prio, i) in best.iter().rev() {
+            match access(*i) {
                 Err(Error::Memory) => {}
                 r => return r,
             }
@@ -392,12 +376,24 @@ impl Tree {
             None
         }
     }
-    /// Reserves this entry if its frame count is in `range`.
-    fn reserve(self, mut check: impl FnMut(Tier, usize) -> Option<Tier>) -> Option<Self> {
-        if !self.reserved()
-            && let Some(tier) = check(self.tier(), self.free())
-        {
-            Some(Self::with(0, true, tier))
+    /// Reserve or steal frames from this entry.
+    fn reserve_or_steal(
+        self,
+        free: usize,
+        policy: PolicyFn,
+        tier: Tier,
+        reserved: &mut bool,
+    ) -> Option<Self> {
+        *reserved = false;
+        if self.free() >= free && !self.reserved() {
+            match (policy)(tier, self.tier(), free) {
+                Policy::Match(_) | Policy::Demote => {
+                    *reserved = true;
+                    Some(Self::with(0, true, tier))
+                }
+                Policy::Steal => Some(self.with_free(self.free() - free)),
+                _ => None,
+            }
         } else {
             None
         }
@@ -414,10 +410,9 @@ impl Tree {
         if self.reserved() {
             Some(
                 self.with_reserved(false)
-                    .with_tier(if policy(tier, self.tier(), free) == Policy::Demote {
-                        tier
-                    } else {
-                        self.tier()
+                    .with_tier(match policy(tier, self.tier(), free) {
+                        Policy::Demote => tier,
+                        _ => self.tier(),
                     })
                     .put(free, policy, default),
             )

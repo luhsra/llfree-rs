@@ -36,6 +36,8 @@ pub const FRAME_SIZE: usize = if cfg!(feature = "16K") {
     0x1000
 };
 /// Number of huge frames in tree
+///
+/// This is a classical accuracy vs speed tradeoff
 pub const TREE_HUGE: usize = cfg_select! {
     feature = "tree_huge_1" => 1,
     feature = "tree_huge_2" => 2,
@@ -47,7 +49,7 @@ pub const TREE_HUGE: usize = cfg_select! {
     feature = "tree_huge_128" => 128,
     feature = "tree_huge_256" => 256,
     feature = "tree_huge_512" => 512,
-    _ => 8,
+    _ => 4,
 };
 /// Number of small frames in tree
 pub const TREE_FRAMES: usize = TREE_HUGE << HUGE_ORDER;
@@ -330,17 +332,18 @@ impl Tiering {
 }
 
 /// Policy for accessing a `target` tree with `free` frames.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Policy {
     /// Match, where higher is better, with [u8::MAX] as perfect match and 0 as bad match.
     /// The allocated frame will have the `target` tier (usually the same as `requested`).
     Match(u8),
+    /// Would demote the `target` tree to the `requested` tier.
+    /// The allocated frame will have the `requested` tier.
+    /// The `bool` indicates whether the `target` tree is entirely empty.
+    Demote,
     /// Can steal from the `target` tree, but does not demote it.
     /// The allocated frame will have the `target` tier (self-demotion).
     Steal,
-    /// Would demote the `target` tree to the `requested` tier.
-    /// The allocated frame will have the `requested` tier.
-    Demote,
     /// Can't be used.
     Invalid,
 }
