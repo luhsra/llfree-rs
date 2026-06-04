@@ -159,7 +159,7 @@ fn main() {
                     let part_frame = FrameId(frame.0 + part * (1 << entry.order as usize));
 
                     if pfn != part_pfn {
-                        info!("Split pfn={part_pfn}");
+                        trace!("Split pfn={part_pfn}");
                     }
 
                     allocated[part_pfn] = Allocation::new()

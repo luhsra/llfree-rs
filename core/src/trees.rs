@@ -3,7 +3,7 @@ use core::sync::atomic::AtomicU32;
 use core::{fmt, slice};
 
 use bitfield_struct::bitfield;
-use log::warn;
+use log::{error, warn};
 
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
@@ -152,64 +152,37 @@ impl<'a> Trees<'a> {
             .ok()
     }
 
-    pub fn get(
-        &self,
-        i: TreeId,
-        free: usize,
-        check: impl Fn(Tier, usize) -> Option<Tier>,
-    ) -> Option<Tier> {
-        let mut tier = None;
+    pub fn steal(&self, i: TreeId, tier: Tier, free: usize, policy: PolicyFn) -> Option<Tier> {
+        let mut new_tier = None;
         self.entries[i.0]
             .try_update(|e| {
-                e.get(free, |t, f| {
-                    tier = check(t, f);
-                    tier
-                })
+                let e = e.steal(tier, free, policy);
+                new_tier = e.map(|e| e.tier());
+                e
             })
             .ok()
-            .map(|_| tier.unwrap())
+            .map(|_| new_tier.unwrap())
     }
 
     pub fn put(&self, i: TreeId, free: usize, policy: PolicyFn) {
         self.entries[i.0].update(|v| v.put(free, policy, self.default));
     }
 
-    /// Increment or reserve the tree, returning the old free counter if it was reserved
-    pub fn put_or_reserve(
-        &self,
-        i: TreeId,
-        free: usize,
-        tier: Tier,
-        may_reserve: bool,
-        policy: PolicyFn,
-    ) -> Option<usize> {
-        let mut reserved = false;
-        let tree = self.entries[i.0].update(|v| {
-            let v = v.put(free, policy, self.default);
-            if may_reserve && !v.reserved() && v.tier() == tier && v.free() > Self::MIN_FREE {
-                // Reserve the tree that was targeted by the last N frees
-                reserved = true;
-                v.with_free(0).with_reserved(true)
-            } else {
-                reserved = false; // <- This one is very important if CAS fails!
-                v
-            }
-        });
-
-        if reserved { Some(tree.free()) } else { None }
-    }
-
     pub fn reserve_or_steal(
         &self,
         i: TreeId,
+        tier: Tier,
         free: usize,
         policy: PolicyFn,
-        tier: Tier,
     ) -> Option<(bool, usize, Tier)> {
-        let mut reserved = false;
+        let mut new = None;
         self.entries[i.0]
-            .try_update(|v| v.reserve_or_steal(free, policy, tier, &mut reserved))
-            .map(|v| (reserved, v.free(), if reserved { tier } else { v.tier() }))
+            .try_update(|v| {
+                let v = v.reserve_or_steal(free, policy, tier);
+                new = v.map(|v| (v.reserved(), v.tier()));
+                v
+            })
+            .map(|v| (new.unwrap().0, v.free(), new.unwrap().1))
             .ok()
     }
 
@@ -367,32 +340,35 @@ impl Tree {
         self.with_free(free)
     }
     /// Decrements the free frames counter if it is large enough
-    fn get(self, free: usize, mut check: impl FnMut(Tier, usize) -> Option<Tier>) -> Option<Self> {
-        if self.free() >= free
-            && let Some(tier) = check(self.tier(), self.free())
-        {
-            Some(self.with_free(self.free() - free).with_tier(tier))
+    fn steal(self, tier: Tier, free: usize, policy: PolicyFn) -> Option<Self> {
+        if self.free() >= free && !self.reserved() {
+            let new_tier = match (policy)(tier, self.tier(), free) {
+                Policy::Match(_) => tier,
+                // Cannot demote reserved trees (requires changing local entries)
+                Policy::Demote if self.reserved() => return None,
+                Policy::Demote => tier,
+                Policy::Steal => self.tier(),
+                Policy::Invalid => return None,
+            };
+            Some(self.with_free(self.free() - free).with_tier(new_tier))
         } else {
             None
         }
     }
     /// Reserve or steal frames from this entry.
-    fn reserve_or_steal(
-        self,
-        free: usize,
-        policy: PolicyFn,
-        tier: Tier,
-        reserved: &mut bool,
-    ) -> Option<Self> {
-        *reserved = false;
+    fn reserve_or_steal(self, free: usize, policy: PolicyFn, tier: Tier) -> Option<Self> {
         if self.free() >= free && !self.reserved() {
             match (policy)(tier, self.tier(), free) {
-                Policy::Match(_) | Policy::Demote => {
-                    *reserved = true;
+                // Reserve the entry if it is not reserved, possibly demoting it.
+                Policy::Match(_) | Policy::Demote if !self.reserved() => {
                     Some(Self::with(0, true, tier))
                 }
+                // Steal frames from matching entries, even if they are reserved.
+                Policy::Match(_) => Some(self.with_free(self.free() - free)),
+                // Cannot demote reserved trees (requires changing local entries)
+                Policy::Demote => None,
                 Policy::Steal => Some(self.with_free(self.free() - free)),
-                _ => None,
+                Policy::Invalid => None,
             }
         } else {
             None
@@ -411,8 +387,9 @@ impl Tree {
             Some(
                 self.with_reserved(false)
                     .with_tier(match policy(tier, self.tier(), free) {
+                        Policy::Match(_) => self.tier(),
                         Policy::Demote => tier,
-                        _ => self.tier(),
+                        Policy::Steal | Policy::Invalid => panic!("unreserve invalid tier"),
                     })
                     .put(free, policy, default),
             )

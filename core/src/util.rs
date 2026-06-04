@@ -164,16 +164,28 @@ pub fn logging() {
     }
 
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .write_style(env_logger::WriteStyle::Auto)
         .format(move |buf, record| {
+            let is_styled = buf
+                .default_level_style(record.level())
+                .get_fg_color()
+                .is_some();
+
             const DIM: &str = "\x1b[90m";
             const RST: &str = "\x1b[0m";
-            let color = match record.level() {
-                log::Level::Error => "\x1b[91m",
-                log::Level::Warn => "\x1b[93m",
-                log::Level::Info => "",
-                log::Level::Debug => DIM,
-                log::Level::Trace => DIM,
+            let reset = if is_styled { RST } else { "" };
+            let color = if is_styled {
+                match record.level() {
+                    log::Level::Error => "\x1b[91m",
+                    log::Level::Warn => "\x1b[93m",
+                    log::Level::Info => "",
+                    log::Level::Debug => DIM,
+                    log::Level::Trace => DIM,
+                }
+            } else {
+                ""
             };
+            let prefix = if is_styled { DIM } else { "" };
 
             let loc = format_args!(
                 "{}:{:<4}",
@@ -187,7 +199,7 @@ pub fn logging() {
             let tid = unsafe { transmute::<ThreadId, u64>(std::thread::current().id()) };
             writeln!(
                 buf,
-                "{color}{:<5}{RST}{DIM} {tid:02?} {loc}{padding} >{RST}{color} {}{RST}",
+                "{color}{:<5}{reset}{prefix} {tid:02?} {loc}{padding} >{reset}{color} {}{reset}",
                 record.level(),
                 record.args()
             )
