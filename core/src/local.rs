@@ -2,6 +2,7 @@ use core::sync::atomic::AtomicU64;
 use core::{fmt, slice};
 
 use bitfield_struct::bitfield;
+use log::debug;
 
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
@@ -171,6 +172,7 @@ impl<'a> Locals<'a> {
     }
 
     pub fn swap(&self, tier: Tier, local: usize, tree: TreeId, free: usize) -> Option<Reservation> {
+        debug!("swap tree");
         let Some(locals) = &self.locals(tier) else {
             panic!("Invalid tier");
         };

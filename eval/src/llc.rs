@@ -252,7 +252,7 @@ mod bindings {
             super::Stats {
                 free_frames: val.free_frames,
                 free_huge: val.free_huge,
-                free_trees: 0,
+                free_trees: val.free_trees,
             }
         }
     }
@@ -366,9 +366,9 @@ mod test {
         logging();
         let (tiering, _request) = Tiering::simple(1);
         let frames = TREE_FRAMES * 4;
-        let meta = MetaData::alloc(&LLC::metadata_size(&tiering, TREE_FRAMES));
+        let meta = MetaData::alloc(&LLC::metadata_size(&tiering, frames));
         warn!("frames: {frames}");
-        let alloc = LLC::new(TREE_FRAMES, Init::FreeAll, &tiering, meta).unwrap();
+        let alloc = LLC::new(frames, Init::FreeAll, &tiering, meta).unwrap();
         warn!("{alloc:?}");
         alloc.validate();
         assert_eq!(alloc.frames(), frames);

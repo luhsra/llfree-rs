@@ -6,20 +6,25 @@ rust-version = "1.95.0"
 
 [dependencies]
 bitfield-struct = "0.13"
+env_logger = {
+  version = "0.11",
+  default-features = false,
+  features = ["auto-color"],
+  optional = true
+}
 log = { version = "0.4", default-features = false }
-env_logger = { version = "0.11", default-features = false, optional = true }
 
 [dev-dependencies]
 env_logger = { version = "0.11", default-features = false }
 
 [features]
 default = []
-std = ["log/std", "env_logger"]
-log_trace = ["log/max_level_trace"]
 log_debug = ["log/max_level_debug"]
-log_info = ["log/max_level_info"]
-log_warn = ["log/max_level_warn"]
 log_error = ["log/max_level_error"]
+log_info = ["log/max_level_info"]
+log_trace = ["log/max_level_trace"]
+log_warn = ["log/max_level_warn"]
+std = ["env_logger", "log/std"]
 
 16K = []
 

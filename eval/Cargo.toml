@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.95.0"
 
 [dependencies]
-llfree = { path = "../core", features = ["std", "log_info"] }
+llfree = { path = "../core", features = ["std"] }
 libc = "0.2"
 log = { version = "0.4", default-features = false }
 bitfield-struct = "0.13"
@@ -22,6 +22,7 @@ bindgen = { version = "0.72", optional = true }
 raw-cpuid = { version = "11.6" }
 
 [features]
+default = []
 llc = ["bindgen"]
 16K = ["llfree/16K"]
 
@@ -35,6 +36,13 @@ tree_huge_64 = ["llfree/tree_huge_64"]
 tree_huge_128 = ["llfree/tree_huge_128"]
 tree_huge_256 = ["llfree/tree_huge_256"]
 tree_huge_512 = ["llfree/tree_huge_512"]
+
+log_trace = ["log/max_level_trace", "llfree/log_trace"]
+log_debug = ["log/max_level_debug", "llfree/log_debug"]
+log_info = ["log/max_level_info", "llfree/log_info"]
+log_warn = ["log/max_level_warn", "llfree/log_warn"]
+log_error = ["log/max_level_error", "llfree/log_error"]
+
 
 # binaries
 

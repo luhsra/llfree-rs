@@ -5,7 +5,7 @@ use core::sync::atomic::AtomicU16;
 use core::{fmt, slice};
 
 use bitfield_struct::bitfield;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 
 use crate::atomic::{Atom, Atomic, AtomicSlice};
 use crate::bitfield::{Bitfield, RowId};
@@ -233,7 +233,6 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        debug!("Nothing found o={order}");
         Err(Error::Memory)
     }
 
@@ -481,18 +480,18 @@ impl<'a> Lower<'a> {
 
         let mut out = std::string::String::new();
         writeln!(out, "Dumping pt {start:?}").unwrap();
-        let table = &self.children(start);
-        for (i, entry) in table.iter().enumerate() {
+        let entries = &self.children(start);
+        for (i, entry) in entries.iter().enumerate() {
             if start.as_frame().0 >= self.frames() {
                 break;
             }
 
             let entry = entry.load();
             let indent = 4;
-            let bitfield = &self.bitfield(start.as_huge());
+            let bitfield = &self.bitfield(HugeId(start.as_huge().0 + i));
             writeln!(out, "{:indent$}l2 i={i}: {entry:?}\t{bitfield:?}", "").unwrap();
-            if !entry.huge() {
-                assert_eq!(bitfield.count_zeros(), entry.free());
+            if !entry.huge() && bitfield.count_zeros() != entry.free() {
+                error!("Invalid free counter i={i}");
             }
         }
         warn!("{out}");
