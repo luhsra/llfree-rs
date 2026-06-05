@@ -51,8 +51,8 @@ impl fmt::Debug for TreeId {
 pub struct Trees<'a> {
     /// Array of level 3 entries, which are the roots of the trees
     entries: &'a [Atom<Tree>],
-    /// Default tier for new trees or entirely free trees,
-    default: Tier,
+    /// Default cluster for new trees or entirely free trees,
+    default: Cluster,
 }
 
 impl fmt::Debug for Trees<'_> {
@@ -92,7 +92,7 @@ impl<'a> Trees<'a> {
         frames: usize,
         buffer: &'a mut [u8],
         tree_init: Option<impl Fn(usize) -> usize>,
-        default: Tier,
+        default: Cluster,
     ) -> Self {
         assert!(buffer.len() >= Self::metadata_size(frames));
 
@@ -121,16 +121,16 @@ impl<'a> Trees<'a> {
             stats.free_frames += tree.free();
             stats.free_trees += tree.free() / TREE_FRAMES;
 
-            let tier = &mut stats.tiers[tree.tier().0 as usize];
-            tier.free_frames += tree.free();
-            tier.alloc_frames += TREE_FRAMES - tree.free();
+            let cluster = &mut stats.clusters[tree.cluster().0 as usize];
+            cluster.free_frames += tree.free();
+            cluster.alloc_frames += TREE_FRAMES - tree.free();
         }
         stats
     }
 
-    pub fn stats_at(&self, i: TreeId) -> (Tier, usize, bool) {
+    pub fn stats_at(&self, i: TreeId) -> (Cluster, usize, bool) {
         let tree = self.entries[i.0].load();
-        (tree.tier(), tree.free(), tree.reserved())
+        (tree.cluster(), tree.free(), tree.reserved())
     }
 
     /// Return the number of entirely free trees
@@ -152,16 +152,22 @@ impl<'a> Trees<'a> {
             .ok()
     }
 
-    pub fn steal(&self, i: TreeId, tier: Tier, free: usize, policy: PolicyFn) -> Option<Tier> {
-        let mut new_tier = None;
+    pub fn steal(
+        &self,
+        i: TreeId,
+        cluster: Cluster,
+        free: usize,
+        policy: PolicyFn,
+    ) -> Option<Cluster> {
+        let mut new_cluster = None;
         self.entries[i.0]
             .try_update(|e| {
-                let e = e.steal(tier, free, policy);
-                new_tier = e.map(|e| e.tier());
+                let e = e.steal(cluster, free, policy);
+                new_cluster = e.map(|e| e.cluster());
                 e
             })
             .ok()
-            .map(|_| new_tier.unwrap())
+            .map(|_| new_cluster.unwrap())
     }
 
     pub fn put(&self, i: TreeId, free: usize, policy: PolicyFn) {
@@ -171,15 +177,15 @@ impl<'a> Trees<'a> {
     pub fn reserve_or_steal(
         &self,
         i: TreeId,
-        tier: Tier,
+        cluster: Cluster,
         free: usize,
         policy: PolicyFn,
-    ) -> Option<(bool, usize, Tier)> {
+    ) -> Option<(bool, usize, Cluster)> {
         let mut new = None;
         self.entries[i.0]
             .try_update(|v| {
-                let v = v.reserve_or_steal(free, policy, tier);
-                new = v.map(|v| (v.reserved(), v.tier()));
+                let v = v.reserve_or_steal(free, policy, cluster);
+                new = v.map(|v| (v.reserved(), v.cluster()));
                 v
             })
             .map(|v| (new.unwrap().0, v.free(), new.unwrap().1))
@@ -187,9 +193,9 @@ impl<'a> Trees<'a> {
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: TreeId, free: usize, tier: Tier, policy: PolicyFn) {
+    pub fn unreserve(&self, i: TreeId, free: usize, cluster: Cluster, policy: PolicyFn) {
         self.entries[i.0]
-            .try_update(|v| v.unreserve_add(free, tier, policy, self.default))
+            .try_update(|v| v.unreserve_add(free, cluster, policy, self.default))
             .expect("Unreserve failed");
     }
 
@@ -199,7 +205,7 @@ impl<'a> Trees<'a> {
         start: TreeId,
         offset: usize,
         len: usize,
-        rate: impl Fn(Tier, usize) -> Policy,
+        rate: impl Fn(Cluster, usize) -> Policy,
         access: impl Fn(TreeId) -> Result<R>,
     ) -> Result<R> {
         let mut best = SortedBuffer::<N, OrdBy<(Policy, bool), TreeId>>::new();
@@ -218,7 +224,7 @@ impl<'a> Trees<'a> {
             if tree.reserved() {
                 continue;
             }
-            match rate(tree.tier(), tree.free()) {
+            match rate(tree.cluster(), tree.free()) {
                 // Try accessing perfect matches directly
                 Policy::Match(u8::MAX) => match access(i) {
                     Err(Error::Memory) => {}
@@ -274,10 +280,10 @@ impl<'a> Trees<'a> {
         fetch_free: impl Fn(TreeId) -> usize,
     ) -> Result<()> {
         if let Some(i) = matcher.id {
-            self.change_at(i, matcher.tier, matcher.free, change, || fetch_free(i))
+            self.change_at(i, matcher.cluster, matcher.free, change, || fetch_free(i))
         } else {
             self.search(TreeId(0), 0, self.len(), |i| {
-                self.change_at(i, matcher.tier, matcher.free, change.clone(), || {
+                self.change_at(i, matcher.cluster, matcher.free, change.clone(), || {
                     fetch_free(i)
                 })
             })
@@ -287,12 +293,13 @@ impl<'a> Trees<'a> {
     fn change_at(
         &self,
         id: TreeId,
-        tier: Option<Tier>,
+        cluster: Option<Cluster>,
         free: usize,
         change: TreeChange,
         fetch_free: impl Fn() -> usize + Copy,
     ) -> Result<()> {
-        match self.entries[id.0].try_update(|e| e.change(tier, free, change.clone(), fetch_free)) {
+        match self.entries[id.0].try_update(|e| e.change(cluster, free, change.clone(), fetch_free))
+        {
             Ok(_) => Ok(()),
             Err(_) => Err(Error::Memory),
         }
@@ -310,58 +317,58 @@ struct Tree {
     reserved: bool,
     /// Are the frames movable?
     #[bits(3)]
-    tier: Tier,
+    cluster: Cluster,
 }
 
 const _: () = assert!(1 << Tree::FREE_BITS > TREE_FRAMES);
-const _: () = assert!(Tree::TIER_BITS == Tier::BITS);
+const _: () = assert!(Tree::CLUSTER_BITS == Cluster::BITS);
 
 impl Atomic for Tree {
     type I = AtomicU32;
 }
 impl Tree {
     /// Creates a new entry.
-    fn with(free: usize, reserved: bool, tier: Tier) -> Self {
+    fn with(free: usize, reserved: bool, cluster: Cluster) -> Self {
         assert!(free <= TREE_FRAMES);
         Self::new()
             .with_free(free)
             .with_reserved(reserved)
-            .with_tier(tier)
+            .with_cluster(cluster)
     }
     /// Increments the free frames counter.
-    fn put(mut self, free: usize, policy: PolicyFn, default: Tier) -> Self {
+    fn put(mut self, free: usize, policy: PolicyFn, default: Cluster) -> Self {
         let free = self.free() + free;
         assert!(free <= TREE_FRAMES, "{free}");
 
         // Check if transition is allowed by policy
-        if free == TREE_FRAMES && policy(self.tier(), default, free) != Policy::Invalid {
-            self.set_tier(default);
+        if free == TREE_FRAMES && policy(self.cluster(), default, free) != Policy::Invalid {
+            self.set_cluster(default);
         }
         self.with_free(free)
     }
     /// Decrements the free frames counter if it is large enough
-    fn steal(self, tier: Tier, free: usize, policy: PolicyFn) -> Option<Self> {
+    fn steal(self, cluster: Cluster, free: usize, policy: PolicyFn) -> Option<Self> {
         if self.free() >= free && !self.reserved() {
-            let new_tier = match (policy)(tier, self.tier(), free) {
-                Policy::Match(_) => tier,
+            let new_cluster = match (policy)(cluster, self.cluster(), free) {
+                Policy::Match(_) => cluster,
                 // Cannot demote reserved trees (requires changing local entries)
                 Policy::Demote if self.reserved() => return None,
-                Policy::Demote => tier,
-                Policy::Steal => self.tier(),
+                Policy::Demote => cluster,
+                Policy::Steal => self.cluster(),
                 Policy::Invalid => return None,
             };
-            Some(self.with_free(self.free() - free).with_tier(new_tier))
+            Some(self.with_free(self.free() - free).with_cluster(new_cluster))
         } else {
             None
         }
     }
     /// Reserve or steal frames from this entry.
-    fn reserve_or_steal(self, free: usize, policy: PolicyFn, tier: Tier) -> Option<Self> {
+    fn reserve_or_steal(self, free: usize, policy: PolicyFn, cluster: Cluster) -> Option<Self> {
         if self.free() >= free && !self.reserved() {
-            match (policy)(tier, self.tier(), free) {
+            match (policy)(cluster, self.cluster(), free) {
                 // Reserve the entry if it is not reserved, possibly demoting it.
                 Policy::Match(_) | Policy::Demote if !self.reserved() => {
-                    Some(Self::with(0, true, tier))
+                    Some(Self::with(0, true, cluster))
                 }
                 // Steal frames from matching entries, even if they are reserved.
                 Policy::Match(_) => Some(self.with_free(self.free() - free)),
@@ -379,17 +386,17 @@ impl Tree {
     fn unreserve_add(
         self,
         free: usize,
-        tier: Tier,
+        cluster: Cluster,
         policy: PolicyFn,
-        default: Tier,
+        default: Cluster,
     ) -> Option<Self> {
         if self.reserved() {
             Some(
                 self.with_reserved(false)
-                    .with_tier(match policy(tier, self.tier(), free) {
-                        Policy::Match(_) => self.tier(),
-                        Policy::Demote => tier,
-                        Policy::Steal | Policy::Invalid => panic!("unreserve invalid tier"),
+                    .with_cluster(match policy(cluster, self.cluster(), free) {
+                        Policy::Match(_) => self.cluster(),
+                        Policy::Demote => cluster,
+                        Policy::Steal | Policy::Invalid => panic!("unreserve invalid cluster"),
                     })
                     .put(free, policy, default),
             )
@@ -405,23 +412,23 @@ impl Tree {
             None
         }
     }
-    /// Change the entry if it is not reserved and the tier and free counter conditions match
+    /// Change the entry if it is not reserved and the cluster and free counter conditions match
     fn change(
         mut self,
-        tier: Option<Tier>,
+        cluster: Option<Cluster>,
         free: usize,
         change: TreeChange,
         fetch_free: impl Fn() -> usize,
     ) -> Option<Self> {
-        if !self.reserved() && tier.is_none_or(|k| k == self.tier()) && self.free() >= free {
-            if let Some(tier) = change.tier {
-                self.set_tier(tier);
+        if !self.reserved() && cluster.is_none_or(|k| k == self.cluster()) && self.free() >= free {
+            if let Some(cluster) = change.cluster {
+                self.set_cluster(cluster);
             }
             match change.operation {
                 Some(TreeOperation::Offline) => self.set_free(0),
                 Some(TreeOperation::Online) if self.free() == 0 => self.set_free(fetch_free()),
                 Some(TreeOperation::Online) => {
-                    warn!("Online non-empty tree: tier={:?}", self.tier());
+                    warn!("Online non-empty tree: cluster={:?}", self.cluster());
                     return None;
                 }
                 None => {}

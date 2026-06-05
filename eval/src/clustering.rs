@@ -3,24 +3,24 @@ use std::sync::atomic::AtomicU64;
 use bitfield_struct::bitfield;
 use facet::Facet;
 use llfree::atomic::{Atom, Atomic};
-use llfree::{Policy, Request, Tier, Tiering};
+use llfree::{Cluster, Clustering, Policy, Request};
 
 use crate::gfp::GFP;
 
 #[derive(Clone, Debug, Facet)]
-pub struct TieringConfig {
-    tiers: Vec<TierConfig>,
+pub struct ClusteringConfig {
+    clusters: Vec<ClusterConfig>,
     default: u8,
     perfect: (usize, usize), // (min, max) free, inclusive
     good: (usize, usize),    // (min, max) free, inclusive
 }
 
-impl TieringConfig {
-    pub fn tiering(&self, cores: usize) -> Tiering {
-        let tiers = self
-            .tiers
+impl ClusteringConfig {
+    pub fn clustering(&self, cores: usize) -> Clustering {
+        let clusters = self
+            .clusters
             .iter()
-            .map(|c| (Tier(c.id), c.count.to_count(cores)))
+            .map(|c| (Cluster(c.id), c.count.to_count(cores)))
             .collect::<Vec<_>>()
             .leak();
 
@@ -49,7 +49,7 @@ impl TieringConfig {
         PERFECT.store(Range::with(self.perfect));
         GOOD.store(Range::with(self.good));
 
-        fn policy(requested: Tier, target: Tier, free: usize) -> Policy {
+        fn policy(requested: Cluster, target: Cluster, free: usize) -> Policy {
             if requested.0 > target.0 {
                 return Policy::Steal;
             } else if requested.0 < target.0 {
@@ -64,7 +64,7 @@ impl TieringConfig {
             Policy::Match(1)
         }
 
-        Tiering::new(tiers, Tier(self.default), policy)
+        Clustering::new(clusters, Cluster(self.default), policy)
     }
 
     pub fn request(
@@ -75,20 +75,20 @@ impl TieringConfig {
         pid: usize,
         gfp: u32,
     ) -> Request {
-        for config in &self.tiers {
+        for config in &self.clusters {
             if config.matches(order, gfp) {
                 return Request::new(
                     order,
-                    Tier(config.id),
+                    Cluster(config.id),
                     config.count.to_local(core, cores, pid),
                 );
             }
         }
-        // Default to first tier
-        let config = &self.tiers[0];
+        // Default to first cluster
+        let config = &self.clusters[0];
         Request::new(
             order,
-            Tier(config.id),
+            Cluster(config.id),
             config.count.to_local(core, cores, pid),
         )
     }
@@ -127,7 +127,7 @@ impl Count {
 }
 
 #[derive(Clone, Debug, Facet)]
-struct TierConfig {
+struct ClusterConfig {
     id: u8,
     count: Count,
     order: Option<(usize, usize)>, // [min, max], inclusive
@@ -137,7 +137,7 @@ struct TierConfig {
     gfp: GfpMatch,
 }
 
-impl TierConfig {
+impl ClusterConfig {
     fn matches(&self, order: usize, gfp: u32) -> bool {
         if let Some((min, max)) = self.order
             && !(min..=max).contains(&order)
@@ -181,8 +181,8 @@ impl GfpMatch {
 
 #[cfg(test)]
 mod test {
+    use crate::clustering::GfpMatch;
     use crate::gfp::GFP;
-    use crate::tiering::GfpMatch;
 
     #[test]
     fn match_seralize() {

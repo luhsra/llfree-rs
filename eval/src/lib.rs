@@ -1,9 +1,9 @@
 use std::ops::{Add, Div};
 
+pub mod clustering;
 pub mod gfp;
 pub mod mmap;
 pub mod thread;
-pub mod tiering;
 
 #[cfg(feature = "llc")]
 mod llc;

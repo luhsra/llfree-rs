@@ -70,11 +70,11 @@ fn main() {
     }
 
     // Map memory for the allocator and initialize it
-    let (tiering, request) = Tiering::simple(threads);
+    let (clustering, request) = Clustering::simple(threads);
     let pages = (memory << 30) / Frame::SIZE;
-    let ms = Allocator::metadata_size(&tiering, pages);
+    let ms = Allocator::metadata_size(&clustering, pages);
     let meta = MetaData::alloc(&ms);
-    let alloc = Allocator::new(pages, Init::FreeAll, &tiering, meta).unwrap();
+    let alloc = Allocator::new(pages, Init::FreeAll, &clustering, meta).unwrap();
     alloc.validate();
 
     // Operate on half of the avaliable memory

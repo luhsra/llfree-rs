@@ -19,19 +19,19 @@ LLFree is a two-level allocator optimized for scalability and fragmentation cont
 
 - **Upper level (`core/src/llfree.rs`)**
   - Manages tree placement/locality and delegates concrete alloc/free to `Lower`.
-  - Uses per-tier local reservations (`Locals`) to reduce contention.
+  - Uses per-cluster local reservations (`Locals`) to reduce contention.
   - Uses global tree metadata (`Trees`) updated via atomics/CAS.
-  - Allocation fallback order: match -> demote -> tier downgrade -> steal.
+  - Allocation fallback order: match -> demote -> cluster downgrade -> steal.
 
-- **Tiering/policy (`core/src/lib.rs`)**
-  - `Tiering` defines tiers + local-slot counts + policy function.
+- **Clustering/policy (`core/src/lib.rs`)**
+  - `Clustering` defines clusters + local-slot counts + policy function.
   - `Policy` values: `Match(priority)`, `Steal`, `Demote`, `Invalid`.
-  - Built-in examples: `Tiering::simple`, `Tiering::movable`.
+  - Built-in examples: `Clustering::simple`, `Clustering::movable`.
 
 - **Key invariants**
   - Tree counters stay consistent with lower-level state.
   - Reserved trees are not mutated by unsupported paths.
-  - Tier stats (`TreeStats`) reflect tree transitions.
+  - Cluster stats (`TreeStats`) reflect tree transitions.
   - Keep lock-free retry/CAS semantics intact.
 
 ## Build, Lint, Test Commands
@@ -109,7 +109,7 @@ C:
   - Functions/modules/fields: `snake_case`
   - Constants: `UPPER_SNAKE_CASE`
 - Types:
-  - Preserve newtype patterns (`FrameId`, `TreeId`, `HugeId`, `Tier`).
+  - Preserve newtype patterns (`FrameId`, `TreeId`, `HugeId`, `Cluster`).
 - Error handling:
   - Use `Result<T, Error>` and explicit variant handling.
   - Prefer `?` and structured fallbacks over ad-hoc branching.
@@ -127,7 +127,7 @@ C:
   - Internal names: `snake_case`, typedefs with `_t`
   - Constants/macros: `UPPER_SNAKE_CASE`
 - Optional/sentinel patterns:
-  - Use `ll_optional_t` and sentinels such as `LLFREE_TIER_NONE`.
+  - Use `ll_optional_t` and sentinels such as `LLFREE_CLUSTER_NONE`.
   - Do not add extra presence booleans when optional/sentinel idioms exist.
 - Error handling:
   - Return `llfree_result_t` at API boundaries.
@@ -144,5 +144,5 @@ C:
   - Register tests via `declare_test(...)`.
   - Use `check`, `check_m`, `check_equal` macros from `llc/tests/test.h`.
   - Run single tests via `make -C llc test T=<pattern>`.
-- For tier/tree changes:
+- For cluster/tree changes:
   - Validate both operation results and stats (`llfree_tree_stats`, `trees_stats_at`).

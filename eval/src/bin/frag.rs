@@ -75,10 +75,10 @@ fn main() {
 
     // Map memory for the allocator and initialize it
     let pages = (memory << 30) / Frame::SIZE;
-    let (tiering, request) = Tiering::simple(threads);
-    let ms = Allocator::metadata_size(&tiering, pages);
+    let (clustering, request) = Clustering::simple(threads);
+    let ms = Allocator::metadata_size(&clustering, pages);
     let meta = MetaData::alloc(&ms);
-    let alloc = Allocator::new(pages, Init::FreeAll, &tiering, meta).unwrap();
+    let alloc = Allocator::new(pages, Init::FreeAll, &clustering, meta).unwrap();
 
     let out = Mutex::new(BufWriter::new(File::create(outfile).unwrap()));
 

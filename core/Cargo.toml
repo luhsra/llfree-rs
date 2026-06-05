@@ -15,7 +15,7 @@ env_logger = {
 log = { version = "0.4", default-features = false }
 
 [dev-dependencies]
-env_logger = { version = "0.11", default-features = false }
+env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
 
 [features]
 default = []

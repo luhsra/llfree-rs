@@ -9,7 +9,7 @@ use log::error;
 use crate::TREE_ORDER;
 use crate::frame::Frame;
 use crate::{
-    Alloc, Error, FrameId, Init, MetaData, MetaSize, Request, Result, Stats, Tier, Tiering,
+    Alloc, Cluster, Clustering, Error, FrameId, Init, MetaData, MetaSize, Request, Result, Stats,
 };
 
 /// Zone allocator, managing a range of memory at a given page frame offset.
@@ -23,21 +23,21 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     fn name() -> &'static str {
         A::name()
     }
-    fn new(frames: usize, init: Init, tiering: &Tiering, meta: MetaData<'a>) -> Result<Self> {
+    fn new(frames: usize, init: Init, clustering: &Clustering, meta: MetaData<'a>) -> Result<Self> {
         Ok(Self {
-            alloc: A::new(frames, init, tiering, meta)?,
+            alloc: A::new(frames, init, clustering, meta)?,
             offset: 0,
             _p: PhantomData,
         })
     }
 
-    fn metadata_size(tiering: &Tiering, frames: usize) -> MetaSize {
-        A::metadata_size(tiering, frames)
+    fn metadata_size(clustering: &Clustering, frames: usize) -> MetaSize {
+        A::metadata_size(clustering, frames)
     }
     unsafe fn metadata(&mut self) -> MetaData<'a> {
         unsafe { self.alloc.metadata() }
     }
-    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(FrameId, Tier)> {
+    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(FrameId, Cluster)> {
         let frame = frame
             .map(|f| {
                 f.0.checked_sub(self.offset)
@@ -45,8 +45,8 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
                     .ok_or(Error::Argument)
             })
             .transpose()?;
-        let (frame_id, tier) = self.alloc.get(frame, flags)?;
-        Ok((FrameId(frame_id.0 + self.offset), tier))
+        let (frame_id, cluster) = self.alloc.get(frame, flags)?;
+        Ok((FrameId(frame_id.0 + self.offset), cluster))
     }
     fn put(&self, frame: FrameId, flags: Request) -> Result<()> {
         let frame = FrameId(frame.0.checked_sub(self.offset).ok_or(Error::Argument)?);
@@ -77,7 +77,7 @@ impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
         offset: usize,
         frames: usize,
         init: Init,
-        tiering: &Tiering,
+        clustering: &Clustering,
         meta: MetaData<'a>,
     ) -> Result<Self> {
         if !offset.is_multiple_of(1 << TREE_ORDER) {
@@ -85,7 +85,7 @@ impl<'a, A: Alloc<'a>> ZoneAlloc<'a, A> {
             return Err(Error::Initialization);
         }
         Ok(Self {
-            alloc: A::new(frames, init, tiering, meta)?,
+            alloc: A::new(frames, init, clustering, meta)?,
             offset,
             _p: PhantomData,
         })
@@ -120,11 +120,11 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
     pub fn create(
         zone: &'a mut [Frame],
         recover: bool,
-        tiering: &Tiering,
+        clustering: &Clustering,
         local: &'a mut [u8],
         trees: &'a mut [u8],
     ) -> Result<Self> {
-        let m = A::metadata_size(tiering, zone.len());
+        let m = A::metadata_size(clustering, zone.len());
         if size_of_val(zone) < m.lower + Frame::SIZE
             || !(zone.as_ptr() as usize).is_multiple_of(Frame::SIZE << TREE_ORDER)
         {
@@ -160,7 +160,7 @@ impl<'a, A: Alloc<'a>> NvmAlloc<'a, A> {
             zone.as_ptr() as usize / Frame::SIZE,
             zone.len(),
             init,
-            tiering,
+            clustering,
             metadata,
         )?;
         Ok(Self { alloc })
@@ -171,16 +171,16 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     fn name() -> &'static str {
         A::name()
     }
-    fn new(_frames: usize, _init: Init, _tiering: &Tiering, _meta: MetaData) -> Result<Self> {
+    fn new(_frames: usize, _init: Init, _clustering: &Clustering, _meta: MetaData) -> Result<Self> {
         unimplemented!()
     }
-    fn metadata_size(tiering: &Tiering, frames: usize) -> MetaSize {
-        A::metadata_size(tiering, frames)
+    fn metadata_size(clustering: &Clustering, frames: usize) -> MetaSize {
+        A::metadata_size(clustering, frames)
     }
     unsafe fn metadata(&mut self) -> MetaData<'a> {
         unsafe { self.alloc.metadata() }
     }
-    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(FrameId, Tier)> {
+    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(FrameId, Cluster)> {
         self.alloc.get(frame, flags)
     }
     fn put(&self, frame: FrameId, flags: Request) -> Result<()> {

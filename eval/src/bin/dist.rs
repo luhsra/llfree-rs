@@ -9,7 +9,7 @@ use facet::Facet;
 use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::{aligned_buf, logging};
-use llfree::{Alloc, HUGE_FRAMES, Init, LLFree, MetaData, Tiering};
+use llfree::{Alloc, Clustering, HUGE_FRAMES, Init, LLFree, MetaData};
 use llfree_eval::mmap::Mapping;
 use llfree_eval::thread;
 use log::warn;
@@ -66,8 +66,8 @@ fn main() {
     let bucket_size = (end - start) / buckets;
     assert!(bucket_size > 0);
 
-    let (tiering, request) = Tiering::simple(threads);
-    let ms = Allocator::metadata_size(&tiering, frames);
+    let (clustering, request) = Clustering::simple(threads);
+    let ms = Allocator::metadata_size(&clustering, frames);
     let mut lower = mapping(0x1000_0000_0000, ms.lower.div_ceil(Frame::SIZE), dax);
     let local = aligned_buf(ms.local);
     let trees = aligned_buf(ms.trees);
@@ -80,7 +80,7 @@ fn main() {
             trees,
             lower: unsafe { slice::from_raw_parts_mut(lower.as_mut_ptr().cast(), ms.lower) },
         };
-        let alloc = Allocator::new(frames, Init::FreeAll, &tiering, meta).unwrap();
+        let alloc = Allocator::new(frames, Init::FreeAll, &clustering, meta).unwrap();
 
         warn!("init time {}ms", timer.elapsed().as_millis());
 

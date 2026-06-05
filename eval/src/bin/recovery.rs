@@ -9,7 +9,7 @@ use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, LLFree, Tiering};
+use llfree::{Alloc, Clustering, LLFree};
 use llfree_eval::mmap::Mapping;
 use llfree_eval::thread;
 use log::warn;
@@ -105,11 +105,11 @@ fn main() {
 
 fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
-    let (tiering, request) = Tiering::simple(threads);
-    let ms = Allocator::metadata_size(&tiering, mapping.len());
+    let (clustering, request) = Clustering::simple(threads);
+    let ms = Allocator::metadata_size(&clustering, mapping.len());
     let local = aligned_buf(ms.local);
     let trees = aligned_buf(ms.trees);
-    let alloc = Allocator::create(&mut mapping, false, &tiering, local, trees).unwrap();
+    let alloc = Allocator::create(&mut mapping, false, &clustering, local, trees).unwrap();
     warn!("Prepare alloc");
 
     thread::parallel(0..threads, |t| {
@@ -139,14 +139,14 @@ fn initialize(memory: usize, dax: &str, threads: usize, crash: bool) {
 
 fn recover(threads: usize, memory: usize, dax: &str) -> u128 {
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
-    let (tiering, _request) = Tiering::simple(threads);
-    let ms = Allocator::metadata_size(&tiering, mapping.len());
+    let (clustering, _request) = Clustering::simple(threads);
+    let ms = Allocator::metadata_size(&clustering, mapping.len());
     let local = aligned_buf(ms.local);
     let trees = aligned_buf(ms.trees);
 
     warn!("Recover alloc");
     let timer = Instant::now();
-    let alloc = Allocator::create(&mut mapping, true, &tiering, local, trees).unwrap();
+    let alloc = Allocator::create(&mut mapping, true, &clustering, local, trees).unwrap();
     let time = timer.elapsed().as_nanos();
 
     let num_alloc = alloc.frames() - alloc.tree_stats().free_frames;

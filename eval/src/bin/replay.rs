@@ -9,8 +9,8 @@ use facet::Facet;
 use figue::{self as args, FigueBuiltins};
 use llfree::util::align_down;
 use llfree::*;
+use llfree_eval::clustering::ClusteringConfig;
 use llfree_eval::gfp::GFP;
-use llfree_eval::tiering::TieringConfig;
 use llfree_eval::{mmap, thread};
 use log::{error, info, trace, warn};
 
@@ -28,9 +28,9 @@ struct Args {
     /// Time interval is ms for monitoring fragmentation
     #[facet(args::named, default = 100000)]
     interval: usize,
-    /// Optional path to a tiering configuration file (JSON)
+    /// Optional path to a clustering configuration file (JSON)
     #[facet(args::named)]
-    tiering: Option<PathBuf>,
+    clustering: Option<PathBuf>,
 
     #[facet(flatten)]
     builtins: FigueBuiltins,
@@ -54,7 +54,7 @@ fn main() {
         stride,
         frag,
         interval,
-        tiering,
+        clustering,
         builtins: _,
     } = figue::from_std_args().unwrap();
 
@@ -76,28 +76,28 @@ fn main() {
     info!("page cache allocs = {page_cache_allocs}");
 
     #[allow(clippy::type_complexity)]
-    let (tiering, request): (
-        Tiering,
+    let (clustering, request): (
+        Clustering,
         Box<dyn Fn(usize, u32, usize, usize) -> Request + Send>,
-    ) = if let Some(tiering) = tiering {
-        let s = fs::read_to_string(tiering).unwrap();
-        let tiering_config: TieringConfig = facet_json::from_str(&s).unwrap();
-        info!("tiering = {tiering_config:?}");
+    ) = if let Some(clustering) = clustering {
+        let s = fs::read_to_string(clustering).unwrap();
+        let clustering_config: ClusteringConfig = facet_json::from_str(&s).unwrap();
+        info!("clustering = {clustering_config:?}");
         (
-            tiering_config.tiering(cores),
+            clustering_config.clustering(cores),
             Box::new(move |order, gfp, core, pid| {
-                tiering_config.request(order, core, cores, pid, gfp)
+                clustering_config.request(order, core, cores, pid, gfp)
             }),
         )
     } else {
-        let (tiering, request) = Tiering::movable(cores);
+        let (clustering, request) = Clustering::movable(cores);
         (
-            tiering,
+            clustering,
             Box::new(move |order, gfp, core, _pid| request(order, core, GFP::MOVABLE == gfp)),
         )
     };
-    let meta = MetaData::alloc(&Allocator::metadata_size(&tiering, max_pfn));
-    let llfree = Allocator::new(max_pfn, Init::FreeAll, &tiering, meta).unwrap();
+    let meta = MetaData::alloc(&Allocator::metadata_size(&clustering, max_pfn));
+    let llfree = Allocator::new(max_pfn, Init::FreeAll, &clustering, meta).unwrap();
     llfree.validate();
 
     info!("start");

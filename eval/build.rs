@@ -42,7 +42,10 @@ fn main() {
             .header(llc_dir.join("std/llfree_types.h").to_string_lossy())
             .clang_arg(format!("-I{}", llc_dir.join("include").display()))
             .clang_arg(format!("-I{}", llc_dir.join("std").display()))
-            .clang_arg(format!("-DLLFREE_TREE_CHILDREN_ORDER={}", TREE_HUGE.ilog2()))
+            .clang_arg(format!(
+                "-DLLFREE_TREE_CHILDREN_ORDER={}",
+                TREE_HUGE.ilog2()
+            ))
             .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
             .allowlist_item("(llf|ll_|LLF).*")
             .generate_cstr(true)

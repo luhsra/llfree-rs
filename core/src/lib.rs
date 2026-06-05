@@ -90,15 +90,15 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// e.g. if it should try recovering from the persistent memory or
     /// just mark all frames as free or allocated.
     ///
-    /// The `tiering` config define how many local trees we have for each tier
+    /// The `clustering` config defines how many local trees we have for each cluster
     /// and the `policy` for accessing them.
     ///
     /// The `meta` data contains buffers for the data structures of the allocator.
     /// It has to outlive the allocator and must be properly aligned and sized (`metadata_size`).
-    fn new(frames: usize, init: Init, tiering: &Tiering, meta: MetaData<'a>) -> Result<Self>;
+    fn new(frames: usize, init: Init, clustering: &Clustering, meta: MetaData<'a>) -> Result<Self>;
 
     /// Returns the size of the metadata buffers required for initialization.
-    fn metadata_size(tiering: &Tiering, frames: usize) -> MetaSize;
+    fn metadata_size(clustering: &Clustering, frames: usize) -> MetaSize;
     /// Returns the metadata buffers.
     ///
     /// # Safety
@@ -107,7 +107,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
 
     /// Allocate a new frame of `order` on the given `local`.
     /// If specified try allocating the given `frame`.
-    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(FrameId, Tier)>;
+    fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(FrameId, Cluster)>;
     /// Free the `frame` of `order` on the given `local`.
     fn put(&self, frame: FrameId, flags: Request) -> Result<()>;
 
@@ -223,53 +223,53 @@ impl fmt::Debug for MetaData<'_> {
     }
 }
 
-/// Defines the tiers and policy for the allocator.
-pub struct Tiering {
-    /// Specifies the tiers and number of local reservations for each tier.
-    tiers_raw: [(Tier, usize); 1 << Tier::BITS],
-    /// Number of tiers in use, i.e. the length of the `tiers` array.
-    tiers_len: usize,
-    /// Default tier for initialization or if a tree becomes completely free.
-    pub default: Tier,
+/// Defines the clusters and policy for the allocator.
+pub struct Clustering {
+    /// Specifies the clusters and number of local reservations for each cluster.
+    clusters_raw: [(Cluster, usize); 1 << Cluster::BITS],
+    /// Number of clusters in use, i.e. the length of the `clusters` array.
+    clusters_len: usize,
+    /// Default cluster for initialization or if a tree becomes completely free.
+    pub default: Cluster,
     /// Policy for accessing a `target` tree with `free` frames.
     pub policy: PolicyFn,
 }
-pub type PolicyFn = fn(requested: Tier, target: Tier, free: usize) -> Policy;
+pub type PolicyFn = fn(requested: Cluster, target: Cluster, free: usize) -> Policy;
 
-impl fmt::Debug for Tiering {
+impl fmt::Debug for Clustering {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Tiering")
-            .field("tiers", &self.tiers())
+        f.debug_struct("Clustering")
+            .field("clusters", &self.clusters())
             .field("default", &self.default)
             .finish()
     }
 }
 
-impl Tiering {
-    pub fn new(tiers: &[(Tier, usize)], default: Tier, policy: PolicyFn) -> Self {
-        assert!(tiers.len() <= 1 << Tier::BITS);
-        let mut tiers_raw = [const { (Tier(0), 0) }; 1 << Tier::BITS];
-        tiers_raw[..tiers.len()].copy_from_slice(tiers);
+impl Clustering {
+    pub fn new(clusters: &[(Cluster, usize)], default: Cluster, policy: PolicyFn) -> Self {
+        assert!(clusters.len() <= 1 << Cluster::BITS);
+        let mut clusters_raw = [const { (Cluster(0), 0) }; 1 << Cluster::BITS];
+        clusters_raw[..clusters.len()].copy_from_slice(clusters);
         Self {
-            tiers_raw,
-            tiers_len: tiers.len(),
+            clusters_raw,
+            clusters_len: clusters.len(),
             default,
             policy,
         }
     }
 
-    pub fn tiers(&self) -> &[(Tier, usize)] {
-        &self.tiers_raw[..self.tiers_len]
+    pub fn clusters(&self) -> &[(Cluster, usize)] {
+        &self.clusters_raw[..self.clusters_len]
     }
 
-    /// Simple policy with two tiers, `0` for small and `1` for huge frames, and local reservations for each core.
+    /// Simple policy with two clusters, `0` for small and `1` for huge frames, and local reservations for each core.
     pub fn simple(cores: usize) -> (Self, impl Fn(usize, usize) -> Request) {
-        let tiers = [
-            (Tier(0), cores), // small frames
-            (Tier(1), cores), // huge frames
+        let clusters = [
+            (Cluster(0), cores), // small frames
+            (Cluster(1), cores), // huge frames
         ];
 
-        fn policy(requested: Tier, target: Tier, free: usize) -> Policy {
+        fn policy(requested: Cluster, target: Cluster, free: usize) -> Policy {
             if requested.0 > target.0 {
                 return Policy::Steal;
             } else if requested.0 < target.0 {
@@ -283,25 +283,30 @@ impl Tiering {
         }
 
         fn request(order: usize, core: usize, cores: usize) -> Request {
-            Request::new(order, Tier((order >= HUGE_ORDER) as _), Some(core % cores))
+            Request::new(
+                order,
+                Cluster((order >= HUGE_ORDER) as _),
+                Some(core % cores),
+            )
         }
 
-        (Self::new(&tiers, Tier(1), policy), move |order, core| {
-            request(order, core, cores)
-        })
+        (
+            Self::new(&clusters, Cluster(1), policy),
+            move |order, core| request(order, core, cores),
+        )
     }
 
-    /// Policy with three tiers, `0` for small immovable frames,
+    /// Policy with three clusters, `0` for small immovable frames,
     /// `1` for small movable frames and `2` for huge frames,
-    /// and local reservations for each core and tier.
+    /// and local reservations for each core and cluster.
     pub fn movable(cores: usize) -> (Self, impl Fn(usize, usize, bool) -> Request) {
-        let tiers = [
-            (Tier(0), cores), // immovable frames
-            (Tier(1), cores), // movable frames
-            (Tier(2), cores), // huge frames
+        let clusters = [
+            (Cluster(0), cores), // immovable frames
+            (Cluster(1), cores), // movable frames
+            (Cluster(2), cores), // huge frames
         ];
 
-        fn policy(requested: Tier, target: Tier, free: usize) -> Policy {
+        fn policy(requested: Cluster, target: Cluster, free: usize) -> Policy {
             if requested.0 > target.0 {
                 return Policy::Steal;
             } else if requested.0 < target.0 {
@@ -316,16 +321,16 @@ impl Tiering {
 
         fn request(order: usize, core: usize, cores: usize, movable: bool) -> Request {
             if order >= HUGE_ORDER {
-                Request::new(order, Tier(2), Some(core % cores))
+                Request::new(order, Cluster(2), Some(core % cores))
             } else if movable {
-                Request::new(order, Tier(1), Some(core % cores))
+                Request::new(order, Cluster(1), Some(core % cores))
             } else {
-                Request::new(order, Tier(0), Some(core % cores))
+                Request::new(order, Cluster(0), Some(core % cores))
             }
         }
 
         (
-            Self::new(&tiers, Tier(2), policy),
+            Self::new(&clusters, Cluster(2), policy),
             move |order, core, movable| request(order, core, cores, movable),
         )
     }
@@ -335,23 +340,23 @@ impl Tiering {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Policy {
     /// Match, where higher is better, with [u8::MAX] as perfect match and 0 as bad match.
-    /// The allocated frame will have the `target` tier (usually the same as `requested`).
+    /// The allocated frame will have the `target` cluster (usually the same as `requested`).
     Match(u8),
-    /// Would demote the `target` tree to the `requested` tier.
-    /// The allocated frame will have the `requested` tier.
+    /// Would demote the `target` tree to the `requested` cluster.
+    /// The allocated frame will have the `requested` cluster.
     /// The `bool` indicates whether the `target` tree is entirely empty.
     Demote,
     /// Can steal from the `target` tree, but does not demote it.
-    /// The allocated frame will have the `target` tier (self-demotion).
+    /// The allocated frame will have the `target` cluster (self-demotion).
     Steal,
     /// Can't be used.
     Invalid,
 }
 
-/// Opaque tier of a tree
+/// Opaque cluster of a tree
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Tier(pub u8);
-impl Tier {
+pub struct Cluster(pub u8);
+impl Cluster {
     pub const BITS: usize = 3;
     pub const LEN: u8 = 1 << Self::BITS;
     pub const fn from_bits(bits: u8) -> Self {
@@ -361,9 +366,9 @@ impl Tier {
         self.0
     }
 }
-impl fmt::Debug for Tier {
+impl fmt::Debug for Cluster {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "T{}", self.0)
+        write!(f, "C{}", self.0)
     }
 }
 
@@ -386,14 +391,18 @@ pub enum Init {
 pub struct Request {
     /// Allocation order (#frames = 1 << order)
     pub order: usize,
-    /// The requested tier.
-    pub tier: Tier,
-    /// The local reservation index for this tier or None for global allocation.
+    /// The requested cluster.
+    pub cluster: Cluster,
+    /// The local reservation index for this cluster or None for global allocation.
     pub local: Option<usize>,
 }
 impl Request {
-    pub fn new(order: usize, tier: Tier, local: Option<usize>) -> Self {
-        Self { order, tier, local }
+    pub fn new(order: usize, cluster: Cluster, local: Option<usize>) -> Self {
+        Self {
+            order,
+            cluster,
+            local,
+        }
     }
 }
 impl Request {
@@ -420,12 +429,12 @@ pub struct TreeStats {
     pub free_frames: usize,
     /// Number of free trees
     pub free_trees: usize,
-    /// Stats per tier
-    pub tiers: [TierStats; 1 << Tier::BITS],
+    /// Stats per cluster
+    pub clusters: [ClusterStats; 1 << Cluster::BITS],
 }
-/// Statistics about a tier of the allocator
+/// Statistics about a cluster of the allocator
 #[derive(Debug, Default)]
-pub struct TierStats {
+pub struct ClusterStats {
     /// Number of free frames
     pub free_frames: usize,
     /// Number of allocated frames
@@ -437,8 +446,8 @@ pub struct TierStats {
 pub struct TreeMatch {
     /// Match a specific tree
     pub id: Option<TreeId>,
-    /// Match a specific tier
-    pub tier: Option<Tier>,
+    /// Match a specific cluster
+    pub cluster: Option<Cluster>,
     /// Require at least `free` frames in the tree
     pub free: usize,
 }
@@ -446,8 +455,8 @@ pub struct TreeMatch {
 /// Change for `change_tree`
 #[derive(Debug, Clone)]
 pub struct TreeChange {
-    /// Change the tier
-    pub tier: Option<Tier>,
+    /// Change the cluster
+    pub cluster: Option<Cluster>,
     /// Transform the tree
     pub operation: Option<TreeOperation>,
 }
@@ -465,7 +474,7 @@ mod test {
 
     use crate::frame::Frame;
     use crate::util::logging;
-    use crate::{Alloc, Init, LLFree, MetaData, Tiering};
+    use crate::{Alloc, Clustering, Init, LLFree, MetaData};
 
     #[test]
     fn minimal() {
@@ -475,13 +484,13 @@ mod test {
         let frames = MEM_SIZE / Frame::SIZE;
 
         warn!("init");
-        // Specify tiers and policy
-        let (tiering, request) = Tiering::simple(1);
+        // Specify clustering policy
+        let (clustering, request) = Clustering::simple(1);
         // Allocate the metadata buffers
-        let ms = LLFree::metadata_size(&tiering, frames);
+        let ms = LLFree::metadata_size(&clustering, frames);
         let meta = MetaData::alloc(&ms);
         // Initialize the allocator
-        let alloc = LLFree::new(frames, Init::FreeAll, &tiering, meta).unwrap();
+        let alloc = LLFree::new(frames, Init::FreeAll, &clustering, meta).unwrap();
         warn!("finit");
         assert_eq!(alloc.tree_stats().free_frames, alloc.frames());
 

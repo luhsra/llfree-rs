@@ -1,43 +1,53 @@
 {
-  "tiers": [
+  "clusters": [
     {
       "id": 0,
-      "count": "cores",
+      "count": "pids",
       "order": [0, 8],
       "gfp": { "off": "MOVABLE" }
     },
     {
       "id": 1,
-      "count": "cores",
+      "count": "pids",
       "order": [0, 8],
       "gfp": {
         "all": [
           { "on": "MOVABLE" },
           { "off": "PAGE_CACHE" },
-          { "not": { "any": [{ "on": "NORETRY" }, { "on": "RECLAIMABLE" }] } }
+          {
+            "not": {
+              "any": [{ "off": "HIGHMEM" }, { "on": "NOFAIL" }, { "off": "FS" }, { "on": "NORETRY" }]
+            }
+          }
         ]
       }
     },
     {
       "id": 2,
-      "count": "cores",
+      "count": "pids",
       "order": [0, 8],
       "gfp": {
         "all": [
           { "on": "MOVABLE" },
           { "on": "PAGE_CACHE" },
-          { "not": { "any": [{ "on": "NORETRY" }, { "on": "RECLAIMABLE" }] } }
+          {
+            "not": {
+              "any": [{ "off": "HIGHMEM" }, { "on": "NOFAIL" }, { "off": "FS" }, { "on": "NORETRY" }]
+            }
+          }
         ]
       }
     },
     {
       "id": 3,
-      "count": "cores",
+      "count": "pids",
       "order": [0, 8],
       "gfp": {
         "all": [
           { "on": "MOVABLE" },
-          { "any": [{ "on": "NORETRY" }, { "on": "RECLAIMABLE" }] }
+          {
+            "any": [{ "off": "HIGHMEM" }, { "on": "NOFAIL" }, { "off": "FS" }, { "on": "NORETRY" }]
+          }
         ]
       }
     },

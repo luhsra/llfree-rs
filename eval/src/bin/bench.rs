@@ -12,10 +12,10 @@ use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, FrameId, LLFree, Request, Result, TREE_ORDER, Tiering};
+use llfree::{Alloc, Clustering, FrameId, LLFree, Request, Result, TREE_ORDER};
+use llfree_eval::clustering::ClusteringConfig;
 use llfree_eval::mmap::Mapping;
 use llfree_eval::thread;
-use llfree_eval::tiering::TieringConfig;
 use log::warn;
 
 /// Benchmarking the allocators against each other.
@@ -54,9 +54,9 @@ struct Args {
     /// Offset for the cpu selection.
     #[facet(args::named, default = 0)]
     offset: usize,
-    /// Optional path to a tiering configuration file (JSON)
+    /// Optional path to a clustering configuration file (JSON)
     #[facet(args::named)]
-    tiering: Option<PathBuf>,
+    clustering: Option<PathBuf>,
 
     #[facet(flatten)]
     builtins: FigueBuiltins,
@@ -77,7 +77,7 @@ fn main() {
         memory,
         stride,
         offset,
-        tiering,
+        clustering,
         builtins: _,
     } = figue::from_std_args().unwrap();
 
@@ -101,19 +101,21 @@ fn main() {
 
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
 
-    let (tiering, request): (Tiering, Box<dyn RequestFn>) = if let Some(tiering) = tiering {
-        let tiering = std::fs::read_to_string(tiering).expect("Failed to read tiering config");
-        let config =
-            facet_json::from_str::<TieringConfig>(&tiering).expect("Failed to read tiering config");
+    let (clustering, request): (Clustering, Box<dyn RequestFn>) =
+        if let Some(clustering) = clustering {
+            let config_str =
+                std::fs::read_to_string(clustering).expect("Failed to read clustering config");
+            let config = facet_json::from_str::<ClusteringConfig>(&config_str)
+                .expect("Failed to read clustering config");
 
-        (
-            config.tiering(threads),
-            Box::new(move |order, core| config.request(order, core, threads, core, 0)),
-        )
-    } else {
-        let (tiering, request) = Tiering::simple(threads);
-        (tiering, Box::new(request))
-    };
+            (
+                config.clustering(threads),
+                Box::new(move |order, core| config.request(order, core, threads, core, 0)),
+            )
+        } else {
+            let (clustering, request) = Clustering::simple(threads);
+            (clustering, Box::new(request))
+        };
 
     for x in x {
         for o in order.iter().copied() {
@@ -121,7 +123,7 @@ fn main() {
             for name in &allocs {
                 for i in 0..iterations {
                     warn!(">>> bench {bench:?} x={x} o={o} {name}\n");
-                    let alloc = alloc(name, &mut mapping, &tiering, request.as_ref());
+                    let alloc = alloc(name, &mut mapping, &clustering, request.as_ref());
                     let perf = bench.run(&*alloc, o, threads, x);
                     writeln!(out, "{name},{x},{o},{i},{memory},{perf}").unwrap();
                 }
@@ -193,25 +195,25 @@ impl<'a, T: Alloc<'a>, F: RequestFn> DynAlloc for BenchAlloc<'a, T, F> {
 fn alloc<'a>(
     name: &str,
     zone: &'a mut [Frame],
-    tiering: &Tiering,
+    clustering: &Clustering,
     request: impl RequestFn + 'a,
 ) -> Box<dyn DynAlloc + 'a> {
     #[cfg(feature = "llc")]
     if llfree_eval::LLC::name() == name {
-        let m = NvmAlloc::<llfree_eval::LLC>::metadata_size(tiering, zone.len());
+        let m = NvmAlloc::<llfree_eval::LLC>::metadata_size(clustering, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
         return Box::new(BenchAlloc::new(
-            NvmAlloc::<llfree_eval::LLC>::create(zone, false, tiering, local, trees).unwrap(),
+            NvmAlloc::<llfree_eval::LLC>::create(zone, false, clustering, local, trees).unwrap(),
             request,
         ));
     }
     if LLFree::name() == name {
-        let m = NvmAlloc::<LLFree>::metadata_size(tiering, zone.len());
+        let m = NvmAlloc::<LLFree>::metadata_size(clustering, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
         return Box::new(BenchAlloc::new(
-            NvmAlloc::<LLFree>::create(zone, false, tiering, local, trees).unwrap(),
+            NvmAlloc::<LLFree>::create(zone, false, clustering, local, trees).unwrap(),
             request,
         ));
     }
