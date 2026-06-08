@@ -7,7 +7,7 @@ use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::{self, WyRand, align_up, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, Clustering, FrameId, LLFree};
+use llfree::{Alloc, Classing, FrameId, LLFree};
 use llfree_eval::mmap::Mapping;
 use llfree_eval::thread;
 use log::{error, warn};
@@ -98,12 +98,12 @@ fn execute(
         )
     };
 
-    let (clustering, request) = Clustering::simple(threads);
+    let (classing, request) = Classing::simple(threads);
 
-    let m = Allocator::metadata_size(&clustering, mapping.len());
+    let m = Allocator::metadata_size(&classing, mapping.len());
     let local = aligned_buf(m.local);
     let trees = aligned_buf(m.trees);
-    let alloc = Allocator::create(mapping, false, &clustering, local, trees).unwrap();
+    let alloc = Allocator::create(mapping, false, &classing, local, trees).unwrap();
     warn!("initialized {}", alloc.frames());
 
     let barrier = Barrier::new(threads);
@@ -197,11 +197,11 @@ fn monitor(
     warn!("check");
 
     // Recover allocator
-    let (clustering, request) = Clustering::simple(threads);
-    let m = Allocator::metadata_size(&clustering, mapping.len());
+    let (classing, request) = Classing::simple(threads);
+    let m = Allocator::metadata_size(&classing, mapping.len());
     let local = aligned_buf(m.local);
     let trees = aligned_buf(m.trees);
-    let alloc = Allocator::create(mapping, true, &clustering, local, trees).unwrap();
+    let alloc = Allocator::create(mapping, true, &classing, local, trees).unwrap();
     warn!("recovered {}", alloc.frames());
 
     let expected = allocs * threads - threads;

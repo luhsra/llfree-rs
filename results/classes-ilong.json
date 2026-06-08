@@ -1,10 +1,16 @@
 {
-  "clusters": [
+  "classes": [
     {
       "id": 0,
       "count": "cores",
       "order": [0, 8],
-      "gfp": { "off": "MOVABLE" }
+      "gfp": { "all": [{ "off": "MOVABLE" }, { "off": "RECLAIMABLE" }] }
+    },
+    {
+      "id": 0,
+      "count": "cores",
+      "order": [0, 8],
+      "gfp": { "all": [{ "off": "MOVABLE" }, { "on": "RECLAIMABLE" }] }
     },
     {
       "id": 1,

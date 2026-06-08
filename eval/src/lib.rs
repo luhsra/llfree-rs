@@ -1,6 +1,6 @@
 use std::ops::{Add, Div};
 
-pub mod clustering;
+pub mod classes;
 pub mod gfp;
 pub mod mmap;
 pub mod thread;

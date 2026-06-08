@@ -1,22 +1,22 @@
 {
-  "clustering": [
+  "classes": [
     {
       "id": 0,
-      "count": "pids",
+      "count": "cores",
       "order": [0, 8],
       "gfp": { "off": "MOVABLE" }
     },
     {
       "id": 1,
-      "count": "pids",
+      "count": "cores",
       "order": [0, 8],
-      "gfp": { "all": [{ "on": "MOVABLE" }, { "off": "PAGE_CACHE" }] }
+      "gfp": { "all": [{ "on": "MOVABLE" }, { "off": "PAGE_CACHE" }, { "off": "RECLAIMABLE" }] }
     },
     {
       "id": 2,
-      "count": "pids",
+      "count": "cores",
       "order": [0, 8],
-      "gfp": { "all": [{ "on": "MOVABLE" }, { "on": "PAGE_CACHE" }] }
+      "gfp": { "all": [{ "on": "MOVABLE" }, { "any": [{ "on": "PAGE_CACHE" }, { "on": "RECLAIMABLE" }] }] }
     },
     {
       "id": 3,

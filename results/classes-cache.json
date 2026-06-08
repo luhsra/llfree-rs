@@ -1,5 +1,5 @@
 {
-  "clustering": [
+  "classes": [
     {
       "id": 0,
       "count": "cores",
@@ -10,13 +10,13 @@
       "id": 1,
       "count": "cores",
       "order": [0, 8],
-      "gfp": { "all": [{ "on": "MOVABLE" }, { "off": "PAGE_CACHE" }, { "off": "RECLAIMABLE" }] }
+      "gfp": { "all": [{ "on": "MOVABLE" }, { "off": "PAGE_CACHE" }] }
     },
     {
       "id": 2,
       "count": "cores",
       "order": [0, 8],
-      "gfp": { "all": [{ "on": "MOVABLE" }, { "any": [{ "on": "PAGE_CACHE" }, { "on": "RECLAIMABLE" }] }] }
+      "gfp": { "all": [{ "on": "MOVABLE" }, { "on": "PAGE_CACHE" }] }
     },
     {
       "id": 3,

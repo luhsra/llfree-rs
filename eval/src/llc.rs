@@ -6,7 +6,7 @@ use core::{fmt, slice};
 
 use llfree::util::Align;
 use llfree::{
-    Alloc, Cluster, ClusterStats, Clustering, FrameId, Init, MetaData, MetaSize, Policy, PolicyFn,
+    Alloc, Class, ClassStats, Classing, FrameId, Init, MetaData, MetaSize, Policy, PolicyFn,
     Request, Result, Stats, TreeStats,
 };
 
@@ -23,7 +23,7 @@ extern "C" fn policy_trampoline(
     let ptr = POLICY_FN.load(Ordering::Relaxed);
     assert!(!ptr.is_null(), "policy function not set");
     let policy_fn: PolicyFn = unsafe { core::mem::transmute(ptr) };
-    let result = policy_fn(Cluster(requested), Cluster(target), free);
+    let result = policy_fn(Class(requested), Class(target), free);
     match result {
         Policy::Match(prio) => bindings::llfree_policy_t {
             type_: bindings::llfree_policy_type_t_LLFREE_POLICY_MATCH,
@@ -61,9 +61,9 @@ impl<'a> Alloc<'a> for LLC {
         "LLC"
     }
 
-    fn metadata_size(clustering: &Clustering, frames: usize) -> MetaSize {
-        let c_clustering = bindings::convert_clustering(clustering);
-        let m = unsafe { bindings::llfree_metadata_size(&c_clustering, frames as _) };
+    fn metadata_size(classing: &Classing, frames: usize) -> MetaSize {
+        let c_classing = bindings::convert_classing(classing);
+        let m = unsafe { bindings::llfree_metadata_size(&c_classing, frames as _) };
         assert!(m.llfree as usize <= SIZE);
         MetaSize {
             local: m.local,
@@ -84,7 +84,7 @@ impl<'a> Alloc<'a> for LLC {
         }
     }
 
-    fn new(frames: usize, init: Init, clustering: &Clustering, meta: MetaData<'a>) -> Result<Self> {
+    fn new(frames: usize, init: Init, classing: &Classing, meta: MetaData<'a>) -> Result<Self> {
         let raw = UnsafeCell::new([0u8; SIZE]);
 
         let init = match init {
@@ -94,9 +94,9 @@ impl<'a> Alloc<'a> for LLC {
             Init::None => 4,
         };
 
-        let c_clustering = bindings::convert_clustering(clustering);
+        let c_classing = bindings::convert_classing(classing);
 
-        let m = unsafe { bindings::llfree_metadata_size(&c_clustering, frames as _) };
+        let m = unsafe { bindings::llfree_metadata_size(&c_classing, frames as _) };
         assert!(SIZE >= m.llfree);
 
         assert!(meta.local.len() >= m.local);
@@ -109,15 +109,15 @@ impl<'a> Alloc<'a> for LLC {
         };
 
         let ret =
-            unsafe { bindings::llfree_init(raw.get().cast(), frames, init, meta, &c_clustering) };
+            unsafe { bindings::llfree_init(raw.get().cast(), frames, init, meta, &c_classing) };
         ret.ok().map(|_| LLC { raw, ms: m })
     }
 
-    fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(FrameId, Cluster)> {
+    fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(FrameId, Class)> {
         let ret =
             unsafe { bindings::llfree_get(self.raw.get().cast(), frame.into(), request.into()) };
         let f = ret.ok()?.value;
-        Ok((FrameId(f as _), Cluster(ret.cluster)))
+        Ok((FrameId(f as _), Class(ret.class)))
     }
 
     fn put(&self, frame: FrameId, request: Request) -> Result<()> {
@@ -138,14 +138,14 @@ impl<'a> Alloc<'a> for LLC {
 
     fn tree_stats(&self) -> TreeStats {
         let s = unsafe { bindings::llfree_tree_stats(self.raw.get().cast()) };
-        let mut clusters = [const {
-            ClusterStats {
+        let mut classes = [const {
+            ClassStats {
                 free_frames: 0,
                 alloc_frames: 0,
             }
-        }; Cluster::LEN as usize];
-        for (i, t) in s.clusters.iter().enumerate() {
-            clusters[i] = ClusterStats {
+        }; Class::LEN as usize];
+        for (i, t) in s.classes.iter().enumerate() {
+            classes[i] = ClassStats {
                 free_frames: t.free_frames,
                 alloc_frames: t.alloc_frames,
             };
@@ -153,7 +153,7 @@ impl<'a> Alloc<'a> for LLC {
         TreeStats {
             free_frames: s.free_frames,
             free_trees: s.free_trees,
-            clusters,
+            classes,
         }
     }
 
@@ -220,7 +220,7 @@ mod bindings {
         fn from(req: super::Request) -> Self {
             llfree_request {
                 order: req.order as _,
-                cluster: req.cluster.0,
+                class: req.class.0,
                 local: match req.local {
                     Some(l) => ll_optional {
                         present: true,
@@ -257,22 +257,19 @@ mod bindings {
         }
     }
 
-    pub fn convert_clustering(clustering: &super::Clustering) -> llfree_clustering {
+    pub fn convert_classing(classing: &super::Classing) -> llfree_classing {
         // Store the Rust policy fn in the global so the trampoline can call it.
-        super::POLICY_FN.store(clustering.policy as *mut (), Ordering::Relaxed);
+        super::POLICY_FN.store(classing.policy as *mut (), Ordering::Relaxed);
 
-        let mut c = llfree_clustering {
-            clusters: [llfree_cluster_conf {
-                cluster: 0,
-                count: 0,
-            }; LLFREE_MAX_CLUSTERS as _],
-            num_clusters: clustering.clusters().len() as _,
-            default_cluster: clustering.default.0,
+        let mut c = llfree_classing {
+            classes: [llfree_class_conf { class: 0, count: 0 }; LLFREE_MAX_CLASSES as _],
+            num_classes: classing.classes().len() as _,
+            default_class: classing.default.0,
             policy: Some(super::policy_trampoline),
         };
-        for (i, &(cluster, count)) in clustering.clusters().iter().enumerate() {
-            c.clusters[i] = llfree_cluster_conf {
-                cluster: cluster.0,
+        for (i, &(class, count)) in classing.classes().iter().enumerate() {
+            c.classes[i] = llfree_class_conf {
+                class: class.0,
                 count: count as _,
             };
         }
@@ -338,7 +335,7 @@ mod bindings {
         fn from(value: TreeMatch) -> Self {
             Self {
                 id: value.id.into(),
-                cluster: value.cluster.map_or(LLFREE_CLUSTER_NONE, |c| c.0),
+                class: value.class.map_or(LLFREE_CLASS_NONE, |c| c.0),
                 free: value.free,
             }
         }
@@ -347,7 +344,7 @@ mod bindings {
     impl From<TreeChange> for llfree_tree_change {
         fn from(value: TreeChange) -> Self {
             Self {
-                cluster: value.cluster.map_or(LLFREE_CLUSTER_NONE, |c| c.0),
+                class: value.class.map_or(LLFREE_CLASS_NONE, |c| c.0),
                 operation: match value.operation {
                     Some(TreeOperation::Online) => llfree_tree_operation_LLFREE_TREE_OP_ONLINE,
                     Some(TreeOperation::Offline) => llfree_tree_operation_LLFREE_TREE_OP_OFFLINE,
@@ -361,17 +358,17 @@ mod bindings {
 #[cfg(all(test, feature = "llc"))]
 mod test {
     use super::LLC;
-    use llfree::{Alloc, Clustering, Init, MetaData, TREE_FRAMES, util::logging};
+    use llfree::{Alloc, Classing, Init, MetaData, TREE_FRAMES, util::logging};
     use log::warn;
 
     #[test]
     fn test_debug() {
         logging();
-        let (clustering, _request) = Clustering::simple(1);
+        let (classing, _request) = Classing::simple(1);
         let frames = TREE_FRAMES * 4;
-        let meta = MetaData::alloc(&LLC::metadata_size(&clustering, frames));
+        let meta = MetaData::alloc(&LLC::metadata_size(&classing, frames));
         warn!("frames: {frames}");
-        let alloc = LLC::new(frames, Init::FreeAll, &clustering, meta).unwrap();
+        let alloc = LLC::new(frames, Init::FreeAll, &classing, meta).unwrap();
         warn!("{alloc:?}");
         alloc.validate();
         assert_eq!(alloc.frames(), frames);

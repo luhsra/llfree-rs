@@ -33,11 +33,11 @@ impl<A: Alloc<'static>> TestAlloc<A> {
         frames: usize,
         init: Init,
     ) -> Result<(Self, impl Fn(usize, usize) -> Request)> {
-        let (clustering, request) = Clustering::simple(cores);
-        let ms = A::metadata_size(&clustering, frames);
+        let (classing, request) = Classing::simple(cores);
+        let ms = A::metadata_size(&classing, frames);
         let meta = MetaData::alloc(&ms);
         Ok((
-            Self(ManuallyDrop::new(A::new(frames, init, &clustering, meta)?)),
+            Self(ManuallyDrop::new(A::new(frames, init, &classing, meta)?)),
             request,
         ))
     }
@@ -698,13 +698,13 @@ fn recover() {
     let expected_frames = 128 * (1 + (1 << HUGE_ORDER));
 
     let mut zone = mmap::Mapping::anon(0x1000_0000_0000, FRAMES, false, false).unwrap();
-    let (clustering, request) = Clustering::simple(1);
-    let m = Allocator::metadata_size(&clustering, FRAMES);
+    let (classing, request) = Classing::simple(1);
+    let m = Allocator::metadata_size(&classing, FRAMES);
     let local = aligned_buf(m.local);
     let trees = aligned_buf(m.trees);
 
     {
-        let alloc = Allocator::create(&mut zone, false, &clustering, local, trees).unwrap();
+        let alloc = Allocator::create(&mut zone, false, &classing, local, trees).unwrap();
 
         let mut _allocated_frames = 0;
         for _ in 0..128 {
@@ -725,7 +725,7 @@ fn recover() {
 
     let local = aligned_buf(m.local);
     let trees = aligned_buf(m.trees);
-    let alloc = Allocator::create(&mut zone, true, &clustering, local, trees).unwrap();
+    let alloc = Allocator::create(&mut zone, true, &classing, local, trees).unwrap();
     assert_eq!(
         alloc.frames() - alloc.tree_stats().free_frames,
         expected_frames
@@ -857,15 +857,15 @@ fn demote_local() {
 
     let (alloc, _request) = Allocator::create(1, FRAMES, Init::FreeAll).unwrap();
 
-    // Create a cluster-1 local reservation first.
-    let req_huge_local = Request::new(HUGE_ORDER, Cluster(1), Some(0));
+    // Create a class-1 local reservation first.
+    let req_huge_local = Request::new(HUGE_ORDER, Class(1), Some(0));
     let _huge = alloc.get(None, req_huge_local).unwrap();
 
     // Trigger demotion with no local slot on the requester side.
     // This only happes when all other trees are exhausted, so we need to reserve all other trees first.
     for _ in 0..(FRAMES - HUGE_FRAMES) {
-        let req_small_global = Request::new(0, Cluster(0), None);
-        let Ok((_small, _cluster)) = alloc.get(None, req_small_global) else {
+        let req_small_global = Request::new(0, Class(0), None);
+        let Ok((_small, _class)) = alloc.get(None, req_small_global) else {
             panic!("Failed to allocate small frame: {alloc:#?}");
         };
     }
@@ -944,20 +944,20 @@ fn stress() {
 }
 
 #[test]
-fn movable_clusters() {
+fn movable_classes() {
     logging();
 
     let cores = 1;
     let frames = 16 * TREE_FRAMES;
-    let (clustering, request) = Clustering::movable(cores);
-    let ms = AllocImpl::metadata_size(&clustering, frames);
+    let (classing, request) = Classing::movable(cores);
+    let ms = AllocImpl::metadata_size(&classing, frames);
     let meta = MetaData::alloc(&ms);
-    let alloc = AllocImpl::new(frames, Init::FreeAll, &clustering, meta).unwrap();
+    let alloc = AllocImpl::new(frames, Init::FreeAll, &classing, meta).unwrap();
 
     let mut pages = Vec::with_capacity(frames);
     for i in 0..frames {
         let movable = i % 3 == 0;
-        let (frame, _cluster) = alloc.get(None, request(0, 0, movable)).unwrap();
+        let (frame, _class) = alloc.get(None, request(0, 0, movable)).unwrap();
         pages.push(frame);
     }
 
@@ -975,10 +975,10 @@ fn movable_clusters() {
 fn zeroed_steals_from_huge() {
     logging();
 
-    // Custom 3-cluster setup: small=0, huge=1, zeroed=2.
-    // Huge is the default cluster.
+    // Custom 3-class setup: small=0, huge=1, zeroed=2.
+    // Huge is the default class.
     // Zeroed > Huge so requesting zeroed from a huge tree -> Steal.
-    fn zeroed_policy(requested: Cluster, target: Cluster, free: usize) -> Policy {
+    fn zeroed_policy(requested: Class, target: Class, free: usize) -> Policy {
         if requested.0 > target.0 {
             return Policy::Steal;
         } else if requested.0 < target.0 {
@@ -995,33 +995,29 @@ fn zeroed_steals_from_huge() {
     let tree_count = 12;
     let frames = tree_count * TREE_FRAMES;
 
-    let clustering = Clustering::new(
-        &[
-            (Cluster(0), cores),
-            (Cluster(1), cores),
-            (Cluster(2), cores),
-        ],
-        Cluster(1), // default = huge
+    let classing = Classing::new(
+        &[(Class(0), cores), (Class(1), cores), (Class(2), cores)],
+        Class(1), // default = huge
         zeroed_policy,
     );
 
-    let ms = AllocImpl::metadata_size(&clustering, frames);
+    let ms = AllocImpl::metadata_size(&classing, frames);
     let meta = MetaData::alloc(&ms);
-    let alloc = AllocImpl::new(frames, Init::FreeAll, &clustering, meta).unwrap();
+    let alloc = AllocImpl::new(frames, Init::FreeAll, &classing, meta).unwrap();
 
     alloc.validate();
     assert_eq!(alloc.tree_stats().free_frames, frames);
 
-    // Convert one fully-free huge tree to zeroed cluster
+    // Convert one fully-free huge tree to zeroed class
     alloc
         .change_tree(
             TreeMatch {
                 id: None,
-                cluster: Some(Cluster(1)),
+                class: Some(Class(1)),
                 free: TREE_FRAMES,
             },
             TreeChange {
-                cluster: None,
+                class: None,
                 operation: Some(TreeOperation::Offline),
             },
         )
@@ -1033,11 +1029,11 @@ fn zeroed_steals_from_huge() {
         .change_tree(
             TreeMatch {
                 id: None,
-                cluster: Some(Cluster(1)),
+                class: Some(Class(1)),
                 free: 0,
             },
             TreeChange {
-                cluster: Some(Cluster(2)),
+                class: Some(Class(2)),
                 operation: Some(TreeOperation::Online),
             },
         )
@@ -1047,31 +1043,27 @@ fn zeroed_steals_from_huge() {
 
     let stats_before = alloc.tree_stats();
     assert_eq!(
-        stats_before.clusters[2].free_frames, TREE_FRAMES,
-        "zeroed cluster should have one full tree"
+        stats_before.classes[2].free_frames, TREE_FRAMES,
+        "zeroed class should have one full tree"
     );
 
     // Exhaust the zeroed tree by allocating all huge frames from it
     let zeroed_capacity = TREE_FRAMES / HUGE_FRAMES;
     for _ in 0..zeroed_capacity {
-        let (_frame, cluster) = alloc
-            .get(None, Request::new(HUGE_ORDER, Cluster(2), Some(0)))
+        let (_frame, class) = alloc
+            .get(None, Request::new(HUGE_ORDER, Class(2), Some(0)))
             .unwrap();
-        assert_eq!(cluster, Cluster(2), "expected zeroed cluster");
+        assert_eq!(class, Class(2), "expected zeroed class");
     }
 
-    // Zeroed tree exhausted; next request should steal from huge cluster
-    let (frame, cluster) = alloc
-        .get(None, Request::new(HUGE_ORDER, Cluster(2), Some(0)))
+    // Zeroed tree exhausted; next request should steal from huge class
+    let (frame, class) = alloc
+        .get(None, Request::new(HUGE_ORDER, Class(2), Some(0)))
         .unwrap();
-    assert_eq!(
-        cluster,
-        Cluster(1),
-        "steal from huge should return cluster 1"
-    );
+    assert_eq!(class, Class(1), "steal from huge should return class 1");
 
     alloc
-        .put(frame, Request::new(HUGE_ORDER, Cluster(2), Some(0)))
+        .put(frame, Request::new(HUGE_ORDER, Class(2), Some(0)))
         .unwrap();
 
     alloc.validate();

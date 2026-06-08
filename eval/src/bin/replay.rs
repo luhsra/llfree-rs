@@ -9,7 +9,7 @@ use facet::Facet;
 use figue::{self as args, FigueBuiltins};
 use llfree::util::align_down;
 use llfree::*;
-use llfree_eval::clustering::ClusteringConfig;
+use llfree_eval::classes::ClassingConfig;
 use llfree_eval::gfp::GFP;
 use llfree_eval::{mmap, thread};
 use log::{error, info, trace, warn};
@@ -28,9 +28,9 @@ struct Args {
     /// Time interval is ms for monitoring fragmentation
     #[facet(args::named, default = 100000)]
     interval: usize,
-    /// Optional path to a clustering configuration file (JSON)
+    /// Optional path to a classing configuration file (JSON)
     #[facet(args::named)]
-    clustering: Option<PathBuf>,
+    classing: Option<PathBuf>,
 
     #[facet(flatten)]
     builtins: FigueBuiltins,
@@ -54,7 +54,7 @@ fn main() {
         stride,
         frag,
         interval,
-        clustering,
+        classing,
         builtins: _,
     } = figue::from_std_args().unwrap();
 
@@ -76,28 +76,28 @@ fn main() {
     info!("page cache allocs = {page_cache_allocs}");
 
     #[allow(clippy::type_complexity)]
-    let (clustering, request): (
-        Clustering,
+    let (classing, request): (
+        Classing,
         Box<dyn Fn(usize, u32, usize, usize) -> Request + Send>,
-    ) = if let Some(clustering) = clustering {
-        let s = fs::read_to_string(clustering).unwrap();
-        let clustering_config: ClusteringConfig = facet_json::from_str(&s).unwrap();
-        info!("clustering = {clustering_config:?}");
+    ) = if let Some(classing) = classing {
+        let s = fs::read_to_string(classing).unwrap();
+        let classing_config: ClassingConfig = facet_json::from_str(&s).unwrap();
+        info!("classing = {classing_config:?}");
         (
-            clustering_config.clustering(cores),
+            classing_config.classing(cores),
             Box::new(move |order, gfp, core, pid| {
-                clustering_config.request(order, core, cores, pid, gfp)
+                classing_config.request(order, core, cores, pid, gfp)
             }),
         )
     } else {
-        let (clustering, request) = Clustering::movable(cores);
+        let (classing, request) = Classing::movable(cores);
         (
-            clustering,
+            classing,
             Box::new(move |order, gfp, core, _pid| request(order, core, GFP::MOVABLE == gfp)),
         )
     };
-    let meta = MetaData::alloc(&Allocator::metadata_size(&clustering, max_pfn));
-    let llfree = Allocator::new(max_pfn, Init::FreeAll, &clustering, meta).unwrap();
+    let meta = MetaData::alloc(&Allocator::metadata_size(&classing, max_pfn));
+    let llfree = Allocator::new(max_pfn, Init::FreeAll, &classing, meta).unwrap();
     llfree.validate();
 
     info!("start");

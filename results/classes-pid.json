@@ -1,26 +1,20 @@
 {
-  "clustering": [
+  "classes": [
     {
       "id": 0,
-      "count": "cores",
+      "count": "pids",
       "order": [0, 8],
-      "gfp": { "all": [{ "off": "MOVABLE" }, { "off": "RECLAIMABLE" }] }
-    },
-    {
-      "id": 0,
-      "count": "cores",
-      "order": [0, 8],
-      "gfp": { "all": [{ "off": "MOVABLE" }, { "on": "RECLAIMABLE" }] }
+      "gfp": { "off": "MOVABLE" }
     },
     {
       "id": 1,
-      "count": "cores",
+      "count": "pids",
       "order": [0, 8],
       "gfp": { "all": [{ "on": "MOVABLE" }, { "off": "PAGE_CACHE" }] }
     },
     {
       "id": 2,
-      "count": "cores",
+      "count": "pids",
       "order": [0, 8],
       "gfp": { "all": [{ "on": "MOVABLE" }, { "on": "PAGE_CACHE" }] }
     },

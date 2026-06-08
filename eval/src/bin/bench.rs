@@ -12,8 +12,8 @@ use figue::{self as args, FigueBuiltins};
 use llfree::frame::Frame;
 use llfree::util::{self, WyRand, aligned_buf};
 use llfree::wrapper::NvmAlloc;
-use llfree::{Alloc, Clustering, FrameId, LLFree, Request, Result, TREE_ORDER};
-use llfree_eval::clustering::ClusteringConfig;
+use llfree::{Alloc, Classing, FrameId, LLFree, Request, Result, TREE_ORDER};
+use llfree_eval::classes::ClassingConfig;
 use llfree_eval::mmap::Mapping;
 use llfree_eval::thread;
 use log::warn;
@@ -54,9 +54,9 @@ struct Args {
     /// Offset for the cpu selection.
     #[facet(args::named, default = 0)]
     offset: usize,
-    /// Optional path to a clustering configuration file (JSON)
+    /// Optional path to a classing configuration file (JSON)
     #[facet(args::named)]
-    clustering: Option<PathBuf>,
+    classing: Option<PathBuf>,
 
     #[facet(flatten)]
     builtins: FigueBuiltins,
@@ -77,7 +77,7 @@ fn main() {
         memory,
         stride,
         offset,
-        clustering,
+        classing,
         builtins: _,
     } = figue::from_std_args().unwrap();
 
@@ -101,21 +101,19 @@ fn main() {
 
     let mut mapping = mapping(0x1000_0000_0000, (memory << 30) / Frame::SIZE, dax);
 
-    let (clustering, request): (Clustering, Box<dyn RequestFn>) =
-        if let Some(clustering) = clustering {
-            let config_str =
-                std::fs::read_to_string(clustering).expect("Failed to read clustering config");
-            let config = facet_json::from_str::<ClusteringConfig>(&config_str)
-                .expect("Failed to read clustering config");
+    let (classing, request): (Classing, Box<dyn RequestFn>) = if let Some(classing) = classing {
+        let config_str = std::fs::read_to_string(classing).expect("Failed to read classing config");
+        let config = facet_json::from_str::<ClassingConfig>(&config_str)
+            .expect("Failed to read classing config");
 
-            (
-                config.clustering(threads),
-                Box::new(move |order, core| config.request(order, core, threads, core, 0)),
-            )
-        } else {
-            let (clustering, request) = Clustering::simple(threads);
-            (clustering, Box::new(request))
-        };
+        (
+            config.classing(threads),
+            Box::new(move |order, core| config.request(order, core, threads, core, 0)),
+        )
+    } else {
+        let (classing, request) = Classing::simple(threads);
+        (classing, Box::new(request))
+    };
 
     for x in x {
         for o in order.iter().copied() {
@@ -123,7 +121,7 @@ fn main() {
             for name in &allocs {
                 for i in 0..iterations {
                     warn!(">>> bench {bench:?} x={x} o={o} {name}\n");
-                    let alloc = alloc(name, &mut mapping, &clustering, request.as_ref());
+                    let alloc = alloc(name, &mut mapping, &classing, request.as_ref());
                     let perf = bench.run(&*alloc, o, threads, x);
                     writeln!(out, "{name},{x},{o},{i},{memory},{perf}").unwrap();
                 }
@@ -195,25 +193,25 @@ impl<'a, T: Alloc<'a>, F: RequestFn> DynAlloc for BenchAlloc<'a, T, F> {
 fn alloc<'a>(
     name: &str,
     zone: &'a mut [Frame],
-    clustering: &Clustering,
+    classing: &Classing,
     request: impl RequestFn + 'a,
 ) -> Box<dyn DynAlloc + 'a> {
     #[cfg(feature = "llc")]
     if llfree_eval::LLC::name() == name {
-        let m = NvmAlloc::<llfree_eval::LLC>::metadata_size(clustering, zone.len());
+        let m = NvmAlloc::<llfree_eval::LLC>::metadata_size(classing, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
         return Box::new(BenchAlloc::new(
-            NvmAlloc::<llfree_eval::LLC>::create(zone, false, clustering, local, trees).unwrap(),
+            NvmAlloc::<llfree_eval::LLC>::create(zone, false, classing, local, trees).unwrap(),
             request,
         ));
     }
     if LLFree::name() == name {
-        let m = NvmAlloc::<LLFree>::metadata_size(clustering, zone.len());
+        let m = NvmAlloc::<LLFree>::metadata_size(classing, zone.len());
         let local = aligned_buf(m.local);
         let trees = aligned_buf(m.trees);
         return Box::new(BenchAlloc::new(
-            NvmAlloc::<LLFree>::create(zone, false, clustering, local, trees).unwrap(),
+            NvmAlloc::<LLFree>::create(zone, false, classing, local, trees).unwrap(),
             request,
         ));
     }

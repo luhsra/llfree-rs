@@ -3,24 +3,24 @@ use std::sync::atomic::AtomicU64;
 use bitfield_struct::bitfield;
 use facet::Facet;
 use llfree::atomic::{Atom, Atomic};
-use llfree::{Cluster, Clustering, Policy, Request};
+use llfree::{Class, Classing, Policy, Request};
 
 use crate::gfp::GFP;
 
 #[derive(Clone, Debug, Facet)]
-pub struct ClusteringConfig {
-    clusters: Vec<ClusterConfig>,
+pub struct ClassingConfig {
+    classes: Vec<ClassConfig>,
     default: u8,
     perfect: (usize, usize), // (min, max) free, inclusive
     good: (usize, usize),    // (min, max) free, inclusive
 }
 
-impl ClusteringConfig {
-    pub fn clustering(&self, cores: usize) -> Clustering {
-        let clusters = self
-            .clusters
+impl ClassingConfig {
+    pub fn classing(&self, cores: usize) -> Classing {
+        let classes = self
+            .classes
             .iter()
-            .map(|c| (Cluster(c.id), c.count.to_count(cores)))
+            .map(|c| (Class(c.id), c.count.to_count(cores)))
             .collect::<Vec<_>>()
             .leak();
 
@@ -49,7 +49,7 @@ impl ClusteringConfig {
         PERFECT.store(Range::with(self.perfect));
         GOOD.store(Range::with(self.good));
 
-        fn policy(requested: Cluster, target: Cluster, free: usize) -> Policy {
+        fn policy(requested: Class, target: Class, free: usize) -> Policy {
             if requested.0 > target.0 {
                 return Policy::Steal;
             } else if requested.0 < target.0 {
@@ -64,7 +64,7 @@ impl ClusteringConfig {
             Policy::Match(1)
         }
 
-        Clustering::new(clusters, Cluster(self.default), policy)
+        Classing::new(classes, Class(self.default), policy)
     }
 
     pub fn request(
@@ -75,20 +75,20 @@ impl ClusteringConfig {
         pid: usize,
         gfp: u32,
     ) -> Request {
-        for config in &self.clusters {
+        for config in &self.classes {
             if config.matches(order, gfp) {
                 return Request::new(
                     order,
-                    Cluster(config.id),
+                    Class(config.id),
                     config.count.to_local(core, cores, pid),
                 );
             }
         }
-        // Default to first cluster
-        let config = &self.clusters[0];
+        // Default to first class
+        let config = &self.classes[0];
         Request::new(
             order,
-            Cluster(config.id),
+            Class(config.id),
             config.count.to_local(core, cores, pid),
         )
     }
@@ -127,7 +127,7 @@ impl Count {
 }
 
 #[derive(Clone, Debug, Facet)]
-struct ClusterConfig {
+struct ClassConfig {
     id: u8,
     count: Count,
     order: Option<(usize, usize)>, // [min, max], inclusive
@@ -137,7 +137,7 @@ struct ClusterConfig {
     gfp: GfpMatch,
 }
 
-impl ClusterConfig {
+impl ClassConfig {
     fn matches(&self, order: usize, gfp: u32) -> bool {
         if let Some((min, max)) = self.order
             && !(min..=max).contains(&order)
@@ -181,7 +181,7 @@ impl GfpMatch {
 
 #[cfg(test)]
 mod test {
-    use crate::clustering::GfpMatch;
+    use crate::classes::GfpMatch;
     use crate::gfp::GFP;
 
     #[test]

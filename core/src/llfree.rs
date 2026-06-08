@@ -36,17 +36,17 @@ macro_rules! ensure {
 /// called *trees*.
 /// This allocator stores these tree entries in a [packed array][Trees].
 ///
-/// Additionally, the allocator manages user-provided [clusters][Cluster].
-/// Clusters are used to separate trees into different groups.
+/// Additionally, the allocator manages user-provided [classes][Class].
+/// Classs are used to separate trees into different groups.
 /// The user also has to provide a [policy function][PolicyFn] that defines
-/// how to access the clusters.
+/// how to access the classes.
 ///
-/// Each cluster can have a different number of [local reservations][Locals],
+/// Each class can have a different number of [local reservations][Locals],
 /// which are used to reduce contention on the tree array.
 ///
-/// If an allocation for a certain cluster cannot be fulfilled,
-/// the allocator falls back on stealing from other clusters or
-/// demoting the request to a lower cluster, depending on the [policy][Policy].
+/// If an allocation for a certain class cannot be fulfilled,
+/// the allocator falls back on stealing from other classes or
+/// demoting the request to a lower class, depending on the [policy][Policy].
 #[repr(align(64))]
 pub struct LLFree<'a> {
     /// CPU local data
@@ -58,7 +58,7 @@ pub struct LLFree<'a> {
     pub lower: Lower<'a>,
     /// Manages the allocator's trees.
     pub trees: Trees<'a>,
-    /// Policy for accessing tree clusters
+    /// Policy for accessing tree classes
     policy: PolicyFn,
 }
 
@@ -77,11 +77,11 @@ impl<'a> Alloc<'a> for LLFree<'a> {
     }
 
     #[cold]
-    fn new(frames: usize, init: Init, clustering: &Clustering, meta: MetaData<'a>) -> Result<Self> {
-        info!("initializing f={frames} {clustering:?} {meta:?}");
+    fn new(frames: usize, init: Init, classing: &Classing, meta: MetaData<'a>) -> Result<Self> {
+        info!("initializing f={frames} {classing:?} {meta:?}");
         ensure!(
             Error::Initialization;
-            meta.valid(&Self::metadata_size(clustering, frames)),
+            meta.valid(&Self::metadata_size(classing, frames)),
             "Invalid metadata"
         );
 
@@ -89,7 +89,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         let lower = Lower::new(frames, init, meta.lower)?;
 
         // Initialize per-CPU data
-        let locals = Locals::new(meta.local, clustering)?;
+        let locals = Locals::new(meta.local, classing)?;
 
         // Init tree array
         let tree_init = if init == Init::None {
@@ -97,19 +97,19 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         } else {
             Some(|start| lower.stats_at(FrameId(start), TREE_ORDER).free_frames)
         };
-        let trees = Trees::new(frames, meta.trees, tree_init, clustering.default);
+        let trees = Trees::new(frames, meta.trees, tree_init, classing.default);
 
         Ok(Self {
             locals,
             lower,
             trees,
-            policy: clustering.policy,
+            policy: classing.policy,
         })
     }
 
-    fn metadata_size(clustering: &Clustering, frames: usize) -> MetaSize {
+    fn metadata_size(classing: &Classing, frames: usize) -> MetaSize {
         MetaSize {
-            local: Locals::metadata_size(clustering),
+            local: Locals::metadata_size(classing),
             trees: Trees::metadata_size(frames),
             lower: Lower::metadata_size(frames),
         }
@@ -125,7 +125,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
     }
 
-    fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(FrameId, Cluster)> {
+    fn get(&self, frame: Option<FrameId>, request: Request) -> Result<(FrameId, Class)> {
         self.check(frame.unwrap_or(FrameId(0)), &request)?;
 
         // Try reserving a specific frame
@@ -133,7 +133,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
             return self.get_at(frame, request);
         }
 
-        let len = self.locals.cluster_locals(request.cluster).unwrap_or(0);
+        let len = self.locals.class_locals(request.class).unwrap_or(0);
         // Different starting points for each core
         let mut start_idx =
             TreeId(self.trees.len().checked_div(len).unwrap_or(0) * request.local.unwrap_or(0));
@@ -142,17 +142,17 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         if let Some(local) = request.local
             && self
                 .locals
-                .cluster_locals(request.cluster)
+                .class_locals(request.class)
                 .is_some_and(|len| len > 0 && len < self.trees.len())
         {
-            match self.get_local(request.order, request.cluster, local, None, true) {
+            match self.get_local(request.order, request.class, local, None, true) {
                 Err((Error::Memory, Some(start))) => start_idx = start,
                 Err((Error::Memory, _)) => {}
                 Err((e, _)) => return Err(e),
                 Ok(r) => return Ok(r),
             }
             // Try reserving new tree
-            match self.search_and_reserve(request.order, request.cluster, local, start_idx) {
+            match self.search_and_reserve(request.order, request.class, local, start_idx) {
                 Err(Error::Memory) => {}
                 r => return r,
             }
@@ -163,13 +163,13 @@ impl<'a> Alloc<'a> for LLFree<'a> {
                 if free < request.frames() {
                     return Policy::Invalid;
                 }
-                (self.policy)(request.cluster, t, free)
+                (self.policy)(request.class, t, free)
             };
             // Any frame
             match self
                 .trees
                 .search_best::<8, _>(start_idx, 0, self.trees.len(), rate, |i| {
-                    self.steal_global(i, request.cluster, request.order, None)
+                    self.steal_global(i, request.class, request.order, None)
                 }) {
                 Err(Error::Memory) => {} // continue
                 r => return r,
@@ -177,7 +177,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
 
         // -- Out of memory handling ---
-        debug!("OOM {:?}", request.cluster);
+        debug!("OOM {:?}", request.class);
 
         // Try stealing from other local reservations
         match self.steal_local(&request, None) {
@@ -203,7 +203,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         let i = frame.as_tree();
 
         // Try updating own trees first
-        let c = request.cluster;
+        let c = request.class;
         if let Some(local) = request.local
             && self.locals.put(c, local, frame.as_tree(), request.frames())
         {
@@ -211,7 +211,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         }
 
         // FIXME: Handle the case where huge pages are split
-        // -> This would ideally demote the huge tree to the next lower cluster
+        // -> This would ideally demote the huge tree to the next lower class
 
         // Increment globally
         self.trees.put(i, request.frames(), self.policy);
@@ -224,9 +224,9 @@ impl<'a> Alloc<'a> for LLFree<'a> {
     }
 
     fn drain(&self) {
-        self.locals.drain(|row, cluster, free| {
+        self.locals.drain(|row, class, free| {
             self.trees
-                .unreserve(row.as_tree(), free, cluster, self.policy);
+                .unreserve(row.as_tree(), free, class, self.policy);
         });
     }
 
@@ -235,7 +235,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         let l_stats = self.locals.stats();
         stats.free_frames += l_stats.free_frames;
         stats.free_trees += l_stats.free_trees;
-        for (c, lc) in stats.clusters.iter_mut().zip(l_stats.clusters.iter()) {
+        for (c, lc) in stats.classes.iter_mut().zip(l_stats.classes.iter()) {
             c.free_frames += lc.free_frames;
             c.alloc_frames += lc.alloc_frames;
         }
@@ -264,7 +264,7 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         let mut reserved = 0;
         for i in (0..self.trees.len()).map(TreeId) {
             match self.trees.stats_at(i) {
-                (_cluster, free, false) => {
+                (_class, free, false) => {
                     let l_free = self
                         .lower
                         .stats_at(i.as_frame(), TREE_FRAMES.ilog2() as _)
@@ -276,12 +276,12 @@ impl<'a> Alloc<'a> for LLFree<'a> {
                 }
             }
         }
-        for cluster in (0..Cluster::LEN).map(Cluster) {
-            if let Some(len) = self.locals.cluster_locals(cluster) {
+        for class in (0..Class::LEN).map(Class) {
+            if let Some(len) = self.locals.class_locals(class) {
                 for local in 0..len {
-                    if let Some(Reservation { row, free, .. }) = self.locals.load(cluster, local) {
+                    if let Some(Reservation { row, free, .. }) = self.locals.load(class, local) {
                         // Tree is expected to be reserved!
-                        let (_cluster, g_free, res) = self.trees.stats_at(row.as_tree());
+                        let (_class, g_free, res) = self.trees.stats_at(row.as_tree());
                         assert!(res);
                         let l_free = self
                             .lower
@@ -311,9 +311,9 @@ impl LLFree<'_> {
             frame.0
         );
         ensure!(
-            self.locals.cluster_locals(request.cluster).is_some(),
-            "Invalid cluster {:?}",
-            request.cluster
+            self.locals.class_locals(request.class).is_some(),
+            "Invalid class {:?}",
+            request.class
         );
         Ok(())
     }
@@ -322,20 +322,20 @@ impl LLFree<'_> {
         &self,
         i: TreeId,
         order: usize,
-        cluster: Cluster,
+        class: Class,
         local: usize,
-    ) -> Result<(FrameId, Cluster)> {
-        if let Some((reserved, free, target_cluster)) =
+    ) -> Result<(FrameId, Class)> {
+        if let Some((reserved, free, target_class)) =
             self.trees
-                .reserve_or_steal(i, cluster, 1 << order, self.policy)
+                .reserve_or_steal(i, class, 1 << order, self.policy)
         {
-            let cluster_len = self
+            let class_len = self
                 .locals
-                .cluster_locals(target_cluster)
-                .expect("Invalid cluster");
+                .class_locals(target_class)
+                .expect("Invalid class");
             // Target might have less locals or none
-            assert!(cluster_len > 0, "No locals for cluster {target_cluster:?}");
-            let local = local % cluster_len;
+            assert!(class_len > 0, "No locals for class {target_class:?}");
+            let local = local % class_len;
 
             // Perform lower alloc, if it fails undo reservation
             match self.lower.get(i.as_row(), order, None) {
@@ -343,20 +343,20 @@ impl LLFree<'_> {
                     // Swap and unreserve old tree
                     if reserved
                         && let Some(Reservation { row, free, .. }) = self.locals.swap(
-                            target_cluster,
+                            target_class,
                             local,
                             frame.as_tree(),
                             free - (1 << order),
                         )
                     {
                         self.trees
-                            .unreserve(row.as_tree(), free, target_cluster, self.policy);
+                            .unreserve(row.as_tree(), free, target_class, self.policy);
                     }
-                    Ok((frame, target_cluster))
+                    Ok((frame, target_class))
                 }
                 Err(e) => {
                     if reserved {
-                        self.trees.unreserve(i, free, target_cluster, self.policy);
+                        self.trees.unreserve(i, free, target_class, self.policy);
                     } else {
                         self.trees.put(i, 1 << order, self.policy);
                     }
@@ -371,13 +371,13 @@ impl LLFree<'_> {
     fn steal_global(
         &self,
         i: TreeId,
-        cluster: Cluster,
+        class: Class,
         order: usize,
         frame: Option<FrameId>,
-    ) -> Result<(FrameId, Cluster)> {
-        if let Some(cluster) = self.trees.steal(i, cluster, 1 << order, self.policy) {
+    ) -> Result<(FrameId, Class)> {
+        if let Some(class) = self.trees.steal(i, class, 1 << order, self.policy) {
             match self.lower.get(i.as_row(), order, frame) {
-                Ok(frame) => Ok((frame, cluster)),
+                Ok(frame) => Ok((frame, class)),
                 Err(e) => {
                     self.trees.put(i, 1 << order, self.policy);
                     Err(e)
@@ -388,10 +388,10 @@ impl LLFree<'_> {
         }
     }
 
-    fn get_at(&self, frame: FrameId, request: Request) -> Result<(FrameId, Cluster)> {
+    fn get_at(&self, frame: FrameId, request: Request) -> Result<(FrameId, Class)> {
         // Try local reservation first
         if let Some(local) = request.local {
-            match self.get_local(request.order, request.cluster, local, Some(frame), true) {
+            match self.get_local(request.order, request.class, local, Some(frame), true) {
                 Err((Error::Memory, _)) => {} // continue with global
                 Err((e, _)) => return Err(e),
                 Ok(r) => return Ok(r),
@@ -399,7 +399,7 @@ impl LLFree<'_> {
         }
 
         // Fallback to global reservation
-        match self.steal_global(frame.as_tree(), request.cluster, request.order, Some(frame)) {
+        match self.steal_global(frame.as_tree(), request.class, request.order, Some(frame)) {
             Err(Error::Memory) => {} // continue
             r => return r,
         }
@@ -413,29 +413,29 @@ impl LLFree<'_> {
         self.demote_local(&request, Some(frame))
     }
 
-    /// Try decrementing the local reservation for the given cluster and local index.
+    /// Try decrementing the local reservation for the given class and local index.
     fn get_local(
         &self,
         order: usize,
-        cluster: Cluster,
+        class: Class,
         local: usize,
         frame: Option<FrameId>,
         sync: bool,
-    ) -> core::result::Result<(FrameId, Cluster), (Error, Option<TreeId>)> {
+    ) -> core::result::Result<(FrameId, Class), (Error, Option<TreeId>)> {
         match self
             .locals
-            .get(cluster, local, frame.map(FrameId::as_tree), 1 << order)
+            .get(class, local, frame.map(FrameId::as_tree), 1 << order)
         {
             Ok(row) => match self.lower.get(row, order, frame) {
                 Ok(frame) => {
                     // Update current bitfield row if it changed
                     if row != frame.as_row() {
-                        self.locals.set_start(cluster, local, frame.as_row());
+                        self.locals.set_start(class, local, frame.as_row());
                     }
-                    Ok((frame, cluster))
+                    Ok((frame, class))
                 }
                 Err(e) => {
-                    debug!("local_lower failed {cluster:?} {}", row.as_tree());
+                    debug!("local_lower failed {class:?} {}", row.as_tree());
                     self.trees.put(row.as_tree(), 1 << order, self.policy);
                     Err((e, Some(row.as_tree())))
                 }
@@ -445,9 +445,9 @@ impl LLFree<'_> {
                 if sync {
                     let min = (1 << order) - free;
                     if let Some(free) = self.trees.sync(row.as_tree(), min) {
-                        if self.locals.put(cluster, local, row.as_tree(), free) {
+                        if self.locals.put(class, local, row.as_tree(), free) {
                             // retry
-                            return self.get_local(order, cluster, local, frame, false);
+                            return self.get_local(order, class, local, frame, false);
                         } else {
                             // undo tree change
                             self.trees.put(row.as_tree(), free, self.policy);
@@ -464,15 +464,15 @@ impl LLFree<'_> {
     fn search_and_reserve(
         &self,
         order: usize,
-        cluster: Cluster,
+        class: Class,
         local: usize,
         start: TreeId,
-    ) -> Result<(FrameId, Cluster)> {
-        debug!("reserve {cluster:?} start");
+    ) -> Result<(FrameId, Class)> {
+        debug!("reserve {class:?} start");
         // Rate how if and how good the tree fulfills the allocation
         let rate = |t, free| {
             if free >= (1 << order) {
-                (self.policy)(cluster, t, free)
+                (self.policy)(class, t, free)
             } else {
                 // Skip if not in range
                 Policy::Invalid
@@ -480,7 +480,7 @@ impl LLFree<'_> {
         };
 
         // Try to reserve a new tree
-        let reserve_or_steal = |i| self.reserve_or_steal(i, order, cluster, local);
+        let reserve_or_steal = |i| self.reserve_or_steal(i, order, class, local);
 
         const CL: usize = align_of::<Align>() / 4;
 
@@ -508,7 +508,7 @@ impl LLFree<'_> {
                 Err(Error::Memory) => {}
                 r => return r,
             }
-            debug!("reserve {cluster:?} no near");
+            debug!("reserve {class:?} no near");
         }
 
         // Global search
@@ -527,22 +527,18 @@ impl LLFree<'_> {
     }
 
     /// Steal from a local reservation and possibly demote or drain it
-    fn demote_local(
-        &self,
-        request: &Request,
-        frame: Option<FrameId>,
-    ) -> Result<(FrameId, Cluster)> {
+    fn demote_local(&self, request: &Request, frame: Option<FrameId>) -> Result<(FrameId, Class)> {
         if let Some((row, old)) = self.locals.demote_any(
-            request.cluster,
+            request.class,
             request.local,
             frame.map(FrameId::as_tree),
             request.frames(),
             self.policy,
         ) {
             // Unreserve the old reservation (or the demoted tree if request.local is None)
-            if let Some(Reservation { row, cluster, free }) = old {
+            if let Some(Reservation { row, class, free }) = old {
                 self.trees
-                    .unreserve(row.as_tree(), free, cluster, self.policy);
+                    .unreserve(row.as_tree(), free, class, self.policy);
             }
 
             match self.lower.get(row, request.order, frame) {
@@ -550,15 +546,15 @@ impl LLFree<'_> {
                     // undo counter decrement
                     self.trees.put(row.as_tree(), request.frames(), self.policy);
                 }
-                r => return r.map(|frame| (frame, request.cluster)),
+                r => return r.map(|frame| (frame, request.class)),
             }
         }
         Err(Error::Memory)
     }
 
-    fn steal_local(&self, request: &Request, frame: Option<FrameId>) -> Result<(FrameId, Cluster)> {
+    fn steal_local(&self, request: &Request, frame: Option<FrameId>) -> Result<(FrameId, Class)> {
         if let Some(reservation) = self.locals.steal_any(
-            request.cluster,
+            request.class,
             request.local,
             frame.map(FrameId::as_tree),
             request.frames(),
@@ -569,7 +565,7 @@ impl LLFree<'_> {
                     self.trees
                         .put(reservation.row.as_tree(), 1 << request.order, self.policy);
                 }
-                r => return r.map(|frame| (frame, reservation.cluster)),
+                r => return r.map(|frame| (frame, reservation.class)),
             }
         }
         Err(Error::Memory)
