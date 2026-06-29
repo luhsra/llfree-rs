@@ -5,7 +5,7 @@ use core::fmt;
 use core::sync::atomic::Ordering::*;
 use core::sync::atomic::*;
 
-use log::trace;
+use log::{error, trace};
 
 /// Atomic wrapper for types that can be converted into atomics
 ///
@@ -89,8 +89,8 @@ pub trait Atomic:
 /// Implementation of the atomic values.
 ///
 /// This is implemented for all atomic types in the standard library.
-pub trait AtomicImpl: Sized {
-    type V: Sized + Eq + Copy;
+pub trait AtomicImpl: Sized + fmt::Debug {
+    type V: Sized + Eq + Copy + fmt::Display + fmt::LowerHex;
     fn new(v: Self::V) -> Self;
     fn load(&self) -> Self::V;
     fn store(&self, v: Self::V);
@@ -197,30 +197,33 @@ pub trait AtomicSlice<T: Copy + Atomic> {
     fn inner_atomic(&self) -> &[T::I];
 
     /// Compare and exchange all values in the slice.
-    fn compare_exchange_all(&self, current: T, new: T) -> Result<(), ()>;
+    fn compare_exchange_all(&self, current: T, new: T) -> Result<(), bool>;
 }
 
-impl<T: Atomic> AtomicSlice<T> for [Atom<T>] {
+impl<T: Atomic + fmt::Debug> AtomicSlice<T> for [Atom<T>] {
     unsafe fn non_atomic(&self) -> &mut [T] {
         // cast to raw memory to let the compiler use vector instructions
-        #[allow(invalid_reference_casting)]
-        unsafe {
-            core::slice::from_raw_parts_mut(self.as_ptr().cast_mut().cast::<T>(), self.len())
-        }
+        unsafe { core::slice::from_raw_parts_mut(self.as_ptr().cast_mut().cast::<T>(), self.len()) }
     }
     fn inner_atomic(&self) -> &[T::I] {
         // cast to raw memory to let the compiler use vector instructions
         unsafe { core::slice::from_raw_parts(self.as_ptr().cast(), self.len()) }
     }
-    fn compare_exchange_all(&self, current: T, new: T) -> Result<(), ()> {
+    fn compare_exchange_all(&self, current: T, new: T) -> Result<(), bool> {
         for i in 0..self.len() {
             if self[i].compare_exchange(current, new).is_err() {
-                // undo
+                // undo changes
+                let mut undo = true;
                 for j in (0..i).rev() {
-                    let r = self[j].compare_exchange(new, current);
-                    assert!(r.is_ok(), "undo failed");
+                    let r = self[j].swap(current);
+                    let rv: <<T as Atomic>::I as AtomicImpl>::V = r.into();
+                    let nv: <<T as Atomic>::I as AtomicImpl>::V = new.into();
+                    if rv != nv {
+                        error!("undo mismatch: {rv:#x} != {nv:#x}");
+                        undo = false;
+                    }
                 }
-                return Err(());
+                return Err(undo);
             }
         }
         Ok(())
