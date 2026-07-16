@@ -10,7 +10,7 @@ use log::{error, info, warn};
 use crate::atomic::{Atom, Atomic, AtomicSlice};
 use crate::bitfield::{Bitfield, RowId};
 use crate::trees::TreeId;
-use crate::util::{Align, align_down, size_of_slice, spin_wait};
+use crate::util::{Align, align_down, spin_wait};
 use crate::{
     Error, FrameId, HUGE_FRAMES, HUGE_ORDER, Init, RETRIES, Result, Stats, TREE_FRAMES, TREE_HUGE,
     TREE_ORDER,
@@ -97,9 +97,9 @@ impl Metadata {
         Self {
             bitfield_len,
             // This also respects the cache line alignment
-            bitfield_size: size_of_slice::<Bitfield>(bitfield_len),
+            bitfield_size: size_of::<Bitfield>() * bitfield_len,
             table_len,
-            table_size: size_of_slice::<Align<[HugeEntry; TREE_HUGE]>>(table_len),
+            table_size: size_of::<Align<[HugeEntry; TREE_HUGE]>>() * table_len,
         }
     }
 }

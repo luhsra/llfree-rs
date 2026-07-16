@@ -30,13 +30,6 @@ pub const fn align_down(v: usize, align: usize) -> usize {
     (v / align) * align
 }
 
-/// Calculate the size of a slice of T, respecting any alignment constraints
-///
-/// Note: This might not be correct for all types, but it is for the ones we use.
-pub const fn size_of_slice<T>(len: usize) -> usize {
-    len * size_of::<T>().next_multiple_of(align_of::<T>())
-}
-
 /// Cache alignment for T
 #[derive(Clone, Default, Hash, PartialEq, Eq)]
 #[repr(align(64))]

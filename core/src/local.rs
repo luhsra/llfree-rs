@@ -6,14 +6,14 @@ use log::debug;
 
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
-use crate::util::{OffsetSlice, size_of_slice};
+use crate::util::OffsetSlice;
 use crate::{Class, Classing, Error, Policy, PolicyFn, TreeStats};
 use crate::{TREE_FRAMES, TreeId};
 
 pub struct Locals<'a> {
     buffer: &'a mut [u8],
     /// Local reservations for each class
-    classes: [Option<OffsetSlice<Local>>; 1 << Class::BITS],
+    classes: [Option<OffsetSlice<Local>>; Class::LEN as usize],
 }
 
 impl fmt::Debug for Locals<'_> {
@@ -30,7 +30,8 @@ impl fmt::Debug for Locals<'_> {
 
 impl<'a> Locals<'a> {
     pub fn metadata_size(classing: &Classing) -> usize {
-        size_of_slice::<Local>(classing.classes().iter().map(|&(_, count)| count).sum())
+        let len: usize = classing.classes().iter().map(|&(_, count)| count).sum();
+        len * size_of::<Local>()
     }
     pub unsafe fn metadata(&mut self) -> &'a mut [u8] {
         // Lifetime hack: internal buffer outlives instance!
@@ -49,7 +50,7 @@ impl<'a> Locals<'a> {
         let mut classes = [const { None }; 1 << Class::BITS];
         for &(class, count) in classing.classes() {
             let local = OffsetSlice::new(offset, count);
-            offset += size_of_slice::<Local>(count);
+            offset += size_of::<Local>() * count;
             classes[class.0 as usize] = Some(local);
         }
         Ok(Self { buffer, classes })

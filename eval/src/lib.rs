@@ -1,5 +1,6 @@
 use std::ops::{Add, Div};
 
+pub mod buddy;
 pub mod classes;
 pub mod gfp;
 pub mod mmap;

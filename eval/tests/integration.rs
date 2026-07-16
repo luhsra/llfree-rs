@@ -18,6 +18,10 @@ cfg_select! {
         use llfree_eval::LLC;
         type AllocImpl = LLC;
     }
+    feature = "buddy" => {
+        use llfree_eval::buddy::Buddy;
+        type AllocImpl = Buddy<'static>;
+    }
     _ => {
         type AllocImpl = LLFree<'static>;
     }

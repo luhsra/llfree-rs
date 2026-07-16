@@ -8,7 +8,7 @@ use log::warn;
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
 use crate::lower::HugeId;
-use crate::util::{Align, OrdBy, SortedBuffer, size_of_slice};
+use crate::util::{Align, OrdBy, SortedBuffer};
 use crate::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -78,8 +78,10 @@ impl<'a> Trees<'a> {
 
     pub const fn metadata_size(frames: usize) -> usize {
         // Event thought the elements are not cache aligned, the whole array should be
-        size_of_slice::<Atom<Tree>>(frames.div_ceil(TREE_FRAMES))
-            .next_multiple_of(align_of::<Align>())
+        size_of::<Atom<Tree>>()
+            * frames
+                .div_ceil(TREE_FRAMES)
+                .next_multiple_of(align_of::<Align>())
     }
 
     pub unsafe fn metadata(&mut self) -> &'a mut [u8] {

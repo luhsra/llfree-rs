@@ -25,6 +25,7 @@ raw-cpuid = { version = "11.6" }
 default = []
 llc = ["bindgen"]
 16K = ["llfree/16K"]
+buddy = []
 
 tree_huge_1 = ["llfree/tree_huge_1"]
 tree_huge_2 = ["llfree/tree_huge_2"]
