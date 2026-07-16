@@ -56,7 +56,6 @@ struct FreeArea {
     nr_free: usize,
 }
 
-/// Maximum order representable by a `usize` frame index.
 const MAX_ORDER: usize = TREE_ORDER;
 const LIST_NONE: usize = usize::MAX;
 type FreeAreas = [[Option<FreeArea>; Class::LEN as usize]; MAX_ORDER + 1];
@@ -96,6 +95,7 @@ impl<'a> Alloc<'a> for Buddy<'a> {
             )
         };
         if pages.len() < frames {
+            error!("Metadata is too small: {} < {frames} pages", pages.len());
             return Err(Error::Argument);
         }
 
@@ -126,7 +126,7 @@ impl<'a> Alloc<'a> for Buddy<'a> {
         match init {
             Init::None | Init::AllocAll => {}
             Init::Recover => {
-                error!("Invalid init mode");
+                error!("Buddy does not support recovery");
                 return Err(Error::Initialization);
             }
             Init::FreeAll => {
@@ -170,6 +170,7 @@ impl<'a> Alloc<'a> for Buddy<'a> {
             || (1usize << flags.order) > self.frames()
             || !self.valid_class(flags.class)
         {
+            error!("Invalid alloc request={flags:?}, frames={}", self.frames());
             return Err(Error::Argument);
         }
         let wanted = 1usize << flags.order;
@@ -255,6 +256,7 @@ impl<'a> Alloc<'a> for Buddy<'a> {
 
     fn put(&self, frame: FrameId, flags: Request) -> llfree::Result<()> {
         if flags.order > MAX_ORDER || !self.valid_class(flags.class) {
+            error!("Invalid free request: frame={frame}, request={flags:?}");
             return Err(Error::Argument);
         }
         let size = 1usize << flags.order;
@@ -265,10 +267,18 @@ impl<'a> Alloc<'a> for Buddy<'a> {
                 .checked_add(size)
                 .is_none_or(|end| end > self.frames())
         {
+            error!(
+                "Invalid free request: frame={frame}, request={flags:?}, frames={}",
+                self.frames()
+            );
             return Err(Error::Argument);
         }
         let mut areas = self.free_area.lock();
         if (frame.0..frame.0 + size).any(|i| unsafe { &*self.pages[i].get() }.private == 0) {
+            error!(
+                "Buddy double free or partially free range: frame={frame}, order={}",
+                flags.order
+            );
             return Err(Error::Argument);
         }
         let class = flags.class;
@@ -308,6 +318,7 @@ impl<'a> Alloc<'a> for Buddy<'a> {
         if matcher.class.is_some_and(|class| !self.valid_class(class))
             || change.class.is_some_and(|class| !self.valid_class(class))
         {
+            error!("Invalid tree change class: matcher={matcher:?}, change={change:?}");
             return Err(Error::Argument);
         }
         let tree_frames = 1usize << TREE_ORDER;
@@ -333,6 +344,7 @@ impl<'a> Alloc<'a> for Buddy<'a> {
                 break;
             }
             let Some((base, class)) = found else {
+                error!("No offline tree matched online request: matcher={matcher:?}");
                 return Err(Error::Memory);
             };
             unsafe {
@@ -368,6 +380,7 @@ impl<'a> Alloc<'a> for Buddy<'a> {
             }
         }
         let Some((base, class)) = found else {
+            error!("No free tree matched change request: matcher={matcher:?}");
             return Err(Error::Memory);
         };
         if let Some(TreeOperation::Offline) = change.operation {
@@ -388,6 +401,7 @@ impl<'a> Alloc<'a> for Buddy<'a> {
             }
             return Ok(());
         }
+        error!("Unsupported tree change: matcher={matcher:?}, change={change:?}");
         Err(Error::Argument)
     }
 
