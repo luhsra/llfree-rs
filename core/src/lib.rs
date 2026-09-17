@@ -16,6 +16,7 @@ pub mod util;
 pub mod wrapper;
 
 mod bitfield;
+pub use bitfield::BitField;
 use bitfield::RowId;
 mod llfree;
 pub use llfree::LLFree;
@@ -28,6 +29,8 @@ pub use trees::TreeId;
 
 use core::fmt;
 use core::mem::align_of;
+
+use log::error;
 
 /// Order of a physical frame
 pub const FRAME_SIZE: usize = if cfg!(feature = "16K") {
@@ -59,8 +62,8 @@ pub const TREE_ORDER: usize = TREE_FRAMES.ilog2() as usize;
 pub const HUGE_ORDER: usize = if cfg!(feature = "16K") { 11 } else { 9 };
 /// Number of small frames in huge frame
 pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
-/// Bit size of the atomic ints that comprise the bitfields
-pub const BITFIELD_ROW: usize = 64;
+/// The ints that comprise the bitfields
+pub type BitRow = u64;
 
 /// Number of retries if an atomic operation fails.
 const RETRIES: usize = 4;
@@ -135,6 +138,17 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
         Err(Error::Memory)
     }
 
+    /// Allocate the entire huge frame at `huge`, returning the old allocation state.
+    fn get_entire_huge(
+        &self,
+        _huge: HugeId,
+        _class: Class,
+        _local: Option<usize>,
+    ) -> Result<BitField> {
+        error!("Unimplemented get_entire_huge");
+        Err(Error::Memory)
+    }
+
     /// Validate the internal state
     #[cold]
     fn validate(&self) {}
@@ -150,17 +164,17 @@ impl FrameId {
         Self(bits as usize)
     }
 
-    const fn as_tree(self) -> TreeId {
+    pub const fn as_tree(self) -> TreeId {
         TreeId(self.0 / TREE_FRAMES)
     }
-    const fn as_huge(self) -> HugeId {
+    pub const fn as_huge(self) -> HugeId {
         HugeId(self.0 / HUGE_FRAMES)
     }
     const fn as_row(self) -> RowId {
-        RowId(self.0 / BITFIELD_ROW)
+        RowId(self.0 / BitRow::BITS as usize)
     }
     const fn row_bit_idx(self) -> usize {
-        self.0 % BITFIELD_ROW
+        self.0 % BitRow::BITS as usize
     }
     pub const fn is_aligned(self, order: usize) -> bool {
         self.0 & ((1 << order) - 1) == 0

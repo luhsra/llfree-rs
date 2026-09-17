@@ -173,6 +173,15 @@ impl<'a> Alloc<'a> for LLC {
         }
     }
 
+    fn get_entire_huge(
+        &self,
+        _huge: llfree::HugeId,
+        _class: Class,
+        _local: Option<usize>,
+    ) -> llfree::Result<llfree::BitField> {
+        todo!("Integrate into llc")
+    }
+
     fn validate(&self) {
         unsafe { bindings::llfree_validate(self.raw.get().cast()) }
     }

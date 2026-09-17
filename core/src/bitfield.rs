@@ -3,23 +3,22 @@
 use core::fmt;
 use core::mem::size_of;
 use core::ops::{Not, Range};
-use core::sync::atomic::AtomicU64;
 
 use log::warn;
 
 use crate::atomic::{Atom, Atomic};
 use crate::lower::HugeId;
 use crate::trees::TreeId;
-use crate::{BITFIELD_ROW, Error, HUGE_ORDER, Result};
+use crate::{BitRow, Error, HUGE_ORDER, Result};
 use crate::{FrameId, HUGE_FRAMES};
 
-const ROWS: usize = HUGE_FRAMES / Bitfield::ROW_BITS;
+const _: () = assert!(HUGE_FRAMES.is_multiple_of(BitRow::BITS as usize));
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RowId(pub usize);
 impl RowId {
     pub const fn as_frame(self) -> FrameId {
-        FrameId(self.0 * BITFIELD_ROW)
+        FrameId(self.0 * BitRow::BITS as usize)
     }
     pub const fn as_huge(self) -> HugeId {
         self.as_frame().as_huge()
@@ -27,8 +26,8 @@ impl RowId {
     pub const fn as_tree(self) -> TreeId {
         self.as_frame().as_tree()
     }
-    pub const fn huge_idx(self) -> usize {
-        self.0 % ROWS
+    pub const fn idx_in_huge(self) -> usize {
+        self.0 % (HUGE_FRAMES / BitRow::BITS as usize)
     }
     #[allow(unused)]
     pub const fn into_bits(self) -> u64 {
@@ -56,25 +55,58 @@ impl fmt::Debug for RowId {
     }
 }
 
-/// Bitfield replacing the level one table.
-pub struct Bitfield {
-    data: [Atom<u64>; ROWS],
+/// Simple bitfield.
+#[derive(Clone, Debug, Default)]
+#[repr(align(64))]
+pub struct BitField {
+    pub data: [BitRow; Self::ROWS],
 }
+const _: () = assert!(core::mem::size_of::<BitField>() == HUGE_FRAMES / 8);
+impl BitField {
+    pub const ROWS: usize = HUGE_FRAMES / BitRow::BITS as usize;
+    pub const ROW_BITS: usize = BitRow::BITS as usize;
 
-const _: () = assert!(size_of::<Bitfield>() >= 8);
-const _: () = assert!(Bitfield::LEN.is_multiple_of(Bitfield::ROW_BITS));
-const _: () = assert!(1 << Bitfield::ORDER == Bitfield::LEN);
-const _: () = assert!(Bitfield::ORDER == HUGE_ORDER);
-
-impl Default for Bitfield {
-    fn default() -> Self {
+    pub const fn zeros() -> Self {
+        Self { data: [0; _] }
+    }
+    pub const fn ones() -> Self {
         Self {
-            data: [const { Atom(AtomicU64::new(0)) }; ROWS],
+            data: [BitRow::MAX; _],
         }
+    }
+    pub const fn get(&self, i: usize) -> bool {
+        (self.data[i / Self::ROW_BITS] & (1 << (i % Self::ROW_BITS))) != 0
+    }
+    pub const fn set(&mut self, i: usize, value: bool) {
+        if value {
+            self.data[i / Self::ROW_BITS] |= 1 << (i % Self::ROW_BITS);
+        } else {
+            self.data[i / Self::ROW_BITS] &= !(1 << (i % Self::ROW_BITS));
+        }
+    }
+    pub fn fill(&mut self, value: bool) {
+        self.data.fill(if value { BitRow::MAX } else { 0 });
+    }
+    pub fn count_ones(&self) -> usize {
+        self.data.iter().map(|&r| r.count_ones() as usize).sum()
+    }
+    pub fn count_zeros(&self) -> usize {
+        self.data.iter().map(|&r| r.count_zeros() as usize).sum()
     }
 }
 
-impl fmt::Debug for Bitfield {
+/// Atomic bitfield.
+#[derive(Default)]
+pub struct ABitField {
+    data: [Atom<BitRow>; Self::ROWS],
+}
+
+const _: () = assert!(size_of::<ABitField>() >= 8);
+const _: () = assert!(ABitField::LEN.is_multiple_of(ABitField::ROW_BITS));
+const _: () = assert!(1 << ABitField::ORDER == ABitField::LEN);
+const _: () = assert!(ABitField::ORDER == HUGE_ORDER);
+
+impl fmt::Debug for ABitField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Bitfield( ")?;
         for d in &self.data {
@@ -85,9 +117,10 @@ impl fmt::Debug for Bitfield {
     }
 }
 
-impl Bitfield {
-    pub const ROW_BITS: usize = BITFIELD_ROW;
-    pub const LEN: usize = ROWS * Self::ROW_BITS;
+impl ABitField {
+    pub const ROWS: usize = HUGE_FRAMES / BitRow::BITS as usize;
+    pub const ROW_BITS: usize = BitRow::BITS as usize;
+    pub const LEN: usize = Self::ROWS * Self::ROW_BITS;
     pub const ORDER: usize = Self::LEN.ilog2() as _;
 
     /// Overwrite the `range` of bits with `v`
@@ -117,12 +150,10 @@ impl Bitfield {
     }
 
     fn row(&self, i: RowId) -> &Atom<u64> {
-        &self.data[i.huge_idx()]
+        &self.data[i.idx_in_huge()]
     }
-
-    /// Return the  `i`-th row
-    pub fn get_row(&self, i: RowId) -> u64 {
-        self.data[i.huge_idx()].load()
+    fn get_row(&self, i: RowId) -> u64 {
+        self.row(i).load()
     }
 
     /// Toggle 2^`order` bits at the `i`-th place if they are all zero or one as expected
@@ -154,7 +185,7 @@ impl Bitfield {
             _ => {
                 // Update multiple rows
                 let num_rows = num_bits / Self::ROW_BITS;
-                let di = i.as_row().huge_idx();
+                let di = i.as_row().idx_in_huge();
                 for i in di..di + num_rows {
                     let expected = if expected { !0 } else { 0 };
                     if let Err(e) = self.row(RowId(i)).compare_exchange(expected, !expected) {
@@ -215,11 +246,13 @@ impl Bitfield {
     /// Orders above 6 need multiple CAS operations, which might lead to race conditions!
     pub fn set_first_zeros(&self, start_row: RowId, order: usize) -> Result<FrameId> {
         if order > Self::ROW_BITS.ilog2() as usize {
-            return self.set_first_zero_rows(order).map(RowId::as_frame);
+            return self
+                .set_first_zero_rows(start_row, order)
+                .map(RowId::as_frame);
         }
 
         for i in 0..self.data.len() {
-            let i = RowId(i + start_row.huge_idx()).huge_idx();
+            let i = RowId(i + start_row.idx_in_huge()).idx_in_huge();
 
             let mut offset = FrameId(0);
             if let Ok(_) = self.row(RowId(i)).try_update(|e| {
@@ -237,13 +270,21 @@ impl Bitfield {
     ///
     /// # Warning
     /// Using multiple CAS operations might lead to race conditions!
-    fn set_first_zero_rows(&self, order: usize) -> Result<RowId> {
+    fn set_first_zero_rows(&self, start_row: RowId, order: usize) -> Result<RowId> {
         debug_assert!(order > Self::ROW_BITS.ilog2() as usize);
         debug_assert!(order <= Self::ORDER);
 
         let num_rows = 1 << (order - Self::ROW_BITS.ilog2() as usize);
+        let start_row = start_row.idx_in_huge() / num_rows;
 
-        for (i, rows) in self.data.chunks(num_rows).enumerate() {
+        for (i, rows) in self
+            .data
+            .chunks(num_rows)
+            .enumerate()
+            .cycle()
+            .skip(start_row)
+            .take(self.data.len() / num_rows)
+        {
             // Check that these rows are free
             if rows.iter().all(|e| e.load() == 0) {
                 for (j, row) in rows.iter().enumerate() {
@@ -263,7 +304,7 @@ impl Bitfield {
         Err(Error::Memory)
     }
 
-    /// Fill this bitset with `v` ignoring any previous data.
+    /// Fill with `v` ignoring any previous data.
     pub fn fill(&self, v: bool) {
         let v = if v { u64::MAX } else { 0 };
         for row in &self.data {
@@ -271,12 +312,47 @@ impl Bitfield {
         }
     }
 
-    /// Returns the number of zeros in this bitfield
+    /// Returns the number of zeros
     pub fn count_zeros(&self) -> usize {
         self.data
             .iter()
             .map(|v| v.load().count_zeros() as usize)
             .sum()
+    }
+
+    /// Copies into `into`, filling it with `v` in the process.
+    pub fn fill_copy(&self, v: bool) -> BitField {
+        const _: () = assert!(BitField::ROW_BITS == ABitField::ROW_BITS);
+        const _: () = assert!(size_of::<BitField>() == size_of::<ABitField>());
+
+        let mut into = BitField::zeros();
+        for (src, dst) in self.data.iter().zip(into.data.iter_mut()) {
+            *dst = src.swap(if v { u64::MAX } else { 0 });
+        }
+        into
+    }
+
+    /// Apply `zeroes` to `self`.
+    ///
+    /// Error if a bit in `self` is already zero.
+    pub fn zero_multiple(&self, zeroes: BitField) -> Result<()> {
+        let mut old = BitField::zeros();
+        for (i, (dst, src)) in self.data.iter().zip(zeroes.data).enumerate() {
+            // check if already zero
+            match dst.try_update(|v| (!v & !src == 0).then_some(v & src)) {
+                Ok(o) => old.data[i] = o,
+                Err(_) => {
+                    // undo
+                    for j in (0..i).rev() {
+                        self.data[j]
+                            .compare_exchange(old.data[j] & zeroes.data[j], old.data[j])
+                            .unwrap();
+                    }
+                    return Err(Error::Memory);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -329,11 +405,11 @@ fn first_zeros_aligned(v: u64, order: usize) -> Option<(u64, usize)> {
 mod test {
     use crate::HUGE_ORDER;
 
-    use super::{FrameId, RowId};
+    use super::{ABitField, BitField, FrameId, RowId};
 
     #[test]
     fn bit_set() {
-        let bitfield = super::Bitfield::default();
+        let bitfield = ABitField::default();
         bitfield.set(FrameId(0)..FrameId(0), true);
         assert_eq!(bitfield.get_row(RowId(0)), 0);
         assert_eq!(bitfield.get_row(RowId(1)), 0);
@@ -362,7 +438,7 @@ mod test {
 
     #[test]
     fn bit_toggle() {
-        let bitfield = super::Bitfield::default();
+        let bitfield = ABitField::default();
 
         assert!(bitfield.is_zero(FrameId(8), 3));
         bitfield.toggle(FrameId(8), 3, false).unwrap();
@@ -388,7 +464,7 @@ mod test {
         bitfield.toggle(FrameId(16), 3, true).unwrap();
         assert_eq!(bitfield.get_row(RowId(0)), 0);
         assert_eq!(bitfield.get_row(RowId(1)), 0);
-        assert!(bitfield.is_zero(FrameId(0), super::Bitfield::ORDER));
+        assert!(bitfield.is_zero(FrameId(0), ABitField::ORDER));
 
         bitfield.toggle(FrameId(0), 6, false).unwrap();
         assert_eq!(bitfield.get_row(RowId(0)), u64::MAX);
@@ -399,6 +475,57 @@ mod test {
         bitfield.toggle(FrameId(0), 7, true).unwrap();
         assert_eq!(bitfield.get_row(RowId(0)), 0);
         assert_eq!(bitfield.get_row(RowId(1)), 0);
+    }
+
+    #[test]
+    fn fill_copy() {
+        let bitfield = ABitField::default();
+        for (i, row) in bitfield.data.iter().enumerate() {
+            row.store(1 << i);
+        }
+
+        let copy = bitfield.fill_copy(true);
+
+        for (i, row) in copy.data.iter().enumerate() {
+            assert_eq!(*row, 1 << i);
+        }
+        assert!(bitfield.data.iter().all(|row| row.load() == u64::MAX));
+    }
+
+    #[test]
+    fn zero_multiple() {
+        let bitfield = ABitField::default();
+        bitfield.fill(true);
+        bitfield.set(FrameId(5)..FrameId(6), false);
+
+        let mut zeroes = BitField::ones();
+        zeroes.set(1, false);
+        zeroes.set(ABitField::ROW_BITS + 2, false);
+
+        bitfield.zero_multiple(zeroes).unwrap();
+
+        assert_eq!(bitfield.get_row(RowId(0)), !(1 << 1) & !(1 << 5));
+        assert_eq!(bitfield.get_row(RowId(1)), !(1 << 2));
+        assert!(bitfield.data[2..].iter().all(|row| row.load() == u64::MAX));
+    }
+
+    #[test]
+    fn zero_multiple_rolls_back_on_error() {
+        let bitfield = ABitField::default();
+        bitfield.fill(true);
+        bitfield.set(
+            FrameId(ABitField::ROW_BITS + 3)..FrameId(ABitField::ROW_BITS + 4),
+            false,
+        );
+
+        let mut zeroes = BitField::ones();
+        zeroes.set(2, false);
+        zeroes.set(ABitField::ROW_BITS + 3, false);
+
+        assert_eq!(bitfield.zero_multiple(zeroes), Err(crate::Error::Memory));
+        assert_eq!(bitfield.get_row(RowId(0)), u64::MAX);
+        assert_eq!(bitfield.get_row(RowId(1)), !(1 << 3));
+        assert!(bitfield.data[2..].iter().all(|row| row.load() == u64::MAX));
     }
 
     #[test]
@@ -483,7 +610,7 @@ mod test {
 
     #[test]
     fn first_zero_rows() {
-        let bitfield = super::Bitfield::default();
+        let bitfield = ABitField::default();
 
         // 9
         assert!(bitfield.data.iter().all(|e| e.load() == 0));

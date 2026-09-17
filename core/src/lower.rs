@@ -8,15 +8,15 @@ use bitfield_struct::bitfield;
 use log::{error, info, warn};
 
 use crate::atomic::{Atom, Atomic, AtomicSlice};
-use crate::bitfield::{Bitfield, RowId};
+use crate::bitfield::{ABitField, RowId};
 use crate::trees::TreeId;
 use crate::util::{Align, align_down, spin_wait};
 use crate::{
-    Error, FrameId, HUGE_FRAMES, HUGE_ORDER, Init, RETRIES, Result, Stats, TREE_FRAMES, TREE_HUGE,
-    TREE_ORDER,
+    BitField, Error, FrameId, HUGE_FRAMES, HUGE_ORDER, Init, RETRIES, Result, Stats, TREE_FRAMES,
+    TREE_HUGE, TREE_ORDER,
 };
 
-const _: () = assert!(Bitfield::LEN == HUGE_FRAMES);
+const _: () = assert!(ABitField::LEN == HUGE_FRAMES);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct HugeId(pub usize);
@@ -27,7 +27,8 @@ impl HugeId {
     pub fn as_tree(self) -> TreeId {
         self.as_frame().as_tree()
     }
-    pub fn as_row(self) -> RowId {
+    #[allow(unused)]
+    pub(crate) fn as_row(self) -> RowId {
         self.as_frame().as_row()
     }
     pub fn child_idx(self) -> usize {
@@ -75,7 +76,7 @@ impl fmt::Debug for HugeId {
 #[derive(Default, Debug)]
 pub struct Lower<'a> {
     len: usize,
-    bitfields: &'a [Align<Bitfield>],
+    bitfields: &'a [Align<ABitField>],
     children: &'a [Align<[Atom<HugeEntry>; TREE_HUGE]>],
 }
 
@@ -92,12 +93,12 @@ struct Metadata {
 
 impl Metadata {
     const fn new(frames: usize) -> Self {
-        let bitfield_len = frames.div_ceil(Bitfield::LEN);
+        let bitfield_len = frames.div_ceil(ABitField::LEN);
         let table_len = frames.div_ceil(TREE_FRAMES);
         Self {
             bitfield_len,
             // This also respects the cache line alignment
-            bitfield_size: size_of::<Bitfield>() * bitfield_len,
+            bitfield_size: size_of::<ABitField>() * bitfield_len,
             table_len,
             table_size: size_of::<Align<[HugeEntry; TREE_HUGE]>>() * table_len,
         }
@@ -148,7 +149,7 @@ impl<'a> Lower<'a> {
     fn children(&self, tree: TreeId) -> &[Atom<HugeEntry>; TREE_HUGE] {
         &self.children[tree.0]
     }
-    fn bitfield(&self, huge: HugeId) -> &Bitfield {
+    fn bitfield(&self, huge: HugeId) -> &ABitField {
         &self.bitfields[huge.0]
     }
 
@@ -171,7 +172,7 @@ impl<'a> Lower<'a> {
                 if entry.huge() {
                     // Check that underlying bitfield is empty
                     let p = self.bitfield(start.as_huge()).count_zeros();
-                    if p != Bitfield::LEN {
+                    if p != ABitField::LEN {
                         warn!("Invalid L2 start=0x{start:?} i{i}: h != {p}");
                         self.bitfield(start.as_huge()).fill(false);
                     }
@@ -210,7 +211,10 @@ impl<'a> Lower<'a> {
             for i in (0..TREE_HUGE).step_by(h_num) {
                 let i = (child_off + i) % TREE_HUGE;
                 if children[i..i + h_num]
-                    .compare_exchange_all(HugeEntry::new_with(Bitfield::LEN), HugeEntry::new_huge())
+                    .compare_exchange_all(
+                        HugeEntry::new_with(ABitField::LEN),
+                        HugeEntry::new_huge(),
+                    )
                     .is_ok()
                 {
                     return Ok(FrameId(tree_start.0 + HugeId(i).as_frame().0));
@@ -244,10 +248,10 @@ impl<'a> Lower<'a> {
         let i = (frame.as_huge().0) % TREE_HUGE;
         let children = &self.children(frame.as_tree());
 
-        if let Some(h_order) = order.checked_sub(Bitfield::ORDER) {
+        if let Some(h_order) = order.checked_sub(ABitField::ORDER) {
             let children = &children[i..i + (1 << h_order)];
             if let Ok(_) = children
-                .compare_exchange_all(HugeEntry::new_with(Bitfield::LEN), HugeEntry::new_huge())
+                .compare_exchange_all(HugeEntry::new_with(ABitField::LEN), HugeEntry::new_huge())
             {
                 return Ok(());
             }
@@ -274,7 +278,7 @@ impl<'a> Lower<'a> {
         if let Some(h_order) = order.checked_sub(HUGE_ORDER) {
             let children = &children[i..i + (1 << h_order)];
             match children
-                .compare_exchange_all(HugeEntry::new_huge(), HugeEntry::new_with(Bitfield::LEN))
+                .compare_exchange_all(HugeEntry::new_huge(), HugeEntry::new_with(ABitField::LEN))
             {
                 Ok(_) => Ok(()),
                 Err(_) => Err(Error::Memory),
@@ -283,7 +287,7 @@ impl<'a> Lower<'a> {
             let old = children[i].load();
             if old.huge() {
                 self.partial_put_huge(old, frame, order)
-            } else if old.free() <= Bitfield::LEN - (1 << order) {
+            } else if old.free() <= ABitField::LEN - (1 << order) {
                 self.put_small(frame, order)
             } else {
                 error!("Addr {frame:?} o={order} {old:?}");
@@ -301,15 +305,15 @@ impl<'a> Lower<'a> {
         let i = frame.as_huge().child_idx();
         let children = &self.children(frame.as_tree());
 
-        if let Some(h_order) = order.checked_sub(Bitfield::ORDER) {
+        if let Some(h_order) = order.checked_sub(ABitField::ORDER) {
             children[i..i + (1 << h_order)]
                 .iter()
-                .all(|e| e.load().free() == Bitfield::LEN)
+                .all(|e| e.load().free() == ABitField::LEN)
         } else {
             let child = children[i].load();
             if child.free() < (1 << order) {
                 false
-            } else if child.free() == Bitfield::LEN {
+            } else if child.free() == ABitField::LEN {
                 true
             } else {
                 let bitfield = &self.bitfield(frame.as_huge());
@@ -368,22 +372,72 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Allocate all frames at the given `huge` frame, returning the previous bitfield.
+    pub fn get_entire_huge(&self, huge: HugeId) -> Result<BitField> {
+        let child = &self.children(huge.as_tree())[huge.child_idx()];
+        // Clear counter first to prevent parallel alloc
+        let Ok(old) = child.try_update(|e| (!e.huge()).then_some(HugeEntry::new_with(0))) else {
+            return Ok(BitField::ones());
+        };
+        let bits = self.bitfield(huge).fill_copy(true);
+        let bits_free = bits.count_zeros();
+        assert!(bits_free >= old.free());
+
+        // In-between free race
+        if bits_free > old.free() {
+            for _ in 0..RETRIES {
+                if child.try_update(|e| e.dec(bits_free - old.free())).is_ok() {
+                    return Ok(bits);
+                }
+                core::hint::spin_loop();
+            }
+            error!(
+                "failed to reserve entire huge: bits={bits_free} old={}",
+                old.free()
+            );
+            self.bitfield(huge)
+                .zero_multiple(bits)
+                .expect("undo failed");
+            child
+                .try_update(|e| e.inc(old.free()))
+                .expect("undo failed");
+            return Err(Error::Memory);
+        }
+        Ok(bits)
+    }
+
+    /// Frees all zero frames in the bitfield at the given `huge` frame, erroring if one is already free.
+    pub fn put_entire_huge(&self, huge: HugeId, bitfield: BitField) -> Result<()> {
+        let child = &self.children(huge.as_tree())[huge.child_idx()];
+        let frames = bitfield.count_zeros();
+        if frames == 0 {
+            return Ok(()); // nothing to do
+        }
+        if self.bitfield(huge).zero_multiple(bitfield).is_err() {
+            return Err(Error::Memory);
+        }
+        child
+            .try_update(|e| e.inc(frames))
+            .expect("failed to update huge entry");
+        Ok(())
+    }
+
     fn free_all(&self) {
         // Init tables
         let (last, tables) = self.children.split_last().unwrap();
         // Table is fully included in the memory range
         for table in tables {
-            unsafe { table.non_atomic() }.fill(HugeEntry::new_with(Bitfield::LEN));
+            unsafe { table.non_atomic() }.fill(HugeEntry::new_with(ABitField::LEN));
         }
         // Table is only partially included in the memory range
         for (i, entry) in last.iter().enumerate() {
-            let frame = tables.len() * TREE_FRAMES + i * Bitfield::LEN;
-            let free = self.frames().saturating_sub(frame).min(Bitfield::LEN);
+            let frame = tables.len() * TREE_FRAMES + i * ABitField::LEN;
+            let free = self.frames().saturating_sub(frame).min(ABitField::LEN);
             entry.store(HugeEntry::new_with(free));
         }
 
         // Init bitfields
-        let last_i = self.frames() / Bitfield::LEN;
+        let last_i = self.frames() / ABitField::LEN;
         let (included, mut remainder) = self.bitfields.split_at(last_i);
         // Bitfield is fully included in the memory range
         for bitfield in included {
@@ -391,10 +445,10 @@ impl<'a> Lower<'a> {
         }
         // Bitfield might be only partially included in the memory range
         if let Some((last, excluded)) = remainder.split_first() {
-            let end = FrameId(self.frames() - included.len() * Bitfield::LEN);
-            debug_assert!(end.0 <= Bitfield::LEN);
+            let end = FrameId(self.frames() - included.len() * ABitField::LEN);
+            debug_assert!(end.0 <= ABitField::LEN);
             last.set(FrameId(0)..end, false);
-            last.set(end..FrameId(Bitfield::LEN), true);
+            last.set(end..FrameId(ABitField::LEN), true);
             remainder = excluded;
         }
         // Not part of the final memory range
@@ -411,7 +465,7 @@ impl<'a> Lower<'a> {
             unsafe { table.non_atomic() }.fill(HugeEntry::new_huge());
         }
         // Table is only partially included in the memory range
-        let last_i = (self.frames() / Bitfield::LEN) - tables.len() * TREE_HUGE;
+        let last_i = (self.frames() / ABitField::LEN) - tables.len() * TREE_HUGE;
         let (included, remainder) = last.split_at(last_i);
         for entry in included {
             entry.store(HugeEntry::new_huge());
@@ -422,7 +476,7 @@ impl<'a> Lower<'a> {
         }
 
         // Init bitfields
-        let last_i = self.frames() / Bitfield::LEN;
+        let last_i = self.frames() / ABitField::LEN;
         let (included, remainder) = self.bitfields.split_at(last_i);
         // Bitfield is fully included in the memory range
         for bitfield in included {
@@ -441,7 +495,7 @@ impl<'a> Lower<'a> {
         if bitfield.toggle(frame, order, true).is_err() {
             error!(
                 "L1 put failed o={order} i={} p={frame:?}",
-                frame.0 % Bitfield::LEN
+                frame.0 % ABitField::LEN
             );
             return Err(Error::Memory);
         }
@@ -460,7 +514,7 @@ impl<'a> Lower<'a> {
         let children = &self.children(frame.as_tree());
         let bitfield = &self.bitfield(frame.as_huge());
         // Try filling the whole bitfield
-        if bitfield.toggle(FrameId(0), Bitfield::ORDER, false).is_ok() {
+        if bitfield.toggle(FrameId(0), ABitField::ORDER, false).is_ok() {
             children[i]
                 .compare_exchange(old, HugeEntry::new())
                 .expect("Failed partial clear");
@@ -535,7 +589,7 @@ impl HugeEntry {
     }
     /// Increments the free frames counter.
     fn inc(self, num_frames: usize) -> Option<Self> {
-        if !self.huge() && self.free() <= Bitfield::LEN - num_frames {
+        if !self.huge() && self.free() <= ABitField::LEN - num_frames {
             Some(Self::new_with(self.free() + num_frames))
         } else {
             None
@@ -552,12 +606,12 @@ mod test {
 
     use log::warn;
 
-    use super::Bitfield;
+    use super::ABitField;
     use crate::lower::Lower;
     use crate::util::{WyRand, aligned_buf, logging, parallel};
     use crate::{
-        Error, FrameId, HUGE_FRAMES, HUGE_ORDER, HugeId, Init, Result, TREE_FRAMES, TREE_HUGE,
-        TREE_ORDER, TreeId,
+        BitField, Error, FrameId, HUGE_FRAMES, HUGE_ORDER, HugeId, Init, Result, TREE_FRAMES,
+        TREE_HUGE, TREE_ORDER, TreeId,
     };
 
     struct LowerTest<'a>(ManuallyDrop<Lower<'a>>);
@@ -598,9 +652,9 @@ mod test {
 
         assert_eq!(
             lower.children(TreeId(0))[0].load().free(),
-            Bitfield::LEN - 3
+            ABitField::LEN - 3
         );
-        assert_eq!(lower.bitfield(HugeId(0)).count_zeros(), Bitfield::LEN - 3);
+        assert_eq!(lower.bitfield(HugeId(0)).count_zeros(), ABitField::LEN - 3);
     }
 
     #[test]
@@ -614,8 +668,8 @@ mod test {
         });
 
         let entry2 = lower.children(TreeId(0))[0].load();
-        assert_eq!(entry2.free(), Bitfield::LEN - 2);
-        assert_eq!(lower.bitfield(HugeId(0)).count_zeros(), Bitfield::LEN - 2);
+        assert_eq!(entry2.free(), ABitField::LEN - 2);
+        assert_eq!(lower.bitfield(HugeId(0)).count_zeros(), ABitField::LEN - 2);
     }
 
     #[test]
@@ -625,7 +679,7 @@ mod test {
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
-        for _ in 0..Bitfield::LEN - 1 {
+        for _ in 0..ABitField::LEN - 1 {
             lower.get(FrameId(0).as_row(), 0, None).unwrap();
         }
 
@@ -635,8 +689,8 @@ mod test {
 
         let table = &lower.children(TreeId(0));
         assert_eq!(table[0].load().free(), 0);
-        assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
-        assert_eq!(lower.bitfield(HugeId(1)).count_zeros(), Bitfield::LEN - 1);
+        assert_eq!(table[1].load().free(), ABitField::LEN - 1);
+        assert_eq!(lower.bitfield(HugeId(1)).count_zeros(), ABitField::LEN - 1);
     }
 
     #[test]
@@ -654,14 +708,14 @@ mod test {
             lower.put(FrameId(frames[t]), 0).unwrap();
         });
 
-        assert_eq!(lower.children(TreeId(0))[0].load().free(), Bitfield::LEN);
+        assert_eq!(lower.children(TreeId(0))[0].load().free(), ABitField::LEN);
     }
 
     #[test]
     fn free_last() {
         logging();
 
-        let mut frames = [0; Bitfield::LEN];
+        let mut frames = [0; ABitField::LEN];
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
@@ -679,15 +733,56 @@ mod test {
     }
 
     #[test]
+    fn get_and_put_entire_huge() {
+        let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
+        let huge = HugeId(0);
+        let allocated = FrameId(1);
+        lower.get(allocated.as_row(), 0, Some(allocated)).unwrap();
+
+        let previous = lower.get_entire_huge(huge).unwrap();
+
+        assert_eq!(previous.count_ones(), 1);
+        assert!(previous.get(allocated.0));
+        assert_eq!(lower.children(TreeId(0))[0].load().free(), 0);
+        assert_eq!(lower.bitfield(huge).count_zeros(), 0);
+
+        lower.put_entire_huge(huge, previous.clone()).unwrap();
+
+        assert_eq!(
+            lower.children(TreeId(0))[0].load().free(),
+            ABitField::LEN - 1
+        );
+        assert_eq!(lower.bitfield(huge).count_zeros(), ABitField::LEN - 1);
+        assert!(!lower.is_free(allocated, 0));
+        assert_eq!(lower.put_entire_huge(huge, previous), Err(Error::Memory));
+        assert_eq!(
+            lower.children(TreeId(0))[0].load().free(),
+            ABitField::LEN - 1
+        );
+        assert_eq!(lower.bitfield(huge).count_zeros(), ABitField::LEN - 1);
+    }
+
+    #[test]
+    fn entire_huge_no_op() {
+        let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
+        let huge = HugeId(0);
+
+        lower.put_entire_huge(huge, BitField::ones()).unwrap();
+
+        assert_eq!(lower.children(TreeId(0))[0].load().free(), ABitField::LEN);
+        assert_eq!(lower.bitfield(huge).count_zeros(), ABitField::LEN);
+    }
+
+    #[test]
     #[cfg(not(feature = "tree_huge_1"))]
     fn realloc_last() {
         logging();
 
-        let mut frames = [0; Bitfield::LEN];
+        let mut frames = [0; ABitField::LEN];
 
         let lower = LowerTest::create(TREE_FRAMES, Init::FreeAll).unwrap();
 
-        for frame in &mut frames[..Bitfield::LEN - 1] {
+        for frame in &mut frames[..ABitField::LEN - 1] {
             *frame = lower.get(FrameId(0).as_row(), 0, None).unwrap().0;
         }
 
@@ -706,8 +801,8 @@ mod test {
             // Table entry skipped
             assert_eq!(table[0].load().free(), 2);
             assert_eq!(lower.bitfield(HugeId(0)).count_zeros(), 2);
-            assert_eq!(table[1].load().free(), Bitfield::LEN - 1);
-            assert_eq!(lower.bitfield(HugeId(1)).count_zeros(), Bitfield::LEN - 1);
+            assert_eq!(table[1].load().free(), ABitField::LEN - 1);
+            assert_eq!(lower.bitfield(HugeId(1)).count_zeros(), ABitField::LEN - 1);
         }
     }
 
@@ -727,11 +822,11 @@ mod test {
         let allocated = 1 + 2 + 4;
         assert_eq!(
             lower.children(TreeId(0))[0].load().free(),
-            Bitfield::LEN - allocated
+            ABitField::LEN - allocated
         );
         assert_eq!(
             lower.bitfield(HugeId(0)).count_zeros(),
-            Bitfield::LEN - allocated
+            ABitField::LEN - allocated
         );
     }
 
@@ -748,14 +843,14 @@ mod test {
 
         assert_eq!(
             lower.children(TreeId(0))[0].load().free(),
-            Bitfield::LEN - 2 - 4
+            ABitField::LEN - 2 - 4
         );
 
         parallel(0..2, |t| {
             lower.put(FrameId(frames[t]), t + 1).unwrap();
         });
 
-        assert_eq!(lower.children(TreeId(0))[0].load().free(), Bitfield::LEN);
+        assert_eq!(lower.children(TreeId(0))[0].load().free(), ABitField::LEN);
     }
 
     #[test]

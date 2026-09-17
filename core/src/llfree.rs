@@ -3,7 +3,7 @@
 use core::fmt;
 use core::ops::Range;
 
-use log::{debug, info};
+use log::{debug, error, info};
 
 use crate::local::{Locals, Reservation};
 use crate::lower::Lower;
@@ -37,7 +37,7 @@ macro_rules! ensure {
 /// This allocator stores these tree entries in a [packed array][Trees].
 ///
 /// Additionally, the allocator manages user-provided [classes][Class].
-/// Classs are used to separate trees into different groups.
+/// Classes are used to separate trees into different groups.
 /// The user also has to provide a [policy function][PolicyFn] that defines
 /// how to access the classes.
 ///
@@ -254,6 +254,74 @@ impl<'a> Alloc<'a> for LLFree<'a> {
         self.trees.change(matcher, change, |i| {
             self.stats_at(i.as_frame(), TREE_ORDER).free_frames
         })
+    }
+
+    /// Allocate the entire huge frame at `huge`, returning the old allocation state.
+    fn get_entire_huge(
+        &self,
+        huge: HugeId,
+        class: Class,
+        local: Option<usize>,
+    ) -> Result<BitField> {
+        ensure!(
+            (huge + HugeId(1)).as_frame().0 <= self.lower.frames(),
+            "huge frame {huge:?} overflows"
+        );
+        ensure!(
+            self.locals.class_locals(class).is_some(),
+            "Invalid class {class:?}"
+        );
+
+        // Get free counter from child and set to zero
+        // Copy and reset bitfield
+        let bits = self.lower.get_entire_huge(huge)?;
+        let frames = bits.count_zeros(); // previous free
+
+        // The difficult part here is to decrement the free counter(s),
+        // depending on the state of the tree.
+
+        // Try local reservation first
+        if let Some(local) = local
+            && let Ok(_) = self.locals.get(class, local, Some(huge.as_tree()), frames)
+        {
+            return Ok(bits);
+        }
+
+        for _ in 0..RETRIES {
+            // Try global tree
+            if let Some(_) = self.trees.steal(huge.as_tree(), class, frames, self.policy) {
+                return Ok(bits);
+            }
+
+            // Someone else has this tree -> steal / demote
+            if let Some(_) =
+                self.locals
+                    .steal_any(class, None, Some(huge.as_tree()), frames, self.policy)
+            {
+                return Ok(bits);
+            }
+            if let Some((_, old)) =
+                self.locals
+                    .demote_any(class, None, Some(huge.as_tree()), frames, self.policy)
+            {
+                // Unreserve if demoted
+                if let Some(Reservation { row, class, free }) = old {
+                    self.trees
+                        .unreserve(row.as_tree(), free, class, self.policy);
+                }
+                return Ok(bits);
+            }
+
+            // We might have split the counters between tree/local -> drain to sync
+            self.drain();
+        }
+
+        error!("failed entire huge - sync counters");
+        // Undo
+        self.lower
+            .put_entire_huge(huge, bits)
+            .expect("undoing failed");
+        Err(Error::Memory)
     }
 
     fn validate(&self) {

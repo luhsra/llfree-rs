@@ -6,10 +6,12 @@ use core::{fmt, slice};
 
 use log::error;
 
+use crate::HUGE_FRAMES;
 use crate::TREE_ORDER;
 use crate::frame::Frame;
 use crate::{
-    Alloc, Class, Classing, Error, FrameId, Init, MetaData, MetaSize, Request, Result, Stats,
+    Alloc, BitField, Class, Classing, Error, FrameId, HugeId, Init, MetaData, MetaSize, Request,
+    Result, Stats,
 };
 
 /// Zone allocator, managing a range of memory at a given page frame offset.
@@ -69,6 +71,20 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for ZoneAlloc<'a, A> {
     }
     fn drain(&self) {
         self.alloc.drain();
+    }
+
+    /// Retrieves the entire huge frame at `huge` into `into`.
+    fn get_entire_huge(
+        &self,
+        huge: HugeId,
+        class: Class,
+        local: Option<usize>,
+    ) -> Result<BitField> {
+        if let Some(huge) = huge.0.checked_sub(self.offset / HUGE_FRAMES) {
+            self.alloc.get_entire_huge(HugeId(huge), class, local)
+        } else {
+            Err(Error::Argument)
+        }
     }
 }
 
@@ -200,6 +216,14 @@ impl<'a, A: Alloc<'a>> Alloc<'a> for NvmAlloc<'a, A> {
     }
     fn drain(&self) {
         self.alloc.drain();
+    }
+    fn get_entire_huge(
+        &self,
+        huge: HugeId,
+        class: Class,
+        local: Option<usize>,
+    ) -> Result<BitField> {
+        self.alloc.get_entire_huge(huge, class, local)
     }
 }
 

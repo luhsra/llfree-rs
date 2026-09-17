@@ -45,6 +45,13 @@ impl<A: Alloc<'static>> TestAlloc<A> {
             request,
         ))
     }
+    pub fn create_with_classing(classing: &Classing, frames: usize, init: Init) -> Result<Self> {
+        let ms = A::metadata_size(classing, frames);
+        let meta = MetaData::alloc(&ms);
+        Ok(Self(ManuallyDrop::new(A::new(
+            frames, init, classing, meta,
+        )?)))
+    }
 }
 impl<A: Alloc<'static>> Drop for TestAlloc<A> {
     fn drop(&mut self) {
@@ -1070,5 +1077,93 @@ fn zeroed_steals_from_huge() {
         .put(frame, Request::new(HUGE_ORDER, Class(2), Some(0)))
         .unwrap();
 
+    alloc.validate();
+}
+
+#[test]
+#[cfg(not(any(feature = "llc", feature = "buddy")))]
+fn get_entire_huge_updates_global_tree() {
+    let (alloc, _) = Allocator::create(1, TREE_FRAMES, Init::FreeAll).unwrap();
+
+    let bits = alloc.get_entire_huge(HugeId(0), Class(1), None).unwrap();
+
+    assert_eq!(bits.count_zeros(), HUGE_FRAMES);
+    assert_eq!(alloc.tree_stats().free_frames, TREE_FRAMES - HUGE_FRAMES);
+    assert_eq!(alloc.stats_at(FrameId(0), 0).free_frames, 0);
+    alloc.validate();
+}
+
+#[test]
+#[cfg(not(any(feature = "llc", feature = "buddy")))]
+fn get_entire_huge_updates_own_local_reservation() {
+    let (alloc, _) = Allocator::create(1, 2 * TREE_FRAMES, Init::FreeAll).unwrap();
+    let request = Request::new(0, Class(1), Some(0));
+    let (allocated, _) = alloc.get(None, request).unwrap();
+    let huge = allocated.as_huge();
+
+    let bits = alloc.get_entire_huge(huge, Class(1), Some(0)).unwrap();
+
+    assert_eq!(bits.count_ones(), 1);
+    assert!(bits.get(allocated.0 % HUGE_FRAMES));
+    assert_eq!(
+        alloc.tree_stats().free_frames,
+        2 * TREE_FRAMES - HUGE_FRAMES
+    );
+    assert_eq!(alloc.stats_at(huge.as_frame(), 0).free_frames, 0);
+    alloc.validate();
+}
+
+#[test]
+#[cfg(not(any(feature = "llc", feature = "buddy")))]
+fn get_entire_huge_steals_other_local_reservation() {
+    let (alloc, _) = Allocator::create(1, 2 * TREE_FRAMES, Init::FreeAll).unwrap();
+    let (allocated, _) = alloc.get(None, Request::new(0, Class(0), Some(0))).unwrap();
+    let huge = allocated.as_huge();
+
+    let bits = alloc.get_entire_huge(huge, Class(1), None).unwrap();
+
+    assert_eq!(bits.count_ones(), 1);
+    assert!(bits.get(allocated.0 % HUGE_FRAMES));
+    assert_eq!(
+        alloc.tree_stats().free_frames,
+        2 * TREE_FRAMES - HUGE_FRAMES
+    );
+    alloc.validate();
+}
+
+#[test]
+#[cfg(not(any(feature = "llc", feature = "buddy")))]
+fn get_entire_huge_demotes_other_local_reservation() {
+    let (alloc, _) = Allocator::create(1, 2 * TREE_FRAMES, Init::FreeAll).unwrap();
+    let (allocated, _) = alloc.get(None, Request::new(0, Class(1), Some(0))).unwrap();
+    let huge = allocated.as_huge();
+
+    let bits = alloc.get_entire_huge(huge, Class(0), Some(0)).unwrap();
+
+    assert_eq!(bits.count_ones(), 1);
+    assert!(bits.get(allocated.0 % HUGE_FRAMES));
+    assert_eq!(
+        alloc.tree_stats().free_frames,
+        2 * TREE_FRAMES - HUGE_FRAMES
+    );
+    alloc.validate();
+}
+
+#[test]
+#[cfg(not(any(feature = "llc", feature = "buddy")))]
+fn get_entire_huge_restores_lower_state_on_failure() {
+    fn invalid(_: Class, _: Class, _: usize) -> Policy {
+        Policy::Invalid
+    }
+    let classing = Classing::new(&[(Class(0), 0)], Class(0), invalid);
+
+    let alloc = Allocator::create_with_classing(&classing, TREE_FRAMES, Init::FreeAll).unwrap();
+
+    assert!(matches!(
+        alloc.get_entire_huge(HugeId(0), Class(0), None),
+        Err(Error::Memory)
+    ));
+    assert_eq!(alloc.tree_stats().free_frames, TREE_FRAMES);
+    assert_eq!(alloc.stats_at(FrameId(0), 0).free_frames, 1);
     alloc.validate();
 }

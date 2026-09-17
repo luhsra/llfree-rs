@@ -20,7 +20,7 @@ impl TreeId {
     pub const fn as_huge(self) -> HugeId {
         self.as_frame().as_huge()
     }
-    pub const fn as_row(self) -> RowId {
+    pub(crate) const fn as_row(self) -> RowId {
         self.as_frame().as_row()
     }
     pub const fn from_bits(value: u64) -> Self {
