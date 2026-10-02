@@ -127,7 +127,7 @@ fn execute(
         *realloc = FrameId(1);
 
         let mut rng = WyRand::new(t as _);
-        for _ in 0.. {
+        loop {
             let i = rng.range(0..allocs as u64) as usize;
             *idx = FrameId(i);
 

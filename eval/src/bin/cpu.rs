@@ -26,11 +26,42 @@ fn main() {
         println!("Vendor: {info}")
     }
 
+    if let Some(info) = cpuid.get_feature_info() {
+        println!("cflush_size: {}", info.cflush_cache_line_size() * 8);
+        println!("cmpxchg16b:  {}", info.has_cmpxchg16b());
+    }
     if let Some(info) = cpuid.get_extended_feature_info() {
-        println!("flushopt: {}", info.has_clflushopt());
-        println!("clwb:     {}", info.has_clwb());
-        println!("avx2:     {}", info.has_avx2());
-        println!("avx512f:  {}", info.has_avx512f());
+        use std::arch::x86_64::__cpuid;
+
+        println!("flushopt:    {}", info.has_clflushopt());
+        println!("clwb:        {}", info.has_clwb());
+        println!("avx2:        {}", info.has_avx2());
+        println!("avx512f:     {}", info.has_avx512f());
+
+        // https://www.felixcloutier.com/x86/movdir64b
+        const LEAF: u32 = 0x7;
+        let res = __cpuid(LEAF);
+        const MOVDIR64B: u32 = 1 << 28;
+        println!("movdir64b:   {}", (res.ecx & MOVDIR64B) != 0);
+    }
+
+    if let Some(info) = cpuid.get_cache_info() {
+        for info in info {
+            println!("{info}");
+        }
+    }
+    if let Some(info) = cpuid.get_cache_parameters() {
+        for info in info {
+            println!(
+                "L{} {}, sets: {}, coherency_line_size: {}, ass={}, inc={}",
+                info.level(),
+                info.cache_type(),
+                info.sets(),
+                info.coherency_line_size(),
+                info.associativity(),
+                info.is_inclusive(),
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

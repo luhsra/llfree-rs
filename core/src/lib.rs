@@ -5,15 +5,19 @@
 // Don't warn for compile-time checks
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::redundant_pattern_matching)]
+#![allow(clippy::missing_safety_doc)]
 
 #[cfg(any(test, feature = "std"))]
 #[macro_use]
 extern crate std;
 
 pub mod atomic;
+pub mod cache;
+pub use cache::CacheLine;
+pub mod cxl;
 pub mod frame;
 pub mod util;
-pub mod wrapper;
+pub use cxl::Uncached;
 
 mod bitfield;
 use bitfield::RowId;
@@ -28,6 +32,9 @@ pub use trees::TreeId;
 
 use core::fmt;
 use core::mem::align_of;
+use core::ops::Add;
+
+use crate::cache::UnsafeCacheLine;
 
 /// Order of a physical frame
 pub const FRAME_SIZE: usize = if cfg!(feature = "16K") {
@@ -59,7 +66,7 @@ pub const TREE_ORDER: usize = TREE_FRAMES.ilog2() as usize;
 pub const HUGE_ORDER: usize = if cfg!(feature = "16K") { 11 } else { 9 };
 /// Number of small frames in huge frame
 pub const HUGE_FRAMES: usize = 1 << HUGE_ORDER;
-/// Bit size of the atomic ints that comprise the bitfields
+/// Bit size of the atomic ints that comprise a bitfield
 pub const BITFIELD_ROW: usize = 64;
 
 /// Number of retries if an atomic operation fails.
@@ -95,10 +102,17 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     ///
     /// The `meta` data contains buffers for the data structures of the allocator.
     /// It has to outlive the allocator and must be properly aligned and sized (`metadata_size`).
-    fn new(frames: usize, init: Init, classing: &Classing, meta: MetaData<'a>) -> Result<Self>;
+    fn new(
+        hosts: usize,
+        host_id: usize,
+        frames: usize,
+        init: Init,
+        classing: &Classing,
+        meta: MetaData<'a>,
+    ) -> Result<Self>;
 
     /// Returns the size of the metadata buffers required for initialization.
-    fn metadata_size(classing: &Classing, frames: usize) -> MetaSize;
+    fn metadata_size(hosts: usize, frames: usize, classing: &Classing) -> MetaSize;
     /// Returns the metadata buffers.
     ///
     /// # Safety
@@ -109,7 +123,7 @@ pub trait Alloc<'a>: Sized + Sync + Send + fmt::Debug {
     /// If specified try allocating the given `frame`.
     fn get(&self, frame: Option<FrameId>, flags: Request) -> Result<(FrameId, Class)>;
     /// Free the `frame` of `order` on the given `local`.
-    fn put(&self, frame: FrameId, flags: Request) -> Result<()>;
+    fn put(&self, frame: FrameId, flags: Request, free_idx: usize) -> Result<()>;
 
     /// Return the total number of frames the allocator manages.
     fn frames(&self) -> usize;
@@ -149,6 +163,9 @@ impl FrameId {
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits as usize)
     }
+    const fn inside_tree(self) -> Self {
+        Self(self.0 % TREE_FRAMES)
+    }
 
     const fn as_tree(self) -> TreeId {
         TreeId(self.0 / TREE_FRAMES)
@@ -183,22 +200,21 @@ impl fmt::Debug for FrameId {
     }
 }
 
-/// Size of the required metadata
+/// Size of the required metadata in cache lines.
 #[derive(Debug)]
 pub struct MetaSize {
-    /// Size of the volatile CPU-local data.
+    /// Host-local data is stored in DRAM.
     pub local: usize,
-    /// Size of the volatile trees.
-    pub trees: usize,
-    /// Size of the optionally persistent data.
-    pub lower: usize,
+    /// Shared data is stored in CXL.
+    pub remote: usize,
 }
 
-// The dynamic metadata of the allocator
+// The dynamic metadata of the allocator.
 pub struct MetaData<'a> {
-    pub local: &'a mut [u8],
-    pub trees: &'a mut [u8],
-    pub lower: &'a mut [u8],
+    /// Host-local data is stored in DRAM.
+    pub local: &'a [UnsafeCacheLine],
+    /// Shared data is stored in CXL.
+    pub remote: &'a Uncached<[UnsafeCacheLine]>,
 }
 
 #[cfg(any(test, feature = "std"))]
@@ -207,8 +223,7 @@ impl MetaData<'_> {
     pub fn alloc(m: &MetaSize) -> Self {
         Self {
             local: util::aligned_buf(m.local),
-            trees: util::aligned_buf(m.trees),
-            lower: util::aligned_buf(m.lower),
+            remote: Uncached::from_ref(util::aligned_buf(m.remote)),
         }
     }
 }
@@ -217,8 +232,7 @@ impl fmt::Debug for MetaData<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MetaData")
             .field("local", &self.local.as_ptr_range())
-            .field("trees", &self.trees.as_ptr_range())
-            .field("lower", &self.lower.as_ptr_range())
+            .field("remote", &unsafe { self.remote.inner().as_ptr_range() })
             .finish()
     }
 }
@@ -233,6 +247,8 @@ pub struct Classing {
     pub default: Class,
     /// Policy for accessing a `target` tree with `free` frames.
     pub policy: PolicyFn,
+    /// Number of free clones for batching, usually one per CPU.
+    pub free_clones: usize,
 }
 pub type PolicyFn = fn(requested: Class, target: Class, free: usize) -> Policy;
 
@@ -246,7 +262,12 @@ impl fmt::Debug for Classing {
 }
 
 impl Classing {
-    pub fn new(classes: &[(Class, usize)], default: Class, policy: PolicyFn) -> Self {
+    pub fn new(
+        classes: &[(Class, usize)],
+        default: Class,
+        policy: PolicyFn,
+        free_clones: usize,
+    ) -> Self {
         assert!(classes.len() <= 1 << Class::BITS);
         let mut classes_raw = [const { (Class(0), 0) }; 1 << Class::BITS];
         classes_raw[..classes.len()].copy_from_slice(classes);
@@ -255,6 +276,7 @@ impl Classing {
             classes_len: classes.len(),
             default,
             policy,
+            free_clones,
         }
     }
 
@@ -286,9 +308,10 @@ impl Classing {
             Request::new(order, Class((order >= HUGE_ORDER) as _), Some(core % cores))
         }
 
-        (Self::new(&classes, Class(1), policy), move |order, core| {
-            request(order, core, cores)
-        })
+        (
+            Self::new(&classes, Class(1), policy, cores),
+            move |order, core| request(order, core, cores),
+        )
     }
 
     /// Policy with three classes, `0` for small immovable frames,
@@ -325,7 +348,7 @@ impl Classing {
         }
 
         (
-            Self::new(&classes, Class(2), policy),
+            Self::new(&classes, Class(2), policy, cores),
             move |order, core, movable| request(order, core, cores, movable),
         )
     }
@@ -416,6 +439,16 @@ pub struct Stats {
     /// Number of entirely free trees
     pub free_trees: usize,
 }
+impl Add for Stats {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Self {
+            free_frames: self.free_frames + other.free_frames,
+            free_huge: self.free_huge + other.free_huge,
+            free_trees: self.free_trees + other.free_trees,
+        }
+    }
+}
 
 /// Statistics about the trees of the allocator
 #[derive(Debug, Default)]
@@ -472,9 +505,51 @@ mod test {
     use crate::{Alloc, Classing, Init, LLFree, MetaData};
 
     #[test]
+    fn free_clones_merge_into_their_own_tree() {
+        let frames = 2 * crate::TREE_FRAMES;
+        let (classing, _) = Classing::simple(1);
+        let meta = MetaData::alloc(&LLFree::metadata_size(1, frames, &classing));
+        let alloc = LLFree::new(1, 0, frames, Init::AllocAll, &classing, meta).unwrap();
+        let request = crate::Request::new(0, crate::Class(0), None);
+        alloc.put(crate::FrameId(0), request, 0).unwrap();
+        alloc
+            .put(crate::FrameId(crate::TREE_FRAMES), request, 0)
+            .unwrap();
+        assert_eq!(alloc.stats().free_frames, 2);
+        assert_eq!(alloc.tree_stats().free_frames, 2);
+        assert_eq!(
+            alloc
+                .stats_at(crate::FrameId(crate::TREE_FRAMES), 0)
+                .free_frames,
+            1
+        );
+        alloc.validate();
+        assert_eq!(unsafe { alloc.lower[0].inner() }.stats().free_frames, 1);
+        assert_eq!(unsafe { alloc.lower[1].inner() }.stats().free_frames, 0);
+        alloc.drain();
+        assert_eq!(alloc.stats().free_frames, 2);
+        assert_eq!(unsafe { alloc.lower[1].inner() }.stats().free_frames, 1);
+        assert_eq!(alloc.tree_stats().free_frames, 2);
+    }
+
+    #[test]
+    fn overlapping_metadata_is_rejected() {
+        let (classing, _) = Classing::simple(1);
+        let sizes = LLFree::metadata_size(1, crate::TREE_FRAMES, &classing);
+        let buffer = crate::util::aligned_buf(sizes.local.max(sizes.remote));
+        let meta = MetaData {
+            local: buffer,
+            remote: crate::Uncached::from_ref(buffer),
+        };
+        assert!(matches!(
+            LLFree::new(1, 0, crate::TREE_FRAMES, Init::FreeAll, &classing, meta),
+            Err(crate::Error::Initialization)
+        ));
+    }
+
+    #[test]
     fn minimal() {
         logging();
-        // 8GiB
         const MEM_SIZE: usize = 1 << 30;
         let frames = MEM_SIZE / Frame::SIZE;
 
@@ -482,10 +557,11 @@ mod test {
         // Specify classing policy
         let (classing, request) = Classing::simple(1);
         // Allocate the metadata buffers
-        let ms = LLFree::metadata_size(&classing, frames);
+        let ms = LLFree::metadata_size(1, frames, &classing);
+        warn!("metadata size: {ms:?}");
         let meta = MetaData::alloc(&ms);
         // Initialize the allocator
-        let alloc = LLFree::new(frames, Init::FreeAll, &classing, meta).unwrap();
+        let alloc = LLFree::new(1, 0, frames, Init::FreeAll, &classing, meta).unwrap();
         warn!("finit");
         assert_eq!(alloc.tree_stats().free_frames, alloc.frames());
 
@@ -500,10 +576,10 @@ mod test {
         alloc.validate();
 
         warn!("put >>>");
-        alloc.put(frame2, request(0, 0)).unwrap();
+        alloc.put(frame2, request(0, 0), 0).unwrap();
         warn!("put <<<");
         warn!("put >>>");
-        alloc.put(frame1, request(0, 0)).unwrap();
+        alloc.put(frame1, request(0, 0), 0).unwrap();
         warn!("put <<<");
         alloc.validate();
     }

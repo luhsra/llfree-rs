@@ -1,4 +1,3 @@
-use core::mem::align_of;
 use core::sync::atomic::AtomicU32;
 use core::{fmt, slice};
 
@@ -7,8 +6,10 @@ use log::warn;
 
 use crate::atomic::{Atom, Atomic};
 use crate::bitfield::RowId;
+use crate::cache::{Align, Aligned, Invalidate};
+use crate::cxl::CXLockGuard;
 use crate::lower::HugeId;
-use crate::util::{Align, OrdBy, SortedBuffer};
+use crate::util::{OrdBy, SortedBuffer};
 use crate::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,24 +49,52 @@ impl fmt::Debug for TreeId {
     }
 }
 
+type TreeChunk = Align<[Atom<Tree>; Trees::CHUNK_TREES]>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkId(pub usize);
+impl ChunkId {
+    pub const fn new(tree: TreeId) -> Self {
+        Self(tree.0 / Trees::CHUNK_TREES)
+    }
+    pub const fn as_tree(self, i: usize) -> TreeId {
+        TreeId(self.0 * Trees::CHUNK_TREES + i)
+    }
+}
+
 pub struct Trees<'a> {
+    /// Number of trees
+    len: usize,
     /// Array of level 3 entries, which are the roots of the trees
-    entries: &'a [Atom<Tree>],
+    chunks: &'a [Uncached<TreeChunk>],
     /// Default class for new trees or entirely free trees,
     default: Class,
+}
+unsafe impl<'a> Aligned for Trees<'a> {
+    unsafe fn cache_line(&self) -> *const CacheLine {
+        self.chunks.as_ptr() as _
+    }
+    fn cache_lines(&self) -> usize {
+        self.chunks.len()
+    }
 }
 
 impl fmt::Debug for Trees<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let max = self.entries.len();
+        let max = self.len;
         let mut free = 0;
         let mut partial = 0;
-        for e in self.entries {
-            let f = e.load().free();
-            if f == TREE_FRAMES {
-                free += 1;
-            } else if f > Self::MIN_FREE {
-                partial += 1;
+        for (i, chunk) in self.chunks.iter().enumerate() {
+            chunk.flush_invalidate(); // -> access reads from memory
+            // Safety: read-only access
+            let chunk = unsafe { chunk.inner() };
+            let len = (self.len - i * Self::CHUNK_TREES).min(Self::CHUNK_TREES);
+            for e in chunk[..len].iter() {
+                let f = e.load().free();
+                if f == TREE_FRAMES {
+                    free += 1;
+                } else if f > Self::MIN_FREE {
+                    partial += 1;
+                }
             }
         }
         write!(f, "(total: {max}, free: {free}, partial: {partial})")?;
@@ -75,88 +104,114 @@ impl fmt::Debug for Trees<'_> {
 
 impl<'a> Trees<'a> {
     pub const MIN_FREE: usize = TREE_FRAMES / 16;
+    const CHUNK_TREES: usize = CacheLine::SIZE / size_of::<Atom<Tree>>();
 
+    /// Cache lines required for the metadata
     pub const fn metadata_size(frames: usize) -> usize {
         // Event thought the elements are not cache aligned, the whole array should be
-        size_of::<Atom<Tree>>()
-            * frames
-                .div_ceil(TREE_FRAMES)
-                .next_multiple_of(align_of::<Align>())
+        (size_of::<Atom<Tree>>() * frames.div_ceil(TREE_FRAMES)).div_ceil(CacheLine::SIZE)
     }
 
-    pub unsafe fn metadata(&mut self) -> &'a mut [u8] {
-        let len = Self::metadata_size(self.len() * TREE_FRAMES);
-        unsafe { slice::from_raw_parts_mut(self.entries.as_ptr().cast_mut().cast(), len) }
+    pub unsafe fn metadata(&mut self) -> &'a Uncached<[UnsafeCacheLine]> {
+        const _: () = assert!(size_of::<TreeChunk>() == CacheLine::SIZE);
+        unsafe {
+            Uncached::from_ref(slice::from_raw_parts(
+                self.chunks.as_ptr().cast(),
+                self.chunks.len(),
+            ))
+        }
     }
 
     /// Initialize the tree array
     pub fn new(
         frames: usize,
-        buffer: &'a mut [u8],
-        tree_init: Option<impl Fn(usize) -> usize>,
+        buffer: &'a Uncached<[UnsafeCacheLine]>,
+        tree_init: Option<impl Fn(TreeId) -> usize>,
         default: Class,
-    ) -> Self {
-        assert!(buffer.len() >= Self::metadata_size(frames));
+    ) -> Result<Self> {
+        if buffer.len() < Self::metadata_size(frames) {
+            return Err(Error::Initialization);
+        }
 
         let len = frames.div_ceil(TREE_FRAMES);
-        let entries: &mut [Atom<Tree>] =
-            unsafe { slice::from_raw_parts_mut(buffer.as_mut_ptr().cast(), len) };
+        let entries = unsafe {
+            buffer
+                .cast_slice::<TreeChunk>(len.div_ceil(Self::CHUNK_TREES))?
+                .transpose()
+        };
 
         if let Some(tree_init) = tree_init {
-            for (i, e) in entries.iter_mut().enumerate() {
-                let frames = tree_init(i * TREE_FRAMES);
-                *e = Atom::new(Tree::with(frames, false, default));
+            for (i, chunk) in entries.iter().enumerate() {
+                let chunk = unsafe { chunk.borrow() };
+                let chunk_len = (len - i * Self::CHUNK_TREES).min(Self::CHUNK_TREES);
+                for (j, e) in chunk[..chunk_len].iter().enumerate() {
+                    let frames = tree_init(ChunkId(i).as_tree(j));
+                    e.store(Tree::with(frames, false, default));
+                }
             }
         }
 
-        Self { entries, default }
+        Ok(Self {
+            len,
+            chunks: entries,
+            default,
+        })
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.len
     }
 
     pub fn stats(&self) -> TreeStats {
         let mut stats = TreeStats::default();
-        for entry in self.entries {
-            let tree = entry.load();
-            stats.free_frames += tree.free();
-            stats.free_trees += tree.free() / TREE_FRAMES;
+        for (i, chunk) in self.chunks.iter().enumerate() {
+            chunk.flush_invalidate(); // -> access reads from memory
+            // Safety: read-only access
+            let chunk = unsafe { chunk.inner() };
+            let len = (self.len - i * Self::CHUNK_TREES).min(Self::CHUNK_TREES);
+            for entry in chunk[..len].iter() {
+                let tree = entry.load();
+                stats.free_frames += tree.free();
+                stats.free_trees += tree.free() / TREE_FRAMES;
 
-            let class = &mut stats.classes[tree.class().0 as usize];
-            class.free_frames += tree.free();
-            class.alloc_frames += TREE_FRAMES - tree.free();
+                let class = &mut stats.classes[tree.class().0 as usize];
+                class.free_frames += tree.free();
+                class.alloc_frames += TREE_FRAMES - tree.free();
+            }
         }
         stats
     }
 
     pub fn stats_at(&self, i: TreeId) -> (Class, usize, bool) {
-        let tree = self.entries[i.0].load();
+        let chunk = &self.chunks[ChunkId::new(i).0];
+        chunk.flush_invalidate();
+        let tree = unsafe { chunk.inner()[i.0 % Self::CHUNK_TREES].load() };
         (tree.class(), tree.free(), tree.reserved())
     }
 
-    /// Return the number of entirely free trees
-    pub fn free(&self) -> usize {
-        self.entries
-            .iter()
-            .filter(|e| e.load().free() == TREE_FRAMES)
-            .count()
-    }
-    /// Return the total sum of the tree counters
-    pub fn free_frames(&self) -> usize {
-        self.entries.iter().map(|e| e.load().free()).sum()
-    }
     /// Sync with the global tree, stealing its counters
-    pub fn sync(&self, i: TreeId, min: usize) -> Option<usize> {
-        self.entries[i.0]
+    pub fn sync(&self, _guard: &CXLockGuard, i: TreeId, min: usize) -> Option<usize> {
+        let chunk = &self.chunks[ChunkId::new(i).0];
+        let chunk = unsafe { chunk.borrow() };
+        chunk[i.0 % Self::CHUNK_TREES]
             .try_update(|e| e.sync_steal(min))
             .map(|tree| tree.free())
             .ok()
     }
 
-    pub fn steal(&self, i: TreeId, class: Class, free: usize, policy: PolicyFn) -> Option<Class> {
+    pub fn steal(
+        &self,
+        _guard: &CXLockGuard<'_, 'a>,
+        i: TreeId,
+        class: Class,
+        free: usize,
+        policy: PolicyFn,
+    ) -> Option<Class> {
+        assert!(i.0 < self.len);
+        let chunk = &self.chunks[ChunkId::new(i).0];
+        let chunk = unsafe { chunk.borrow() };
         let mut new_class = None;
-        self.entries[i.0]
+        chunk[i.0 % Self::CHUNK_TREES]
             .try_update(|e| {
                 let e = e.steal(class, free, policy);
                 new_class = e.map(|e| e.class());
@@ -166,19 +221,26 @@ impl<'a> Trees<'a> {
             .map(|_| new_class.unwrap())
     }
 
-    pub fn put(&self, i: TreeId, free: usize, policy: PolicyFn) {
-        self.entries[i.0].update(|v| v.put(free, policy, self.default));
+    pub fn put(&self, _guard: &CXLockGuard<'_, 'a>, i: TreeId, free: usize, policy: PolicyFn) {
+        assert!(i.0 < self.len);
+        let chunk = &self.chunks[ChunkId::new(i).0];
+        let chunk = unsafe { chunk.borrow() };
+        chunk[i.0 % Self::CHUNK_TREES].update(|v| v.put(free, policy, self.default));
     }
 
     pub fn reserve_or_steal(
         &self,
+        _guard: &CXLockGuard<'_, 'a>,
         i: TreeId,
         class: Class,
         free: usize,
         policy: PolicyFn,
     ) -> Option<(bool, usize, Class)> {
+        assert!(i.0 < self.len);
+        let chunk = &self.chunks[ChunkId::new(i).0];
+        let chunk = unsafe { chunk.borrow() };
         let mut new = None;
-        self.entries[i.0]
+        chunk[i.0 % Self::CHUNK_TREES]
             .try_update(|v| {
                 let v = v.reserve_or_steal(free, policy, class);
                 new = v.map(|v| (v.reserved(), v.class()));
@@ -189,8 +251,18 @@ impl<'a> Trees<'a> {
     }
 
     /// Unreserve an entry, adding the local entry counter to the global one
-    pub fn unreserve(&self, i: TreeId, free: usize, class: Class, policy: PolicyFn) {
-        self.entries[i.0]
+    pub fn unreserve(
+        &self,
+        _guard: &CXLockGuard<'_, 'a>,
+        i: TreeId,
+        free: usize,
+        class: Class,
+        policy: PolicyFn,
+    ) {
+        assert!(i.0 < self.len);
+        let chunk = &self.chunks[ChunkId::new(i).0];
+        let chunk = unsafe { chunk.borrow() };
+        chunk[i.0 % Self::CHUNK_TREES]
             .try_update(|v| v.unreserve_add(free, class, policy, self.default))
             .expect("Unreserve failed");
     }
@@ -198,6 +270,7 @@ impl<'a> Trees<'a> {
     /// Iterate through all trees, trying to find the best N fits, then trying to `access` them
     pub fn search_best<const N: usize, R>(
         &self,
+        _guard: &CXLockGuard<'_, 'a>,
         start: TreeId,
         offset: usize,
         len: usize,
@@ -205,6 +278,8 @@ impl<'a> Trees<'a> {
         access: impl Fn(TreeId) -> Result<R>,
     ) -> Result<R> {
         let mut best = SortedBuffer::<N, OrdBy<(Policy, bool), TreeId>>::new();
+        let offset = offset / Self::CHUNK_TREES;
+        let len = len.div_ceil(Self::CHUNK_TREES);
 
         for i in offset..len {
             // Alternating between before and after start
@@ -213,23 +288,34 @@ impl<'a> Trees<'a> {
             } else {
                 -i.div_ceil(2).cast_signed()
             };
-            let s = (start.0 + self.entries.len()).cast_signed();
-            let i = TreeId((s + off).cast_unsigned() % self.entries.len());
+            let s = (ChunkId::new(start).0 + self.chunks.len()).cast_signed();
+            let i = ChunkId((s + off).cast_unsigned() % self.chunks.len());
 
-            let tree = self.entries[i.0].load();
-            if tree.reserved() {
-                continue;
-            }
-            match rate(tree.class(), tree.free()) {
-                // Try accessing perfect matches directly
-                Policy::Match(u8::MAX) => match access(i) {
-                    Err(Error::Memory) => {}
-                    r => return r,
-                },
-                // Skip invalid matches
-                Policy::Invalid => {}
-                // Cache the best matches
-                p => best.add(OrdBy((p, tree.free() == TREE_FRAMES), i)),
+            let chunk = &self.chunks[i.0];
+            chunk.flush_invalidate(); // <- load from memory
+
+            let chunk = unsafe { chunk.inner() }; // SAFETY: read-only access
+            for (j, tree) in chunk.iter().enumerate() {
+                let tree_id = i.as_tree(j);
+                if tree_id.0 >= self.len {
+                    continue;
+                }
+
+                let tree = tree.load();
+                if tree.reserved() {
+                    continue;
+                }
+                match rate(tree.class(), tree.free()) {
+                    // Try accessing perfect matches directly
+                    Policy::Match(u8::MAX) => match access(tree_id) {
+                        Err(Error::Memory) => {}
+                        r => return r,
+                    },
+                    // Skip invalid matches
+                    Policy::Invalid => {}
+                    // Cache the best matches
+                    p => best.add(OrdBy((p, tree.free() == TREE_FRAMES), tree_id)),
+                }
             }
         }
 
@@ -247,11 +333,15 @@ impl<'a> Trees<'a> {
     /// Iterate through all trees as long `access` returns `Error::Memory`
     pub fn search<R>(
         &self,
+        _guard: &CXLockGuard<'_, 'a>,
         start: TreeId,
         offset: usize,
         len: usize,
         access: impl Fn(TreeId) -> Result<R>,
     ) -> Result<R> {
+        let offset = offset / Self::CHUNK_TREES;
+        let len = len.div_ceil(Self::CHUNK_TREES);
+
         for i in offset..len {
             // Alternating between before and after start
             let off = if i.is_multiple_of(2) {
@@ -259,11 +349,16 @@ impl<'a> Trees<'a> {
             } else {
                 -(i.div_ceil(2) as isize)
             };
-            let s = (start.0 + self.entries.len()) as isize;
-            let i = TreeId((s + off) as usize % self.entries.len());
-            match access(i) {
-                Err(Error::Memory) => {}
-                r => return r,
+            let s = (ChunkId::new(start).0 + self.chunks.len()) as isize;
+            let i = ChunkId((s + off) as usize % self.chunks.len());
+
+            let len = (self.len - i.0 * Self::CHUNK_TREES).min(Self::CHUNK_TREES);
+            for j in 0..len {
+                let tree_id = i.as_tree(j);
+                match access(tree_id) {
+                    Err(Error::Memory) => {}
+                    r => return r,
+                }
             }
         }
         Err(Error::Memory)
@@ -271,30 +366,44 @@ impl<'a> Trees<'a> {
 
     pub fn change(
         &self,
+        _guard: &CXLockGuard<'_, 'a>,
         matcher: TreeMatch,
         change: TreeChange,
         fetch_free: impl Fn(TreeId) -> usize,
     ) -> Result<()> {
         if let Some(i) = matcher.id {
-            self.change_at(i, matcher.class, matcher.free, change, || fetch_free(i))
+            self.change_at(_guard, i, matcher.class, matcher.free, change, || {
+                fetch_free(i)
+            })
         } else {
-            self.search(TreeId(0), 0, self.len(), |i| {
-                self.change_at(i, matcher.class, matcher.free, change.clone(), || {
-                    fetch_free(i)
-                })
+            self.search(_guard, TreeId(0), 0, self.len, |i| {
+                self.change_at(
+                    _guard,
+                    i,
+                    matcher.class,
+                    matcher.free,
+                    change.clone(),
+                    || fetch_free(i),
+                )
             })
         }
     }
 
     fn change_at(
         &self,
+        _guard: &CXLockGuard<'_, 'a>,
         id: TreeId,
         class: Option<Class>,
         free: usize,
         change: TreeChange,
         fetch_free: impl Fn() -> usize + Copy,
     ) -> Result<()> {
-        match self.entries[id.0].try_update(|e| e.change(class, free, change.clone(), fetch_free)) {
+        assert!(id.0 < self.len);
+        let chunk = &self.chunks[ChunkId::new(id).0];
+        let chunk = unsafe { chunk.borrow() };
+        match chunk[id.0 % Self::CHUNK_TREES]
+            .try_update(|e| e.change(class, free, change.clone(), fetch_free))
+        {
             Ok(_) => Ok(()),
             Err(_) => Err(Error::Memory),
         }
@@ -401,7 +510,7 @@ impl Tree {
     }
     /// Set the free counter to zero if it is large enough for synchronization
     fn sync_steal(self, min: usize) -> Option<Self> {
-        if self.reserved() && self.free() > min {
+        if self.reserved() && self.free() > 0 && self.free() >= min {
             Some(self.with_free(0))
         } else {
             None
@@ -432,5 +541,120 @@ impl Tree {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::cell::{Cell, UnsafeCell};
+
+    use super::*;
+    use crate::cxl::CXLock;
+
+    #[test]
+    fn initialization_and_stats_exclude_padding() {
+        for count in [1, Trees::CHUNK_TREES, Trees::CHUNK_TREES + 1] {
+            let buffer = [const { UnsafeCell::new(CacheLine([0xff; CacheLine::SIZE])) }; 2];
+            let frames = count * TREE_FRAMES;
+            let buffer = &buffer[..Trees::metadata_size(frames)];
+            let initialized = Cell::new(0);
+            let trees = Trees::new(
+                frames,
+                Uncached::from_ref(buffer),
+                Some(|id: TreeId| {
+                    assert_eq!(id.0, initialized.get());
+                    assert!(id.0 < count);
+                    initialized.set(initialized.get() + 1);
+                    TREE_FRAMES
+                }),
+                Class(0),
+            )
+            .unwrap();
+
+            assert_eq!(trees.len(), count);
+            assert_eq!(trees.chunks.len(), count.div_ceil(Trees::CHUNK_TREES));
+            assert_eq!(initialized.get(), count);
+            let stats = trees.stats();
+            assert_eq!(stats.free_frames, frames);
+            assert_eq!(stats.free_trees, count);
+            assert_eq!(stats.classes[0].free_frames, frames);
+            assert_eq!(stats.classes[0].alloc_frames, 0);
+        }
+    }
+
+    #[test]
+    fn searches_exclude_padding() {
+        let buffer = [const { UnsafeCell::new(CacheLine([0; CacheLine::SIZE])) }; 2];
+        let count = Trees::CHUNK_TREES + 1;
+        let trees = Trees::new(
+            count * TREE_FRAMES,
+            Uncached::from_ref(&buffer[..]),
+            Some(|_| TREE_FRAMES),
+            Class(0),
+        )
+        .unwrap();
+        let lock_buffer = [const { UnsafeCell::new(CacheLine([0; CacheLine::SIZE])) }; 2];
+        let mut lock = CXLock::init(0, 1, Uncached::from_ref(&lock_buffer[..])).unwrap();
+        let guard = lock.lock();
+        let visited = Cell::new(0u64);
+        let access = |id: TreeId| -> Result<()> {
+            assert!(id.0 < count);
+            assert_eq!(visited.get() & (1 << id.0), 0);
+            visited.set(visited.get() | (1 << id.0));
+            Err(Error::Memory)
+        };
+
+        assert_eq!(
+            trees.search(&guard, TreeId(0), 0, count, access),
+            Err(Error::Memory)
+        );
+        assert_eq!(visited.get(), (1 << count) - 1);
+        visited.set(0);
+        assert_eq!(
+            trees.search_best::<1, _>(
+                &guard,
+                TreeId(0),
+                0,
+                count,
+                |_, _| Policy::Match(u8::MAX),
+                access,
+            ),
+            Err(Error::Memory)
+        );
+        assert_eq!(visited.get(), (1 << count) - 1);
+    }
+
+    #[test]
+    fn searches_start_at_requested_tree_chunk() {
+        let buffer = [const { UnsafeCell::new(CacheLine([0; CacheLine::SIZE])) }; 4];
+        let count = 3 * Trees::CHUNK_TREES + 1;
+        let trees = Trees::new(
+            count * TREE_FRAMES,
+            Uncached::from_ref(&buffer[..]),
+            Some(|_| TREE_FRAMES),
+            Class(0),
+        )
+        .unwrap();
+        let lock_buffer = [const { UnsafeCell::new(CacheLine([0; CacheLine::SIZE])) }; 2];
+        let mut lock = CXLock::init(0, 1, Uncached::from_ref(&lock_buffer[..])).unwrap();
+        let guard = lock.lock();
+        let start = TreeId(Trees::CHUNK_TREES + 3);
+        let expected = TreeId(Trees::CHUNK_TREES);
+
+        assert_eq!(
+            trees.search(&guard, start, 0, Trees::CHUNK_TREES, Ok),
+            Ok(expected)
+        );
+        assert_eq!(
+            trees.search_best::<1, _>(
+                &guard,
+                start,
+                0,
+                Trees::CHUNK_TREES,
+                |_, _| Policy::Match(u8::MAX),
+                Ok,
+            ),
+            Ok(expected)
+        );
     }
 }

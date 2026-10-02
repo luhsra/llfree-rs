@@ -1,12 +1,12 @@
 //! General utility functions
 
+use crate::cache::{Aligned, CacheLine};
 use core::cmp::Ordering;
 use core::marker::PhantomData;
-use core::mem::{align_of, size_of};
-use core::ops::{Deref, DerefMut};
-use core::{fmt, slice};
+use core::mem::size_of;
+use core::slice;
 
-/// Retries the condition n times and returns if it was successfull.
+/// Retries the condition n times and returns if it was successful.
 /// This pauses the CPU between retries if possible.
 pub fn spin_wait(n: usize, mut cond: impl FnMut() -> bool) -> bool {
     for _ in 0..n {
@@ -30,40 +30,19 @@ pub const fn align_down(v: usize, align: usize) -> usize {
     (v / align) * align
 }
 
-/// Cache alignment for T
-#[derive(Clone, Default, Hash, PartialEq, Eq)]
-#[repr(align(64))]
-pub struct Align<T = ()>(pub T);
-
-const _: () = assert!(align_of::<Align>() == 64);
-const _: () = assert!(align_of::<Align<usize>>() == 64);
-const _: () = assert!(size_of::<Align<usize>>() == 64);
-
-impl<T> Deref for Align<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.0
-    }
-}
-impl<T> DerefMut for Align<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.0
-    }
-}
-impl<T: fmt::Debug> fmt::Debug for Align<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
-    }
-}
-
 /// A slice of T stored at an offset in a byte buffer.
 #[derive(Debug, Clone, Copy)]
-pub struct OffsetSlice<T> {
+pub struct OffsetSlice<T: Aligned> {
+    /// Cache line offset of the slice
     offset: usize,
+    /// Length in number of `T` elements
     length: usize,
     _p: PhantomData<T>,
 }
-impl<T> OffsetSlice<T> {
+impl<T: Aligned> OffsetSlice<T> {
+    /// Number of cache lines per `T` element
+    const ITEM_CACHE_LINES: usize = size_of::<T>().div_ceil(CacheLine::SIZE);
+
     pub fn new(offset: usize, length: usize) -> Self {
         Self {
             offset,
@@ -77,12 +56,12 @@ impl<T> OffsetSlice<T> {
     pub fn is_empty(&self) -> bool {
         self.length == 0
     }
-    pub fn as_slice<'a>(&self, buffer: &'a [u8]) -> &'a [T] {
-        assert!(self.offset + self.length * size_of::<T>() <= buffer.len());
+    pub fn as_slice<'a>(&self, buffer: &'a [CacheLine]) -> &'a [T] {
+        assert!(self.offset + self.length * Self::ITEM_CACHE_LINES <= buffer.len());
         unsafe { slice::from_raw_parts(buffer.as_ptr().add(self.offset).cast(), self.length) }
     }
-    pub fn as_slice_mut<'a>(&self, buffer: &'a mut [u8]) -> &'a mut [T] {
-        assert!(self.offset + self.length * size_of::<T>() <= buffer.len());
+    pub fn as_slice_mut<'a>(&self, buffer: &'a mut [CacheLine]) -> &'a mut [T] {
+        assert!(self.offset + self.length * Self::ITEM_CACHE_LINES <= buffer.len());
         unsafe {
             slice::from_raw_parts_mut(buffer.as_mut_ptr().add(self.offset).cast(), self.length)
         }
@@ -141,6 +120,7 @@ impl<K: Ord, V> Eq for OrdBy<K, V> {}
 
 #[cfg(any(test, feature = "std"))]
 pub fn logging() {
+    use core::fmt;
     use core::mem::transmute;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::boxed::Box;
@@ -265,15 +245,14 @@ impl WyRand {
 }
 
 #[cfg(any(test, feature = "std"))]
-pub fn aligned_buf(size: usize) -> &'static mut [u8] {
-    use std::alloc::{Layout, alloc_zeroed};
-    let ptr = unsafe { alloc_zeroed(Layout::from_size_align(size, align_of::<Align>()).unwrap()) };
-    unsafe { std::slice::from_raw_parts_mut(ptr, size) }
+pub fn aligned_buf<T: Aligned>(len: usize) -> &'static mut [T] {
+    use std::boxed::Box;
+    unsafe { Box::leak(Box::new_zeroed_slice(len).assume_init()) }
 }
 
 #[cfg(test)]
 mod test {
-    use super::{WyRand, align_down, align_up};
+    use super::{CacheLine, WyRand, align_down, align_up};
 
     #[test]
     fn wy_rand() {
@@ -316,16 +295,16 @@ mod test {
     #[test]
     fn aligned_buf() {
         use super::aligned_buf;
-        let sizes = [0, 1, 63, 64, 65, 128, 256, 1024];
+        let sizes = [0, 1, 63, 64, 65, 128, 256];
         for &size in &sizes {
-            let buf = aligned_buf(size);
+            let buf = aligned_buf::<CacheLine>(size);
             assert_eq!(buf.len(), size, "buffer length mismatch for size {size}");
             assert!(
                 (buf.as_ptr() as usize).is_multiple_of(64),
                 "buffer not 64-byte aligned for size {size}"
             );
             assert!(
-                buf.iter().all(|&b| b == 0),
+                buf.iter().flat_map(|cl| cl.0.iter()).all(|&b| b == 0),
                 "buffer not zeroed for size {size}"
             );
         }

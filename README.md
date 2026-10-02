@@ -48,6 +48,9 @@ llfree = { git = "https://github.com/luhsra/llfree-rs.git" }
 The following example shows how to use the allocator to allocate and free page frames.
 
 ```rust
+# #[cfg(feature = "std")]
+# fn main() {
+
 use llfree::{Alloc, LLFree, Classing, MetaData, Init};
 
 // Assuming a 4K page size and 1 GiB of memory
@@ -56,15 +59,19 @@ let frames = 1 << 30 / 4096;
 // Specify classes and policy
 let (classing, request) = Classing::simple(1);
 // Allocate the metadata buffers
-let ms = LLFree::metadata_size(&classing, frames);
+let ms = LLFree::metadata_size(1, frames, &classing);
 let meta = MetaData::alloc(&ms);
 // Initialize the allocator
-let alloc = LLFree::new(frames, Init::FreeAll, &classing, meta).unwrap();
+let alloc = LLFree::new(1, 0, frames, Init::FreeAll, &classing, meta).unwrap();
 
 // Allocate and free page frames
 let (frame, _class) = alloc.get(None, request(0, 0)).unwrap();
 // ...
-alloc.put(frame, request(0, 0)).unwrap();
+alloc.put(frame, request(0, 0), 0).unwrap();
+
+# }
+# #[cfg(not(feature = "std"))]
+# fn main() {}
 ```
 
 ## Project Structure
